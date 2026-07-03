@@ -77,6 +77,33 @@ pub struct Config {
     pub fastq_tags: FastqTags,
 }
 
+/// How a `-t` total worker budget splits across the pipeline stages. Derived
+/// empirically (2026-07-03 sweep, mid_eqbase): bgzf *decode* gains nothing from
+/// threads (serial inflate keeps up), while *render* (MM/ML reconstruction) and
+/// *encode* (bgzf/gz compression) scale almost identically — so the
+/// wall-time-minimizing split reserves one thread for the serial reader and
+/// divides the rest evenly between render and encode, with **render** taking the
+/// odd thread (measured best at `-t 8`: render 4 / encode 3). Note: `-t 2` and
+/// `-t 3` collapse to the same 1/1/1 split (too few threads to split further).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadBudget {
+    pub decode: usize,
+    pub render: usize,
+    pub encode: usize,
+}
+
+/// Split a total worker budget across decode/render/encode.
+pub fn thread_budget(total: usize) -> ThreadBudget {
+    let total = total.max(1);
+    let rest = total.saturating_sub(1).max(2); // >= 2 so render & encode each get >= 1
+    // Render gets the odd thread — empirically the wall-time-optimal split
+    // (2026-07-03 sweep on the pool.install structure, mid_eqbase: at total 8,
+    // render 4 / encode 3 beat render 3 / encode 4, 2.44s vs 2.64s).
+    let render = rest.div_ceil(2);
+    let encode = (rest - render).max(1);
+    ThreadBudget { decode: 1, render, encode }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +140,17 @@ mod tests {
         // be rejected, while a normal 2-byte ASCII tag still parses.
         assert!(FastqTags::parse("é").is_err());
         assert!(FastqTags::parse("RG").is_ok());
+    }
+
+    #[test]
+    fn thread_budget_split() {
+        assert_eq!(thread_budget(8), ThreadBudget { decode: 1, render: 4, encode: 3 });
+        assert_eq!(thread_budget(4), ThreadBudget { decode: 1, render: 2, encode: 1 });
+        assert_eq!(thread_budget(16), ThreadBudget { decode: 1, render: 8, encode: 7 });
+        for t in [1usize, 2, 3] {
+            let b = thread_budget(t);
+            assert!(b.decode >= 1 && b.render >= 1 && b.encode >= 1);
+        }
     }
 
     #[test]

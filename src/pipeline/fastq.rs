@@ -71,51 +71,54 @@ where
         return run_fastq_seq(records, writer, cfg);
     }
 
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(cfg.threads).build()?;
+    let render_workers = crate::config::thread_budget(cfg.threads).render;
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(render_workers).build()?;
     let input_reads = AtomicU64::new(0);
     let output_reads = AtomicU64::new(0);
-    let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(cfg.threads * 4);
+    let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(render_workers * 4);
 
     let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
     let parse_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
 
-    pool.in_place_scope(|scope| {
-        // Writer task drains rendered buffers in arrival order. On a write
-        // error we must keep draining (not `break`): `rx` stays alive on this
-        // stack frame, so if we stopped receiving, producers blocked on the
-        // bounded `tx.send` in the `par_bridge().for_each` below would never
-        // unblock, `in_place_scope` would never return, and the recorded
-        // error would never surface — a deadlock instead of an `Err`.
-        scope.spawn(|_| {
+    // Writer on a plain scoped OS thread; render on the budget-sized LOCAL rayon
+    // pool via `pool.install` so the nested `par_bridge` uses THAT pool (not
+    // rayon's global num_cpus pool) — this is what makes `-t` bound the render
+    // threads. The writer keeps draining on a write error (never `break`) so
+    // bounded-channel producers can't deadlock.
+    std::thread::scope(|s| {
+        let write_err_ref = &write_err;
+        s.spawn(move || {
             let mut errored = false;
             for buf in rx.iter() {
                 if errored {
                     continue; // keep draining so bounded-channel producers never block
                 }
                 if let Err(e) = writer.write_all(&buf) {
-                    *write_err.lock().unwrap() = Some(e);
+                    *write_err_ref.lock().unwrap() = Some(e);
                     errored = true;
                 }
             }
         });
 
-        records.par_bridge().for_each(|rec| {
-            let rec = match rec {
-                Ok(r) => r,
-                Err(e) => {
-                    let mut g = parse_err.lock().unwrap();
-                    if g.is_none() {
-                        *g = Some(e);
+        pool.install(|| {
+            records.par_bridge().for_each(|rec| {
+                let rec = match rec {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let mut g = parse_err.lock().unwrap();
+                        if g.is_none() {
+                            *g = Some(e);
+                        }
+                        return;
                     }
-                    return;
+                };
+                input_reads.fetch_add(1, Ordering::Relaxed);
+                let (out, buf) = render_record(&rec, cfg);
+                if out > 0 {
+                    output_reads.fetch_add(out, Ordering::Relaxed);
+                    let _ = tx.send(buf);
                 }
-            };
-            input_reads.fetch_add(1, Ordering::Relaxed);
-            let (out, buf) = render_record(&rec, cfg);
-            if out > 0 {
-                output_reads.fetch_add(out, Ordering::Relaxed);
-                let _ = tx.send(buf);
-            }
+            });
         });
         drop(tx);
     });

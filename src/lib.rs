@@ -71,10 +71,14 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     match (in_fmt, out_fmt) {
         (Format::Bam, Format::Bam) => {
             note_tags_ignored(&cfg, in_fmt, out_fmt);
-            let (header, records) = io::bam::reader(in_path, cfg.threads)?;
+            let (header, records) = io::bam::reader(in_path, config::thread_budget(cfg.threads).decode)?;
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
-            let mut sink = io::bam::writer(cfg.io.output.as_deref(), &out_header, cfg.threads)?;
+            let mut sink = io::bam::writer(
+                cfg.io.output.as_deref(),
+                &out_header,
+                config::thread_budget(cfg.threads).encode,
+            )?;
             let stats = pipeline::run_bam(&out_header, records, &mut sink, &cfg)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded — an I/O
@@ -85,7 +89,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             return Ok(());
         }
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
-            let (_header, records) = io::bam::reader(in_path, cfg.threads)?;
+            let (_header, records) = io::bam::reader(in_path, config::thread_budget(cfg.threads).decode)?;
             let mut writer = fastq_writer(&cfg, out_fmt)?;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg)?;
             writer.finish()?;
@@ -162,7 +166,8 @@ impl FastqOut {
 }
 
 /// Build the FASTQ output writer: a file or stdout, wrapped in a parallel gzip
-/// encoder (`gzp`, using `cfg.threads` worker threads) when the output format
+/// encoder (`gzp`, using the ENCODE share of the `-t` budget —
+/// `thread_budget(cfg.threads).encode` — worker threads) when the output format
 /// is `FastqGz`, else a plain buffered writer.
 fn fastq_writer(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<FastqOut> {
     let base: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
@@ -171,7 +176,7 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<FastqOut> {
     };
     if matches!(out_fmt, io::Format::FastqGz) {
         let w = ParCompressBuilder::<Gzip>::new()
-            .num_threads(cfg.threads.max(1))
+            .num_threads(config::thread_budget(cfg.threads).encode)
             .unwrap()
             .compression_level(Compression::new(6))
             .from_writer(base);
@@ -216,16 +221,22 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
         io::dir::Family::Bam => match out_fmt {
             Format::Bam => {
                 note_tags_ignored(cfg, family_fmt, out_fmt);
-                let (header, records) = io::dir::bam_reader(&paths, cfg.threads)?;
+                let (header, records) =
+                    io::dir::bam_reader(&paths, config::thread_budget(cfg.threads).decode)?;
                 let out_header = provenance_header(header);
-                let mut sink = io::bam::writer(cfg.io.output.as_deref(), &out_header, cfg.threads)?;
+                let mut sink = io::bam::writer(
+                    cfg.io.output.as_deref(),
+                    &out_header,
+                    config::thread_budget(cfg.threads).encode,
+                )?;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg)?;
                 sink.finish()?;
                 eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
                 Ok(())
             }
             Format::Fastq | Format::FastqGz => {
-                let (_header, records) = io::dir::bam_reader(&paths, cfg.threads)?;
+                let (_header, records) =
+                    io::dir::bam_reader(&paths, config::thread_budget(cfg.threads).decode)?;
                 let mut writer = fastq_writer(cfg, out_fmt)?;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg)?;
                 writer.finish()?;

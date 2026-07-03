@@ -153,22 +153,22 @@ where
     Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
     WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
 {
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(cfg.threads).build()?;
+    let render_workers = crate::config::thread_budget(cfg.threads).render;
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(render_workers).build()?;
     let input_reads = AtomicU64::new(0);
     let output_reads = AtomicU64::new(0);
-    let (tx, rx) = crossbeam_channel::bounded::<T>(cfg.threads * 4);
+    let (tx, rx) = crossbeam_channel::bounded::<T>(render_workers * 4);
     let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
     let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
 
-    pool.in_place_scope(|scope| {
-        // `write_one` and `sink` are moved wholesale into this task (they're not
-        // used again after it's spawned): a plain `Fn` reference capture would
-        // additionally require `WriteOne: Sync`, which the call sites below
-        // can't offer for a `sink.write_record(header, rec)` closure. `write_err`
-        // still needs to be read after the scope joins, so it's captured through
-        // a `Copy` shared reference taken up front instead of being moved.
+    // Writer on a plain scoped OS thread; render on the budget-sized LOCAL rayon
+    // pool via `pool.install` so the nested `par_bridge` uses THAT pool (not
+    // rayon's global num_cpus pool) — this is what makes `-t` bound the render
+    // threads. The writer keeps draining on a write error (never `break`) so
+    // bounded-channel producers can't deadlock.
+    std::thread::scope(|s| {
         let write_err_ref = &write_err;
-        scope.spawn(move |_| {
+        s.spawn(move || {
             let mut errored = false;
             for item in rx.iter() {
                 if errored {
@@ -181,32 +181,34 @@ where
             }
         });
 
-        records.par_bridge().for_each(|rec| {
-            let rec = match rec {
-                Ok(r) => r,
-                Err(e) => {
-                    let mut g = proc_err.lock().unwrap();
-                    if g.is_none() {
-                        *g = Some(e);
+        pool.install(|| {
+            records.par_bridge().for_each(|rec| {
+                let rec = match rec {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let mut g = proc_err.lock().unwrap();
+                        if g.is_none() {
+                            *g = Some(e);
+                        }
+                        return;
                     }
-                    return;
-                }
-            };
-            input_reads.fetch_add(1, Ordering::Relaxed);
-            match render(&rec, cfg) {
-                Ok(items) => {
-                    output_reads.fetch_add(items.len() as u64, Ordering::Relaxed);
-                    for it in items {
-                        let _ = tx.send(it);
+                };
+                input_reads.fetch_add(1, Ordering::Relaxed);
+                match render(&rec, cfg) {
+                    Ok(items) => {
+                        output_reads.fetch_add(items.len() as u64, Ordering::Relaxed);
+                        for it in items {
+                            let _ = tx.send(it);
+                        }
+                    }
+                    Err(e) => {
+                        let mut g = proc_err.lock().unwrap();
+                        if g.is_none() {
+                            *g = Some(e);
+                        }
                     }
                 }
-                Err(e) => {
-                    let mut g = proc_err.lock().unwrap();
-                    if g.is_none() {
-                        *g = Some(e);
-                    }
-                }
-            }
+            });
         });
         drop(tx);
     });
