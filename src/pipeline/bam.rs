@@ -808,7 +808,13 @@ mod tests {
 
         let sorted_records = |bytes: &[u8]| {
             let s = String::from_utf8(bytes.to_vec()).unwrap();
-            let mut v: Vec<String> = s.split('@').filter(|x| !x.is_empty()).map(String::from).collect();
+            // Group every 4 consecutive lines into one record rather than
+            // splitting on '@': a QUAL byte of Phred-31 (ASCII '@') would
+            // corrupt an '@'-split. FASTQ records are exactly 4 lines each
+            // here (no multiline), so this is a lossless re-chunking.
+            let lines: Vec<&str> = s.lines().collect();
+            assert_eq!(lines.len() % 4, 0, "expected whole 4-line FASTQ records, got {} lines", lines.len());
+            let mut v: Vec<String> = lines.chunks(4).map(|c| c.join("\n")).collect();
             v.sort();
             v
         };

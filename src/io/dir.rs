@@ -80,17 +80,26 @@ type BamRecordIter = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
 /// stream under the first header — `samtools cat` semantics for homogeneous
 /// uBAM).
 ///
+/// `workers` is the MT-bgzf decode worker count (same knob as the single-file
+/// `io::bam::reader`), passed through to every per-file reader. This is safe
+/// from oversubscription despite chaining N files: the first file's reader is
+/// opened eagerly right here, but each `rest` file's reader is opened lazily,
+/// one at a time, only once `flat_map` actually reaches it — and `Iterator`'s
+/// `Chain`/`FlatMap` drop the exhausted inner iterator before advancing to the
+/// next, closing its MT reader (and joining its worker threads) first. So at
+/// most one file's `workers` bgzf threads are ever live at once, never N×.
+///
 /// Returns an `Err` if `paths` is empty rather than panicking. Each file is
 /// opened exactly once: the first file's record iterator (obtained alongside
 /// its header) is reused via `chain` rather than reopening that file.
-pub fn bam_reader(paths: &[PathBuf]) -> anyhow::Result<(sam::Header, BamRecordIter)> {
+pub fn bam_reader(paths: &[PathBuf], workers: usize) -> anyhow::Result<(sam::Header, BamRecordIter)> {
     let (first, rest) = paths
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("bam_reader called with no BAM files"))?;
-    let (header, first_records) = crate::io::bam::reader(Some(first), 1)?;
+    let (header, first_records) = crate::io::bam::reader(Some(first), workers)?;
     let rest = rest.to_vec();
-    let rest_records = rest.into_iter().flat_map(|p| -> BamRecordIter {
-        match crate::io::bam::reader(Some(&p), 1) {
+    let rest_records = rest.into_iter().flat_map(move |p| -> BamRecordIter {
+        match crate::io::bam::reader(Some(&p), workers) {
             Ok((_hdr, recs)) => recs,
             Err(e) => Box::new(std::iter::once(Err(e))),
         }

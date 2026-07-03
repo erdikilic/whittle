@@ -216,7 +216,7 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
         io::dir::Family::Bam => match out_fmt {
             Format::Bam => {
                 note_tags_ignored(cfg, family_fmt, out_fmt);
-                let (header, records) = io::dir::bam_reader(&paths)?;
+                let (header, records) = io::dir::bam_reader(&paths, cfg.threads)?;
                 let out_header = provenance_header(header);
                 let mut sink = io::bam::writer(cfg.io.output.as_deref(), &out_header, cfg.threads)?;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg)?;
@@ -225,7 +225,7 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
                 Ok(())
             }
             Format::Fastq | Format::FastqGz => {
-                let (_header, records) = io::dir::bam_reader(&paths)?;
+                let (_header, records) = io::dir::bam_reader(&paths, cfg.threads)?;
                 let mut writer = fastq_writer(cfg, out_fmt)?;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg)?;
                 writer.finish()?;

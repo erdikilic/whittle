@@ -197,12 +197,23 @@ fn trimmed_output_multimod_mods_match_oracle_t8() {
 }
 
 /// Multi-record cross-check at t=8: ~200 differently-named reads (each a copy
-/// of the multi-mod fixture), decoded and compared per-read via
-/// `hts_mods_by_read` rather than as one flattened bag. `run_bam`'s parallel
-/// path is unordered (records land in arrival order, not input order), so this
-/// specifically stresses that per-read MM/ML reconstruction stays correct even
-/// when many records are in flight across the rayon pool concurrently, not
-/// just that the aggregate multiset matches.
+/// of the multi-mod fixture, but with a per-read-distinct ML payload — see
+/// below), decoded and compared per-read via `hts_mods_by_read` rather than as
+/// one flattened bag. `run_bam`'s parallel path is unordered (records land in
+/// arrival order, not input order), so this specifically stresses that
+/// per-read MM/ML reconstruction stays correct even when many records are in
+/// flight across the rayon pool concurrently, not just that the aggregate
+/// multiset matches.
+///
+/// Each read's 7 ML bytes are shifted by its own index `i` (`byte.wrapping_add(i
+/// as u8)`, `i` in 0..200 so no wraparound), giving every read a distinct qual
+/// fingerprint while keeping the same modified positions (MM unchanged) and
+/// the same ML count (7, matching the 7 modified positions). Since the
+/// per-read comparison below checks read `i`'s *own* decoded quals against
+/// its *own* filtered original, a name<->payload mis-pairing bug (e.g. read
+/// `i`'s output compared against read `j`'s original mods) would now produce
+/// a qual mismatch and fail the test — with the old identical-payload fixture
+/// such a mis-pairing was invisible because every read's mods were the same.
 #[test]
 fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -223,10 +234,13 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
             Tag::BASE_MODIFICATIONS,
             Value::String(b"C+m,0,1,2;C+h,2,1;A+a,0,1;".to_vec().into()),
         );
-        data.insert(
-            Tag::BASE_MODIFICATION_PROBABILITIES,
-            Value::Array(Array::UInt8(vec![200, 150, 100, 55, 66, 240, 10])),
-        );
+        // Distinct ML payload per read: shift the base bytes by `i` so read
+        // `i`'s decoded quals are unique (see doc comment above).
+        let ml: Vec<u8> = [200u8, 150, 100, 55, 66, 240, 10]
+            .into_iter()
+            .map(|b| b.wrapping_add(i as u8))
+            .collect();
+        data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml)));
         data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(10));
         w.write_alignment_record(&header, &rec).unwrap();
     }
