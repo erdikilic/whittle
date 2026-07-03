@@ -131,6 +131,19 @@ pub fn config_for_test(
     head_crop: usize,
     tail_crop: usize,
 ) -> Config {
+    config_for_test_threads(input, output, head_crop, tail_crop, 1)
+}
+
+/// Same as `config_for_test`, but with an explicit thread count (used by tests
+/// that need to exercise the parallel BAM dispatch, e.g. a `t8` oracle run).
+#[doc(hidden)]
+pub fn config_for_test_threads(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    head_crop: usize,
+    tail_crop: usize,
+    threads: usize,
+) -> Config {
     Config {
         io: IoConfig {
             input: Some(input.to_path_buf()),
@@ -148,7 +161,7 @@ pub fn config_for_test(
             qual_mode: QualMode::Mean,
         },
         trim: TrimPlan { head: head_crop, tail: tail_crop, quality: None },
-        threads: 1,
+        threads: threads.max(1),
         fastq_tags: FastqTags::All,
     }
 }
