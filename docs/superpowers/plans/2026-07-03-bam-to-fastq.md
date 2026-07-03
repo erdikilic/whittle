@@ -378,7 +378,8 @@ fn write_head<W: Write>(
 }
 
 /// Write one output segment as a plain FASTQ record. `phred` is raw; ASCII is
-/// emitted by adding 33.
+/// emitted by adding 33. Thin wrapper over `write_segment_tagged` with no tags,
+/// so the record layout lives in exactly one place.
 pub fn write_segment<W: Write>(
     w: &mut W,
     name: &[u8],
@@ -387,13 +388,7 @@ pub fn write_segment<W: Write>(
     total_segments: usize,
     segment_idx: usize,
 ) -> io::Result<()> {
-    write_head(w, name, total_segments, segment_idx)?;
-    w.write_all(b"\n")?;
-    w.write_all(seq)?;
-    w.write_all(b"\n+\n")?;
-    let ascii: Vec<u8> = phred.iter().map(|&q| q.saturating_add(33)).collect();
-    w.write_all(&ascii)?;
-    w.write_all(b"\n")
+    write_segment_tagged(w, name, seq, phred, total_segments, segment_idx, b"")
 }
 
 /// Like `write_segment`, but inserts `tags` (already TAB-prefixed per field, or
