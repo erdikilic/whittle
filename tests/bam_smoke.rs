@@ -77,8 +77,15 @@ fn bam_to_bam_end_to_end() {
     }
     assert_eq!(out_records.len(), 2, "both reads should survive --head-crop 2 (len 10, 8 > min-length)");
 
+    // Default threads (4) run the BAM pipeline unordered, so look records up by
+    // name instead of assuming input order is preserved on output.
+    let by_name: std::collections::HashMap<Vec<u8>, RecordBuf> = out_records
+        .iter()
+        .map(|r| (r.name().unwrap().to_vec(), r.clone()))
+        .collect();
+
     // read1: "ACGTACGTAC" head-cropped by 2 -> "GTACGTAC" (8 bases), no mods.
-    let o1 = &out_records[0];
+    let o1 = &by_name[&b"read1".to_vec()];
     assert_eq!(o1.name().unwrap().to_vec(), b"read1");
     assert_eq!(AsRef::<[u8]>::as_ref(o1.sequence()), b"GTACGTAC");
     assert!(o1.data().get(&Tag::BASE_MODIFICATIONS).is_none());
@@ -88,7 +95,7 @@ fn bam_to_bam_end_to_end() {
     // 0,2,3 -> abs positions 0,3,4 (ML [10,20,30] one-per-position). Window [2,8)
     // keeps abs 3,4 (drops abs 0); renumbered against the window's C positions
     // (3,4,5,7) that's occurrences 0,1 -> deltas [0,0], ML [20,30].
-    let o2 = &out_records[1];
+    let o2 = &by_name[&b"read2".to_vec()];
     assert_eq!(o2.name().unwrap().to_vec(), b"read2");
     assert_eq!(AsRef::<[u8]>::as_ref(o2.sequence()), b"ACCCAC");
     let mm = match o2.data().get(&Tag::BASE_MODIFICATIONS) {

@@ -161,6 +161,98 @@ fn trimmed_output_multimod_mods_match_oracle() {
     );
 }
 
+/// Threaded (t=8) variant of `trimmed_output_multimod_mods_match_oracle`: same
+/// fixture, same head/tail crop, but driven through the parallel BAM dispatch
+/// (`cfg.threads = 8`) via `config_for_test_threads`. `chopping::run` builds a
+/// rayon pool regardless of record count, so this still exercises the
+/// unordered render -> bounded-channel -> MT-bgzf-writer path end to end; the
+/// assertion body is identical to the t1 oracle (order-independent by
+/// construction — both sides are sorted before comparison), so this proves
+/// MM/ML reconstruction is correct under parallelism, not just under t1.
+#[test]
+fn trimmed_output_multimod_mods_match_oracle_t8() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.ubam");
+    let output = dir.path().join("out.ubam");
+    write_fixture_multimod(&input);
+
+    let cfg = chopping::cli::config_for_test_threads(&input, &output, 2, 2, 8);
+    chopping::run(cfg).unwrap();
+
+    let (head, tail, len) = (2usize, 2usize, 10usize);
+    let tail_start = len - tail;
+    let original = hts_mods(&input);
+    let expected: Vec<_> = original
+        .iter()
+        .filter(|(pos, ..)| *pos >= head && *pos < tail_start)
+        .map(|&(pos, cb, mb, st, q)| (pos - head, cb, mb, st, q))
+        .collect();
+
+    let got = hts_mods(&output);
+    let mut a = expected.clone();
+    let mut b = got.clone();
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "multi-mod mods must survive parallel (t8) reconstruction");
+}
+
+/// Multi-record cross-check at t=8: ~200 differently-named reads (each a copy
+/// of the multi-mod fixture), decoded and compared per-read via
+/// `hts_mods_by_read` rather than as one flattened bag. `run_bam`'s parallel
+/// path is unordered (records land in arrival order, not input order), so this
+/// specifically stresses that per-read MM/ML reconstruction stays correct even
+/// when many records are in flight across the rayon pool concurrently, not
+/// just that the aggregate multiset matches.
+#[test]
+fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.ubam");
+    let output = dir.path().join("out.ubam");
+
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(&input).unwrap());
+    w.write_header(&header).unwrap();
+    for i in 0..200 {
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        *rec.name_mut() = Some(format!("read{i}").into_bytes().into());
+        *rec.sequence_mut() = b"CCACCGACAC".to_vec().into();
+        *rec.quality_scores_mut() = vec![40u8; 10].into();
+        let data = rec.data_mut();
+        data.insert(
+            Tag::BASE_MODIFICATIONS,
+            Value::String(b"C+m,0,1,2;C+h,2,1;A+a,0,1;".to_vec().into()),
+        );
+        data.insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(vec![200, 150, 100, 55, 66, 240, 10])),
+        );
+        data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(10));
+        w.write_alignment_record(&header, &rec).unwrap();
+    }
+    w.try_finish().unwrap();
+
+    let cfg = chopping::cli::config_for_test_threads(&input, &output, 2, 2, 8);
+    chopping::run(cfg).unwrap();
+
+    let (head, orig_len) = (2usize, 10usize);
+    let orig = hts_mods_by_read(&input);
+    let out = hts_mods_by_read(&output);
+    assert_eq!(out.len(), 200, "all 200 reads must survive the t8 parallel run");
+
+    for (name, (_, got_mods)) in &out {
+        let (_, orig_mods) = orig
+            .get(name)
+            .unwrap_or_else(|| panic!("output read {name} has no matching original read"));
+        let expected = filter_offset(orig_mods, head, orig_len);
+        assert_eq!(
+            sorted(&expected),
+            sorted(got_mods),
+            "t8 mod mismatch for read {name}"
+        );
+    }
+}
+
 // --- Real-data sweep (Task 7) -----------------------------------------------
 //
 // Everything below is only exercised when `CHOPPING_UBAM` points at a real
@@ -250,6 +342,42 @@ fn real_ubam_oracle_sweep() {
             sorted(&expected),
             sorted(got_mods),
             "mod mismatch for read {name}"
+        );
+    }
+}
+
+/// Threaded (t=8) companion to `real_ubam_oracle_sweep`: same real-data sweep,
+/// same head=10/tail=10 crop, but driven through the parallel BAM dispatch.
+/// Reads are matched by name (the parallel path is unordered), so this is a
+/// real-world-scale spot-check that `-t 8` produces byte-valid, mod-correct
+/// output on genuine ONT/dorado data, not just the small synthetic fixtures.
+//   CHOPPING_UBAM=data/short_eqread/short_eqread.bam \
+//     cargo test --test bam_mods_oracle -- --ignored
+#[test]
+#[ignore]
+fn real_ubam_oracle_sweep_t8() {
+    let Some(path) = std::env::var_os("CHOPPING_UBAM") else { return };
+    let input = std::path::PathBuf::from(path);
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("out.ubam");
+
+    let cfg = chopping::cli::config_for_test_threads(&input, &output, 10, 10, 8);
+    chopping::run(cfg).unwrap();
+
+    let orig = hts_mods_by_read(&input);
+    let out = hts_mods_by_read(&output);
+    assert!(!out.is_empty(), "no output reads decoded from {}", output.display());
+    assert_eq!(out.len(), orig.len(), "t8 run must not drop or duplicate reads");
+
+    for (name, (_, got_mods)) in &out {
+        let (orig_len, orig_mods) = orig
+            .get(name)
+            .unwrap_or_else(|| panic!("output read {name} has no matching original read"));
+        let expected = filter_offset(orig_mods, 10, *orig_len);
+        assert_eq!(
+            sorted(&expected),
+            sorted(got_mods),
+            "t8 mod mismatch for read {name}"
         );
     }
 }
