@@ -31,10 +31,16 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
-    let mut writer: BufWriter<Box<dyn Write>> = BufWriter::new(match cfg.io.output.as_deref() {
+    let base_writer: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
         Some(p) => Box::new(std::fs::File::create(p)?),
         None => Box::new(std::io::stdout()),
-    });
+    };
+    let writer_inner: Box<dyn Write + Send> = if matches!(out_fmt, Format::FastqGz) {
+        Box::new(flate2::write::GzEncoder::new(base_writer, flate2::Compression::default()))
+    } else {
+        base_writer
+    };
+    let mut writer = BufWriter::new(writer_inner);
 
     match (in_fmt, out_fmt) {
         (Format::Fastq, Format::Fastq)
@@ -43,10 +49,11 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         | (Format::FastqGz, Format::FastqGz) => {
             let gz_in = matches!(in_fmt, Format::FastqGz);
             let records = io::fastq::reader(in_path, gz_in)?;
-            // gz output wrapping is added in a later task if out_fmt is FastqGz;
-            // Plan 1 supports plain FASTQ output here, gz output in Task 9 note.
             let stats = pipeline::run_fastq(records, &mut writer, &cfg)?;
             writer.flush()?;
+            // Drop the writer (finishing the GzEncoder, if any, and flushing the
+            // BufWriter) before returning so all bytes are on disk / stdout.
+            drop(writer);
             eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
             Ok(())
         }
