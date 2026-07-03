@@ -105,6 +105,18 @@ fn provenance_header(mut header: noodles_sam::Header) -> noodles_sam::Header {
     use noodles_sam::header::record::value::map::Program;
     use noodles_sam::header::record::value::map::program::tag;
 
+    // `Programs::add` walks the existing `@PG` chain via `Programs::leaves`,
+    // which indexes the program map directly and panics if any program's `PP`
+    // (previous-program) field names an ID that isn't itself a program in the
+    // header. Real-world uBAMs can have exactly this: e.g. an ONT/dorado file
+    // put through `samtools sort`/`view`/`reset` observed with
+    // `@PG ID:samtools PP:basecaller` where no `ID:basecaller` record survived
+    // into the header. Since the `@PG` line is cosmetic, skip adding it rather
+    // than let a merely-untidy header crash the whole run.
+    if has_dangling_program_chain(&header) {
+        return header;
+    }
+
     let program = Map::<Program>::builder()
         .insert(tag::NAME, "chopping")
         .insert(tag::VERSION, env!("CARGO_PKG_VERSION"))
@@ -115,4 +127,20 @@ fn provenance_header(mut header: noodles_sam::Header) -> noodles_sam::Header {
     }
 
     header
+}
+
+/// True if any `@PG` record's `PP` field references an ID that is not itself a
+/// program in the header. `Programs::leaves` (used internally by
+/// `Programs::add`) panics on such a chain instead of returning an error, so
+/// this must be checked before calling `add`.
+fn has_dangling_program_chain(header: &noodles_sam::Header) -> bool {
+    use noodles_sam::header::record::value::map::program::tag;
+
+    let programs = header.programs().as_ref();
+    programs.values().any(|program| {
+        program
+            .other_fields()
+            .get(&tag::PREVIOUS_PROGRAM_ID)
+            .is_some_and(|previous_id| !programs.contains_key(previous_id))
+    })
 }
