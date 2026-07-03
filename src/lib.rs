@@ -71,21 +71,21 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     match (in_fmt, out_fmt) {
         (Format::Bam, Format::Bam) => {
             note_tags_ignored(&cfg, in_fmt, out_fmt);
-            let (header, records) = io::bam::reader(in_path)?;
+            let (header, records) = io::bam::reader(in_path, 1)?;
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
-            let mut writer = io::bam::writer(cfg.io.output.as_deref(), &out_header)?;
-            let stats = pipeline::run_bam(&out_header, records, &mut writer, &cfg)?;
+            let mut sink = io::bam::writer(cfg.io.output.as_deref(), &out_header, 1)?;
+            let stats = pipeline::run_bam(&out_header, records, &mut sink, &cfg)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded — an I/O
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
             // truncated BAM with a success exit code.
-            writer.try_finish()?;
+            sink.finish()?;
             eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
             return Ok(());
         }
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
-            let (_header, records) = io::bam::reader(in_path)?;
+            let (_header, records) = io::bam::reader(in_path, 1)?;
             let mut writer = fastq_writer(&cfg, out_fmt)?;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg)?;
             writer.finish()?;
@@ -218,9 +218,9 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
                 note_tags_ignored(cfg, family_fmt, out_fmt);
                 let (header, records) = io::dir::bam_reader(&paths)?;
                 let out_header = provenance_header(header);
-                let mut writer = io::bam::writer(cfg.io.output.as_deref(), &out_header)?;
-                let stats = pipeline::run_bam(&out_header, records, &mut writer, cfg)?;
-                writer.try_finish()?;
+                let mut sink = io::bam::writer(cfg.io.output.as_deref(), &out_header, 1)?;
+                let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg)?;
+                sink.finish()?;
                 eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
                 Ok(())
             }

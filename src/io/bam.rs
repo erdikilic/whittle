@@ -1,12 +1,15 @@
 use std::fs::File;
 use std::io::{self, Write};
+use std::num::NonZero;
 use std::path::Path;
 
 use noodles_bam as bam;
+use noodles_bgzf as bgzf;
+use noodles_sam::alignment::io::Write as _; // write_header / write_alignment_record
 use noodles_sam::{self as sam, alignment::RecordBuf};
 
 /// A boxed, owning iterator over decoded `RecordBuf`s (or per-record errors).
-type RecordBufIterBox = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>>>;
+type RecordBufIterBox = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
 
 /// Error (naming the read) if the record is aligned. uBAM only in v1.
 pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
@@ -22,17 +25,25 @@ pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
     )
 }
 
-/// Open a BAM reader; return the header and an owning `RecordBuf` iterator.
-pub fn reader(input: Option<&Path>) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
-    let inner: Box<dyn io::Read> = match input {
+/// Open a BAM reader; MT-bgzf when `workers > 1`. Returns the header and a Send
+/// owning `RecordBuf` iterator.
+pub fn reader(input: Option<&Path>, workers: usize) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
+    let inner: Box<dyn io::Read + Send> = match input {
         Some(p) => Box::new(File::open(p)?),
         None => Box::new(io::stdin()),
     };
-    let mut r = bam::io::Reader::new(inner);
-    let header = r.read_header()?;
-    let header_for_iter = header.clone();
-    let iter = RecordBufIter { reader: r, header: header_for_iter };
-    Ok((header, Box::new(iter)))
+    if workers > 1 {
+        let mt = bgzf::io::MultithreadedReader::with_worker_count(NonZero::new(workers).unwrap(), inner);
+        let mut r = bam::io::Reader::from(mt);
+        let header = r.read_header()?;
+        let hc = header.clone();
+        Ok((header, Box::new(RecordBufIter { reader: r, header: hc })))
+    } else {
+        let mut r = bam::io::Reader::new(inner);
+        let header = r.read_header()?;
+        let hc = header.clone();
+        Ok((header, Box::new(RecordBufIter { reader: r, header: hc })))
+    }
 }
 
 struct RecordBufIter<R: io::Read> {
@@ -52,18 +63,52 @@ impl<R: io::Read> Iterator for RecordBufIter<R> {
     }
 }
 
-/// A BAM writer with the (provenance-annotated) header already written.
-pub fn writer(
-    output: Option<&Path>,
-    header: &sam::Header,
-) -> anyhow::Result<bam::io::Writer<noodles_bgzf::io::Writer<Box<dyn Write>>>> {
-    let inner: Box<dyn Write> = match output {
+/// A BAM output sink: single-threaded bgzf (t1) or multithreaded bgzf (t>1).
+pub enum BamSink {
+    Single(bam::io::Writer<bgzf::io::Writer<Box<dyn Write + Send>>>),
+    Multi(bam::io::Writer<bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>>),
+}
+
+/// Build the sink (header written), MT-bgzf when `workers > 1`.
+pub fn writer(output: Option<&Path>, header: &sam::Header, workers: usize) -> anyhow::Result<BamSink> {
+    let inner: Box<dyn Write + Send> = match output {
         Some(p) => Box::new(File::create(p)?),
         None => Box::new(io::stdout()),
     };
-    let mut w = bam::io::Writer::new(inner);
-    w.write_header(header)?;
-    Ok(w)
+    if workers > 1 {
+        let mt = bgzf::io::MultithreadedWriter::with_worker_count(NonZero::new(workers).unwrap(), inner);
+        let mut w = bam::io::Writer::from(mt);
+        w.write_header(header)?;
+        Ok(BamSink::Multi(w))
+    } else {
+        let mut w = bam::io::Writer::new(inner); // single-threaded bgzf::Writer under the hood
+        w.write_header(header)?;
+        Ok(BamSink::Single(w))
+    }
+}
+
+impl BamSink {
+    pub fn write_record(&mut self, header: &sam::Header, rec: &RecordBuf) -> io::Result<()> {
+        match self {
+            BamSink::Single(w) => w.write_alignment_record(header, rec),
+            BamSink::Multi(w) => w.write_alignment_record(header, rec),
+        }
+    }
+
+    /// Flush + finalize (bgzf EOF block). Single: `try_finish`; Multi:
+    /// `into_inner().finish()` (its `Drop` swallows errors — must be explicit).
+    pub fn finish(self) -> anyhow::Result<()> {
+        match self {
+            BamSink::Single(mut w) => {
+                w.try_finish()?;
+                Ok(())
+            }
+            BamSink::Multi(w) => {
+                w.into_inner().finish()?;
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -83,5 +128,33 @@ mod tests {
         let err = ensure_unaligned(&rec).unwrap_err().to_string();
         assert!(err.contains("r1"));
         assert!(err.contains("aligned"));
+    }
+
+    #[test]
+    fn mt_writer_roundtrips_through_mt_reader() {
+        use noodles_sam::alignment::record::Flags;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mt.bam");
+
+        // Write two unmapped records through a 4-worker MT BamSink.
+        let header = sam::Header::default();
+        let mut sink = writer(Some(&path), &header, 4).unwrap();
+        for name in [b"r1".as_slice(), b"r2".as_slice()] {
+            let mut rec = RecordBuf::default();
+            *rec.flags_mut() = Flags::UNMAPPED;
+            *rec.name_mut() = Some(name.into());
+            *rec.sequence_mut() = b"ACGT".to_vec().into();
+            *rec.quality_scores_mut() = vec![40u8; 4].into();
+            sink.write_record(&header, &rec).unwrap();
+        }
+        sink.finish().unwrap();
+
+        // Read back through a 4-worker MT reader.
+        let (_h, records) = reader(Some(&path), 4).unwrap();
+        let names: Vec<Vec<u8>> = records
+            .map(|r| r.unwrap().name().map(|n| n.to_vec()).unwrap_or_default())
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&b"r1".to_vec()) && names.contains(&b"r2".to_vec()));
     }
 }

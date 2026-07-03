@@ -86,10 +86,10 @@ pub fn bam_reader(paths: &[PathBuf]) -> anyhow::Result<(sam::Header, BamRecordIt
     let (first, rest) = paths
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("bam_reader called with no BAM files"))?;
-    let (header, first_records) = crate::io::bam::reader(Some(first))?;
+    let (header, first_records) = crate::io::bam::reader(Some(first), 1)?;
     let rest = rest.to_vec();
     let rest_records = rest.into_iter().flat_map(|p| -> BamRecordIter {
-        match crate::io::bam::reader(Some(&p)) {
+        match crate::io::bam::reader(Some(&p), 1) {
             Ok((_hdr, recs)) => recs,
             Err(e) => Box::new(std::iter::once(Err(e))),
         }

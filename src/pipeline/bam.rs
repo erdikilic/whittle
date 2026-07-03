@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use noodles_sam::{self as sam, alignment::RecordBuf};
-use noodles_sam::alignment::io::Write as _;
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
@@ -92,15 +91,12 @@ pub fn reconstruct_mods(
 }
 
 /// Single-threaded uBAM pipeline: refuse aligned reads, filter, trim, reconstruct.
-pub fn run_bam<W>(
+pub fn run_bam(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
-    writer: &mut noodles_bam::io::Writer<W>,
+    sink: &mut crate::io::bam::BamSink,
     cfg: &Config,
-) -> anyhow::Result<Stats>
-where
-    W: std::io::Write,
-{
+) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
     for rec in records {
         let rec = rec?;
@@ -128,7 +124,7 @@ where
         let total = intervals.len();
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
             let out = reconstruct_record(&rec, s, e, total, idx);
-            writer.write_alignment_record(header, &out)?;
+            sink.write_record(header, &out)?;
             stats.output_reads += 1;
         }
     }
@@ -287,8 +283,8 @@ mod tests {
         // quality_scores left at its default (empty) -> SEQ/QUAL length mismatch.
 
         let header = sam::Header::default();
-        let mut buf: Vec<u8> = Vec::new();
-        let mut writer = noodles_bam::io::Writer::new(&mut buf);
+        let dir = tempfile::tempdir().unwrap();
+        let mut sink = crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, 1).unwrap();
 
         let cfg = Config {
             io: IoConfig { input: None, output: None, in_format: None, out_format: None },
@@ -301,7 +297,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
         };
 
-        let result = run_bam(&header, [Ok(rec)].into_iter(), &mut writer, &cfg);
+        let result = run_bam(&header, [Ok(rec)].into_iter(), &mut sink, &cfg);
         assert!(result.is_err(), "SEQ/QUAL length mismatch must error, not panic");
     }
 
