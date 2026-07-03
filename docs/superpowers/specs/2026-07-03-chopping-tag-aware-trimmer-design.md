@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-03
 - **Status:** Approved for v1
-- **Repo:** https://github.com/erdikilic/chopping (private, empty — real initial commit + 0.1.0 release deferred)
+- **Repo:** https://github.com/erdikilic/chopping (private **dev repo**, `origin` wired and dev work pushed; a separate new repo will host the public release + 0.1.0)
 
 ## Goal
 
@@ -83,14 +83,26 @@ same slice **and** rebuilds MM/ML/MN. No trimmer or filter knows the format.
 ### Trimmers & filters
 
 Ported from chopper as pure functions over the quality/sequence slice, returning
-intervals:
-- `fixed-crop` (`--headcrop` / `--tailcrop`)
-- `trim-by-quality` (trim ends below `--cutoff`)
-- `best-read-segment` (Mott algorithm, `--cutoff`)
-- `split-by-low-quality` (`--cutoff`, `--split-window`)
+intervals. Each operation is its own flag with its threshold **on the flag** —
+there is no `--trim-approach` selector and no separate `--cutoff`:
+- fixed crop — `-H/--head-crop <N>`, `-T/--tail-crop <N>`
+- trim ends by quality — `--trim-qual <Q>` (trim both ends until per-base Q ≥ threshold)
+- best segment — `--best-segment <Q>` (Mott algorithm; inherently probability-based)
+- split by low quality — `--split-qual <Q>` with `--split-window <N>` (default 1)
 
-Filters: length (`--minlength`/`--maxlength`), mean quality
-(`--minqual`/`--maxqual`), GC (`--mingc`/`--maxgc`). All single-pass, shared.
+Composition: fixed crop composes with everything and is applied **first**; the
+three quality ops (`--trim-qual`, `--best-segment`, `--split-qual`) are **mutually
+exclusive** — supplying two is a hard error. Split segments are governed by the
+global `--min-length`.
+
+Filters: length (`-l/--min-length`, `-L/--max-length`), read-level quality
+(`-q/--min-qual`, `-Q/--max-qual`), GC (`-g/--min-gc`, `-G/--max-gc`). All
+single-pass, shared. The read-quality metric for `-q/-Q` is selected by
+`-m/--qual-mode`: `mean` (error-probability mean — the ONT-standard read Q, i.e.
+chopper's `ave_qual`; **default**), `arithmetic` (plain mean of Phred integers),
+or `median` (median Phred via a 256-bucket histogram). `--qual-mode` governs the
+`-q/-Q` filter only; the per-base trim ops are unaffected (`--best-segment`
+remains probability-based by construction).
 
 ## MM/ML/MN reconstruction (the core)
 
@@ -126,6 +138,10 @@ through unchanged.
 
 ## I/O & aligned-read refusal
 
+- **Format detection** (never requires a flag): input by file extension
+  (`.fastq`/`.fq`, `.fastq.gz`/`.fq.gz`, `.bam`), falling back to magic-byte
+  sniffing for stdin; output by output extension, or mirrors the input format
+  when writing to stdout. `--in-format`/`--out-format` are optional overrides.
 - FASTQ via `seq_io`; `.gz` via a gzip layer on reader/writer.
 - BAM via `noodles-bam` + `noodles-bgzf` (libdeflate).
 - On BAM read, any record whose unmapped flag is **clear** (aligned: has
@@ -143,12 +159,36 @@ don't parallelize parsing, parallelize the per-read work.
 
 ## CLI
 
-`-i/--input` (or stdin), `-o/--output` (or stdout), `--in-format`/`--out-format`
-overrides, `-t/--threads`. Filtering: `-l/--minlength`, `--maxlength`,
-`-q/--minqual`, `--maxqual`, `--mingc`, `--maxgc`. Trimming:
-`--trim-approach {fixed-crop|trim-by-quality|best-read-segment|split-by-low-quality}`
-with `--cutoff`, `--headcrop`, `--tailcrop`, `--split-window`. Mod recompute is
-automatic on BAM (no flag).
+Long names are kebab-case; short flags follow **lowercase = minimum, uppercase =
+maximum**. Format flags are optional (auto-detected). `--contam` and `--inverse`
+are removed. Mod recompute is automatic on BAM (no flag).
+
+```
+-i, --input <PATH>       input file                     [default: stdin]
+-o, --output <PATH>      output file                    [default: stdout]
+    --in-format <FMT>    override input detection       [fastq | fastq-gz | bam]
+    --out-format <FMT>   override output detection      [fastq | fastq-gz | bam]
+-t, --threads <N>        worker threads                 [default: 4]
+
+-l, --min-length <N>     min read length                [default: 1]
+-L, --max-length <N>     max read length                [default: unlimited]
+-q, --min-qual <F>       min read quality               [default: 0]
+-Q, --max-qual <F>       max read quality               [default: 1000]
+-g, --min-gc <F>         min GC fraction (0–1)
+-G, --max-gc <F>         max GC fraction (0–1)
+-m, --qual-mode <MODE>   read-quality metric for -q/-Q  [mean | arithmetic | median]  [default: mean]
+
+-H, --head-crop <N>      remove N bases from the read start
+-T, --tail-crop <N>      remove N bases from the read end
+    --trim-qual <Q>      trim both ends until per-base quality ≥ Q
+    --best-segment <Q>   keep only the single highest-quality segment (Mott)
+    --split-qual <Q>     split into segments at low-quality runs (< Q); each becomes its own read
+    --split-window <N>   consecutive sub-Q bases needed to split           [default: 1]
+```
+
+Rules: `--head-crop`/`--tail-crop` compose and run first; `--trim-qual`,
+`--best-segment`, `--split-qual` are mutually exclusive (two → error); split
+segments obey `--min-length`.
 
 ## Testing (first-class — this is a "well-tested" tool)
 
