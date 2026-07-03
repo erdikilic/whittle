@@ -120,6 +120,7 @@ pub fn parse() -> anyhow::Result<Config> {
 }
 
 /// Build a Config directly (used by integration tests). head/tail are fixed crops.
+#[doc(hidden)]
 pub fn config_for_test(
     input: &std::path::Path,
     output: &std::path::Path,

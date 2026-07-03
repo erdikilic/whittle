@@ -34,10 +34,11 @@ chopping -i reads.fastq.gz -o trimmed.fastq.gz \
   -t 8
 ```
 
-This keeps reads of at least 500 bases with a mean quality >= 10 (`-l`/`-q`),
-crops 20 bases off each end (`-H`/`-T`), then trims any remaining low-quality
-edges below Q8 (`--trim-qual`) — all before the length/quality filters are
-re-applied to the trimmed result — using 8 worker threads (`-t`).
+The length/quality/GC filters (`-l`/`-q`) are applied to the whole read
+first; then trimming runs — cropping 20 bases off each end (`-H`/`-T`) and
+trimming any remaining low-quality edges below Q8 (`--trim-qual`); each
+resulting output segment must still satisfy `-l`/`--min-length` — all using 8
+worker threads (`-t`).
 
 ### uBAM example
 

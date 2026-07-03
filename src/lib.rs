@@ -65,6 +65,11 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             let out_header = provenance_header(header);
             let mut writer = io::bam::writer(cfg.io.output.as_deref(), &out_header)?;
             let stats = pipeline::run_bam(&out_header, records, &mut writer, &cfg)?;
+            // Explicitly finish (final bgzf block + EOF marker) instead of relying
+            // on `Drop`, whose `try_finish` error is silently discarded — an I/O
+            // failure on final flush (e.g. ENOSPC) would otherwise yield a
+            // truncated BAM with a success exit code.
+            writer.try_finish()?;
             eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
             return Ok(());
         }
