@@ -54,10 +54,24 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
-    // Reject BAM before creating/truncating the output file so a rejected run
-    // never leaves a stray 0-byte file behind.
-    if matches!(in_fmt, Format::Bam) || matches!(out_fmt, Format::Bam) {
-        anyhow::bail!("BAM support arrives in Plan 2");
+    // BAM dispatch, and the cross-format BAM<->FASTQ rejection, happen before
+    // creating/truncating the output file so a rejected run never leaves a
+    // stray 0-byte file behind. Only the (Fastq*, Fastq*) combinations fall
+    // through to the FASTQ path below.
+    match (in_fmt, out_fmt) {
+        (Format::Bam, Format::Bam) => {
+            let (header, records) = io::bam::reader(in_path)?;
+            // Provenance: append our @PG line to a cloned header before writing.
+            let out_header = provenance_header(header);
+            let mut writer = io::bam::writer(cfg.io.output.as_deref(), &out_header)?;
+            let stats = pipeline::run_bam(&out_header, records, &mut writer, &cfg)?;
+            eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+            return Ok(());
+        }
+        (Format::Bam, _) | (_, Format::Bam) => {
+            anyhow::bail!("cross-format BAM<->FASTQ conversion is not supported in v1")
+        }
+        _ => {}
     }
 
     let base_writer: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
@@ -80,4 +94,25 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     drop(writer);
     eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
     Ok(())
+}
+
+/// Append an `@PG` provenance record (`ID:chopping`, program name + version) to a
+/// cloned header before writing. Best-effort: `Programs::add` can fail (e.g. on a
+/// duplicate ID), in which case the header is written unchanged — the `@PG` line
+/// is cosmetic and must never block record output.
+fn provenance_header(mut header: noodles_sam::Header) -> noodles_sam::Header {
+    use noodles_sam::header::record::value::Map;
+    use noodles_sam::header::record::value::map::Program;
+    use noodles_sam::header::record::value::map::program::tag;
+
+    let program = Map::<Program>::builder()
+        .insert(tag::NAME, "chopping")
+        .insert(tag::VERSION, env!("CARGO_PKG_VERSION"))
+        .build();
+
+    if let Ok(program) = program {
+        let _ = header.programs_mut().add("chopping", program);
+    }
+
+    header
 }
