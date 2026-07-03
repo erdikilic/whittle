@@ -134,4 +134,119 @@ mod tests {
         assert_eq!(m.groups[0].deltas, vec![1, 0]);
         assert_eq!(m.groups[0].ml, vec![20, 30]);
     }
+
+    #[test]
+    fn mod_exactly_at_window_start_is_kept() {
+        // C at 0..=4, all modified. Window [2,5): abs2 (== start) must survive,
+        // abs4 (== end-1) must survive; there is no abs5 (half-open end).
+        let m = recon(b"C+m,0,0,0,0,0;", &[1, 2, 3, 4, 5], b"CCCCC", 2, 5);
+        assert_eq!(m.groups.len(), 1);
+        assert_eq!(m.groups[0].deltas, vec![0, 0, 0]); // abs 2,3,4 renumbered
+        assert_eq!(m.groups[0].ml, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn mod_exactly_at_window_end_is_excluded() {
+        // Window [0,3): abs0 (== start == 0) kept; abs3 (== end) dropped (half-open).
+        let m = recon(b"C+m,0,0,0,0,0;", &[1, 2, 3, 4, 5], b"CCCCC", 0, 3);
+        assert_eq!(m.groups.len(), 1);
+        assert_eq!(m.groups[0].deltas, vec![0, 0, 0]); // abs 0,1,2
+        assert_eq!(m.groups[0].ml, vec![1, 2, 3]);
+    }
+
+    /// Property test: over many random sequences, modification patterns, and
+    /// windows, the reconstructed ML array must stay byte-aligned — its length
+    /// equals the number of surviving modified positions (single code), and the
+    /// kept bytes are EXACTLY those of the in-window positions, in order. It
+    /// independently re-derives the survivors (a simpler oracle) rather than
+    /// trusting `reconstruct`, so it catches the ML-misalignment class of bug
+    /// that would silently shift every downstream probability.
+    #[test]
+    fn ml_stays_byte_aligned_over_random_windows() {
+        // Deterministic LCG — reproducible, no external rng dependency.
+        struct Lcg(u64);
+        impl Lcg {
+            fn next_u64(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                self.0
+            }
+            fn below(&mut self, n: usize) -> usize {
+                ((self.next_u64() >> 33) as usize) % n
+            }
+        }
+        let mut rng = Lcg(0x0123_4567_89ab_cdef);
+
+        for _ in 0..3000 {
+            let n = 5 + rng.below(40);
+            let seq: Vec<u8> = (0..n).map(|_| b"ACGT"[rng.below(4)]).collect();
+            let c_pos: Vec<usize> = seq
+                .iter()
+                .enumerate()
+                .filter(|&(_, &b)| b == b'C')
+                .map(|(i, _)| i)
+                .collect();
+            if c_pos.is_empty() {
+                continue;
+            }
+            // Random subset of C occurrences to modify (ascending), one ML byte each.
+            let mut occ = Vec::new();
+            for o in 0..c_pos.len() {
+                if rng.below(2) == 0 {
+                    occ.push(o);
+                }
+            }
+            if occ.is_empty() {
+                continue;
+            }
+            let mut deltas = Vec::new();
+            let mut prev: i64 = -1;
+            for &o in &occ {
+                deltas.push((o as i64 - prev - 1) as usize);
+                prev = o as i64;
+            }
+            let ml: Vec<u8> = (0..occ.len()).map(|_| rng.below(256) as u8).collect();
+            let mut mm = b"C+m".to_vec();
+            for d in &deltas {
+                mm.extend_from_slice(format!(",{d}").as_bytes());
+            }
+            mm.push(b';');
+            let a = rng.below(n + 1);
+            let b = rng.below(n + 1);
+            let (start, end) = if a <= b { (a, b) } else { (b, a) };
+
+            let out = recon(&mm, &ml, &seq, start, end);
+
+            // Independent expected survivors (position order preserved).
+            let mut exp_ml = Vec::new();
+            for (k, &o) in occ.iter().enumerate() {
+                let abs = c_pos[o];
+                if abs >= start && abs < end {
+                    exp_ml.push(ml[k]);
+                }
+            }
+
+            if exp_ml.is_empty() {
+                assert!(
+                    out.groups.is_empty(),
+                    "no survivors in [{start},{end}) but a group was emitted: seq={seq:?}"
+                );
+            } else {
+                assert_eq!(out.groups.len(), 1, "seq={seq:?} window=[{start},{end})");
+                let g = &out.groups[0];
+                // Single code -> exactly one ML byte per surviving delta. The invariant.
+                assert_eq!(
+                    g.ml.len(),
+                    g.deltas.len(),
+                    "ML/deltas length mismatch: seq={seq:?} window=[{start},{end})"
+                );
+                assert_eq!(
+                    g.ml, exp_ml,
+                    "kept ML must equal in-window positions': seq={seq:?} window=[{start},{end})"
+                );
+            }
+        }
+    }
 }

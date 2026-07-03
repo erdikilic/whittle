@@ -92,6 +92,75 @@ fn trimmed_output_mods_match_oracle() {
     assert_eq!(a, b, "trimmed mod set must equal original filtered to [3, len) offset by 3");
 }
 
+/// Multi-mod fixture: one read carrying THREE mod groups — `C+m`, `C+h`, `A+a`
+/// (the real dorado shape) — with the C at abs 3 modified by BOTH `m` and `h`,
+/// to exercise multiple groups, multiple fundamental bases, AND a same-position
+/// double mod all reconstructed through a head+tail crop.
+fn write_fixture_multimod(path: &Path) {
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
+    w.write_header(&header).unwrap();
+
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = Flags::UNMAPPED;
+    *rec.name_mut() = Some(b"read1".into());
+    // seq: C at 0,1,3,4,7,9 ; A at 2,6,8.
+    *rec.sequence_mut() = b"CCACCGACAC".to_vec().into();
+    *rec.quality_scores_mut() = vec![40u8; 10].into();
+    let data = rec.data_mut();
+    // C+m at C-occ 0,2,5 -> abs 0,3,9 ; C+h at C-occ 2,4 -> abs 3,7 (abs3 shared) ;
+    // A+a at A-occ 0,2 -> abs 2,8. ML concatenated in MM-group order.
+    data.insert(
+        Tag::BASE_MODIFICATIONS,
+        Value::String(b"C+m,0,1,2;C+h,2,1;A+a,0,1;".to_vec().into()),
+    );
+    data.insert(
+        Tag::BASE_MODIFICATION_PROBABILITIES,
+        Value::Array(Array::UInt8(vec![200, 150, 100, 55, 66, 240, 10])),
+    );
+    data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(10));
+    w.write_alignment_record(&header, &rec).unwrap();
+}
+
+#[test]
+fn trimmed_output_multimod_mods_match_oracle() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.ubam");
+    let output = dir.path().join("out.ubam");
+    write_fixture_multimod(&input);
+
+    // head-crop 2, tail-crop 2 -> surviving window [2, 8) on the length-10 read.
+    let cfg = chopping::cli::config_for_test(&input, &output, 2, 2);
+    chopping::run(cfg).unwrap();
+
+    let (head, tail, len) = (2usize, 2usize, 10usize);
+    let tail_start = len - tail;
+    let original = hts_mods(&input);
+    let expected: Vec<_> = original
+        .iter()
+        .filter(|(pos, ..)| *pos >= head && *pos < tail_start)
+        .map(|&(pos, cb, mb, st, q)| (pos - head, cb, mb, st, q))
+        .collect();
+
+    let got = hts_mods(&output);
+    let mut a = expected.clone();
+    let mut b = got.clone();
+    a.sort();
+    b.sort();
+    assert_eq!(
+        a, b,
+        "multi-mod trimmed set must equal original filtered to [2,8) offset by 2"
+    );
+
+    // Guard against a trivial pass: the surviving set must genuinely be multi-mod
+    // (>1 distinct mod code) and non-empty, so this exercises real reconstruction.
+    let codes: std::collections::HashSet<char> = b.iter().map(|t| t.2).collect();
+    assert!(
+        b.len() >= 3 && codes.len() >= 2,
+        "expected a non-trivial multi-mod survivor set, got {b:?}"
+    );
+}
+
 // --- Real-data sweep (Task 7) -----------------------------------------------
 //
 // Everything below is only exercised when `CHOPPING_UBAM` points at a real
