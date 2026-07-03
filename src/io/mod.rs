@@ -26,10 +26,8 @@ pub fn from_extension(path: &Path) -> Option<Format> {
 /// Detect input format from the path extension; if unknown or reading stdin,
 /// fall back to sniffing the first bytes.
 pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format> {
-    if let Some(p) = path {
-        if let Some(f) = from_extension(p) {
-            return Ok(f);
-        }
+    if let Some(f) = path.and_then(from_extension) {
+        return Ok(f);
     }
     if sniff.starts_with(&[0x1f, 0x8b]) {
         Ok(Format::FastqGz)
