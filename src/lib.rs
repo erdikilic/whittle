@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod filter;
 pub mod io;
+pub mod mods;
 pub mod pipeline;
 pub mod qual;
 pub mod record;
