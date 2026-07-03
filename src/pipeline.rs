@@ -186,15 +186,16 @@ pub fn reconstruct_record(
         if mm_new.is_empty() {
             data.remove(&Tag::BASE_MODIFICATIONS);
             data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
+            data.remove(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH);
         } else {
             data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm_new.into()));
             data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml_new)));
+            // MN reflects the output segment length whenever mods were present.
+            data.insert(
+                Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
+                Value::Int32((end - start) as i32),
+            );
         }
-        // MN reflects the output segment length whenever mods were present.
-        data.insert(
-            Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
-            Value::Int32((end - start) as i32),
-        );
     }
 
     out
@@ -447,5 +448,6 @@ mod bam_tests {
         assert_eq!(AsRef::<[u8]>::as_ref(out.name().unwrap()), b"r1_segment_2");
         assert!(out.data().get(&Tag::BASE_MODIFICATIONS).is_none());
         assert!(out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES).is_none());
+        assert!(out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH).is_none());
     }
 }
