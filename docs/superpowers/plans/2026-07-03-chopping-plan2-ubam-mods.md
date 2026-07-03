@@ -802,17 +802,20 @@ pub fn reconstruct_record(
 
         let data = out.data_mut();
         if mm_new.is_empty() {
+            // No mods survive in this segment: drop MM/ML AND MN (an MN with no
+            // MM/ML is an orphaned, meaningless tag that confuses downstream tools).
             data.remove(&Tag::BASE_MODIFICATIONS);
             data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
+            data.remove(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH);
         } else {
             data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm_new.into()));
             data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml_new)));
+            // MN reflects the output segment length.
+            data.insert(
+                Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
+                Value::Int32((end - start) as i32),
+            );
         }
-        // MN reflects the output segment length whenever mods were present.
-        data.insert(
-            Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
-            Value::Int32((end - start) as i32),
-        );
     }
 
     out
