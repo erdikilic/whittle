@@ -20,6 +20,7 @@ pub struct TrimPlan {
 /// window, offsetting intervals back to original coordinates. Every returned
 /// segment is >= `min_length`.
 pub fn apply(seq_len: usize, phred: &[u8], plan: &TrimPlan, min_length: usize) -> Vec<(usize, usize)> {
+    debug_assert_eq!(seq_len, phred.len(), "apply: seq_len must equal phred.len()");
     let start = plan.head.min(seq_len);
     let end = seq_len.saturating_sub(plan.tail).max(start);
     if start >= end {

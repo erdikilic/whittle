@@ -68,6 +68,8 @@ mod tests {
         assert!(!passes(b"ATG", &[30, 30, 30], &c)); // too short
         assert!(passes(b"ATGCG", &[30; 5], &c));
         assert!(!passes(b"ATGCGATGC", &[30; 9], &c)); // too long
+        assert!(passes(b"ATGC", &[30; 4], &c)); // len == min_length, inclusive
+        assert!(passes(b"ATGCGATG", &[30; 8], &c)); // len == max_length, inclusive
     }
 
     #[test]
@@ -91,6 +93,7 @@ mod tests {
         c.max_gc = Some(0.6);
         assert!(passes(b"ATGC", &[30; 4], &c)); // 0.5
         assert!(!passes(b"AAAT", &[30; 4], &c)); // 0.0
+        assert!(passes(b"GCAAA", &[30; 5], &c)); // gc == min_gc (0.4), inclusive
     }
 
     #[test]
