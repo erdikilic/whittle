@@ -82,12 +82,21 @@ where
     let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
 
     pool.in_place_scope(|scope| {
-        // Writer task drains rendered buffers in arrival order.
+        // Writer task drains rendered buffers in arrival order. On a write
+        // error we must keep draining (not `break`): `rx` stays alive on this
+        // stack frame, so if we stopped receiving, producers blocked on the
+        // bounded `tx.send` in the `par_bridge().for_each` below would never
+        // unblock, `in_place_scope` would never return, and the recorded
+        // error would never surface — a deadlock instead of an `Err`.
         scope.spawn(|_| {
+            let mut errored = false;
             for buf in rx.iter() {
+                if errored {
+                    continue; // keep draining so bounded-channel producers never block
+                }
                 if let Err(e) = writer.write_all(&buf) {
                     *write_err.lock().unwrap() = Some(e);
-                    break;
+                    errored = true;
                 }
             }
         });
@@ -216,5 +225,38 @@ mod tests {
             v
         };
         assert_eq!(sort_records(&seq_out), sort_records(&par_out));
+    }
+
+    #[test]
+    fn parallel_surfaces_write_error_without_deadlock() {
+        use crate::config::IoConfig;
+        use std::io::{self, Write};
+
+        struct FailAfter { limit: usize, written: usize }
+        impl Write for FailAfter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if self.written >= self.limit {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "boom"));
+                }
+                self.written += buf.len();
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+
+        let cfg = Config {
+            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            filter: base_filter(),
+            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            threads: 4,
+        };
+        // Far more records than the bounded channel capacity (threads*4), so a
+        // pre-fix build would deadlock instead of returning.
+        let recs: Vec<ReadRecord> = (0..2000)
+            .map(|i| rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10]))
+            .collect();
+        let mut w = FailAfter { limit: 100, written: 0 };
+        let res = run_fastq(recs.into_iter().map(anyhow::Ok), &mut w, &cfg);
+        assert!(res.is_err(), "write error must surface as Err, and must not hang");
     }
 }
