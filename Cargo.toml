@@ -30,6 +30,7 @@ bstr = "1"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+rust-htslib = { version = "1.0", default-features = false, features = ["libdeflate"] }
 
 [profile.release]
 lto = "fat"

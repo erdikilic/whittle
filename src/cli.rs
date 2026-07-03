@@ -118,3 +118,31 @@ pub fn parse() -> anyhow::Result<Config> {
         threads: c.threads.max(1),
     })
 }
+
+/// Build a Config directly (used by integration tests). head/tail are fixed crops.
+pub fn config_for_test(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    head_crop: usize,
+    tail_crop: usize,
+) -> Config {
+    Config {
+        io: IoConfig {
+            input: Some(input.to_path_buf()),
+            output: Some(output.to_path_buf()),
+            in_format: Some(Format::Bam),
+            out_format: Some(Format::Bam),
+        },
+        filter: FilterConfig {
+            min_length: 1,
+            max_length: usize::MAX,
+            min_qual: 0.0,
+            max_qual: 1000.0,
+            min_gc: None,
+            max_gc: None,
+            qual_mode: QualMode::Mean,
+        },
+        trim: TrimPlan { head: head_crop, tail: tail_crop, quality: None },
+        threads: 1,
+    }
+}
