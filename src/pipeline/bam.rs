@@ -1,9 +1,11 @@
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use noodles_sam::{self as sam, alignment::RecordBuf};
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
+use rayon::prelude::*;
 
 use crate::config::{Config, FastqTags};
 use crate::io::fastq::{format_aux_field, format_mods_aux, write_segment, write_segment_tagged};
@@ -91,7 +93,7 @@ pub fn reconstruct_mods(
 }
 
 /// Single-threaded uBAM pipeline: refuse aligned reads, filter, trim, reconstruct.
-pub fn run_bam(
+fn run_bam_seq(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
     sink: &mut crate::io::bam::BamSink,
@@ -129,6 +131,148 @@ pub fn run_bam(
         }
     }
     Ok(stats)
+}
+
+/// Shared parallel driver: reader iterator -> rayon pool (render) -> bounded
+/// channel -> dedicated writer thread (write_one). Unordered. Mirrors
+/// `run_fastq`'s error seam (see `pipeline/fastq.rs`): the first parse/render
+/// error and the first write error are each captured in a `Mutex<Option<_>>`
+/// slot; the writer task keeps draining `rx` after an error (never `break`) so
+/// producer threads blocked on the bounded channel's `tx.send` can never
+/// deadlock waiting for a writer that stopped consuming.
+fn run_bam_parallel<T, S, Render, WriteOne>(
+    records: impl Iterator<Item = anyhow::Result<RecordBuf>> + Send,
+    cfg: &Config,
+    sink: &mut S,
+    render: Render,
+    write_one: WriteOne,
+) -> anyhow::Result<Stats>
+where
+    T: Send,
+    S: Send,
+    Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
+    WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
+{
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(cfg.threads).build()?;
+    let input_reads = AtomicU64::new(0);
+    let output_reads = AtomicU64::new(0);
+    let (tx, rx) = crossbeam_channel::bounded::<T>(cfg.threads * 4);
+    let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
+    let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
+
+    pool.in_place_scope(|scope| {
+        // `write_one` and `sink` are moved wholesale into this task (they're not
+        // used again after it's spawned): a plain `Fn` reference capture would
+        // additionally require `WriteOne: Sync`, which the call sites below
+        // can't offer for a `sink.write_record(header, rec)` closure. `write_err`
+        // still needs to be read after the scope joins, so it's captured through
+        // a `Copy` shared reference taken up front instead of being moved.
+        let write_err_ref = &write_err;
+        scope.spawn(move |_| {
+            let mut errored = false;
+            for item in rx.iter() {
+                if errored {
+                    continue; // keep draining so bounded-channel producers never block
+                }
+                if let Err(e) = write_one(sink, &item) {
+                    *write_err_ref.lock().unwrap() = Some(e);
+                    errored = true;
+                }
+            }
+        });
+
+        records.par_bridge().for_each(|rec| {
+            let rec = match rec {
+                Ok(r) => r,
+                Err(e) => {
+                    let mut g = proc_err.lock().unwrap();
+                    if g.is_none() {
+                        *g = Some(e);
+                    }
+                    return;
+                }
+            };
+            input_reads.fetch_add(1, Ordering::Relaxed);
+            match render(&rec, cfg) {
+                Ok(items) => {
+                    output_reads.fetch_add(items.len() as u64, Ordering::Relaxed);
+                    for it in items {
+                        let _ = tx.send(it);
+                    }
+                }
+                Err(e) => {
+                    let mut g = proc_err.lock().unwrap();
+                    if g.is_none() {
+                        *g = Some(e);
+                    }
+                }
+            }
+        });
+        drop(tx);
+    });
+
+    if let Some(e) = proc_err.lock().unwrap().take() {
+        return Err(e);
+    }
+    if let Some(e) = write_err.lock().unwrap().take() {
+        return Err(e.into());
+    }
+    Ok(Stats {
+        input_reads: input_reads.load(Ordering::Relaxed),
+        output_reads: output_reads.load(Ordering::Relaxed),
+    })
+}
+
+/// Threads-aware uBAM pipeline entry point: refuse aligned reads, filter, trim,
+/// reconstruct. Sequential for `cfg.threads <= 1`; otherwise renders each
+/// record on a rayon work pool and drains the resulting `RecordBuf`s through
+/// `run_bam_parallel`'s bounded channel onto a dedicated writer task. Output
+/// order is unordered for `threads > 1` (records land in arrival order, not
+/// input order) — the BAM format has no ordering requirement for uBAM.
+pub fn run_bam(
+    header: &sam::Header,
+    records: impl Iterator<Item = anyhow::Result<RecordBuf>> + Send,
+    sink: &mut crate::io::bam::BamSink,
+    cfg: &Config,
+) -> anyhow::Result<Stats> {
+    if cfg.threads <= 1 {
+        return run_bam_seq(header, records, sink, cfg);
+    }
+    run_bam_parallel(
+        records,
+        cfg,
+        sink,
+        // render: per-record guards + filter + trim + reconstruct -> Vec<RecordBuf>
+        |rec, cfg| {
+            crate::io::bam::ensure_unaligned(rec)?;
+            let seq = rec.sequence().as_ref().to_vec();
+            let qual = rec.quality_scores().as_ref().to_vec();
+            if qual.len() != seq.len() {
+                let name = rec
+                    .name()
+                    .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+                    .unwrap_or_else(|| "<unnamed>".to_string());
+                anyhow::bail!(
+                    "read {name}: BAM record SEQ length {} != QUAL length {} \
+                     (records without full per-base quality are not supported)",
+                    seq.len(),
+                    qual.len()
+                );
+            }
+            if !filter::passes(&seq, &qual, &cfg.filter) {
+                return Ok(Vec::new());
+            }
+            let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+            let total = intervals.len();
+            Ok(intervals
+                .into_iter()
+                .enumerate()
+                .map(|(idx, (s, e))| reconstruct_record(rec, s, e, total, idx))
+                .collect())
+        },
+        // write_one: encode+write on the writer thread (bgzf compress is MT).
+        |sink, rec| sink.write_record(header, rec),
+    )
 }
 
 /// Assemble the TAB-prefixed aux-tag block for one interval: carried non-mod
@@ -438,5 +582,148 @@ mod tests {
         let mut out = Vec::new();
         run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
         assert_eq!(out, b"@plain\nACGT\n+\nIIII\n");
+    }
+
+    #[test]
+    fn run_bam_parallel_matches_sequential_as_multiset() {
+        use crate::config::{FastqTags, IoConfig};
+        use crate::filter::FilterConfig;
+        use crate::qual::QualMode;
+        use crate::trim::TrimPlan;
+
+        let mk = |threads| Config {
+            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            filter: FilterConfig {
+                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
+                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan { head: 2, tail: 2, quality: None },
+            threads,
+            fastq_tags: FastqTags::All,
+        };
+        // 300 reads with mods so reconstruction runs on every one.
+        let recs: Vec<RecordBuf> = (0..300)
+            .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))
+            .collect();
+
+        let header = sam::Header::default();
+        let decode = |bytes: &[u8]| -> Vec<(Vec<u8>, Vec<u8>)> {
+            // (seq, MM-bytes) pairs, sorted, as an order-independent fingerprint.
+            let mut r = noodles_bam::io::Reader::new(bytes);
+            let h = r.read_header().unwrap();
+            let mut out = Vec::new();
+            let mut buf = RecordBuf::default();
+            while r.read_record_buf(&h, &mut buf).unwrap() != 0 {
+                let seq = buf.sequence().as_ref().to_vec();
+                let mm = match buf.data().get(&Tag::BASE_MODIFICATIONS) {
+                    Some(Value::String(s)) => s.to_vec(),
+                    _ => Vec::new(),
+                };
+                out.push((seq, mm));
+            }
+            out.sort();
+            out
+        };
+
+        // t1 -> single-threaded bgzf sink, written to a tempfile.
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("t1.bam");
+        let mut sink1 = crate::io::bam::writer(Some(&p1), &header, 1).unwrap();
+        run_bam(&header, recs.clone().into_iter().map(anyhow::Ok), &mut sink1, &mk(1)).unwrap();
+        sink1.finish().unwrap();
+        let b1 = std::fs::read(&p1).unwrap();
+
+        // t8 -> MT sink to a tempfile (MT writer needs an owned Write + Send).
+        let p8 = dir.path().join("t8.bam");
+        let mut sink8 = crate::io::bam::writer(Some(&p8), &header, 8).unwrap();
+        run_bam(&header, recs.into_iter().map(anyhow::Ok), &mut sink8, &mk(8)).unwrap();
+        sink8.finish().unwrap();
+        let b8 = std::fs::read(&p8).unwrap();
+
+        assert_eq!(decode(&b1), decode(&b8), "t1 and t8 must produce the same record set");
+    }
+
+    /// Mirrors `pipeline::fastq`'s `parallel_surfaces_write_error_without_deadlock`,
+    /// but drives `run_bam_parallel` directly with a stub sink whose `write_one`
+    /// starts erroring after `limit` writes. Record count (3000) exceeds the
+    /// bounded channel capacity (`threads * 4` = 16), so a pre-fix build that
+    /// stops draining `rx` on the first write error would deadlock instead of
+    /// returning.
+    #[test]
+    fn run_bam_parallel_surfaces_write_error_without_deadlock() {
+        use crate::config::IoConfig;
+        use crate::filter::FilterConfig;
+        use crate::qual::QualMode;
+        use crate::trim::TrimPlan;
+        use std::io;
+
+        struct FailAfter { limit: usize, written: usize }
+
+        let cfg = Config {
+            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            filter: FilterConfig {
+                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
+                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            threads: 4,
+            fastq_tags: crate::config::FastqTags::All,
+        };
+        let recs: Vec<anyhow::Result<RecordBuf>> =
+            (0..3000).map(|_| anyhow::Ok(RecordBuf::default())).collect();
+
+        let mut sink = FailAfter { limit: 100, written: 0 };
+        let res = run_bam_parallel(
+            recs.into_iter(),
+            &cfg,
+            &mut sink,
+            |_rec, _cfg| anyhow::Ok(vec![()]),
+            |sink, _item: &()| -> io::Result<()> {
+                if sink.written >= sink.limit {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "boom"));
+                }
+                sink.written += 1;
+                Ok(())
+            },
+        );
+        assert!(res.is_err(), "write error must surface as Err, and must not hang");
+    }
+
+    /// Mirrors `pipeline::fastq`'s `parallel_surfaces_parse_error_instead_of_dropping_it`,
+    /// driving `run_bam_parallel` directly so a malformed upstream record (an
+    /// `Err` item from the input iterator) is not silently swallowed.
+    #[test]
+    fn run_bam_parallel_surfaces_parse_error_instead_of_dropping_it() {
+        use crate::config::IoConfig;
+        use crate::filter::FilterConfig;
+        use crate::qual::QualMode;
+        use crate::trim::TrimPlan;
+        use std::io;
+
+        struct NullSink;
+
+        let cfg = Config {
+            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            filter: FilterConfig {
+                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
+                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            threads: 4,
+            fastq_tags: crate::config::FastqTags::All,
+        };
+        let good: Vec<anyhow::Result<RecordBuf>> =
+            (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
+        let recs = good.into_iter().chain(std::iter::once(Err(anyhow::anyhow!("bad record"))));
+
+        let mut sink = NullSink;
+        let res = run_bam_parallel(
+            recs,
+            &cfg,
+            &mut sink,
+            |_rec, _cfg| anyhow::Ok(vec![()]),
+            |_sink: &mut NullSink, _item: &()| -> io::Result<()> { Ok(()) },
+        );
+        assert!(res.is_err(), "a malformed record must not be silently dropped on the parallel path");
     }
 }
