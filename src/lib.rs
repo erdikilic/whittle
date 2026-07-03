@@ -70,6 +70,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     // through to the FASTQ path below.
     match (in_fmt, out_fmt) {
         (Format::Bam, Format::Bam) => {
+            note_tags_ignored(&cfg, in_fmt, out_fmt);
             let (header, records) = io::bam::reader(in_path)?;
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
@@ -83,12 +84,21 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
             return Ok(());
         }
-        (Format::Bam, _) | (_, Format::Bam) => {
-            anyhow::bail!("cross-format BAM<->FASTQ conversion is not supported in v1")
+        (Format::Bam, Format::Fastq | Format::FastqGz) => {
+            let (_header, records) = io::bam::reader(in_path)?;
+            let mut writer = fastq_writer(&cfg, out_fmt)?;
+            let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg)?;
+            writer.finish()?;
+            eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+            return Ok(());
+        }
+        (Format::Fastq | Format::FastqGz, Format::Bam) => {
+            anyhow::bail!("cross-format FASTQ->BAM conversion is not supported")
         }
         _ => {}
     }
 
+    note_tags_ignored(&cfg, in_fmt, out_fmt);
     let mut writer = fastq_writer(&cfg, out_fmt)?;
 
     let gz_in = matches!(in_fmt, Format::FastqGz);
@@ -195,6 +205,7 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
                     "cross-format conversion (FASTQ folder to BAM) is not supported in v1"
                 );
             }
+            note_tags_ignored(cfg, family_fmt, out_fmt);
             let mut writer = fastq_writer(cfg, out_fmt)?;
             let records = io::dir::fastq_records(&paths);
             let stats = pipeline::run_fastq(records, &mut writer, cfg)?;
@@ -202,20 +213,38 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
             eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
             Ok(())
         }
-        io::dir::Family::Bam => {
-            if !matches!(out_fmt, Format::Bam) {
-                anyhow::bail!(
-                    "cross-format conversion (BAM folder to FASTQ) is not supported in v1"
-                );
+        io::dir::Family::Bam => match out_fmt {
+            Format::Bam => {
+                note_tags_ignored(cfg, family_fmt, out_fmt);
+                let (header, records) = io::dir::bam_reader(&paths)?;
+                let out_header = provenance_header(header);
+                let mut writer = io::bam::writer(cfg.io.output.as_deref(), &out_header)?;
+                let stats = pipeline::run_bam(&out_header, records, &mut writer, cfg)?;
+                writer.try_finish()?;
+                eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+                Ok(())
             }
-            let (header, records) = io::dir::bam_reader(&paths)?;
-            let out_header = provenance_header(header);
-            let mut writer = io::bam::writer(cfg.io.output.as_deref(), &out_header)?;
-            let stats = pipeline::run_bam(&out_header, records, &mut writer, cfg)?;
-            writer.try_finish()?;
-            eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
-            Ok(())
-        }
+            Format::Fastq | Format::FastqGz => {
+                let (_header, records) = io::dir::bam_reader(&paths)?;
+                let mut writer = fastq_writer(cfg, out_fmt)?;
+                let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg)?;
+                writer.finish()?;
+                eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+                Ok(())
+            }
+        },
+    }
+}
+
+/// `--fastq-tags` only affects BAM→FASTQ output. When the user set a non-default
+/// value (`none`/an explicit list) on any other path, emit a one-line stderr note
+/// rather than silently ignoring it. (An explicit `all` is the default and stays
+/// silent.)
+fn note_tags_ignored(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) {
+    if !matches!(cfg.fastq_tags, config::FastqTags::All) {
+        eprintln!(
+            "note: --fastq-tags applies only to BAM->FASTQ output; ignored for {in_fmt:?}->{out_fmt:?}"
+        );
     }
 }
 
