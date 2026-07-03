@@ -309,7 +309,7 @@ fn build_fastq_tags(
 /// write each surviving segment as FASTQ with the selected aux tags in the header
 /// (MM/ML/MN reconstructed; others verbatim). gz compression, when requested, is
 /// handled by the parallel `gzp` writer this drains into.
-pub fn run_bam_to_fastq<W>(
+fn run_bam_to_fastq_seq<W>(
     records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
     writer: &mut W,
     cfg: &Config,
@@ -354,6 +354,64 @@ where
         }
     }
     Ok(stats)
+}
+
+/// Threads-aware uBAM→FASTQ pipeline entry point: refuse aligned reads, filter,
+/// trim, then write each surviving segment as FASTQ with the selected aux tags
+/// in the header (MM/ML/MN reconstructed; others verbatim). Sequential for
+/// `cfg.threads <= 1`; otherwise renders each record's FASTQ segments on a
+/// rayon work pool and drains the resulting byte buffers through
+/// `run_bam_parallel`'s bounded channel onto the writer, appended as-is.
+/// Output order is unordered for `threads > 1` (records land in arrival order,
+/// not input order).
+pub fn run_bam_to_fastq<W: Write + Send>(
+    records: impl Iterator<Item = anyhow::Result<RecordBuf>> + Send,
+    writer: &mut W,
+    cfg: &Config,
+) -> anyhow::Result<Stats> {
+    if cfg.threads <= 1 {
+        return run_bam_to_fastq_seq(records, writer, cfg);
+    }
+    run_bam_parallel(
+        records,
+        cfg,
+        writer,
+        // render: guards + filter + trim -> Vec<Vec<u8>> (rendered FASTQ segments)
+        |rec, cfg| {
+            crate::io::bam::ensure_unaligned(rec)?;
+            let seq = rec.sequence().as_ref().to_vec();
+            let qual = rec.quality_scores().as_ref().to_vec();
+            if qual.len() != seq.len() {
+                let name = rec.name().map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+                    .unwrap_or_else(|| "<unnamed>".to_string());
+                anyhow::bail!(
+                    "read {name}: BAM record SEQ length {} != QUAL length {} \
+                     (records without full per-base quality are not supported)",
+                    seq.len(), qual.len()
+                );
+            }
+            if !filter::passes(&seq, &qual, &cfg.filter) {
+                return Ok(Vec::new());
+            }
+            let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
+            let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+            let total = intervals.len();
+            let mut out = Vec::with_capacity(total);
+            for (idx, (s, e)) in intervals.into_iter().enumerate() {
+                let tags = build_fastq_tags(rec, &seq, s, e, &cfg.fastq_tags);
+                let mut buf = Vec::new();
+                if tags.is_empty() {
+                    write_segment(&mut buf, &name, &seq[s..e], &qual[s..e], total, idx)?;
+                } else {
+                    write_segment_tagged(&mut buf, &name, &seq[s..e], &qual[s..e], total, idx, &tags)?;
+                }
+                out.push(buf);
+            }
+            Ok(out)
+        },
+        // write_one: append rendered bytes to the FastqOut writer.
+        |w, buf| w.write_all(buf),
+    )
 }
 
 #[cfg(test)]
@@ -725,5 +783,41 @@ mod tests {
             |_sink: &mut NullSink, _item: &()| -> io::Result<()> { Ok(()) },
         );
         assert!(res.is_err(), "a malformed record must not be silently dropped on the parallel path");
+    }
+
+    #[test]
+    fn run_bam_to_fastq_parallel_matches_sequential_as_multiset() {
+        use crate::config::{FastqTags, IoConfig};
+        use crate::filter::FilterConfig;
+        use crate::qual::QualMode;
+        use crate::trim::TrimPlan;
+
+        let mk = |threads| Config {
+            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            filter: FilterConfig {
+                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
+                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan { head: 2, tail: 2, quality: None },
+            threads,
+            fastq_tags: FastqTags::All,
+        };
+        let recs: Vec<RecordBuf> = (0..300)
+            .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))
+            .collect();
+
+        let sorted_records = |bytes: &[u8]| {
+            let s = String::from_utf8(bytes.to_vec()).unwrap();
+            let mut v: Vec<String> = s.split('@').filter(|x| !x.is_empty()).map(String::from).collect();
+            v.sort();
+            v
+        };
+
+        let mut a = Vec::new();
+        run_bam_to_fastq(recs.clone().into_iter().map(anyhow::Ok), &mut a, &mk(1)).unwrap();
+        let mut b = Vec::new();
+        run_bam_to_fastq(recs.into_iter().map(anyhow::Ok), &mut b, &mk(8)).unwrap();
+
+        assert_eq!(sorted_records(&a), sorted_records(&b), "t1 and t8 FASTQ must match as a multiset");
     }
 }
