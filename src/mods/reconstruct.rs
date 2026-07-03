@@ -45,7 +45,7 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
             new_deltas.push((widx - prev_widx - 1) as usize);
             prev_widx = widx;
 
-            let ml_start = k * ncodes;
+            let ml_start = (k * ncodes).min(g.ml.len());
             let ml_end = (ml_start + ncodes).min(g.ml.len());
             new_ml.extend_from_slice(&g.ml[ml_start..ml_end]);
         }
@@ -112,5 +112,26 @@ mod tests {
         assert_eq!(m.groups[0].deltas, vec![0]);
         assert_eq!(m.groups[0].ml, vec![8]);
         assert_eq!((m.groups[0].base, m.groups[0].strand), (b'G', b'-'));
+    }
+
+    #[test]
+    fn truncated_ml_does_not_panic() {
+        // MM lists 3 modified C's but ML has only 1 byte (malformed/truncated).
+        let m = reconstruct(&crate::mods::parse(b"C+m,0,0,0;", &[5]), b"CCC", 0, 3);
+        // All three C's are in-window; deltas renumber to [0,0,0]; only the ML bytes
+        // that actually exist are kept (no panic).
+        assert_eq!(m.groups.len(), 1);
+        assert_eq!(m.groups[0].deltas, vec![0, 0, 0]);
+        assert_eq!(m.groups[0].ml, vec![5]);
+    }
+
+    #[test]
+    fn renumber_with_nonzero_gap_and_offset_first() {
+        // seq CCCCC (C at 0,1,2,3,4). MM C+m,0,1,0 -> modified at occ 0,2,3 => abs 0,2,3, ML [a,b,c].
+        // Window [1,5): drop abs 0 (outside); keep abs 2 and 3.
+        // window C positions = [1,2,3,4]; widx(2)=1 -> delta 1; widx(3)=2 -> delta 0.
+        let m = reconstruct(&crate::mods::parse(b"C+m,0,1,0;", &[10, 20, 30]), b"CCCCC", 1, 5);
+        assert_eq!(m.groups[0].deltas, vec![1, 0]);
+        assert_eq!(m.groups[0].ml, vec![20, 30]);
     }
 }
