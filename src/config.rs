@@ -26,13 +26,13 @@ impl FastqTags {
             _ => {
                 let mut set = BTreeSet::new();
                 for tok in s.split(',') {
-                    let b = tok.as_bytes();
-                    if b.len() != 2 {
+                    if tok.len() != 2 || !tok.bytes().all(|c| c.is_ascii_alphanumeric()) {
                         anyhow::bail!(
                             "--fastq-tags: invalid tag {tok:?} (SAM tags are exactly 2 \
                              characters); use `all`, `none`, or a comma list like `MM,ML,RG`"
                         );
                     }
+                    let b = tok.as_bytes();
                     set.insert([b[0], b[1]]);
                 }
                 Ok(FastqTags::Only(set))
@@ -104,6 +104,15 @@ mod tests {
         assert!(FastqTags::parse("MM,ABC").is_err()); // 3-char token
         assert!(FastqTags::parse("").is_err()); // empty -> one empty token
         assert!(FastqTags::parse("MM,").is_err()); // trailing empty token
+    }
+
+    #[test]
+    fn parse_rejects_non_ascii_two_byte_token() {
+        // "é" is a single codepoint encoded as 2 UTF-8 bytes, so a length-only
+        // check (`b.len() != 2`) would wrongly accept it as a "tag". It must
+        // be rejected, while a normal 2-byte ASCII tag still parses.
+        assert!(FastqTags::parse("é").is_err());
+        assert!(FastqTags::parse("RG").is_ok());
     }
 
     #[test]

@@ -64,10 +64,10 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
-    // BAM dispatch, and the cross-format BAM<->FASTQ rejection, happen before
-    // creating/truncating the output file so a rejected run never leaves a
-    // stray 0-byte file behind. Only the (Fastq*, Fastq*) combinations fall
-    // through to the FASTQ path below.
+    // BAM dispatch happens before creating/truncating the output file, and so
+    // do the FASTQ->BAM rejection and the BAM->FASTQ conversion, so a rejected
+    // run never leaves a stray 0-byte file behind. Only the (Fastq*, Fastq*)
+    // combinations fall through to the FASTQ path below.
     match (in_fmt, out_fmt) {
         (Format::Bam, Format::Bam) => {
             note_tags_ignored(&cfg, in_fmt, out_fmt);

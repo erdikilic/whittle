@@ -171,7 +171,7 @@ pub fn reconstruct_record(
     // Rebuild MM/ML/MN when the source carried modification tags. Only touch the
     // three tags when the source actually had `MM` (preserves prior behavior:
     // a source with ML/MN but no MM is left untouched).
-    if src.data().get(&Tag::BASE_MODIFICATIONS).is_some() {
+    if matches!(src.data().get(&Tag::BASE_MODIFICATIONS), Some(Value::String(_))) {
         let data = out.data_mut();
         match reconstruct_mods(src, &seq, start, end) {
             Some((mm_new, ml_new)) => {
@@ -595,6 +595,43 @@ mod bam_tests {
 
         let result = run_bam(&header, [Ok(rec)].into_iter(), &mut writer, &cfg);
         assert!(result.is_err(), "SEQ/QUAL length mismatch must error, not panic");
+    }
+
+    /// Regression test for the outer gate in `reconstruct_record`: a spec-invalid
+    /// `MM` tag (typed as anything other than `Value::String`, e.g. `Int32`) must
+    /// leave `MM`/`ML`/`MN` completely untouched. Pre-fix, the gate was a bare
+    /// `.is_some()` check, which let this record enter the mod-rebuild block;
+    /// `reconstruct_mods`'s `Some(Value::String(s)) => ... , _ => return None`
+    /// match then falls through to `None` for a non-string MM, and the `None`
+    /// branch in `reconstruct_record` REMOVES all three tags instead of leaving
+    /// them alone. The fix narrows the gate to `matches!(.., Some(Value::String(_)))`
+    /// so a spec-invalid MM never enters the rebuild block at all.
+    #[test]
+    fn reconstruct_record_leaves_non_string_mm_untouched() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGT".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 4].into();
+        let data = src.data_mut();
+        data.insert(Tag::BASE_MODIFICATIONS, Value::Int32(5)); // spec-invalid MM
+        data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(vec![1, 2, 3])));
+        data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(4));
+
+        let out = reconstruct_record(&src, 1, 4, 1, 0);
+
+        match out.data().get(&Tag::BASE_MODIFICATIONS) {
+            Some(Value::Int32(5)) => {}
+            other => panic!("MM must be left untouched for a non-string value, got {other:?}"),
+        }
+        match out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
+            Some(Value::Array(Array::UInt8(v))) if v == &[1u8, 2, 3] => {}
+            other => panic!("ML must be left untouched, got {other:?}"),
+        }
+        match out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
+            Some(Value::Int32(4)) => {}
+            other => panic!("MN must be left untouched, got {other:?}"),
+        }
     }
 
     #[test]

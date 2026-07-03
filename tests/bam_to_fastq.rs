@@ -181,6 +181,27 @@ fn cross_check_fastq_header_mods_equal_bam_path() {
 }
 
 #[test]
+fn folder_dispatch_bam_to_fastq() {
+    // The single-file BAM->FASTQ path is covered above; this exercises the
+    // FOLDER dispatch arm (`run_folder`'s Bam-family -> FASTQ branch in
+    // src/lib.rs) by pointing `-i` at a directory instead of a file.
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("barcode01");
+    std::fs::create_dir_all(&sub).unwrap();
+    let inp = sub.join("in.bam");
+    let out = dir.path().join("out.fastq");
+    write_fixture(&inp);
+
+    run(&["--out-format", "fastq", "--head-crop", "2"], &sub, &out);
+
+    let s = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(
+        read2_header_line(&s),
+        "@read2\tRG:Z:grp1\tMM:Z:C+m,0,0;\tML:B:C,20,30\tMN:i:6"
+    );
+}
+
+#[test]
 fn fastq_tags_on_fastq_input_prints_ignored_note() {
     let dir = tempfile::tempdir().unwrap();
     let inp = dir.path().join("in.fastq");

@@ -258,6 +258,12 @@ mod tests {
         assert_eq!(format_aux_field(*b"pa", &Value::Float(0.5)), b"pa:f:0.5");
         assert_eq!(format_aux_field(*b"bc", &Value::Character(b'K')), b"bc:A:K");
         assert_eq!(format_aux_field(*b"H2", &Value::Hex(b"1AE3".as_slice().into())), b"H2:H:1AE3");
+        // Every integer width serializes with SAM type code `i`, regardless of
+        // signedness or size.
+        assert_eq!(format_aux_field(*b"i1", &Value::Int8(-5)), b"i1:i:-5");
+        assert_eq!(format_aux_field(*b"i2", &Value::Int16(-300)), b"i2:i:-300");
+        assert_eq!(format_aux_field(*b"i3", &Value::UInt16(400)), b"i3:i:400");
+        assert_eq!(format_aux_field(*b"i4", &Value::UInt32(70000)), b"i4:i:70000");
     }
 
     #[test]

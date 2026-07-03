@@ -57,7 +57,7 @@ On BAM→FASTQ, aux tags are written into the FASTQ header, tab-delimited, in th
 (`@read\tMM:Z:…\tML:B:C,…`). MM/ML/MN are **reconstructed** for the trimmed
 segment; every other tag is copied **verbatim**.
 
-```
+```text
 --fastq-tags all     # default: carry every aux tag
 --fastq-tags none    # plain FASTQ, no tags
 --fastq-tags MM,ML   # only the (reconstructed) modification tags
@@ -122,6 +122,7 @@ See **The MM/ML/ML guarantee** below.
 | `-i`, `--input <PATH>` | Input file (omit for stdin) |
 | `-o`, `--output <PATH>` | Output file (omit for stdout) |
 | `--in-format`, `--out-format {fastq,fastq-gz,bam}` | Force format instead of detecting it |
+| `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`; MM/ML/MN reconstructed, others verbatim) |
 | `-t`, `--threads <N>` | Worker threads for the FASTQ pipeline (default 4; uBAM is single-threaded) |
 | `-l`, `--min-length <N>` | Minimum read length to keep (default 1) — also the minimum length for a *split segment* to be kept, see below |
 | `-L`, `--max-length <N>` | Maximum read length to keep |
