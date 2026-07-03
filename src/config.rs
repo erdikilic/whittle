@@ -1,8 +1,64 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::filter::FilterConfig;
 use crate::io::Format;
 use crate::trim::TrimPlan;
+
+/// Which aux tags to carry into FASTQ headers on BAM→FASTQ conversion.
+/// MM/ML/MN are reconstructed (trim-aware); every other carried tag is verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FastqTags {
+    /// Carry every aux tag from the source record.
+    All,
+    /// Carry no tags — emit plain FASTQ.
+    None,
+    /// Carry only the listed 2-character SAM tags.
+    Only(BTreeSet<[u8; 2]>),
+}
+
+impl FastqTags {
+    /// Parse a `--fastq-tags` spec: `all`, `none`, or a comma list of 2-char tags.
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "all" => Ok(FastqTags::All),
+            "none" => Ok(FastqTags::None),
+            _ => {
+                let mut set = BTreeSet::new();
+                for tok in s.split(',') {
+                    let b = tok.as_bytes();
+                    if b.len() != 2 {
+                        anyhow::bail!(
+                            "--fastq-tags: invalid tag {tok:?} (SAM tags are exactly 2 \
+                             characters); use `all`, `none`, or a comma list like `MM,ML,RG`"
+                        );
+                    }
+                    set.insert([b[0], b[1]]);
+                }
+                Ok(FastqTags::Only(set))
+            }
+        }
+    }
+
+    /// Whether a non-mod tag is carried.
+    pub fn carries(&self, tag: &[u8; 2]) -> bool {
+        match self {
+            FastqTags::All => true,
+            FastqTags::None => false,
+            FastqTags::Only(s) => s.contains(tag),
+        }
+    }
+
+    /// Whether the reconstructed MM/ML/MN block is carried. The block is a unit:
+    /// on under `All`, or when an explicit list contains `MM` or `ML`.
+    pub fn carries_mods(&self) -> bool {
+        match self {
+            FastqTags::All => true,
+            FastqTags::None => false,
+            FastqTags::Only(s) => s.contains(b"MM") || s.contains(b"ML"),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct IoConfig {
@@ -18,4 +74,52 @@ pub struct Config {
     pub filter: FilterConfig,
     pub trim: TrimPlan,
     pub threads: usize,
+    pub fastq_tags: FastqTags,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_all_none() {
+        assert_eq!(FastqTags::parse("all").unwrap(), FastqTags::All);
+        assert_eq!(FastqTags::parse("none").unwrap(), FastqTags::None);
+    }
+
+    #[test]
+    fn parse_list_collects_tags() {
+        let t = FastqTags::parse("MM,ML,RG").unwrap();
+        match t {
+            FastqTags::Only(ref s) => {
+                assert!(s.contains(b"MM") && s.contains(b"ML") && s.contains(b"RG"));
+                assert_eq!(s.len(), 3);
+            }
+            other => panic!("expected Only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_bad_token() {
+        assert!(FastqTags::parse("MM,ABC").is_err()); // 3-char token
+        assert!(FastqTags::parse("").is_err()); // empty -> one empty token
+        assert!(FastqTags::parse("MM,").is_err()); // trailing empty token
+    }
+
+    #[test]
+    fn carries_rules() {
+        assert!(FastqTags::All.carries(b"RG"));
+        assert!(FastqTags::All.carries_mods());
+        assert!(!FastqTags::None.carries(b"RG"));
+        assert!(!FastqTags::None.carries_mods());
+
+        let only = FastqTags::parse("ML,RG").unwrap();
+        assert!(only.carries(b"RG"));
+        assert!(!only.carries(b"XY"));
+        // mod block carried when the list has MM *or* ML:
+        assert!(only.carries_mods());
+        // MN alone does not turn on the mod block:
+        let mn_only = FastqTags::parse("MN").unwrap();
+        assert!(!mn_only.carries_mods());
+    }
 }

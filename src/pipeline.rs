@@ -271,6 +271,7 @@ mod tests {
             filter: base_filter(),
             trim: TrimPlan { head: 1, tail: 1, quality: None },
             threads: 1,
+            fastq_tags: crate::config::FastqTags::All,
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
         let mut out = Vec::new();
@@ -286,6 +287,7 @@ mod tests {
             filter: base_filter(),
             trim: TrimPlan { head: 0, tail: 0, quality: Some(QualityOp::Split { cutoff: 10, window: 1 }) },
             threads: 1,
+            fastq_tags: crate::config::FastqTags::All,
         };
         // good(3) bad(1) good(3): I I I # I I I  -> two segments (0,3),(4,7)
         let phred: Vec<u8> = b"III#III".iter().map(|&b| b - 33).collect();
@@ -305,6 +307,7 @@ mod tests {
             filter: f,
             trim: TrimPlan { head: 0, tail: 0, quality: None },
             threads: 1,
+            fastq_tags: crate::config::FastqTags::All,
         };
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
@@ -321,6 +324,7 @@ mod tests {
             filter: base_filter(),
             trim: TrimPlan { head: 0, tail: 0, quality: Some(QualityOp::TrimQual(20)) },
             threads,
+            fastq_tags: crate::config::FastqTags::All,
         };
         // Owned records (ReadRecord: Clone); wrap in Ok at iteration time so each run
         // gets a fresh Send iterator. anyhow::Error is not Clone, so we can't clone a
@@ -369,6 +373,7 @@ mod tests {
             filter: base_filter(),
             trim: TrimPlan { head: 0, tail: 0, quality: None },
             threads: 4,
+            fastq_tags: crate::config::FastqTags::All,
         };
         // Far more records than the bounded channel capacity (threads*4), so a
         // pre-fix build would deadlock instead of returning.
@@ -389,6 +394,7 @@ mod tests {
             filter: base_filter(),
             trim: TrimPlan { head: 0, tail: 0, quality: None },
             threads: 4,
+            fastq_tags: crate::config::FastqTags::All,
         };
         let good: Vec<anyhow::Result<ReadRecord>> = (0..5)
             .map(|i| anyhow::Ok(rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10])))
@@ -483,6 +489,7 @@ mod bam_tests {
             },
             trim: TrimPlan { head: 0, tail: 0, quality: None },
             threads: 1,
+            fastq_tags: crate::config::FastqTags::All,
         };
 
         let result = run_bam(&header, [Ok(rec)].into_iter(), &mut writer, &cfg);
