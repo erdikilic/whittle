@@ -45,7 +45,11 @@ directory and explain.
 Chain the per-file record iterators into one stream (each file opened and
 gz-decoded per its own extension), fed to the existing `pipeline::run_fastq`.
 Trimming/filtering/splitting and `--threads` behave exactly as for a single file.
-Output: `-o` file/stdout, gz when the output extension is `.gz`.
+Output: `-o` file/stdout, gz (via `gzp`'s parallel encoder) only when the
+output extension is `.gz`/`--out-format fastq-gz` is given explicitly — same
+never-auto-compress rule as the single-file path (`io::resolve_output`): a
+folder of `.fastq.gz` inputs with no output extension merges to plain FASTQ,
+not gz.
 
 ### BAM merge
 Use the **first** (sorted) file's header — `samtools cat` semantics; a single
@@ -57,7 +61,10 @@ under that header into `pipeline::run_bam` → one merged BAM. Aligned-read refu
 
 ### Output
 Unchanged: `-o <file>` or stdout; format from the `-o` extension, else the
-folder's format family (FASTQ-family folder → FASTQ; BAM folder → BAM).
+folder's format family (FASTQ-family folder → FASTQ; BAM folder → BAM) — with
+the same never-auto-compress rule as elsewhere: a FASTQ-family folder full of
+`.gz` inputs still defaults to plain FASTQ output unless `-o *.gz`/
+`--out-format fastq-gz` is given.
 
 ## Code shape
 

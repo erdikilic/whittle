@@ -12,6 +12,9 @@ pub use config::Config;
 
 use std::io::{BufReader, BufWriter, Read, Write};
 
+use gzp::par::compress::{ParCompress, ParCompressBuilder};
+use gzp::{Compression, ZWriter, deflate::Gzip};
+
 /// Top-level entry point. Dispatches on the input: a directory triggers
 /// folder-merge (all read files in it merged into one output); otherwise a
 /// single file / stdin is trimmed. FASTQ and unaligned BAM are supported.
@@ -91,30 +94,81 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
     let stats = pipeline::run_fastq(records, &mut writer, &cfg)?;
-    writer.flush()?;
-    // Drop the writer (finishing the GzEncoder, if any, and flushing the
-    // BufWriter) before returning so all bytes are on disk / stdout.
-    drop(writer);
+    writer.finish()?;
     eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
     Ok(())
 }
 
-/// Build the FASTQ output writer: a file or stdout, wrapped in a gzip encoder
-/// when the output format is `FastqGz`, then buffered.
-fn fastq_writer(
-    cfg: &Config,
-    out_fmt: io::Format,
-) -> anyhow::Result<BufWriter<Box<dyn Write + Send>>> {
-    let base_writer: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
+/// FASTQ output writer: either a plain buffered writer, or a `gzp` parallel
+/// gzip writer (used only when the output format is explicitly `FastqGz` —
+/// see `io::resolve_output`, which no longer auto-compresses).
+///
+/// `gzp`'s `ParCompress` REQUIRES an explicit `finish()` call to flush its
+/// final (possibly partial) compressed block plus the gzip footer/checksum:
+/// its `Write` impl only ever hands off *full* buffered chunks to the
+/// compressor threads, so the tail end only ever gets flushed by `finish()`,
+/// never by `flush()`. `ParCompress`'s own `Drop` impl does call `finish()` as
+/// a backstop if it's still live, but it `.unwrap()`s the result — any I/O
+/// error at that point becomes an uncatchable panic instead of a propagated
+/// `anyhow::Result::Err`. Calling `finish()` explicitly, as the single seam
+/// both callers below go through instead of `flush()` + `drop()`, keeps that
+/// failure mode as an ordinary `Err`.
+enum FastqOut {
+    Plain(BufWriter<Box<dyn Write + Send>>),
+    Gz(ParCompress<'static, Gzip, Box<dyn Write + Send>>),
+}
+
+impl Write for FastqOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            FastqOut::Plain(w) => w.write(buf),
+            FastqOut::Gz(w) => w.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            FastqOut::Plain(w) => w.flush(),
+            FastqOut::Gz(w) => w.flush(),
+        }
+    }
+}
+
+impl FastqOut {
+    /// Finalize: for gz, flush the final block + gzip footer via gzp's
+    /// `ZWriter::finish` (required — see the type's docs above); for plain,
+    /// flush the `BufWriter`. Must be called before returning success.
+    fn finish(self) -> anyhow::Result<()> {
+        match self {
+            FastqOut::Plain(mut w) => {
+                w.flush()?;
+                Ok(())
+            }
+            FastqOut::Gz(mut w) => {
+                w.finish()?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Build the FASTQ output writer: a file or stdout, wrapped in a parallel gzip
+/// encoder (`gzp`, using `cfg.threads` worker threads) when the output format
+/// is `FastqGz`, else a plain buffered writer.
+fn fastq_writer(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<FastqOut> {
+    let base: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
         Some(p) => Box::new(std::fs::File::create(p)?),
         None => Box::new(std::io::stdout()),
     };
-    let writer_inner: Box<dyn Write + Send> = if matches!(out_fmt, io::Format::FastqGz) {
-        Box::new(flate2::write::GzEncoder::new(base_writer, flate2::Compression::default()))
+    if matches!(out_fmt, io::Format::FastqGz) {
+        let w = ParCompressBuilder::<Gzip>::new()
+            .num_threads(cfg.threads.max(1))
+            .unwrap()
+            .compression_level(Compression::new(6))
+            .from_writer(base);
+        Ok(FastqOut::Gz(w))
     } else {
-        base_writer
-    };
-    Ok(BufWriter::new(writer_inner))
+        Ok(FastqOut::Plain(BufWriter::new(base)))
+    }
 }
 
 /// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
@@ -144,8 +198,7 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
             let mut writer = fastq_writer(cfg, out_fmt)?;
             let records = io::dir::fastq_records(&paths);
             let stats = pipeline::run_fastq(records, &mut writer, cfg)?;
-            writer.flush()?;
-            drop(writer);
+            writer.finish()?;
             eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
             Ok(())
         }

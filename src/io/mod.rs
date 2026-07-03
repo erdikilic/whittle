@@ -44,7 +44,17 @@ pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format>
 
 /// Output format from the path extension, else mirror the input format.
 pub fn resolve_output(path: Option<&Path>, input: Format) -> Format {
-    path.and_then(from_extension).unwrap_or(input)
+    // An explicit output extension always wins.
+    if let Some(f) = path.and_then(from_extension) {
+        return f;
+    }
+    // Otherwise mirror the input EXCEPT never auto-compress: a .gz input
+    // defaults to PLAIN fastq output (gz only when explicitly requested via
+    // `-o *.gz` above or `--out-format fastq-gz`, which is handled upstream).
+    match input {
+        Format::FastqGz => Format::Fastq,
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -75,5 +85,18 @@ mod tests {
         assert_eq!(resolve_output(None, Format::Bam), Format::Bam);
         assert_eq!(resolve_output(None, Format::Fastq), Format::Fastq);
         assert_eq!(resolve_output(Some(Path::new("o.bam")), Format::Fastq), Format::Bam);
+    }
+
+    #[test]
+    fn output_never_auto_compresses_gz_input() {
+        // A .gz input with no output path/format defaults to PLAIN fastq —
+        // auto-compressing on stdout would be silent and surprising.
+        assert_eq!(resolve_output(None, Format::FastqGz), Format::Fastq);
+        // gz output is still available when explicitly requested via a `.gz`
+        // output path extension.
+        assert_eq!(
+            resolve_output(Some(Path::new("o.fastq.gz")), Format::Fastq),
+            Format::FastqGz
+        );
     }
 }

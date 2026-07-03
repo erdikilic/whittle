@@ -140,9 +140,17 @@ through unchanged.
 
 - **Format detection** (never requires a flag): input by file extension
   (`.fastq`/`.fq`, `.fastq.gz`/`.fq.gz`, `.bam`), falling back to magic-byte
-  sniffing for stdin; output by output extension, or mirrors the input format
-  when writing to stdout. `--in-format`/`--out-format` are optional overrides.
-- FASTQ via `seq_io`; `.gz` via a gzip layer on reader/writer.
+  sniffing for stdin; output by output extension, else mirrors the input
+  format **except it never auto-compresses**: a `.gz` input with no output
+  extension/`--out-format` defaults to plain FASTQ, not `.gz` — silently
+  gzip-compressing stdout when the caller never asked for it is surprising
+  and slow. Gz output only happens when explicitly requested (`-o *.gz`/`.fq.gz`
+  or `--out-format fastq-gz`). `--in-format`/`--out-format` are optional
+  overrides.
+- FASTQ via `seq_io`; `.gz` input via a gzip layer on the reader. `.gz` output
+  is produced by `gzp`'s parallel gzip encoder (using `--threads` worker
+  threads) rather than a single-threaded encoder, since encode throughput was
+  the bottleneck once trimming itself was parallelized.
 - BAM via `noodles-bam` + `noodles-bgzf` (libdeflate).
 - On BAM read, any record whose unmapped flag is **clear** (aligned: has
   refID/CIGAR) → hard error naming the read and stating aligned BAM is not yet
@@ -207,9 +215,10 @@ segments obey `--min-length`.
 
 ## Dependencies
 
-`seq_io`, `noodles-{bam,sam,bgzf}`, `flate2` (gz), `clap` (derive),
-`rayon` + `crossbeam`, `anyhow` (binary) + `thiserror` (library). `rust-htslib`
-is a **dev-dependency** for the oracle only. Rust 2024 edition.
+`seq_io`, `noodles-{bam,sam,bgzf}`, `flate2` (gz decode + read-side gz sniffing),
+`gzp` (parallel gz encode on write), `clap` (derive), `rayon` + `crossbeam`,
+`anyhow` (binary) + `thiserror` (library). `rust-htslib` is a
+**dev-dependency** for the oracle only. Rust 2024 edition.
 
 ## Error handling
 

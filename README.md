@@ -24,6 +24,16 @@ stdout). Format is detected from the file extension, or sniffed from the
 first bytes when reading a stream; it can also be forced with
 `--in-format`/`--out-format {fastq,fastq-gz,bam}`.
 
+**Output is plain FASTQ by default — it is never auto-compressed.** A `.gz`
+input does not imply gzipped output: with no `-o` extension and no
+`--out-format`, `chopping` always writes plain FASTQ (this matters most on
+stdout, where silently emitting gzip bytes would be surprising and is also
+slower). Gzip output only happens when you ask for it explicitly, either via
+an `-o <path>.fastq.gz`/`.fq.gz` extension or `--out-format fastq-gz`. When it
+does, it's produced by a parallel gzip encoder (`gzp`) that uses `-t/--threads`
+worker threads, so `-t 8 -o out.fastq.gz` compresses using all 8 threads
+instead of a single-threaded bottleneck.
+
 ### FASTQ example
 
 ```bash
