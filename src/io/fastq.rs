@@ -3,6 +3,8 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
+use noodles_sam::alignment::record_buf::data::field::Value;
+use noodles_sam::alignment::record_buf::data::field::value::Array;
 use seq_io::fastq::{Reader, Record};
 
 use crate::record::ReadRecord;
@@ -48,14 +50,12 @@ impl<R: Read> Iterator for RecordIter<R> {
     }
 }
 
-/// Write one output segment as a FASTQ record. On splits (`total_segments > 1`)
-/// the id gets a `_segment_N` suffix inserted before any description, matching
-/// chopper's convention. `phred` is raw; ASCII is emitted by adding 33.
-pub fn write_segment<W: Write>(
+/// Write the `@`-prefixed header id for a segment (no trailing newline, no tags).
+/// On splits (`total_segments > 1`) the id gets a `_segment_N` suffix inserted
+/// before any space-separated description, matching chopper's convention.
+fn write_head<W: Write>(
     w: &mut W,
     name: &[u8],
-    seq: &[u8],
-    phred: &[u8],
     total_segments: usize,
     segment_idx: usize,
 ) -> io::Result<()> {
@@ -71,12 +71,137 @@ pub fn write_segment<W: Write>(
     } else {
         w.write_all(name)?;
     }
+    Ok(())
+}
+
+/// Write one output segment as a plain FASTQ record. `phred` is raw; ASCII is
+/// emitted by adding 33. Thin wrapper over `write_segment_tagged` with no tags,
+/// so the record layout lives in exactly one place.
+pub fn write_segment<W: Write>(
+    w: &mut W,
+    name: &[u8],
+    seq: &[u8],
+    phred: &[u8],
+    total_segments: usize,
+    segment_idx: usize,
+) -> io::Result<()> {
+    write_segment_tagged(w, name, seq, phred, total_segments, segment_idx, b"")
+}
+
+/// Like `write_segment`, but inserts `tags` (already TAB-prefixed per field, or
+/// empty) between the header id and the newline: `@<id>[_segment_N]<tags>`.
+pub fn write_segment_tagged<W: Write>(
+    w: &mut W,
+    name: &[u8],
+    seq: &[u8],
+    phred: &[u8],
+    total_segments: usize,
+    segment_idx: usize,
+    tags: &[u8],
+) -> io::Result<()> {
+    write_head(w, name, total_segments, segment_idx)?;
+    w.write_all(tags)?;
     w.write_all(b"\n")?;
     w.write_all(seq)?;
     w.write_all(b"\n+\n")?;
     let ascii: Vec<u8> = phred.iter().map(|&q| q.saturating_add(33)).collect();
     w.write_all(&ascii)?;
     w.write_all(b"\n")
+}
+
+/// One SAM aux field as text `XX:T:VALUE` (no leading TAB). Integers of any
+/// source width serialize with SAM type code `i`; `B` arrays keep their subtype.
+pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&tag);
+    out.push(b':');
+    match value {
+        Value::Character(c) => {
+            out.extend_from_slice(b"A:");
+            out.push(*c);
+        }
+        Value::Int8(n) => write!(out, "i:{n}").unwrap(),
+        Value::UInt8(n) => write!(out, "i:{n}").unwrap(),
+        Value::Int16(n) => write!(out, "i:{n}").unwrap(),
+        Value::UInt16(n) => write!(out, "i:{n}").unwrap(),
+        Value::Int32(n) => write!(out, "i:{n}").unwrap(),
+        Value::UInt32(n) => write!(out, "i:{n}").unwrap(),
+        Value::Float(x) => write!(out, "f:{x}").unwrap(),
+        Value::String(s) => {
+            out.extend_from_slice(b"Z:");
+            out.extend_from_slice(AsRef::<[u8]>::as_ref(s));
+        }
+        Value::Hex(s) => {
+            out.extend_from_slice(b"H:");
+            out.extend_from_slice(AsRef::<[u8]>::as_ref(s));
+        }
+        Value::Array(a) => {
+            out.extend_from_slice(b"B:");
+            write_array(&mut out, a);
+        }
+    }
+    out
+}
+
+fn write_array(out: &mut Vec<u8>, a: &Array) {
+    match a {
+        Array::Int8(v) => {
+            out.push(b'c');
+            for x in v {
+                write!(out, ",{x}").unwrap();
+            }
+        }
+        Array::UInt8(v) => {
+            out.push(b'C');
+            for x in v {
+                write!(out, ",{x}").unwrap();
+            }
+        }
+        Array::Int16(v) => {
+            out.push(b's');
+            for x in v {
+                write!(out, ",{x}").unwrap();
+            }
+        }
+        Array::UInt16(v) => {
+            out.push(b'S');
+            for x in v {
+                write!(out, ",{x}").unwrap();
+            }
+        }
+        Array::Int32(v) => {
+            out.push(b'i');
+            for x in v {
+                write!(out, ",{x}").unwrap();
+            }
+        }
+        Array::UInt32(v) => {
+            out.push(b'I');
+            for x in v {
+                write!(out, ",{x}").unwrap();
+            }
+        }
+        Array::Float(v) => {
+            out.push(b'f');
+            for x in v {
+                write!(out, ",{x}").unwrap();
+            }
+        }
+    }
+}
+
+/// The reconstructed MM/ML/MN block as SAM aux text (no leading TAB):
+/// `MM:Z:<mm>\tML:B:C,<ml…>\tMN:i:<mn>`.
+pub fn format_mods_aux(mm: &[u8], ml: &[u8], mn: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"MM:Z:");
+    out.extend_from_slice(mm);
+    out.extend_from_slice(b"\tML:B:C");
+    for b in ml {
+        write!(out, ",{b}").unwrap();
+    }
+    write!(out, "\tMN:i:{mn}").unwrap();
+    out
 }
 
 fn split_head(name: &[u8]) -> (&[u8], Option<&[u8]>) {
@@ -120,5 +245,60 @@ mod tests {
         assert_eq!(recs[0].seq, b"ACGT");
         assert_eq!(recs[0].qual, vec![40, 40, 40, 40]); // 'I' = 73 - 33
         assert_eq!(recs[1].qual, vec![0, 0]); // '!' = 33 - 33
+    }
+
+    use noodles_sam::alignment::record_buf::data::field::Value;
+    use noodles_sam::alignment::record_buf::data::field::value::Array;
+
+    #[test]
+    fn aux_scalar_types() {
+        assert_eq!(format_aux_field(*b"RG", &Value::String(b"grp1".as_slice().into())), b"RG:Z:grp1");
+        assert_eq!(format_aux_field(*b"NM", &Value::Int32(-3)), b"NM:i:-3");
+        assert_eq!(format_aux_field(*b"Uq", &Value::UInt8(200)), b"Uq:i:200");
+        assert_eq!(format_aux_field(*b"pa", &Value::Float(0.5)), b"pa:f:0.5");
+        assert_eq!(format_aux_field(*b"bc", &Value::Character(b'K')), b"bc:A:K");
+        assert_eq!(format_aux_field(*b"H2", &Value::Hex(b"1AE3".as_slice().into())), b"H2:H:1AE3");
+    }
+
+    #[test]
+    fn aux_array_subtypes() {
+        assert_eq!(format_aux_field(*b"a1", &Value::Array(Array::UInt8(vec![1, 2, 3]))), b"a1:B:C,1,2,3");
+        assert_eq!(format_aux_field(*b"a2", &Value::Array(Array::Int8(vec![-1, 2]))), b"a2:B:c,-1,2");
+        assert_eq!(format_aux_field(*b"a3", &Value::Array(Array::Int16(vec![-5]))), b"a3:B:s,-5");
+        assert_eq!(format_aux_field(*b"a4", &Value::Array(Array::UInt16(vec![5]))), b"a4:B:S,5");
+        assert_eq!(format_aux_field(*b"a5", &Value::Array(Array::Int32(vec![7]))), b"a5:B:i,7");
+        assert_eq!(format_aux_field(*b"a6", &Value::Array(Array::UInt32(vec![8]))), b"a6:B:I,8");
+        assert_eq!(format_aux_field(*b"a7", &Value::Array(Array::Float(vec![1.5]))), b"a7:B:f,1.5");
+    }
+
+    #[test]
+    fn mods_aux_layout() {
+        assert_eq!(format_mods_aux(b"C+m,0;", &[10, 20], 6), b"MM:Z:C+m,0;\tML:B:C,10,20\tMN:i:6");
+        // empty ML -> zero-length B:C array
+        assert_eq!(format_mods_aux(b"C+m;", &[], 4), b"MM:Z:C+m;\tML:B:C\tMN:i:4");
+    }
+
+    #[test]
+    fn tagged_writer_appends_tags_after_id() {
+        let mut out = Vec::new();
+        write_segment_tagged(&mut out, b"read2", b"AC", &[40, 40], 1, 0, b"\tRG:Z:grp1\tMM:Z:C+m,0;\tML:B:C,20\tMN:i:2").unwrap();
+        assert_eq!(out, b"@read2\tRG:Z:grp1\tMM:Z:C+m,0;\tML:B:C,20\tMN:i:2\nAC\n+\nII\n");
+    }
+
+    #[test]
+    fn tagged_writer_empty_tags_is_plain_record() {
+        let mut a = Vec::new();
+        write_segment_tagged(&mut a, b"read1", b"ACGT", &[40, 40, 40, 40], 1, 0, b"").unwrap();
+        let mut b = Vec::new();
+        write_segment(&mut b, b"read1", b"ACGT", &[40, 40, 40, 40], 1, 0).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, b"@read1\nACGT\n+\nIIII\n");
+    }
+
+    #[test]
+    fn tagged_writer_split_suffix_then_tags() {
+        let mut out = Vec::new();
+        write_segment_tagged(&mut out, b"read2", b"AC", &[40, 40], 2, 1, b"\tMN:i:2").unwrap();
+        assert_eq!(out, b"@read2_segment_2\tMN:i:2\nAC\n+\nII\n");
     }
 }
