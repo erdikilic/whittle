@@ -230,11 +230,14 @@ validate each token is 2 chars, collect into `FastqTags::Only`. All existing
 FASTQ header must equal the values `reconstruct_record` writes into the BAM record
 (both go through `reconstruct_mods`) — guards against the two paths drifting.
 
-**Oracle (htslib, dev-dep):** BAM→FASTQ with `--fastq-tags all`, re-import with
-`samtools import -T '*'` (skip the test if `samtools` is unavailable), decode mods
-from the re-imported BAM with htslib, and assert the per-position mod set equals
-the original mods filtered to the interval and offset by `start` — the same
-decode-equivalence style as the existing BAM oracle.
+**Correctness (hermetic, no external tools):** the cross-check above is the
+load-bearing guarantee — the BAM→FASTQ `MM/ML/MN` bytes must equal the BAM→BAM
+output's, which is already htslib-oracle-verified (`tests/bam_mods_oracle.rs`,
+including a 57k-read real-data sweep). Because both paths call the same
+`reconstruct_mods`, equality transitively proves the FASTQ-header mods are
+oracle-correct. No `samtools` dependency in the suite. (An optional, gated
+`samtools import -T '*'` interop check may be added later purely to confirm the
+real tool accepts our header format — never load-bearing.)
 
 **CLI (`assert_cmd`):** `-i tests/…/mods.bam -o out.fastq` and `-o out.fastq.gz`
 produce the expected header tags; `--out-format fastq` on a `.bam` input works;
