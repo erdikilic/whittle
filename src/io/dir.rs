@@ -75,22 +75,27 @@ pub fn fastq_records(
 type BamRecordIter = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>>>;
 
 /// The first file's header plus one chained record stream over all BAM files
-/// (each file's own header is read and discarded; records stream under the
-/// first header — `samtools cat` semantics for homogeneous uBAM).
+/// (each file's own header is read and discarded past the first; records
+/// stream under the first header — `samtools cat` semantics for homogeneous
+/// uBAM).
 ///
-/// Panics if `paths` is empty; call only with `classify`'s (non-empty) output.
+/// Returns an `Err` if `paths` is empty rather than panicking. Each file is
+/// opened exactly once: the first file's record iterator (obtained alongside
+/// its header) is reused via `chain` rather than reopening that file.
 pub fn bam_reader(paths: &[PathBuf]) -> anyhow::Result<(sam::Header, BamRecordIter)> {
-    let (header, _first_records) = crate::io::bam::reader(Some(&paths[0]))?;
-    let paths = paths.to_vec();
-    let records = paths
-        .into_iter()
-        .flat_map(|p| -> BamRecordIter {
-            match crate::io::bam::reader(Some(&p)) {
-                Ok((_hdr, recs)) => recs,
-                Err(e) => Box::new(std::iter::once(Err(e))),
-            }
-        });
-    Ok((header, Box::new(records)))
+    let (first, rest) = paths
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("bam_reader called with no BAM files"))?;
+    let (header, first_records) = crate::io::bam::reader(Some(first))?;
+    let rest = rest.to_vec();
+    let rest_records = rest.into_iter().flat_map(|p| -> BamRecordIter {
+        match crate::io::bam::reader(Some(&p)) {
+            Ok((_hdr, recs)) => recs,
+            Err(e) => Box::new(std::iter::once(Err(e))),
+        }
+    });
+    let records: BamRecordIter = Box::new(first_records.chain(rest_records));
+    Ok((header, records))
 }
 
 #[cfg(test)]

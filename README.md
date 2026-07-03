@@ -47,7 +47,9 @@ worker threads (`-t`).
 `.fastq.gz`/`.fq.gz`, or `.bam`) — in sorted filename order — into one
 trimmed output (`-o` file or stdout). The folder must be one format (all
 FASTQ-family, or all BAM); non-recursive (subdirectories are ignored); a
-mixed or empty folder is an error.
+mixed or empty folder is an error. In folder mode the format is detected
+per file by extension, so `--in-format` has no effect on a directory input
+(`--out-format`/`-o`'s extension still control the output).
 
 ```bash
 chopping -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-qual 10

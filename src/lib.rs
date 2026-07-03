@@ -12,8 +12,9 @@ pub use config::Config;
 
 use std::io::{BufReader, BufWriter, Read, Write};
 
-/// Top-level entry point: dispatch on the resolved input/output formats and run
-/// the matching pipeline. Plan 1 implements only the FASTQ path; Plan 2 adds BAM.
+/// Top-level entry point. Dispatches on the input: a directory triggers
+/// folder-merge (all read files in it merged into one output); otherwise a
+/// single file / stdin is trimmed. FASTQ and unaligned BAM are supported.
 pub fn run(cfg: Config) -> anyhow::Result<()> {
     use io::Format;
 
@@ -123,6 +124,7 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
     use io::Format;
 
     let (family, paths) = io::dir::classify(dir)?;
+    eprintln!("Merging {} {:?} file(s) from {}", paths.len(), family, dir.display());
     let family_fmt = match family {
         io::dir::Family::Fastq => Format::Fastq,
         io::dir::Family::Bam => Format::Bam,
