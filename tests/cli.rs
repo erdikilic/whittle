@@ -34,3 +34,20 @@ fn min_length_filters() {
         .success()
         .stdout(""); // filtered out
 }
+
+#[test]
+fn gz_output_roundtrips() {
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.fastq.gz");
+    chopping()
+        .args(["--in-format", "fastq", "-o"])
+        .arg(&out)
+        .write_stdin("@r1\nACGT\n+\nIIII\n")
+        .assert()
+        .success();
+    let mut gz = flate2::read::MultiGzDecoder::new(std::fs::File::open(&out).unwrap());
+    let mut s = String::new();
+    gz.read_to_string(&mut s).unwrap();
+    assert_eq!(s, "@r1\nACGT\n+\nIIII\n");
+}
