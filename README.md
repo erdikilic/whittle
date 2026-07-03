@@ -35,6 +35,41 @@ does, it's produced by a parallel gzip encoder (`gzp`) that uses `-t/--threads`
 worker threads, so `-t 8 -o out.fastq.gz` compresses using all 8 threads
 instead of a single-threaded bottleneck.
 
+### Format conversion
+
+`chopping` auto-detects formats from file extensions (or `--in-format` /
+`--out-format`). Supported conversions:
+
+| input → output | FASTQ | FASTQ.gz | BAM |
+|----------------|:-----:|:--------:|:---:|
+| FASTQ / FASTQ.gz | ✅ | ✅ | ❌ |
+| unaligned BAM   | ✅ | ✅ | ✅ |
+
+When no `-o` extension / `--out-format` is given, output **mirrors** the input
+(BAM stays BAM), except a `.gz` input defaults to plain FASTQ (never
+auto-compressed). FASTQ→BAM is not supported (there is no header/tags to build a
+BAM from).
+
+#### BAM → FASTQ tags (`--fastq-tags`)
+
+On BAM→FASTQ, aux tags are written into the FASTQ header, tab-delimited, in the
+`samtools fastq -T` / `samtools import -T` convention
+(`@read\tMM:Z:…\tML:B:C,…`). MM/ML/MN are **reconstructed** for the trimmed
+segment; every other tag is copied **verbatim**.
+
+```text
+--fastq-tags all     # default: carry every aux tag
+--fastq-tags none    # plain FASTQ, no tags
+--fastq-tags MM,ML   # only the (reconstructed) modification tags
+--fastq-tags MM,ML,RG
+```
+
+> **Caveat:** only MM/ML/MN are trim-aware. Some other aux tags are themselves
+> position-dependent (e.g. dorado's `mv` move table, `ts`/`ns` signal-trim
+> counts); under `--fastq-tags all` they are copied verbatim and will be **stale**
+> after trimming — the same behaviour as `samtools fastq -T`. Exclude them with an
+> explicit `--fastq-tags` list if that matters for your downstream.
+
 ### FASTQ example
 
 ```bash
@@ -87,6 +122,7 @@ See **The MM/ML/ML guarantee** below.
 | `-i`, `--input <PATH>` | Input file (omit for stdin) |
 | `-o`, `--output <PATH>` | Output file (omit for stdout) |
 | `--in-format`, `--out-format {fastq,fastq-gz,bam}` | Force format instead of detecting it |
+| `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`; MM/ML/MN reconstructed, others verbatim) |
 | `-t`, `--threads <N>` | Worker threads for the FASTQ pipeline (default 4; uBAM is single-threaded) |
 | `-l`, `--min-length <N>` | Minimum read length to keep (default 1) — also the minimum length for a *split segment* to be kept, see below |
 | `-L`, `--max-length <N>` | Maximum read length to keep |
@@ -158,9 +194,10 @@ surviving window:
 - **No contamination filtering.** There is no minimap2-based adapter/barcode/
   host-contamination screen (unlike e.g. Porechop_ABI). `chopping` only
   filters and trims by length, quality, and GC content.
-- **No cross-format conversion.** BAM in, FASTQ out (or vice versa) is
-  explicitly rejected — `chopping` trims BAM to BAM and FASTQ to FASTQ, not
-  across formats.
+- **No FASTQ→BAM conversion.** FASTQ in, BAM out is explicitly rejected —
+  there's no header/tags to build a BAM record from a bare FASTQ read. The
+  reverse, BAM→FASTQ, *is* supported; see [Format conversion](#format-conversion)
+  above.
 - **BAM over stdin needs an explicit hint.** BAM files are BGZF-compressed,
   which shares gzip's magic bytes (`\x1f\x8b`) with the bytes `chopping` uses
   to auto-detect gzipped FASTQ. A `.bam` file *path* auto-detects fine (the

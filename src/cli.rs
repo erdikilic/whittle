@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{Config, IoConfig};
+use crate::config::{Config, FastqTags, IoConfig};
 use crate::filter::FilterConfig;
 use crate::io::Format;
 use crate::qual::QualMode;
@@ -21,6 +21,8 @@ struct Cli {
     out_format: Option<FormatArg>,
     #[arg(short = 't', long, default_value_t = 4, help_heading = "Setup")]
     threads: usize,
+    #[arg(long, default_value = "all", help_heading = "Setup")]
+    fastq_tags: String,
 
     #[arg(short = 'l', long, default_value_t = 1, help_heading = "Filtering")]
     min_length: usize,
@@ -97,6 +99,7 @@ pub fn parse() -> anyhow::Result<Config> {
     } else {
         None
     };
+    let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
 
     Ok(Config {
         io: IoConfig {
@@ -116,6 +119,7 @@ pub fn parse() -> anyhow::Result<Config> {
         },
         trim: TrimPlan { head: c.head_crop, tail: c.tail_crop, quality },
         threads: c.threads.max(1),
+        fastq_tags,
     })
 }
 
@@ -145,5 +149,6 @@ pub fn config_for_test(
         },
         trim: TrimPlan { head: head_crop, tail: tail_crop, quality: None },
         threads: 1,
+        fastq_tags: FastqTags::All,
     }
 }
