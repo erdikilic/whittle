@@ -144,3 +144,71 @@ fn has_dangling_program_chain(header: &noodles_sam::Header) -> bool {
             .is_some_and(|previous_id| !programs.contains_key(previous_id))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noodles_sam::header::record::value::Map;
+    use noodles_sam::header::record::value::map::Program;
+    use noodles_sam::header::record::value::map::program::tag;
+
+    /// Regression test for `d481c48`: a header with a dangling `@PG PP:` chain
+    /// (a `PP` value that names a program ID not present in the header) used
+    /// to panic inside `noodles_sam::header::Programs::add` — called via
+    /// `provenance_header` — because `Programs::leaves` indexes the program
+    /// map directly by the `PP` id without checking it exists first. Real
+    /// ONT/samtools headers hit this in the wild (see `d481c48`'s commit
+    /// message). `provenance_header` must detect the dangling reference via
+    /// `has_dangling_program_chain` and return the header unchanged instead
+    /// of calling `Programs::add`.
+    #[test]
+    fn provenance_header_does_not_panic_on_dangling_pp_chain() {
+        // "pg1" claims a previous program "ghost", but "ghost" is never
+        // added to the header — a genuinely dangling reference.
+        let dangling_program = Map::<Program>::builder()
+            .insert(tag::PREVIOUS_PROGRAM_ID, "ghost")
+            .build()
+            .expect("valid PP field");
+
+        let header = noodles_sam::Header::builder()
+            .add_program("pg1", dangling_program)
+            .build();
+
+        // Sanity-check that the header really is dangling (i.e. this test
+        // isn't accidentally exercising the clean path).
+        assert!(has_dangling_program_chain(&header));
+
+        // Pre-fix, this call panicked inside `Programs::add` -> `leaves`
+        // -> `has_cycle`, which indexes the program map with the `PP` id
+        // and panics when that id isn't a key (`ghost` isn't present here).
+        // Post-fix, `provenance_header` must return without panicking, and
+        // since the chain is dangling it must skip adding the `chopping`
+        // `@PG` line entirely.
+        let out_header = provenance_header(header);
+
+        assert!(
+            !out_header.programs().as_ref().contains_key(&b"chopping"[..]),
+            "expected no chopping @PG line to be added when the existing chain is dangling"
+        );
+    }
+
+    /// Companion positive-path test: a plain header with no dangling `@PG`
+    /// chain must still get the `chopping` provenance record added, so the
+    /// dangling-chain guard doesn't accidentally suppress the common case.
+    #[test]
+    fn provenance_header_adds_chopping_program_on_clean_header() {
+        let header = noodles_sam::Header::default();
+        assert!(!has_dangling_program_chain(&header));
+
+        let out_header = provenance_header(header);
+
+        assert!(
+            out_header
+                .programs()
+                .roots()
+                .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"chopping"),
+            "expected an @PG record with ID chopping in the output header, got {:?}",
+            out_header.programs()
+        );
+    }
+}
