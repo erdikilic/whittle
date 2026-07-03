@@ -42,7 +42,10 @@ pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format>
     }
 }
 
-/// Output format from the path extension, else mirror the input format.
+/// Output format from the path extension, else mirror the input format — with
+/// one exception: never auto-compress. A `.gz` (`FastqGz`) input with no output
+/// extension defaults to plain `Fastq`, so gzip output only ever happens when the
+/// caller explicitly asks (`-o *.gz` / `--out-format fastq-gz`).
 pub fn resolve_output(path: Option<&Path>, input: Format) -> Format {
     // An explicit output extension always wins.
     if let Some(f) = path.and_then(from_extension) {
