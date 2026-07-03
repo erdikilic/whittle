@@ -1,4 +1,5 @@
 pub mod bam;
+pub mod dir;
 pub mod fastq;
 
 use std::path::Path;
