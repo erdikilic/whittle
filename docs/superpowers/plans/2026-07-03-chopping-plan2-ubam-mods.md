@@ -400,7 +400,10 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
             new_deltas.push((widx - prev_widx - 1) as usize);
             prev_widx = widx;
 
-            let ml_start = k * ncodes;
+            // Clamp BOTH ends: a truncated/malformed ML (shorter than
+            // deltas.len()*ncodes) must degrade to an empty run, never an
+            // inverted slice range (which would panic).
+            let ml_start = (k * ncodes).min(g.ml.len());
             let ml_end = (ml_start + ncodes).min(g.ml.len());
             new_ml.extend_from_slice(&g.ml[ml_start..ml_end]);
         }
