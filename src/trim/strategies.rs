@@ -1,5 +1,8 @@
 use crate::qual::phred_to_prob;
 
+/// A list of half-open `[start, end)` index ranges into a read.
+type Segments = Vec<(usize, usize)>;
+
 /// Trim low-quality bases from both ends until reaching a base with phred >= cutoff.
 /// Ported from chopper TrimByQualityStrategy (inputs are raw phred here).
 pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
@@ -61,7 +64,7 @@ pub fn split_low_quality(phred: &[u8], cutoff: u8, min_length: usize, window: us
     let mut last_good: Option<usize> = None;
     let mut bad_run = 0usize;
 
-    let push = |start: usize, end: usize, out: &mut Vec<(usize, usize)>| {
+    let push = |start: usize, end: usize, out: &mut Segments| {
         if end - start >= min_length {
             out.push((start, end));
         }
@@ -143,7 +146,7 @@ mod tests {
     #[test]
     fn split_matches_chopper() {
         // (cutoff, min_length, expected) — from chopper split_by_low_quality_strategy_test, window=1.
-        let cases: [(u8, usize, Vec<(usize, usize)>); 6] = [
+        let cases: [(u8, usize, Segments); 6] = [
             (20, 3, vec![(6, 9), (10, 16)]),
             (7, 3, vec![(4, 15), (17, 20)]),
             (15, 3, vec![(4, 7), (14, 19)]),
