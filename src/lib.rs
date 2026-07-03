@@ -19,6 +19,12 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
 
     let in_path = cfg.io.input.as_deref();
 
+    if let Some(p) = in_path
+        && p.is_dir()
+    {
+        return run_folder(p, &cfg);
+    }
+
     // Open the input (file or stdin) up front so format detection can sniff
     // its first bytes without losing them: any bytes consumed while sniffing
     // get prepended back via a Cursor+chain before the FASTQ reader is built.
@@ -79,16 +85,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         _ => {}
     }
 
-    let base_writer: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
-        Some(p) => Box::new(std::fs::File::create(p)?),
-        None => Box::new(std::io::stdout()),
-    };
-    let writer_inner: Box<dyn Write + Send> = if matches!(out_fmt, Format::FastqGz) {
-        Box::new(flate2::write::GzEncoder::new(base_writer, flate2::Compression::default()))
-    } else {
-        base_writer
-    };
-    let mut writer = BufWriter::new(writer_inner);
+    let mut writer = fastq_writer(&cfg, out_fmt)?;
 
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
@@ -99,6 +96,72 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     drop(writer);
     eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
     Ok(())
+}
+
+/// Build the FASTQ output writer: a file or stdout, wrapped in a gzip encoder
+/// when the output format is `FastqGz`, then buffered.
+fn fastq_writer(
+    cfg: &Config,
+    out_fmt: io::Format,
+) -> anyhow::Result<BufWriter<Box<dyn Write + Send>>> {
+    let base_writer: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
+        Some(p) => Box::new(std::fs::File::create(p)?),
+        None => Box::new(std::io::stdout()),
+    };
+    let writer_inner: Box<dyn Write + Send> = if matches!(out_fmt, io::Format::FastqGz) {
+        Box::new(flate2::write::GzEncoder::new(base_writer, flate2::Compression::default()))
+    } else {
+        base_writer
+    };
+    Ok(BufWriter::new(writer_inner))
+}
+
+/// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
+/// then merge all its read files into a single trimmed output using the same
+/// pipelines as the single-file path.
+fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
+    use io::Format;
+
+    let (family, paths) = io::dir::classify(dir)?;
+    let family_fmt = match family {
+        io::dir::Family::Fastq => Format::Fastq,
+        io::dir::Family::Bam => Format::Bam,
+    };
+    let out_fmt = cfg
+        .io
+        .out_format
+        .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
+
+    match family {
+        io::dir::Family::Fastq => {
+            if matches!(out_fmt, Format::Bam) {
+                anyhow::bail!(
+                    "cross-format conversion (FASTQ folder to BAM) is not supported in v1"
+                );
+            }
+            let mut writer = fastq_writer(cfg, out_fmt)?;
+            let records = io::dir::fastq_records(&paths);
+            let stats = pipeline::run_fastq(records, &mut writer, cfg)?;
+            writer.flush()?;
+            drop(writer);
+            eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+            Ok(())
+        }
+        io::dir::Family::Bam => {
+            if !matches!(out_fmt, Format::Bam) {
+                anyhow::bail!(
+                    "cross-format conversion (BAM folder to FASTQ) is not supported in v1"
+                );
+            }
+            let (header, records) = io::dir::bam_reader(&paths)?;
+            let out_header = provenance_header(header);
+            let mut writer = io::bam::writer(cfg.io.output.as_deref(), &out_header)?;
+            let stats = pipeline::run_bam(&out_header, records, &mut writer, cfg)?;
+            writer.try_finish()?;
+            eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+            Ok(())
+        }
+    }
 }
 
 /// Append an `@PG` provenance record (`ID:chopping`, program name + version) to a

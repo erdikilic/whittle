@@ -77,6 +77,8 @@ type BamRecordIter = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>>>;
 /// The first file's header plus one chained record stream over all BAM files
 /// (each file's own header is read and discarded; records stream under the
 /// first header — `samtools cat` semantics for homogeneous uBAM).
+///
+/// Panics if `paths` is empty; call only with `classify`'s (non-empty) output.
 pub fn bam_reader(paths: &[PathBuf]) -> anyhow::Result<(sam::Header, BamRecordIter)> {
     let (header, _first_records) = crate::io::bam::reader(Some(&paths[0]))?;
     let paths = paths.to_vec();
