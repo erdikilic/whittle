@@ -120,6 +120,7 @@ pub fn parse() -> anyhow::Result<Config> {
         trim: TrimPlan { head: c.head_crop, tail: c.tail_crop, quality },
         threads: c.threads.max(1),
         fastq_tags,
+        render_workers: 0,
     })
 }
 
@@ -163,5 +164,6 @@ pub fn config_for_test_threads(
         trim: TrimPlan { head: head_crop, tail: tail_crop, quality: None },
         threads: threads.max(1),
         fastq_tags: FastqTags::All,
+        render_workers: 0,
     }
 }

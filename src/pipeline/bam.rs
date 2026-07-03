@@ -153,7 +153,7 @@ where
     Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
     WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
 {
-    let render_workers = crate::config::thread_budget(cfg.threads).render;
+    let render_workers = if cfg.render_workers >= 1 { cfg.render_workers } else { cfg.threads.max(1) };
     let pool = rayon::ThreadPoolBuilder::new().num_threads(render_workers).build()?;
     let input_reads = AtomicU64::new(0);
     let output_reads = AtomicU64::new(0);
@@ -499,6 +499,7 @@ mod tests {
             trim: TrimPlan { head: 0, tail: 0, quality: None },
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
+            render_workers: 0,
         };
 
         let result = run_bam(&header, [Ok(rec)].into_iter(), &mut sink, &cfg);
@@ -570,6 +571,7 @@ mod tests {
             trim: TrimPlan { head, tail: 0, quality },
             threads: 1,
             fastq_tags: tags,
+            render_workers: 0,
         }
     }
 
@@ -660,6 +662,7 @@ mod tests {
             trim: TrimPlan { head: 2, tail: 2, quality: None },
             threads,
             fastq_tags: FastqTags::All,
+            render_workers: 0,
         };
         // 300 reads with mods so reconstruction runs on every one.
         let recs: Vec<RecordBuf> = (0..300)
@@ -728,6 +731,7 @@ mod tests {
             trim: TrimPlan { head: 0, tail: 0, quality: None },
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
+            render_workers: 0,
         };
         let recs: Vec<anyhow::Result<RecordBuf>> =
             (0..3000).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -771,6 +775,7 @@ mod tests {
             trim: TrimPlan { head: 0, tail: 0, quality: None },
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
+            render_workers: 0,
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
             (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -803,6 +808,7 @@ mod tests {
             trim: TrimPlan { head: 2, tail: 2, quality: None },
             threads,
             fastq_tags: FastqTags::All,
+            render_workers: 0,
         };
         let recs: Vec<RecordBuf> = (0..300)
             .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))

@@ -19,15 +19,18 @@ use gzp::{Compression, ZWriter, deflate::Gzip};
 /// folder-merge (all read files in it merged into one output); otherwise a
 /// single file / stdin is trimmed. FASTQ and unaligned BAM are supported.
 pub fn run(cfg: Config) -> anyhow::Result<()> {
+    use config::EncodeKind;
     use io::Format;
 
-    let in_path = cfg.io.input.as_deref();
+    let mut cfg = cfg;
 
-    if let Some(p) = in_path
-        && p.is_dir()
-    {
-        return run_folder(p, &cfg);
+    // Scoped so the borrow of `cfg.io.input` ends before `run_folder` needs
+    // `&mut cfg` — the directory path itself is cloned out first.
+    if let Some(dir) = cfg.io.input.as_deref().filter(|p| p.is_dir()).map(|p| p.to_path_buf()) {
+        return run_folder(&dir, &mut cfg);
     }
+
+    let in_path = cfg.io.input.as_deref();
 
     // Open the input (file or stdin) up front so format detection can sniff
     // its first bytes without losing them: any bytes consumed while sniffing
@@ -71,14 +74,12 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     match (in_fmt, out_fmt) {
         (Format::Bam, Format::Bam) => {
             note_tags_ignored(&cfg, in_fmt, out_fmt);
-            let (header, records) = io::bam::reader(in_path, config::thread_budget(cfg.threads).decode)?;
+            let b = config::thread_budget(cfg.threads, true, EncodeKind::Bgzf);
+            let (header, records) = io::bam::reader(in_path, b.decode)?;
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
-            let mut sink = io::bam::writer(
-                cfg.io.output.as_deref(),
-                &out_header,
-                config::thread_budget(cfg.threads).encode,
-            )?;
+            let mut sink = io::bam::writer(cfg.io.output.as_deref(), &out_header, b.encode)?;
+            cfg.render_workers = b.render;
             let stats = pipeline::run_bam(&out_header, records, &mut sink, &cfg)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded — an I/O
@@ -89,8 +90,11 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             return Ok(());
         }
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
-            let (_header, records) = io::bam::reader(in_path, config::thread_budget(cfg.threads).decode)?;
-            let mut writer = fastq_writer(&cfg, out_fmt)?;
+            let encode = if matches!(out_fmt, Format::FastqGz) { EncodeKind::Gzip } else { EncodeKind::None };
+            let b = config::thread_budget(cfg.threads, true, encode);
+            let (_header, records) = io::bam::reader(in_path, b.decode)?;
+            let mut writer = fastq_writer(&cfg, out_fmt, b.encode)?;
+            cfg.render_workers = b.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg)?;
             writer.finish()?;
             eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
@@ -103,7 +107,10 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     }
 
     note_tags_ignored(&cfg, in_fmt, out_fmt);
-    let mut writer = fastq_writer(&cfg, out_fmt)?;
+    let encode = if matches!(out_fmt, Format::FastqGz) { EncodeKind::Gzip } else { EncodeKind::None };
+    let b = config::thread_budget(cfg.threads, false, encode);
+    let mut writer = fastq_writer(&cfg, out_fmt, b.encode)?;
+    cfg.render_workers = b.render;
 
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
@@ -166,17 +173,18 @@ impl FastqOut {
 }
 
 /// Build the FASTQ output writer: a file or stdout, wrapped in a parallel gzip
-/// encoder (`gzp`, using the ENCODE share of the `-t` budget —
-/// `thread_budget(cfg.threads).encode` — worker threads) when the output format
-/// is `FastqGz`, else a plain buffered writer.
-fn fastq_writer(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<FastqOut> {
+/// encoder (`gzp`, using `gz_workers` worker threads — the caller's
+/// workload-aware ENCODE share of the `-t` budget) when the output format is
+/// `FastqGz`, else a plain buffered writer. `gz_workers` is only read on the
+/// `FastqGz` branch, so plain-output callers may pass any value.
+fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow::Result<FastqOut> {
     let base: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
         Some(p) => Box::new(std::fs::File::create(p)?),
         None => Box::new(std::io::stdout()),
     };
     if matches!(out_fmt, io::Format::FastqGz) {
         let w = ParCompressBuilder::<Gzip>::new()
-            .num_threads(config::thread_budget(cfg.threads).encode)
+            .num_threads(gz_workers)
             .unwrap()
             .compression_level(Compression::new(6))
             .from_writer(base);
@@ -189,7 +197,8 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<FastqOut> {
 /// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
 /// then merge all its read files into a single trimmed output using the same
 /// pipelines as the single-file path.
-fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
+fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
+    use config::EncodeKind;
     use io::Format;
 
     let (family, paths) = io::dir::classify(dir)?;
@@ -211,7 +220,10 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
                 );
             }
             note_tags_ignored(cfg, family_fmt, out_fmt);
-            let mut writer = fastq_writer(cfg, out_fmt)?;
+            let encode = if matches!(out_fmt, Format::FastqGz) { EncodeKind::Gzip } else { EncodeKind::None };
+            let b = config::thread_budget(cfg.threads, false, encode);
+            let mut writer = fastq_writer(cfg, out_fmt, b.encode)?;
+            cfg.render_workers = b.render;
             let records = io::dir::fastq_records(&paths);
             let stats = pipeline::run_fastq(records, &mut writer, cfg)?;
             writer.finish()?;
@@ -221,23 +233,22 @@ fn run_folder(dir: &std::path::Path, cfg: &Config) -> anyhow::Result<()> {
         io::dir::Family::Bam => match out_fmt {
             Format::Bam => {
                 note_tags_ignored(cfg, family_fmt, out_fmt);
-                let (header, records) =
-                    io::dir::bam_reader(&paths, config::thread_budget(cfg.threads).decode)?;
+                let b = config::thread_budget(cfg.threads, true, EncodeKind::Bgzf);
+                let (header, records) = io::dir::bam_reader(&paths, b.decode)?;
                 let out_header = provenance_header(header);
-                let mut sink = io::bam::writer(
-                    cfg.io.output.as_deref(),
-                    &out_header,
-                    config::thread_budget(cfg.threads).encode,
-                )?;
+                let mut sink = io::bam::writer(cfg.io.output.as_deref(), &out_header, b.encode)?;
+                cfg.render_workers = b.render;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg)?;
                 sink.finish()?;
                 eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
                 Ok(())
             }
             Format::Fastq | Format::FastqGz => {
-                let (_header, records) =
-                    io::dir::bam_reader(&paths, config::thread_budget(cfg.threads).decode)?;
-                let mut writer = fastq_writer(cfg, out_fmt)?;
+                let encode = if matches!(out_fmt, Format::FastqGz) { EncodeKind::Gzip } else { EncodeKind::None };
+                let b = config::thread_budget(cfg.threads, true, encode);
+                let (_header, records) = io::dir::bam_reader(&paths, b.decode)?;
+                let mut writer = fastq_writer(cfg, out_fmt, b.encode)?;
+                cfg.render_workers = b.render;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg)?;
                 writer.finish()?;
                 eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);

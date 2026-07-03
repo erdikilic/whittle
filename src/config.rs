@@ -75,16 +75,19 @@ pub struct Config {
     pub trim: TrimPlan,
     pub threads: usize,
     pub fastq_tags: FastqTags,
+    /// Resolved render-pool size for this dispatch; `0` means "fall back to
+    /// `threads`" (used by tests and any caller that hasn't computed a
+    /// workload-aware budget). Set by `run`/`run_folder` from
+    /// `thread_budget(..).render` before the pipeline runs.
+    pub render_workers: usize,
 }
 
-/// How a `-t` total worker budget splits across the pipeline stages. Derived
-/// empirically (2026-07-03 sweep, mid_eqbase): bgzf *decode* gains nothing from
-/// threads (serial inflate keeps up), while *render* (MM/ML reconstruction) and
-/// *encode* (bgzf/gz compression) scale almost identically — so the
-/// wall-time-minimizing split reserves one thread for the serial reader and
-/// divides the rest evenly between render and encode, with **render** taking the
-/// odd thread (measured best at `-t 8`: render 4 / encode 3). Note: `-t 2` and
-/// `-t 3` collapse to the same 1/1/1 split (too few threads to split further).
+/// How a `-t` total worker budget splits across the pipeline stages. The split
+/// is workload-aware (see `thread_budget`): decode never benefits from more
+/// than 1 thread (serial inflate keeps up), while render (MM/ML
+/// reconstruction, or the trim-only pass for FASTQ) and encode (bgzf/gzip
+/// compression) are weighted against each other based on how heavy each stage
+/// actually is for the dispatched (input, output) pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadBudget {
     pub decode: usize,
@@ -92,16 +95,39 @@ pub struct ThreadBudget {
     pub encode: usize,
 }
 
-/// Split a total worker budget across decode/render/encode.
-pub fn thread_budget(total: usize) -> ThreadBudget {
+/// The output compression stage's weight, for thread budgeting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeKind {
+    /// No compression pool (plain FASTQ out).
+    None,
+    /// bgzf (BAM out) — libdeflate, medium cost.
+    Bgzf,
+    /// gzip via gzp (FASTQ.gz out) — heavier.
+    Gzip,
+}
+
+/// Split a `-t` total worker budget across decode/render/encode, given whether
+/// RENDER is heavy (BAM input → MM/ML reconstruction) vs light (FASTQ input →
+/// trim only), and the encode stage's kind. Empirically tuned (2026-07-03 sweep,
+/// mid_eqbase): decode never benefits (serial inflate keeps up → 1); the rest is
+/// split so the heavier stage gets more threads.
+pub fn thread_budget(total: usize, render_heavy: bool, encode: EncodeKind) -> ThreadBudget {
     let total = total.max(1);
-    let rest = total.saturating_sub(1).max(2); // >= 2 so render & encode each get >= 1
-    // Render gets the odd thread — empirically the wall-time-optimal split
-    // (2026-07-03 sweep on the pool.install structure, mid_eqbase: at total 8,
-    // render 4 / encode 3 beat render 3 / encode 4, 2.44s vs 2.64s).
-    let render = rest.div_ceil(2);
-    let encode = (rest - render).max(1);
-    ThreadBudget { decode: 1, render, encode }
+    let rest = total.saturating_sub(1).max(2); // >= 2 so both stages can get >= 1
+    let (render, encode_n) = match (render_heavy, encode) {
+        // No compression pool → render gets everything (encode field unused).
+        (_, EncodeKind::None) => (rest, 1),
+        // BAM in + bgzf out: render slightly favored (bgzf/libdeflate is fast). R4E3.
+        (true, EncodeKind::Bgzf) => (rest.div_ceil(2), rest / 2),
+        // BAM in + gzip out: both heavy, encode slightly favored. R3E4.
+        (true, EncodeKind::Gzip) => (rest / 2, rest.div_ceil(2)),
+        // FASTQ in (light render) + any compression: encode dominates. R1E6.
+        (false, _) => {
+            let r = (rest / 6).max(1);
+            (r, rest - r)
+        }
+    };
+    ThreadBudget { decode: 1, render: render.max(1), encode: encode_n.max(1) }
 }
 
 #[cfg(test)]
@@ -144,12 +170,18 @@ mod tests {
 
     #[test]
     fn thread_budget_split() {
-        assert_eq!(thread_budget(8), ThreadBudget { decode: 1, render: 4, encode: 3 });
-        assert_eq!(thread_budget(4), ThreadBudget { decode: 1, render: 2, encode: 1 });
-        assert_eq!(thread_budget(16), ThreadBudget { decode: 1, render: 8, encode: 7 });
-        for t in [1usize, 2, 3] {
-            let b = thread_budget(t);
-            assert!(b.decode >= 1 && b.render >= 1 && b.encode >= 1);
+        use EncodeKind::*;
+        assert_eq!(thread_budget(8, true, Bgzf), ThreadBudget { decode: 1, render: 4, encode: 3 });
+        assert_eq!(thread_budget(8, true, Gzip), ThreadBudget { decode: 1, render: 3, encode: 4 });
+        assert_eq!(thread_budget(8, false, Gzip), ThreadBudget { decode: 1, render: 1, encode: 6 });
+        assert_eq!(thread_budget(8, true, None), ThreadBudget { decode: 1, render: 7, encode: 1 });
+        for t in [1usize, 2, 3, 4, 16] {
+            for rh in [true, false] {
+                for e in [None, Bgzf, Gzip] {
+                    let b = thread_budget(t, rh, e);
+                    assert!(b.decode >= 1 && b.render >= 1 && b.encode >= 1);
+                }
+            }
         }
     }
 
