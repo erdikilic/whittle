@@ -17,15 +17,19 @@ pub fn reader(
         Some(p) => Box::new(File::open(p)?),
         None => Box::new(io::stdin()),
     };
-    let buffered = BufReader::new(raw);
-    let inner: Box<dyn Read + Send> = if gz {
-        Box::new(MultiGzDecoder::new(buffered))
-    } else {
-        Box::new(buffered)
-    };
-    Ok(Box::new(RecordIter {
-        reader: Reader::new(inner),
-    }))
+    let buffered: Box<dyn Read + Send> = Box::new(BufReader::new(raw));
+    Ok(reader_from(buffered, gz))
+}
+
+/// Build a streaming FASTQ record iterator over an already-open source (e.g. a
+/// peeked-and-chained stdin stream), transparently decompressing gzip when
+/// `gz` is true.
+pub fn reader_from(
+    inner: Box<dyn Read + Send>,
+    gz: bool,
+) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
+    let inner: Box<dyn Read + Send> = if gz { Box::new(MultiGzDecoder::new(inner)) } else { inner };
+    Box::new(RecordIter { reader: Reader::new(inner) })
 }
 
 struct RecordIter<R: Read> {
@@ -70,7 +74,7 @@ pub fn write_segment<W: Write>(
     w.write_all(b"\n")?;
     w.write_all(seq)?;
     w.write_all(b"\n+\n")?;
-    let ascii: Vec<u8> = phred.iter().map(|&q| q + 33).collect();
+    let ascii: Vec<u8> = phred.iter().map(|&q| q.saturating_add(33)).collect();
     w.write_all(&ascii)?;
     w.write_all(b"\n")
 }

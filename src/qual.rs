@@ -114,5 +114,6 @@ mod tests {
     fn read_quality_dispatches() {
         assert_eq!(read_quality(&[10, 20, 30], QualMode::Arithmetic), 20.0);
         assert_eq!(read_quality(&[10, 20, 30], QualMode::Median), 20.0);
+        assert_eq!(read_quality(&[10], QualMode::Mean), mean_prob_q(&[10]));
     }
 }

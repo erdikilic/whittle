@@ -60,11 +60,12 @@ fn render_record(rec: &ReadRecord, cfg: &Config) -> (u64, Vec<u8>) {
 /// dedicated writer task. Output order is unordered for `threads > 1` since
 /// buffers are written in arrival order, not input order.
 ///
-/// Record-parse errors (`Err` items from `records`): the sequential path
-/// surfaces them via `?` and aborts the whole run. The parallel path currently
-/// drops the offending item and continues — for Plan 1, malformed FASTQ over
-/// multiple threads only aborts the affected read, not the whole run. Strict
-/// propagation would need a shared error slot mirroring `write_err` below.
+/// Record-parse errors (`Err` items from `records`): both paths surface them
+/// as an `Err` from this function. The sequential path aborts immediately via
+/// `?`; the parallel path captures the first parse error in a shared slot and
+/// keeps draining so producer threads never block on the bounded channel,
+/// surfacing the error once the scope joins (matching the sequential path's
+/// fail behavior, just at end-of-run instead of mid-stream).
 pub fn run_fastq<W, I>(records: I, writer: &mut W, cfg: &Config) -> anyhow::Result<Stats>
 where
     W: Write + Send,
@@ -80,6 +81,7 @@ where
     let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(cfg.threads * 4);
 
     let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
+    let parse_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
 
     pool.in_place_scope(|scope| {
         // Writer task drains rendered buffers in arrival order. On a write
@@ -104,7 +106,13 @@ where
         records.par_bridge().for_each(|rec| {
             let rec = match rec {
                 Ok(r) => r,
-                Err(_) => return,
+                Err(e) => {
+                    let mut g = parse_err.lock().unwrap();
+                    if g.is_none() {
+                        *g = Some(e);
+                    }
+                    return;
+                }
             };
             input_reads.fetch_add(1, Ordering::Relaxed);
             let (out, buf) = render_record(&rec, cfg);
@@ -116,6 +124,9 @@ where
         drop(tx);
     });
 
+    if let Some(e) = parse_err.lock().unwrap().take() {
+        return Err(e);
+    }
     if let Some(e) = write_err.lock().unwrap().take() {
         return Err(e.into());
     }
@@ -258,5 +269,25 @@ mod tests {
         let mut w = FailAfter { limit: 100, written: 0 };
         let res = run_fastq(recs.into_iter().map(anyhow::Ok), &mut w, &cfg);
         assert!(res.is_err(), "write error must surface as Err, and must not hang");
+    }
+
+    #[test]
+    fn parallel_surfaces_parse_error_instead_of_dropping_it() {
+        use crate::config::IoConfig;
+
+        let cfg = Config {
+            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            filter: base_filter(),
+            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            threads: 4,
+        };
+        let good: Vec<anyhow::Result<ReadRecord>> = (0..5)
+            .map(|i| anyhow::Ok(rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10])))
+            .collect();
+        let recs = good.into_iter().chain(std::iter::once(Err(anyhow::anyhow!("bad record"))));
+
+        let mut out = Vec::new();
+        let res = run_fastq(recs, &mut out, &cfg);
+        assert!(res.is_err(), "a malformed record must not be silently dropped on the parallel path");
     }
 }
