@@ -219,6 +219,18 @@ where
 
         let seq = rec.sequence().as_ref().to_vec();
         let qual = rec.quality_scores().as_ref().to_vec();
+        if qual.len() != seq.len() {
+            let name = rec
+                .name()
+                .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+                .unwrap_or_else(|| "<unnamed>".to_string());
+            anyhow::bail!(
+                "read {name}: BAM record SEQ length {} != QUAL length {} \
+                 (records without full per-base quality are not supported)",
+                seq.len(),
+                qual.len()
+            );
+        }
         if !filter::passes(&seq, &qual, &cfg.filter) {
             continue;
         }
@@ -436,6 +448,45 @@ mod bam_tests {
             _ => panic!("no MN"),
         };
         assert_eq!(mn, 2);
+    }
+
+    /// Regression test for a QUAL-absent uBAM record: `quality_scores()`
+    /// decodes to empty while `sequence()` keeps its bases, so `seq.len() !=
+    /// qual.len()`. Pre-fix, `run_bam` fed this straight into `trim::apply`,
+    /// which slices `phred[start..end]` using `seq.len()`-derived bounds and
+    /// panics (via `debug_assert_eq!` in debug builds, or an out-of-bounds
+    /// slice panic in release) instead of returning an `Err`. Post-fix, the
+    /// length-mismatch guard in `run_bam` must bail with an `Err` before any
+    /// of that runs.
+    #[test]
+    fn qual_seq_length_mismatch_errors_without_panicking() {
+        use crate::config::IoConfig;
+        use crate::filter::FilterConfig;
+        use crate::qual::QualMode;
+        use crate::trim::TrimPlan;
+
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        *rec.name_mut() = Some(b"r1".into());
+        *rec.sequence_mut() = b"ACGT".to_vec().into();
+        // quality_scores left at its default (empty) -> SEQ/QUAL length mismatch.
+
+        let header = sam::Header::default();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut writer = noodles_bam::io::Writer::new(&mut buf);
+
+        let cfg = Config {
+            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            filter: FilterConfig {
+                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
+                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            threads: 1,
+        };
+
+        let result = run_bam(&header, [Ok(rec)].into_iter(), &mut writer, &cfg);
+        assert!(result.is_err(), "SEQ/QUAL length mismatch must error, not panic");
     }
 
     #[test]
