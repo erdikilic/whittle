@@ -25,6 +25,7 @@ noodles-bam = "0.90.0"
 noodles-sam = "0.85.0"
 noodles-bgzf = { version = "0.47.0", features = ["libdeflate"] }
 bstr = "1"
+gzp = "2"
 
 [dev-dependencies]
 assert_cmd = "2"
