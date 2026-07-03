@@ -14,7 +14,9 @@ pub enum Format {
 /// Extension-based detection. Recognises `.fastq`/`.fq`, the `.gz` variants, and `.bam`.
 pub fn from_extension(path: &Path) -> Option<Format> {
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-    if name.ends_with(".fastq.gz") || name.ends_with(".fq.gz") {
+    // Any trailing `.gz` is gzipped FASTQ — the only gz format this tool handles —
+    // so a bare `out.gz` counts as fastq-gz, not just `.fastq.gz`/`.fq.gz`.
+    if name.ends_with(".gz") {
         Some(Format::FastqGz)
     } else if name.ends_with(".fastq") || name.ends_with(".fq") {
         Some(Format::Fastq)
@@ -71,6 +73,7 @@ mod tests {
         assert_eq!(from_extension(Path::new("x.fq")), Some(Format::Fastq));
         assert_eq!(from_extension(Path::new("x.fastq.gz")), Some(Format::FastqGz));
         assert_eq!(from_extension(Path::new("x.fq.gz")), Some(Format::FastqGz));
+        assert_eq!(from_extension(Path::new("x.gz")), Some(Format::FastqGz)); // bare .gz
         assert_eq!(from_extension(Path::new("x.bam")), Some(Format::Bam));
         assert_eq!(from_extension(Path::new("x.txt")), None);
     }

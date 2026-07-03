@@ -29,7 +29,8 @@ input does not imply gzipped output: with no `-o` extension and no
 `--out-format`, `chopping` always writes plain FASTQ (this matters most on
 stdout, where silently emitting gzip bytes would be surprising and is also
 slower). Gzip output only happens when you ask for it explicitly, either via
-an `-o <path>.fastq.gz`/`.fq.gz` extension or `--out-format fastq-gz`. When it
+an `-o` path ending in `.gz` (e.g. `out.fastq.gz`, `out.fq.gz`, or a bare
+`out.gz`) or `--out-format fastq-gz`. When it
 does, it's produced by a parallel gzip encoder (`gzp`) that uses `-t/--threads`
 worker threads, so `-t 8 -o out.fastq.gz` compresses using all 8 threads
 instead of a single-threaded bottleneck.
