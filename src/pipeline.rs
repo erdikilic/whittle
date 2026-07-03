@@ -3,10 +3,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
 
+use noodles_sam::{self as sam, alignment::RecordBuf};
+use noodles_sam::alignment::io::Write as _;
+use noodles_sam::alignment::record::data::field::Tag;
+use noodles_sam::alignment::record_buf::data::field::Value;
+use noodles_sam::alignment::record_buf::data::field::value::Array;
+
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
-use crate::{filter, trim};
+use crate::{filter, mods, trim};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Stats {
@@ -134,6 +140,96 @@ where
         input_reads: input_reads.load(Ordering::Relaxed),
         output_reads: output_reads.load(Ordering::Relaxed),
     })
+}
+
+/// Build one output uBAM record for interval [start,end): slice SEQ/QUAL, rebuild
+/// MM/ML/MN, suffix the name on splits. Non-mod aux tags are carried through
+/// unchanged (they ride along in the cloned RecordBuf).
+pub fn reconstruct_record(
+    src: &RecordBuf,
+    start: usize,
+    end: usize,
+    total: usize,
+    idx: usize,
+) -> RecordBuf {
+    let mut out = src.clone();
+
+    // Slice sequence + quality.
+    let seq = src.sequence().as_ref().to_vec();
+    let qual = src.quality_scores().as_ref().to_vec();
+    *out.sequence_mut() = seq[start..end].to_vec().into();
+    *out.quality_scores_mut() = qual[start..end].to_vec().into();
+
+    // Name suffix on splits.
+    if total > 1 {
+        let base = src.name().map(|n| n.to_vec()).unwrap_or_default();
+        let mut name = base;
+        name.extend_from_slice(format!("_segment_{}", idx + 1).as_bytes());
+        *out.name_mut() = Some(name.into());
+    }
+
+    // Rebuild MM/ML/MN when the source carried modification tags.
+    let mm_raw = match src.data().get(&Tag::BASE_MODIFICATIONS) {
+        Some(Value::String(s)) => Some(s.to_vec()),
+        _ => None,
+    };
+    if let Some(mm_raw) = mm_raw {
+        let ml_raw: Vec<u8> = match src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
+            Some(Value::Array(Array::UInt8(v))) => v.clone(),
+            _ => Vec::new(),
+        };
+        let parsed = mods::parse(&mm_raw, &ml_raw);
+        let sliced = mods::reconstruct(&parsed, &seq, start, end);
+        let (mm_new, ml_new) = mods::serialize(&sliced);
+
+        let data = out.data_mut();
+        if mm_new.is_empty() {
+            data.remove(&Tag::BASE_MODIFICATIONS);
+            data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
+        } else {
+            data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm_new.into()));
+            data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml_new)));
+        }
+        // MN reflects the output segment length whenever mods were present.
+        data.insert(
+            Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
+            Value::Int32((end - start) as i32),
+        );
+    }
+
+    out
+}
+
+/// Single-threaded uBAM pipeline: refuse aligned reads, filter, trim, reconstruct.
+pub fn run_bam<W>(
+    header: &sam::Header,
+    records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
+    writer: &mut noodles_bam::io::Writer<W>,
+    cfg: &Config,
+) -> anyhow::Result<Stats>
+where
+    W: std::io::Write,
+{
+    let mut stats = Stats::default();
+    for rec in records {
+        let rec = rec?;
+        crate::io::bam::ensure_unaligned(&rec)?;
+        stats.input_reads += 1;
+
+        let seq = rec.sequence().as_ref().to_vec();
+        let qual = rec.quality_scores().as_ref().to_vec();
+        if !filter::passes(&seq, &qual, &cfg.filter) {
+            continue;
+        }
+        let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+        let total = intervals.len();
+        for (idx, (s, e)) in intervals.into_iter().enumerate() {
+            let out = reconstruct_record(&rec, s, e, total, idx);
+            writer.write_alignment_record(header, &out)?;
+            stats.output_reads += 1;
+        }
+    }
+    Ok(stats)
 }
 
 #[cfg(test)]
@@ -289,5 +385,67 @@ mod tests {
         let mut out = Vec::new();
         let res = run_fastq(recs, &mut out, &cfg);
         assert!(res.is_err(), "a malformed record must not be silently dropped on the parallel path");
+    }
+}
+
+#[cfg(test)]
+mod bam_tests {
+    use super::*;
+    use noodles_sam::alignment::RecordBuf;
+    use noodles_sam::alignment::record::Flags;
+    use noodles_sam::alignment::record::data::field::Tag;
+    use noodles_sam::alignment::record_buf::data::field::Value;
+    use noodles_sam::alignment::record_buf::data::field::value::Array;
+
+    fn ubam_with_mods(seq: &[u8], quals: Vec<u8>, mm: &[u8], ml: Vec<u8>) -> RecordBuf {
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        *rec.name_mut() = Some(b"r1".into());
+        *rec.sequence_mut() = seq.to_vec().into();
+        *rec.quality_scores_mut() = quals.into();
+        let data = rec.data_mut();
+        data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm.to_vec().into()));
+        data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml)));
+        rec
+    }
+
+    #[test]
+    fn slices_seq_qual_and_rebuilds_tags() {
+        // seq = C C A C ; C+m modified at C occ 0 and 2 -> pos 0 and 3; ML [10,20].
+        let src = ubam_with_mods(b"CCAC", vec![30, 31, 32, 33], b"C+m,0,1;", vec![10, 20]);
+        // keep window [2,4): seq "AC", the modified C at pos3 survives (occ within window idx0).
+        let out = reconstruct_record(&src, 2, 4, 1, 0);
+
+        assert_eq!(out.sequence().as_ref(), b"AC");
+        assert_eq!(out.quality_scores().as_ref(), &[32, 33]);
+
+        let mm = match out.data().get(&Tag::BASE_MODIFICATIONS) {
+            Some(Value::String(s)) => s.to_vec(),
+            _ => panic!("no MM"),
+        };
+        assert_eq!(mm, b"C+m,0;");
+        let ml = match out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
+            Some(Value::Array(Array::UInt8(v))) => v.clone(),
+            _ => panic!("no ML"),
+        };
+        assert_eq!(ml, vec![20]);
+        // MN updated to the output length.
+        let mn = match out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
+            Some(Value::Int32(n)) => *n,
+            _ => panic!("no MN"),
+        };
+        assert_eq!(mn, 2);
+    }
+
+    #[test]
+    fn split_suffixes_name_and_drops_empty_mods() {
+        let src = ubam_with_mods(b"CCAC", vec![30, 31, 32, 33], b"C+m,0;", vec![10]); // mod at pos0
+        // segment [2,4) has no surviving C mod -> MM/ML removed entirely.
+        let out = reconstruct_record(&src, 2, 4, 2, 1);
+        // `.as_ref()` is ambiguous on `&BStr` (impls `AsRef<[u8]>` and `AsRef<BStr>`);
+        // disambiguate with a turbofish (noodles-sam 0.85 / bstr 1.x adjustment).
+        assert_eq!(AsRef::<[u8]>::as_ref(out.name().unwrap()), b"r1_segment_2");
+        assert!(out.data().get(&Tag::BASE_MODIFICATIONS).is_none());
+        assert!(out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES).is_none());
     }
 }
