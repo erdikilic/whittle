@@ -115,12 +115,6 @@ fn bam_to_bam_end_to_end() {
     assert_eq!(mn, 6, "MN should equal the output segment length");
 }
 
-/// Regression test for the BGZF/gzip magic collision: a real BAM is BGZF, which
-/// begins with gzip's `1f 8b` magic, so before the fix `detect_input` sniffed a
-/// BAM on stdin (no `--in-format`) as gzipped FASTQ and failed with a misleading
-/// "FASTQ parse error … found 'B'". A BAM piped on stdin must now be detected and
-/// converted, exercising both BGZF sniffing and `io::bam::reader_from` (which
-/// reads from the chained probe stream instead of re-opening stdin).
 /// End-to-end: a PacBio-style uBAM with per-base kinetics (`ip`/`pw`, one value
 /// per base) must have those arrays sliced in lockstep with the sequence when the
 /// read is trimmed — otherwise the output record is invalid (array length != SEQ
@@ -226,6 +220,12 @@ fn bam_update_moves_slices_move_table() {
     assert_eq!(ts, 16, "ts must advance past the trimmed head signal");
 }
 
+/// Regression test for the BGZF/gzip magic collision: a real BAM is BGZF, which
+/// begins with gzip's `1f 8b` magic, so before the fix `detect_input` sniffed a
+/// BAM on stdin (no `--in-format`) as gzipped FASTQ and failed with a misleading
+/// "FASTQ parse error … found 'B'". A BAM piped on stdin must now be detected and
+/// converted, exercising both BGZF sniffing and `io::bam::reader_from` (which
+/// reads from the chained probe stream instead of re-opening stdin).
 #[test]
 fn bam_on_stdin_without_in_format_is_detected() {
     let dir = tempfile::tempdir().unwrap();

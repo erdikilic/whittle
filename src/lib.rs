@@ -222,28 +222,12 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
     use config::EncodeKind;
     use io::Format;
 
-    let (family, mut paths) = io::dir::classify(dir)?;
-    // Never read the output back as an input: if `-o` points inside `-i <dir>`
-    // (e.g. on a rerun where the merged file now sits in the folder), drop it
-    // from the input set so it isn't merged into — and truncated by — itself.
-    if let Some(outp) = cfg.io.output.as_deref() {
-        let before = paths.len();
-        paths.retain(|p| !same_path(p, outp));
-        if paths.len() < before {
-            eprintln!(
-                "note: excluding the output file {} from the {:?} input set in {}",
-                outp.display(),
-                family,
-                dir.display()
-            );
-        }
-    }
-    if paths.is_empty() {
-        anyhow::bail!(
-            "no input read files left in {} after excluding the output file",
-            dir.display()
-        );
-    }
+    // Pass the output path so `classify` excludes it up front — before its
+    // mixed-family check — so a rerun whose stale output sits inside the folder
+    // (even a cross-format one, e.g. a `.fastq` output in a BAM folder) is never
+    // read back as an input nor makes the folder look "mixed". `classify` bails if
+    // nothing is left.
+    let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
     eprintln!("Merging {} {:?} file(s) from {}", paths.len(), family, dir.display());
     let family_fmt = match family {
         io::dir::Family::Fastq => Format::Fastq,
@@ -309,7 +293,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
 /// it falls back to canonicalizing the parent directory and re-joining the file
 /// name. Conservative: any resolution failure yields `false` (don't block a run
 /// on a path we can't resolve).
-fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     // When both paths already exist, an inode+device match is definitive — and it
     // also catches hard links to one inode, which path canonicalization misses.
     #[cfg(unix)]

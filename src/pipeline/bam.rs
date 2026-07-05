@@ -149,11 +149,20 @@ fn polya_updates(
         Some(Value::Array(Array::Int32(v))) => v,
         _ => return drop_both(),
     };
+    // pa = [anchor, range0.start, range0.end, range1.start, range1.end]. dorado's
+    // poly-A signal ranges are half-open `[start, end)`: the anchor and the range
+    // starts are inclusive sample indices, so they must be `< kept_end`; the range
+    // ENDS are exclusive and may equal `kept_end` (the window's own exclusive end).
+    // Every real position must also be `>= kept_start`. Sentinels (`< 0`) skipped.
     let has_real = pa.iter().any(|&p| p >= 0);
     let survives = has_real
-        && pa.iter().filter(|&&p| p >= 0).all(|&p| {
+        && pa.iter().enumerate().all(|(i, &p)| {
+            if p < 0 {
+                return true; // sentinel (NOT_FOUND / NOT_ENABLED)
+            }
             let p = i64::from(p);
-            p >= kept_start && p <= kept_end
+            let within_upper = if i == 2 || i == 4 { p <= kept_end } else { p < kept_end };
+            p >= kept_start && within_upper
         });
     if !survives {
         return drop_both();
@@ -1470,6 +1479,27 @@ mod tests {
                 std::str::from_utf8(t).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn update_moves_polya_boundary_end_inclusive_anchor_exclusive() {
+        // split [3,6): kept window [18,26). A range END exactly at kept_end
+        // (exclusive) survives; an anchor at kept_end is out of the window -> drop.
+        let mk = |pa: Vec<i32>| {
+            let mut src = ubam_with_moves();
+            src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(pa)));
+            src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+            src
+        };
+        // range end == kept_end (26) -> survives, shifted by -18.
+        let kept = reconstruct_record(&mk(vec![20, 18, 26, -1, -1]), 3, 6, 2, 1, true);
+        match kept.data().get(&Tag::new(b'p', b'a')) {
+            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[2, 0, 8, -1, -1]),
+            other => panic!("range-end at kept_end should survive: {other:?}"),
+        }
+        // anchor == kept_end (26) -> out of window -> dropped.
+        let dropped = reconstruct_record(&mk(vec![26, 18, 24, -1, -1]), 3, 6, 2, 1, true);
+        assert!(dropped.data().get(&Tag::new(b'p', b'a')).is_none(), "anchor at exclusive boundary drops");
     }
 
     #[test]

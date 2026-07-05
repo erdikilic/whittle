@@ -108,6 +108,29 @@ fn folder_rerun_does_not_reingest_its_own_output() {
     assert_eq!(first, second, "rerun must produce the same output, not re-ingest it");
 }
 
+#[test]
+fn folder_bam_to_fastq_rerun_excludes_cross_format_output() {
+    // A BAM folder producing a FASTQ output *inside itself*: on rerun the stale
+    // merged.fastq must be excluded before the mixed-family check — otherwise the
+    // folder (a.bam + merged.fastq) would wrongly look "mixed" and error.
+    let dir = tempfile::tempdir().unwrap();
+    write_ubam(&dir.path().join("a.bam"), b"r1", b"ACGTACGT", vec![40; 8]);
+    let out = dir.path().join("merged.fastq");
+
+    // First run creates merged.fastq inside the BAM folder.
+    chopping().arg("-i").arg(dir.path()).arg("-o").arg(&out)
+        .args(["--out-format", "fastq", "-t", "1"]).assert().success();
+    let first = std::fs::read_to_string(&out).unwrap();
+
+    // Rerun must succeed (not error as "mixed"), exclude the output, same result.
+    chopping().arg("-i").arg(dir.path()).arg("-o").arg(&out)
+        .args(["--out-format", "fastq", "-t", "1"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("excluding the output file"));
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), first);
+}
+
 fn write_ubam_with_rg(path: &Path, name: &[u8], rg: &str) {
     use noodles_sam::header::record::value::Map;
     use noodles_sam::header::record::value::map::ReadGroup;

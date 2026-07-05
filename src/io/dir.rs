@@ -13,9 +13,12 @@ pub enum Family {
 }
 
 /// Classify a directory's immediate children into a single read-file family and
-/// a sorted path list. Non-read files and subdirectories are ignored. Errors if
-/// the folder mixes FASTQ and BAM, or contains no read files.
-pub fn classify(dir: &Path) -> anyhow::Result<(Family, Vec<PathBuf>)> {
+/// a sorted path list. Non-read files and subdirectories are ignored, as is
+/// `exclude` (the run's output file, so it is never read back as an input — this
+/// must happen *before* the mixed-family check, or a rerun whose stale output has
+/// a different extension than the folder's reads would wrongly look "mixed").
+/// Errors if the folder mixes FASTQ and BAM, or contains no read files.
+pub fn classify(dir: &Path, exclude: Option<&Path>) -> anyhow::Result<(Family, Vec<PathBuf>)> {
     let mut fastq = Vec::new();
     let mut bam = Vec::new();
 
@@ -24,6 +27,10 @@ pub fn classify(dir: &Path) -> anyhow::Result<(Family, Vec<PathBuf>)> {
     for entry in entries {
         let path = entry?.path();
         if !path.is_file() {
+            continue;
+        }
+        if exclude.is_some_and(|e| crate::same_path(&path, e)) {
+            eprintln!("note: excluding the output file {} from the input set", path.display());
             continue;
         }
         match from_extension(&path) {
@@ -165,7 +172,7 @@ mod tests {
         touch(d.path(), "a_0.fastq");
         touch(d.path(), "sequencing_summary.txt"); // ignored
         std::fs::create_dir(d.path().join("subdir")).unwrap(); // ignored
-        let (fam, paths) = classify(d.path()).unwrap();
+        let (fam, paths) = classify(d.path(), None).unwrap();
         assert_eq!(fam, Family::Fastq);
         let names: Vec<_> = paths.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
         assert_eq!(names, vec!["a_0.fastq", "b_1.fastq.gz"]); // sorted, .txt/subdir excluded
@@ -176,7 +183,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         touch(d.path(), "x.bam");
         touch(d.path(), "y.bam");
-        let (fam, paths) = classify(d.path()).unwrap();
+        let (fam, paths) = classify(d.path(), None).unwrap();
         assert_eq!(fam, Family::Bam);
         assert_eq!(paths.len(), 2);
     }
@@ -186,15 +193,30 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         touch(d.path(), "a.fastq");
         touch(d.path(), "b.bam");
-        let err = classify(d.path()).unwrap_err().to_string();
+        let err = classify(d.path(), None).unwrap_err().to_string();
         assert!(err.contains("mixes"));
+    }
+
+    #[test]
+    fn excludes_cross_format_output_before_mixed_check() {
+        // A BAM folder with a stale `.fastq` output inside would look "mixed"; the
+        // output must be excluded up front so classify still returns Bam (this is
+        // the folder-rerun cross-format case).
+        let d = tempfile::tempdir().unwrap();
+        touch(d.path(), "a.bam");
+        touch(d.path(), "b.bam");
+        touch(d.path(), "merged.fastq");
+        let out = d.path().join("merged.fastq");
+        let (fam, paths) = classify(d.path(), Some(out.as_path())).unwrap();
+        assert_eq!(fam, Family::Bam);
+        assert_eq!(paths.len(), 2, "the .fastq output must be excluded, leaving the 2 bams");
     }
 
     #[test]
     fn empty_folder_error() {
         let d = tempfile::tempdir().unwrap();
         touch(d.path(), "notes.txt"); // no read files
-        let err = classify(d.path()).unwrap_err().to_string();
+        let err = classify(d.path(), None).unwrap_err().to_string();
         assert!(err.contains("no FASTQ or BAM"));
     }
 }
