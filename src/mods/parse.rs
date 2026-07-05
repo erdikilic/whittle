@@ -19,7 +19,9 @@ pub fn parse(mm: &[u8], ml: &[u8]) -> Mods {
         if i < token.len() && token[i].is_ascii_digit() {
             let mut id = 0u32;
             while i < token.len() && token[i].is_ascii_digit() {
-                id = id * 10 + (token[i] - b'0') as u32;
+                // Saturating: a corrupt over-long id must clamp, never overflow
+                // (which would panic in debug / silently wrap in release).
+                id = id.saturating_mul(10).saturating_add((token[i] - b'0') as u32);
                 i += 1;
             }
             codes.push(ModCode::Chebi(id));
@@ -47,7 +49,9 @@ pub fn parse(mm: &[u8], ml: &[u8]) -> Mods {
             let mut n = 0usize;
             let mut saw = false;
             while i < token.len() && token[i].is_ascii_digit() {
-                n = n * 10 + (token[i] - b'0') as usize;
+                // Saturating for the same reason as the ChEBI id above; a delta
+                // this large is unreachable and gets dropped in reconstruct.
+                n = n.saturating_mul(10).saturating_add((token[i] - b'0') as usize);
                 i += 1;
                 saw = true;
             }
@@ -118,5 +122,16 @@ mod tests {
         assert_eq!(g.status, None);
         assert!(g.deltas.is_empty());
         assert!(g.ml.is_empty());
+    }
+
+    #[test]
+    fn over_long_numeric_fields_saturate_without_panicking() {
+        // A corrupt 20-digit ChEBI id and delta overflow u32/usize with the naive
+        // `n*10 + d`; saturating arithmetic must clamp instead of panicking (this
+        // test is a debug build, where overflow panics).
+        let m = parse(b"C+99999999999999999999,88888888888888888888;", &[1]);
+        assert_eq!(m.groups.len(), 1);
+        assert_eq!(m.groups[0].codes, vec![ModCode::Chebi(u32::MAX)]);
+        assert_eq!(m.groups[0].deltas, vec![usize::MAX]);
     }
 }

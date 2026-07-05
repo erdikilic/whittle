@@ -102,6 +102,39 @@ pub fn parse() -> anyhow::Result<Config> {
             c.compression_level
         );
     }
+
+    // Reject contradictory or out-of-domain filter bounds up front, rather than
+    // silently keeping zero reads and exiting successfully.
+    let max_length = c.max_length.unwrap_or(usize::MAX);
+    if c.min_length > max_length {
+        anyhow::bail!(
+            "--min-length ({}) must not exceed --max-length ({max_length})",
+            c.min_length
+        );
+    }
+    if c.min_qual > c.max_qual {
+        anyhow::bail!(
+            "--min-qual ({}) must not exceed --max-qual ({})",
+            c.min_qual,
+            c.max_qual
+        );
+    }
+    if let Some(g) = c.min_gc
+        && !(0.0..=1.0).contains(&g)
+    {
+        anyhow::bail!("--min-gc ({g}) must be a fraction between 0 and 1");
+    }
+    if let Some(g) = c.max_gc
+        && !(0.0..=1.0).contains(&g)
+    {
+        anyhow::bail!("--max-gc ({g}) must be a fraction between 0 and 1");
+    }
+    if let (Some(a), Some(b)) = (c.min_gc, c.max_gc)
+        && a > b
+    {
+        anyhow::bail!("--min-gc ({a}) must not exceed --max-gc ({b})");
+    }
+
     let quality = if let Some(q) = c.trim_qual {
         Some(QualityOp::TrimQual(q))
     } else if let Some(q) = c.best_segment {

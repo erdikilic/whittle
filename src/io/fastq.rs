@@ -61,12 +61,21 @@ fn write_head<W: Write>(
 ) -> io::Result<()> {
     w.write_all(b"@")?;
     if total_segments > 1 {
-        let (id, desc) = split_head(name);
-        w.write_all(id)?;
-        write!(w, "_segment_{}", segment_idx + 1)?;
-        if let Some(d) = desc {
-            w.write_all(b" ")?;
-            w.write_all(d)?;
+        // Suffix the read id (everything up to the first ASCII whitespace) and
+        // re-emit the original delimiter + remainder verbatim. This preserves both
+        // a space-separated description AND a tab-delimited tag list (`samtools
+        // fastq -T` style) — the old space-only split appended the suffix past the
+        // tab, mutating the first tag's value.
+        match name.iter().position(|&b| b == b' ' || b == b'\t') {
+            Some(i) => {
+                w.write_all(&name[..i])?;
+                write!(w, "_segment_{}", segment_idx + 1)?;
+                w.write_all(&name[i..])?;
+            }
+            None => {
+                w.write_all(name)?;
+                write!(w, "_segment_{}", segment_idx + 1)?;
+            }
         }
     } else {
         w.write_all(name)?;
@@ -208,13 +217,6 @@ pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
     out
 }
 
-fn split_head(name: &[u8]) -> (&[u8], Option<&[u8]>) {
-    match name.iter().position(|&b| b == b' ') {
-        Some(i) => (&name[..i], Some(&name[i + 1..])),
-        None => (name, None),
-    }
-}
-
 #[cfg(test)]
 fn reader_from_slice(bytes: &'static [u8]) -> RecordIter<&'static [u8]> {
     RecordIter {
@@ -238,6 +240,17 @@ mod tests {
         let mut out = Vec::new();
         write_segment(&mut out, b"read1 desc", b"AC", &[40, 40], 2, 1).unwrap();
         assert_eq!(out, b"@read1_segment_2 desc\nAC\n+\nII\n");
+    }
+
+    #[test]
+    fn split_segment_preserves_tab_delimited_tags() {
+        // A `samtools fastq -T`-style header carries SAM tags after a TAB. The
+        // `_segment_N` suffix must land right after the read id, keeping the TAB
+        // and the tag value intact — not append past the tag (which would mutate
+        // both the id and the RG value).
+        let mut out = Vec::new();
+        write_segment(&mut out, b"r1\tRG:Z:grp", b"AC", &[40, 40], 2, 0).unwrap();
+        assert_eq!(out, b"@r1_segment_1\tRG:Z:grp\nAC\n+\nII\n");
     }
 
     #[test]
