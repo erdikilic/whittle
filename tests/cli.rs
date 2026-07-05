@@ -8,7 +8,14 @@ fn chopping() -> Command {
 #[test]
 fn head_tail_crop_over_stdin() {
     chopping()
-        .args(["--head-crop", "1", "--tail-crop", "1", "--in-format", "fastq"])
+        .args([
+            "--head-crop",
+            "1",
+            "--tail-crop",
+            "1",
+            "--in-format",
+            "fastq",
+        ])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
         .assert()
         .success()
@@ -18,7 +25,14 @@ fn head_tail_crop_over_stdin() {
 #[test]
 fn mutually_exclusive_quality_ops_error() {
     chopping()
-        .args(["--trim-qual", "10", "--best-segment", "10", "--in-format", "fastq"])
+        .args([
+            "--trim-qual",
+            "10",
+            "--best-segment",
+            "10",
+            "--in-format",
+            "fastq",
+        ])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
         .assert()
         .failure()
@@ -46,13 +60,19 @@ fn same_input_output_file_is_rejected_and_preserves_input() {
     let before = std::fs::read(&path).unwrap();
 
     chopping()
-        .arg("-i").arg(&path)
-        .arg("-o").arg(&path)
+        .arg("-i")
+        .arg(&path)
+        .arg("-o")
+        .arg(&path)
         .assert()
         .failure()
         .stderr(predicate::str::contains("same file"));
 
-    assert_eq!(std::fs::read(&path).unwrap(), before, "input must not be modified");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "input must not be modified"
+    );
 }
 
 #[test]
@@ -110,13 +130,19 @@ fn hard_linked_input_output_is_rejected_and_preserves_input() {
     let before = std::fs::read(&input).unwrap();
 
     chopping()
-        .arg("-i").arg(&input)
-        .arg("-o").arg(&output)
+        .arg("-i")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
         .assert()
         .failure()
         .stderr(predicate::str::contains("same file"));
 
-    assert_eq!(std::fs::read(&input).unwrap(), before, "hard-linked input must be preserved");
+    assert_eq!(
+        std::fs::read(&input).unwrap(),
+        before,
+        "hard-linked input must be preserved"
+    );
 }
 
 #[test]

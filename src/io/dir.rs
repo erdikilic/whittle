@@ -22,15 +22,18 @@ pub fn classify(dir: &Path, exclude: Option<&Path>) -> anyhow::Result<(Family, V
     let mut fastq = Vec::new();
     let mut bam = Vec::new();
 
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("reading directory {}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?;
     for entry in entries {
         let path = entry?.path();
         if !path.is_file() {
             continue;
         }
         if exclude.is_some_and(|e| crate::same_path(&path, e)) {
-            eprintln!("note: excluding the output file {} from the input set", path.display());
+            eprintln!(
+                "note: excluding the output file {} from the input set",
+                path.display()
+            );
             continue;
         }
         match from_extension(&path) {
@@ -99,7 +102,10 @@ type BamRecordIter = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
 /// Returns an `Err` if `paths` is empty rather than panicking. Each file is
 /// opened exactly once: the first file's record iterator (obtained alongside
 /// its header) is reused via `chain` rather than reopening that file.
-pub fn bam_reader(paths: &[PathBuf], workers: usize) -> anyhow::Result<(sam::Header, BamRecordIter)> {
+pub fn bam_reader(
+    paths: &[PathBuf],
+    workers: usize,
+) -> anyhow::Result<(sam::Header, BamRecordIter)> {
     let (first, rest) = paths
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("bam_reader called with no BAM files"))?;
@@ -174,7 +180,10 @@ mod tests {
         std::fs::create_dir(d.path().join("subdir")).unwrap(); // ignored
         let (fam, paths) = classify(d.path(), None).unwrap();
         assert_eq!(fam, Family::Fastq);
-        let names: Vec<_> = paths.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+        let names: Vec<_> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["a_0.fastq", "b_1.fastq.gz"]); // sorted, .txt/subdir excluded
     }
 
@@ -209,7 +218,11 @@ mod tests {
         let out = d.path().join("merged.fastq");
         let (fam, paths) = classify(d.path(), Some(out.as_path())).unwrap();
         assert_eq!(fam, Family::Bam);
-        assert_eq!(paths.len(), 2, "the .fastq output must be excluded, leaving the 2 bams");
+        assert_eq!(
+            paths.len(),
+            2,
+            "the .fastq output must be excluded, leaving the 2 bams"
+        );
     }
 
     #[test]

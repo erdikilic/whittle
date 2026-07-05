@@ -26,7 +26,14 @@ pub fn run_fastq_seq<W: Write>(
         let intervals = trim::apply(rec.seq.len(), &rec.qual, &cfg.trim, cfg.filter.min_length);
         let total = intervals.len();
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
-            write_segment(writer, &rec.name, &rec.seq[s..e], &rec.qual[s..e], total, idx)?;
+            write_segment(
+                writer,
+                &rec.name,
+                &rec.seq[s..e],
+                &rec.qual[s..e],
+                total,
+                idx,
+            )?;
             stats.output_reads += 1;
         }
     }
@@ -44,7 +51,15 @@ fn render_record(rec: &ReadRecord, cfg: &Config) -> (u64, Vec<u8>) {
     let mut buf = Vec::new();
     let mut out = 0u64;
     for (idx, (s, e)) in intervals.into_iter().enumerate() {
-        write_segment(&mut buf, &rec.name, &rec.seq[s..e], &rec.qual[s..e], total, idx).unwrap();
+        write_segment(
+            &mut buf,
+            &rec.name,
+            &rec.seq[s..e],
+            &rec.qual[s..e],
+            total,
+            idx,
+        )
+        .unwrap();
         out += 1;
     }
     (out, buf)
@@ -71,8 +86,14 @@ where
         return run_fastq_seq(records, writer, cfg);
     }
 
-    let render_workers = if cfg.render_workers >= 1 { cfg.render_workers } else { cfg.threads.max(1) };
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(render_workers).build()?;
+    let render_workers = if cfg.render_workers >= 1 {
+        cfg.render_workers
+    } else {
+        cfg.threads.max(1)
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(render_workers)
+        .build()?;
     let input_reads = AtomicU64::new(0);
     let output_reads = AtomicU64::new(0);
     let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(render_workers * 4);
@@ -146,22 +167,40 @@ mod tests {
     use crate::trim::{QualityOp, TrimPlan};
 
     fn rec(name: &str, seq: &[u8], phred: Vec<u8>) -> ReadRecord {
-        ReadRecord { name: name.as_bytes().to_vec(), seq: seq.to_vec(), qual: phred }
+        ReadRecord {
+            name: name.as_bytes().to_vec(),
+            seq: seq.to_vec(),
+            qual: phred,
+        }
     }
 
     fn base_filter() -> FilterConfig {
         FilterConfig {
-            min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
-            min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            min_length: 1,
+            max_length: usize::MAX,
+            min_qual: 0.0,
+            max_qual: 1000.0,
+            min_gc: None,
+            max_gc: None,
+            qual_mode: QualMode::Mean,
         }
     }
 
     #[test]
     fn fixed_crop_writes_one_segment() {
         let cfg = Config {
-            io: crate::config::IoConfig { input: None, output: None, in_format: None, out_format: None },
+            io: crate::config::IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
             filter: base_filter(),
-            trim: TrimPlan { head: 1, tail: 1, quality: None },
+            trim: TrimPlan {
+                head: 1,
+                tail: 1,
+                quality: None,
+            },
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -178,9 +217,21 @@ mod tests {
     #[test]
     fn split_writes_suffixed_segments() {
         let cfg = Config {
-            io: crate::config::IoConfig { input: None, output: None, in_format: None, out_format: None },
+            io: crate::config::IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
             filter: base_filter(),
-            trim: TrimPlan { head: 0, tail: 0, quality: Some(QualityOp::Split { cutoff: 10, window: 1 }) },
+            trim: TrimPlan {
+                head: 0,
+                tail: 0,
+                quality: Some(QualityOp::Split {
+                    cutoff: 10,
+                    window: 1,
+                }),
+            },
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -192,7 +243,10 @@ mod tests {
         let recs = vec![Ok(rec("r1", b"AAATAAA", phred))];
         let mut out = Vec::new();
         let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg).unwrap();
-        assert_eq!(out, b"@r1_segment_1\nAAA\n+\nIII\n@r1_segment_2\nAAA\n+\nIII\n");
+        assert_eq!(
+            out,
+            b"@r1_segment_1\nAAA\n+\nIII\n@r1_segment_2\nAAA\n+\nIII\n"
+        );
         assert_eq!((stats.input_reads, stats.output_reads), (1, 2));
     }
 
@@ -201,9 +255,18 @@ mod tests {
         let mut f = base_filter();
         f.min_length = 10;
         let cfg = Config {
-            io: crate::config::IoConfig { input: None, output: None, in_format: None, out_format: None },
+            io: crate::config::IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
             filter: f,
-            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            trim: TrimPlan {
+                head: 0,
+                tail: 0,
+                quality: None,
+            },
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -221,9 +284,18 @@ mod tests {
     fn parallel_matches_sequential_as_multiset() {
         use crate::config::IoConfig;
         let mk = |threads| Config {
-            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            io: IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
             filter: base_filter(),
-            trim: TrimPlan { head: 0, tail: 0, quality: Some(QualityOp::TrimQual(20)) },
+            trim: TrimPlan {
+                head: 0,
+                tail: 0,
+                quality: Some(QualityOp::TrimQual(20)),
+            },
             threads,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -238,7 +310,12 @@ mod tests {
             .collect();
 
         let mut seq_out = Vec::new();
-        run_fastq(recs.clone().into_iter().map(anyhow::Ok), &mut seq_out, &mk(1)).unwrap();
+        run_fastq(
+            recs.clone().into_iter().map(anyhow::Ok),
+            &mut seq_out,
+            &mk(1),
+        )
+        .unwrap();
 
         let mut par_out = Vec::new();
         run_fastq(recs.into_iter().map(anyhow::Ok), &mut par_out, &mk(4)).unwrap();
@@ -260,7 +337,10 @@ mod tests {
         use crate::config::IoConfig;
         use std::io::{self, Write};
 
-        struct FailAfter { limit: usize, written: usize }
+        struct FailAfter {
+            limit: usize,
+            written: usize,
+        }
         impl Write for FailAfter {
             fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
                 if self.written >= self.limit {
@@ -269,13 +349,24 @@ mod tests {
                 self.written += buf.len();
                 Ok(buf.len())
             }
-            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
         }
 
         let cfg = Config {
-            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            io: IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
             filter: base_filter(),
-            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            trim: TrimPlan {
+                head: 0,
+                tail: 0,
+                quality: None,
+            },
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -287,9 +378,15 @@ mod tests {
         let recs: Vec<ReadRecord> = (0..2000)
             .map(|i| rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10]))
             .collect();
-        let mut w = FailAfter { limit: 100, written: 0 };
+        let mut w = FailAfter {
+            limit: 100,
+            written: 0,
+        };
         let res = run_fastq(recs.into_iter().map(anyhow::Ok), &mut w, &cfg);
-        assert!(res.is_err(), "write error must surface as Err, and must not hang");
+        assert!(
+            res.is_err(),
+            "write error must surface as Err, and must not hang"
+        );
     }
 
     #[test]
@@ -297,9 +394,18 @@ mod tests {
         use crate::config::IoConfig;
 
         let cfg = Config {
-            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
+            io: IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
             filter: base_filter(),
-            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            trim: TrimPlan {
+                head: 0,
+                tail: 0,
+                quality: None,
+            },
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -309,10 +415,15 @@ mod tests {
         let good: Vec<anyhow::Result<ReadRecord>> = (0..5)
             .map(|i| anyhow::Ok(rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10])))
             .collect();
-        let recs = good.into_iter().chain(std::iter::once(Err(anyhow::anyhow!("bad record"))));
+        let recs = good
+            .into_iter()
+            .chain(std::iter::once(Err(anyhow::anyhow!("bad record"))));
 
         let mut out = Vec::new();
         let res = run_fastq(recs, &mut out, &cfg);
-        assert!(res.is_err(), "a malformed record must not be silently dropped on the parallel path");
+        assert!(
+            res.is_err(),
+            "a malformed record must not be silently dropped on the parallel path"
+        );
     }
 }

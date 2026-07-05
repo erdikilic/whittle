@@ -23,14 +23,18 @@ fn plain_output_by_default_even_with_gz_input() {
     let input = dir.path().join("reads.fastq.gz");
 
     // Build a small gzipped FASTQ input.
-    let mut enc = GzEncoder::new(std::fs::File::create(&input).unwrap(), Compression::default());
+    let mut enc = GzEncoder::new(
+        std::fs::File::create(&input).unwrap(),
+        Compression::default(),
+    );
     enc.write_all(b"@r1\nACGTACGTAC\n+\nIIIIIIIIII\n").unwrap();
     enc.finish().unwrap();
 
     // No -o, no --out-format: with the old "mirror the input format"
     // behavior this would silently gzip-compress stdout. It must not.
     let assert = chopping()
-        .arg("-i").arg(&input)
+        .arg("-i")
+        .arg(&input)
         .args(["-H", "2", "-T", "2", "-t", "4"])
         .assert()
         .success();
@@ -59,8 +63,10 @@ fn explicit_gz_output_roundtrips_through_parallel_encoder() {
     // -t 4: exercise gzp's multi-threaded encoder, not just the trivial
     // single-thread case.
     chopping()
-        .arg("-i").arg(&input)
-        .arg("-o").arg(&out)
+        .arg("-i")
+        .arg(&input)
+        .arg("-o")
+        .arg(&out)
         .args(["-H", "2", "-T", "2", "-t", "4"])
         .assert()
         .success();

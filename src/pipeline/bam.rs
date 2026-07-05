@@ -1,10 +1,10 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use noodles_sam::{self as sam, alignment::RecordBuf};
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
+use noodles_sam::{self as sam, alignment::RecordBuf};
 use rayon::prelude::*;
 
 use crate::config::{Config, FastqTags};
@@ -97,7 +97,11 @@ fn parse_move_table(value: &Value) -> Option<(i8, &[i8])> {
     match value {
         Value::Array(Array::Int8(a)) => {
             let (stride, moves) = a.split_first()?;
-            if *stride > 0 { Some((*stride, moves)) } else { None }
+            if *stride > 0 {
+                Some((*stride, moves))
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -161,7 +165,11 @@ fn polya_updates(
                 return true; // sentinel (NOT_FOUND / NOT_ENABLED)
             }
             let p = i64::from(p);
-            let within_upper = if i == 2 || i == 4 { p <= kept_end } else { p < kept_end };
+            let within_upper = if i == 2 || i == 4 {
+                p <= kept_end
+            } else {
+                p < kept_end
+            };
             p >= kept_start && within_upper
         });
     if !survives {
@@ -172,7 +180,13 @@ fn polya_updates(
         // its ts is 0). Sentinels stay untouched. pt (base count) is unchanged.
         let shifted: Vec<i32> = pa
             .iter()
-            .map(|&p| if p >= 0 { (i64::from(p) - kept_start) as i32 } else { p })
+            .map(|&p| {
+                if p >= 0 {
+                    (i64::from(p) - kept_start) as i32
+                } else {
+                    p
+                }
+            })
             .collect();
         vec![(pa_tag, Some(Value::Array(Array::Int32(shifted))))]
     } else {
@@ -233,12 +247,19 @@ fn signal_tag_updates(
 
     let stride_n = stride as usize;
     let block_first = ones[start];
-    let block_second = if end == seq_len { moves.len() } else { ones[end] };
+    let block_second = if end == seq_len {
+        moves.len()
+    } else {
+        ones[end]
+    };
 
     let mut new_mv = Vec::with_capacity(1 + block_second - block_first);
     new_mv.push(stride);
     new_mv.extend_from_slice(&moves[block_first..block_second]);
-    let mut updates = vec![(Tag::new(b'm', b'v'), Some(Value::Array(Array::Int8(new_mv))))];
+    let mut updates = vec![(
+        Tag::new(b'm', b'v'),
+        Some(Value::Array(Array::Int8(new_mv))),
+    )];
 
     // Original-signal window the kept bases span: [ts0 + block_first*stride,
     // ts0 + block_second*stride). `ns = span + front trim` matches dorado's
@@ -262,7 +283,10 @@ fn signal_tag_updates(
     } else {
         // Head/tail crop in place: keep the read identity, advance the front trim.
         updates.push((Tag::new(b't', b's'), Some(Value::Int32(kept_start as i32))));
-        updates.push((Tag::new(b'n', b's'), Some(Value::Int32((kept_start + span) as i32))));
+        updates.push((
+            Tag::new(b'n', b's'),
+            Some(Value::Int32((kept_start + span) as i32)),
+        ));
     }
     updates.extend(polya_updates(src, kept_start, kept_end, total > 1));
     updates
@@ -309,7 +333,10 @@ pub fn reconstruct_record(
     // Rebuild MM/ML/MN when the source carried modification tags. Only touch the
     // three tags when the source actually had `MM` (preserves prior behavior:
     // a source with ML/MN but no MM is left untouched).
-    if matches!(src.data().get(&Tag::BASE_MODIFICATIONS), Some(Value::String(_))) {
+    if matches!(
+        src.data().get(&Tag::BASE_MODIFICATIONS),
+        Some(Value::String(_))
+    ) {
         let data = out.data_mut();
         match reconstruct_mods(src, &seq, start, end) {
             Some((mm_new, ml_new)) => {
@@ -317,7 +344,10 @@ pub fn reconstruct_record(
                 match ml_new {
                     // Source had ML: write the sliced ML.
                     Some(ml) => {
-                        data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml)));
+                        data.insert(
+                            Tag::BASE_MODIFICATION_PROBABILITIES,
+                            Value::Array(Array::UInt8(ml)),
+                        );
                     }
                     // Source was MM-only: drop the cloned ML so we stay MM-only
                     // rather than emit an empty (invalid) ML.
@@ -362,7 +392,8 @@ pub fn reconstruct_record(
         // recomputes it per (sub)read — but only when the source carried one.
         if src.data().get(&Tag::new(b'q', b's')).is_some() {
             let qs = crate::qual::mean_prob_q(&qual[start..end]) as f32;
-            out.data_mut().insert(Tag::new(b'q', b's'), Value::Float(qs));
+            out.data_mut()
+                .insert(Tag::new(b'q', b's'), Value::Float(qs));
         }
     }
 
@@ -509,8 +540,14 @@ where
     Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
     WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
 {
-    let render_workers = if cfg.render_workers >= 1 { cfg.render_workers } else { cfg.threads.max(1) };
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(render_workers).build()?;
+    let render_workers = if cfg.render_workers >= 1 {
+        cfg.render_workers
+    } else {
+        cfg.threads.max(1)
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(render_workers)
+        .build()?;
     let input_reads = AtomicU64::new(0);
     let output_reads = AtomicU64::new(0);
     let (tx, rx) = crossbeam_channel::bounded::<T>(render_workers * 4);
@@ -778,12 +815,15 @@ pub fn run_bam_to_fastq<W: Write + Send>(
             let seq = rec.sequence().as_ref().to_vec();
             let qual = rec.quality_scores().as_ref().to_vec();
             if qual.len() != seq.len() {
-                let name = rec.name().map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+                let name = rec
+                    .name()
+                    .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
                     .unwrap_or_else(|| "<unnamed>".to_string());
                 anyhow::bail!(
                     "read {name}: BAM record SEQ length {} != QUAL length {} \
                      (records without full per-base quality are not supported)",
-                    seq.len(), qual.len()
+                    seq.len(),
+                    qual.len()
                 );
             }
             if !filter::passes(&seq, &qual, &cfg.filter) {
@@ -799,7 +839,15 @@ pub fn run_bam_to_fastq<W: Write + Send>(
                 if tags.is_empty() {
                     write_segment(&mut buf, &name, &seq[s..e], &qual[s..e], total, idx)?;
                 } else {
-                    write_segment_tagged(&mut buf, &name, &seq[s..e], &qual[s..e], total, idx, &tags)?;
+                    write_segment_tagged(
+                        &mut buf,
+                        &name,
+                        &seq[s..e],
+                        &qual[s..e],
+                        total,
+                        idx,
+                        &tags,
+                    )?;
                 }
                 out.push(buf);
             }
@@ -827,7 +875,10 @@ mod tests {
         *rec.quality_scores_mut() = quals.into();
         let data = rec.data_mut();
         data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm.to_vec().into()));
-        data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml)));
+        data.insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(ml)),
+        );
         rec
     }
 
@@ -882,15 +933,30 @@ mod tests {
 
         let header = sam::Header::default();
         let dir = tempfile::tempdir().unwrap();
-        let mut sink = crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, 1, 6).unwrap();
+        let mut sink =
+            crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, 1, 6).unwrap();
 
         let cfg = Config {
-            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
-            filter: FilterConfig {
-                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
-                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            io: IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
             },
-            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            filter: FilterConfig {
+                min_length: 1,
+                max_length: usize::MAX,
+                min_qual: 0.0,
+                max_qual: 1000.0,
+                min_gc: None,
+                max_gc: None,
+                qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan {
+                head: 0,
+                tail: 0,
+                quality: None,
+            },
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -899,7 +965,10 @@ mod tests {
         };
 
         let result = run_bam(&header, [Ok(rec)].into_iter(), &mut sink, &cfg);
-        assert!(result.is_err(), "SEQ/QUAL length mismatch must error, not panic");
+        assert!(
+            result.is_err(),
+            "SEQ/QUAL length mismatch must error, not panic"
+        );
     }
 
     /// Regression test for the outer gate in `reconstruct_record`: a spec-invalid
@@ -920,7 +989,10 @@ mod tests {
         *src.quality_scores_mut() = vec![40; 4].into();
         let data = src.data_mut();
         data.insert(Tag::BASE_MODIFICATIONS, Value::Int32(5)); // spec-invalid MM
-        data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(vec![1, 2, 3])));
+        data.insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(vec![1, 2, 3])),
+        );
         data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(4));
 
         let out = reconstruct_record(&src, 1, 4, 1, 0, false);
@@ -948,8 +1020,16 @@ mod tests {
         // disambiguate with a turbofish (noodles-sam 0.85 / bstr 1.x adjustment).
         assert_eq!(AsRef::<[u8]>::as_ref(out.name().unwrap()), b"r1_segment_2");
         assert!(out.data().get(&Tag::BASE_MODIFICATIONS).is_none());
-        assert!(out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES).is_none());
-        assert!(out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH).is_none());
+        assert!(
+            out.data()
+                .get(&Tag::BASE_MODIFICATION_PROBABILITIES)
+                .is_none()
+        );
+        assert!(
+            out.data()
+                .get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH)
+                .is_none()
+        );
     }
 
     use crate::config::{FastqTags, IoConfig};
@@ -959,12 +1039,26 @@ mod tests {
 
     fn cfg_bam2fq(quality: Option<QualityOp>, head: usize, tags: FastqTags) -> Config {
         Config {
-            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
-            filter: FilterConfig {
-                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
-                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            io: IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
             },
-            trim: TrimPlan { head, tail: 0, quality },
+            filter: FilterConfig {
+                min_length: 1,
+                max_length: usize::MAX,
+                min_qual: 0.0,
+                max_qual: 1000.0,
+                min_gc: None,
+                max_gc: None,
+                qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan {
+                head,
+                tail: 0,
+                quality,
+            },
             threads: 1,
             fastq_tags: tags,
             render_workers: 0,
@@ -977,11 +1071,10 @@ mod tests {
     // ML [10,20,30]. head-crop 2 -> window [2,8): keeps abs 3,4 renumbered -> "C+m,0,0;" ML [20,30] MN 6.
     fn read2_with_mods_and_rg() -> RecordBuf {
         let mut rec = ubam_with_mods(b"CCACCCAC", vec![35; 8], b"C+m,0,1,0;", vec![10, 20, 30]);
-        rec.data_mut().insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(8));
-        rec.data_mut().insert(
-            Tag::READ_GROUP,
-            Value::String(b"grp1".as_slice().into()),
-        );
+        rec.data_mut()
+            .insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(8));
+        rec.data_mut()
+            .insert(Tag::READ_GROUP, Value::String(b"grp1".as_slice().into()));
         rec
     }
 
@@ -989,11 +1082,15 @@ mod tests {
     fn bam2fq_all_carries_rg_and_reconstructed_mods() {
         let cfg = cfg_bam2fq(None, 2, FastqTags::All);
         let mut out = Vec::new();
-        let stats = run_bam_to_fastq([Ok(read2_with_mods_and_rg())].into_iter(), &mut out, &cfg).unwrap();
+        let stats =
+            run_bam_to_fastq([Ok(read2_with_mods_and_rg())].into_iter(), &mut out, &cfg).unwrap();
         assert_eq!((stats.input_reads, stats.output_reads), (1, 1));
         let s = String::from_utf8(out).unwrap();
         // header carries RG verbatim + reconstructed mod block; seq head-cropped by 2.
-        assert!(s.starts_with("@r1\tRG:Z:grp1\tMM:Z:C+m,0,0;\tML:B:C,20,30\tMN:i:6\n"), "got: {s:?}");
+        assert!(
+            s.starts_with("@r1\tRG:Z:grp1\tMM:Z:C+m,0,0;\tML:B:C,20,30\tMN:i:6\n"),
+            "got: {s:?}"
+        );
         assert!(s.contains("\nACCCAC\n+\n"), "cropped seq wrong: {s:?}");
     }
 
@@ -1004,7 +1101,10 @@ mod tests {
         run_bam_to_fastq([Ok(read2_with_mods_and_rg())].into_iter(), &mut out, &cfg).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(!s.contains("RG:Z"), "RG must be dropped: {s:?}");
-        assert!(s.contains("MM:Z:C+m,0,0;\tML:B:C,20,30\tMN:i:6"), "mods missing: {s:?}");
+        assert!(
+            s.contains("MM:Z:C+m,0,0;\tML:B:C,20,30\tMN:i:6"),
+            "mods missing: {s:?}"
+        );
     }
 
     #[test]
@@ -1018,17 +1118,31 @@ mod tests {
     #[test]
     fn bam2fq_split_suffixes_and_segments_mods() {
         // split at the low-qual base; each segment gets its own reconstructed mods.
-        let cfg = cfg_bam2fq(Some(QualityOp::Split { cutoff: 20, window: 1 }), 0, FastqTags::All);
+        let cfg = cfg_bam2fq(
+            Some(QualityOp::Split {
+                cutoff: 20,
+                window: 1,
+            }),
+            0,
+            FastqTags::All,
+        );
         // seq CCAC, C+m at occ 0 and 2 -> abs 0,3; qual: good good BAD good so split [0,2),[3,4)
         let mut rec = ubam_with_mods(b"CCAC", vec![40, 40, 1, 40], b"C+m,0,1;", vec![100, 200]);
-        rec.data_mut().insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(4));
+        rec.data_mut()
+            .insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(4));
         let mut out = Vec::new();
         let stats = run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
         assert_eq!(stats.output_reads, 2);
         let s = String::from_utf8(out).unwrap();
         // segment 1 = [0,2) "CC" keeps abs-0 mod; segment 2 = [3,4) "C" keeps abs-3 mod.
-        assert!(s.contains("@r1_segment_1\tMM:Z:C+m,0;\tML:B:C,100\tMN:i:2"), "seg1: {s:?}");
-        assert!(s.contains("@r1_segment_2\tMM:Z:C+m,0;\tML:B:C,200\tMN:i:1"), "seg2: {s:?}");
+        assert!(
+            s.contains("@r1_segment_1\tMM:Z:C+m,0;\tML:B:C,100\tMN:i:2"),
+            "seg1: {s:?}"
+        );
+        assert!(
+            s.contains("@r1_segment_2\tMM:Z:C+m,0;\tML:B:C,200\tMN:i:1"),
+            "seg2: {s:?}"
+        );
     }
 
     #[test]
@@ -1056,8 +1170,10 @@ mod tests {
         *src.name_mut() = Some(b"r1".into());
         *src.sequence_mut() = b"CCAC".to_vec().into(); // C at 0,1,3
         *src.quality_scores_mut() = vec![40; 4].into();
-        src.data_mut()
-            .insert(Tag::BASE_MODIFICATIONS, Value::String(b"C+m,0,1;".to_vec().into()));
+        src.data_mut().insert(
+            Tag::BASE_MODIFICATIONS,
+            Value::String(b"C+m,0,1;".to_vec().into()),
+        );
         // deliberately no ML, no MN.
 
         let out = reconstruct_record(&src, 0, 4, 1, 0, false);
@@ -1070,7 +1186,9 @@ mod tests {
         assert_eq!(mm, b"C+m,0,1;");
         // ML must be ABSENT — never an empty array.
         assert!(
-            out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES).is_none(),
+            out.data()
+                .get(&Tag::BASE_MODIFICATION_PROBABILITIES)
+                .is_none(),
             "MM-only source must not gain an ML tag"
         );
         // MN set to the window length.
@@ -1089,15 +1207,23 @@ mod tests {
         *rec.name_mut() = Some(b"r1".into());
         *rec.sequence_mut() = b"CCAC".to_vec().into();
         *rec.quality_scores_mut() = vec![40; 4].into();
-        rec.data_mut()
-            .insert(Tag::BASE_MODIFICATIONS, Value::String(b"C+m,0,1;".to_vec().into()));
+        rec.data_mut().insert(
+            Tag::BASE_MODIFICATIONS,
+            Value::String(b"C+m,0,1;".to_vec().into()),
+        );
 
         let cfg = cfg_bam2fq(None, 0, FastqTags::All);
         let mut out = Vec::new();
         run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
         let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("MM:Z:C+m,0,1;\tMN:i:4"), "expected MM+MN, got: {s:?}");
-        assert!(!s.contains("ML:B"), "MM-only record must not emit an ML field: {s:?}");
+        assert!(
+            s.contains("MM:Z:C+m,0,1;\tMN:i:4"),
+            "expected MM+MN, got: {s:?}"
+        );
+        assert!(
+            !s.contains("ML:B"),
+            "MM-only record must not emit an ML field: {s:?}"
+        );
     }
 
     #[test]
@@ -1111,9 +1237,18 @@ mod tests {
         *src.sequence_mut() = b"ACGTAC".to_vec().into();
         *src.quality_scores_mut() = vec![40; 6].into();
         let d = src.data_mut();
-        d.insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8(vec![10, 11, 12, 13, 14, 15])));
-        d.insert(Tag::new(b'p', b'w'), Value::Array(Array::UInt16(vec![20, 21, 22, 23, 24, 25])));
-        d.insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![5, 1, 0, 1, 0])));
+        d.insert(
+            Tag::new(b'i', b'p'),
+            Value::Array(Array::UInt8(vec![10, 11, 12, 13, 14, 15])),
+        );
+        d.insert(
+            Tag::new(b'p', b'w'),
+            Value::Array(Array::UInt16(vec![20, 21, 22, 23, 24, 25])),
+        );
+        d.insert(
+            Tag::new(b'm', b'v'),
+            Value::Array(Array::Int8(vec![5, 1, 0, 1, 0])),
+        );
         d.insert(Tag::READ_GROUP, Value::String(b"grp".as_slice().into()));
 
         // window [2,5): "GTA" (head-crop 2, tail-crop 1).
@@ -1127,8 +1262,14 @@ mod tests {
             Some(Value::Array(Array::UInt16(v))) => assert_eq!(v, &[22, 23, 24]),
             other => panic!("pw should be sliced [2,5): {other:?}"),
         }
-        assert!(out.data().get(&Tag::new(b'm', b'v')).is_none(), "mv must be dropped on trim");
-        assert!(matches!(out.data().get(&Tag::READ_GROUP), Some(Value::String(_))), "RG kept");
+        assert!(
+            out.data().get(&Tag::new(b'm', b'v')).is_none(),
+            "mv must be dropped on trim"
+        );
+        assert!(
+            matches!(out.data().get(&Tag::READ_GROUP), Some(Value::String(_))),
+            "RG kept"
+        );
     }
 
     #[test]
@@ -1139,9 +1280,13 @@ mod tests {
         *src.sequence_mut() = b"ACGT".to_vec().into();
         *src.quality_scores_mut() = vec![40; 4].into();
         // Unknown B-array whose length == read length -> sliced structurally.
-        src.data_mut().insert(Tag::new(b'z', b'z'), Value::Array(Array::Int32(vec![1, 2, 3, 4])));
+        src.data_mut().insert(
+            Tag::new(b'z', b'z'),
+            Value::Array(Array::Int32(vec![1, 2, 3, 4])),
+        );
         // B-array whose length != read length -> not per-base, left alone.
-        src.data_mut().insert(Tag::new(b'x', b'y'), Value::Array(Array::UInt8(vec![9, 9])));
+        src.data_mut()
+            .insert(Tag::new(b'x', b'y'), Value::Array(Array::UInt8(vec![9, 9])));
 
         let out = reconstruct_record(&src, 1, 3, 1, 0, false); // window [1,3)
         match out.data().get(&Tag::new(b'z', b'z')) {
@@ -1161,8 +1306,14 @@ mod tests {
         *src.name_mut() = Some(b"r1".into());
         *src.sequence_mut() = b"ACGT".to_vec().into();
         *src.quality_scores_mut() = vec![40; 4].into();
-        src.data_mut().insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8(vec![1, 2, 3, 4])));
-        src.data_mut().insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![5, 1, 1])));
+        src.data_mut().insert(
+            Tag::new(b'i', b'p'),
+            Value::Array(Array::UInt8(vec![1, 2, 3, 4])),
+        );
+        src.data_mut().insert(
+            Tag::new(b'm', b'v'),
+            Value::Array(Array::Int8(vec![5, 1, 1])),
+        );
 
         // Full window [0,4): nothing trimmed -> everything preserved verbatim.
         let out = reconstruct_record(&src, 0, 4, 1, 0, false);
@@ -1170,7 +1321,10 @@ mod tests {
             Some(Value::Array(Array::UInt8(v))) => assert_eq!(v, &[1, 2, 3, 4]),
             other => panic!("ip unchanged: {other:?}"),
         }
-        assert!(out.data().get(&Tag::new(b'm', b'v')).is_some(), "mv kept when untrimmed");
+        assert!(
+            out.data().get(&Tag::new(b'm', b'v')).is_some(),
+            "mv kept when untrimmed"
+        );
     }
 
     #[test]
@@ -1180,13 +1334,19 @@ mod tests {
         *rec.name_mut() = Some(b"r1".into());
         *rec.sequence_mut() = b"ACGTAC".to_vec().into();
         *rec.quality_scores_mut() = vec![40; 6].into();
-        rec.data_mut().insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8(vec![10, 11, 12, 13, 14, 15])));
+        rec.data_mut().insert(
+            Tag::new(b'i', b'p'),
+            Value::Array(Array::UInt8(vec![10, 11, 12, 13, 14, 15])),
+        );
 
         let cfg = cfg_bam2fq(None, 2, FastqTags::All); // head-crop 2 -> window [2,6)
         let mut out = Vec::new();
         run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
         let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("ip:B:C,12,13,14,15"), "kinetics not sliced in FASTQ header: {s:?}");
+        assert!(
+            s.contains("ip:B:C,12,13,14,15"),
+            "kinetics not sliced in FASTQ header: {s:?}"
+        );
     }
 
     #[test]
@@ -1197,7 +1357,10 @@ mod tests {
         *src.sequence_mut() = b"ACGT".to_vec().into();
         *src.quality_scores_mut() = vec![40; 4].into();
         // ip length 3 != read length 4 -> malformed known per-base tag.
-        src.data_mut().insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8(vec![1, 2, 3])));
+        src.data_mut().insert(
+            Tag::new(b'i', b'p'),
+            Value::Array(Array::UInt8(vec![1, 2, 3])),
+        );
 
         assert!(has_malformed_perbase_tag(&src, 4));
         // Can't safely slice it -> left exactly as-is.
@@ -1217,11 +1380,17 @@ mod tests {
         *src.sequence_mut() = b"ACGTAC".to_vec().into();
         *src.quality_scores_mut() = vec![40; 6].into();
         let d = src.data_mut();
-        d.insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![2, 1, 1, 0, 1, 1, 0, 1, 1])));
+        d.insert(
+            Tag::new(b'm', b'v'),
+            Value::Array(Array::Int8(vec![2, 1, 1, 0, 1, 1, 0, 1, 1])),
+        );
         d.insert(Tag::new(b't', b's'), Value::Int32(10));
         // Consistent: ts0 + n_blocks*stride = 10 + 8*2 = 26.
         d.insert(Tag::new(b'n', b's'), Value::Int32(26));
-        d.insert(Tag::new(b's', b't'), Value::String(b"2024-06-21T10:00:00Z".as_slice().into()));
+        d.insert(
+            Tag::new(b's', b't'),
+            Value::String(b"2024-06-21T10:00:00Z".as_slice().into()),
+        );
         d.insert(Tag::new(b'd', b'u'), Value::Float(5.0));
         src
     }
@@ -1231,7 +1400,11 @@ mod tests {
         // head-crop 2 -> window [2,6): block_first=ones[2]=3, block_second=8.
         let out = reconstruct_record(&ubam_with_moves(), 2, 6, 1, 0, true);
         assert_eq!(out.sequence().as_ref(), b"GTAC");
-        assert_eq!(AsRef::<[u8]>::as_ref(out.name().unwrap()), b"r1", "crop keeps the read name");
+        assert_eq!(
+            AsRef::<[u8]>::as_ref(out.name().unwrap()),
+            b"r1",
+            "crop keeps the read name"
+        );
         // mv = [stride] + moves[3 .. 8] = [2] + [1,1,0,1,1].
         match out.data().get(&Tag::new(b'm', b'v')) {
             Some(Value::Array(Array::Int8(v))) => assert_eq!(v, &[2, 1, 1, 0, 1, 1]),
@@ -1250,8 +1423,14 @@ mod tests {
         assert!(out.data().get(&Tag::new(b's', b'p')).is_none());
         assert!(out.data().get(&Tag::new(b'p', b'i')).is_none());
         // A crop keeps the read identity, so st/du stay.
-        assert!(out.data().get(&Tag::new(b's', b't')).is_some(), "st kept on crop");
-        assert!(out.data().get(&Tag::new(b'd', b'u')).is_some(), "du kept on crop");
+        assert!(
+            out.data().get(&Tag::new(b's', b't')).is_some(),
+            "st kept on crop"
+        );
+        assert!(
+            out.data().get(&Tag::new(b'd', b'u')).is_some(),
+            "du kept on crop"
+        );
     }
 
     #[test]
@@ -1306,8 +1485,14 @@ mod tests {
             o => panic!("s1 rn should be -1: {o:?}"),
         }
         // st/du describe the parent read -> dropped on a split subread.
-        assert!(s1.data().get(&Tag::new(b's', b't')).is_none(), "st dropped on split");
-        assert!(s1.data().get(&Tag::new(b'd', b'u')).is_none(), "du dropped on split");
+        assert!(
+            s1.data().get(&Tag::new(b's', b't')).is_none(),
+            "st dropped on split"
+        );
+        assert!(
+            s1.data().get(&Tag::new(b'd', b'u')).is_none(),
+            "du dropped on split"
+        );
 
         let s2 = reconstruct_record(&ubam_with_moves(), 3, 6, 2, 1, true);
         assert_eq!(AsRef::<[u8]>::as_ref(s2.name().unwrap()), b"r1_segment_2");
@@ -1330,7 +1515,10 @@ mod tests {
     fn default_drops_all_signal_tags_on_trim() {
         let mut src = ubam_with_moves();
         src.data_mut().insert(Tag::new(b's', b'p'), Value::Int32(5));
-        src.data_mut().insert(Tag::new(b'p', b'i'), Value::String(b"parent".as_slice().into()));
+        src.data_mut().insert(
+            Tag::new(b'p', b'i'),
+            Value::String(b"parent".as_slice().into()),
+        );
 
         // update_moves = false + trimmed -> mv/ts/ns/sp/pi all removed.
         let out = reconstruct_record(&src, 2, 6, 1, 0, false);
@@ -1352,11 +1540,20 @@ mod tests {
         // First two bases low quality (phred 2), the rest Q40.
         *src.quality_scores_mut() = vec![2, 2, 40, 40, 40, 40].into();
         let d = src.data_mut();
-        d.insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![100, 200, 300, 400, 500])));
+        d.insert(
+            Tag::new(b'p', b'a'),
+            Value::Array(Array::Int32(vec![100, 200, 300, 400, 500])),
+        );
         d.insert(Tag::new(b'p', b't'), Value::Int32(50));
-        d.insert(Tag::new(b'b', b'i'), Value::Array(Array::Float(vec![0.9, 5.0, 20.0])));
+        d.insert(
+            Tag::new(b'b', b'i'),
+            Value::Array(Array::Float(vec![0.9, 5.0, 20.0])),
+        );
         d.insert(Tag::new(b'q', b's'), Value::Float(20.0)); // whole-read qs (stale after crop)
-        d.insert(Tag::new(b'R', b'G'), Value::String(b"grp".as_slice().into()));
+        d.insert(
+            Tag::new(b'R', b'G'),
+            Value::String(b"grp".as_slice().into()),
+        );
 
         // head-crop 2 -> window [2,6): keeps only the Q40 bases.
         let out = reconstruct_record(&src, 2, 6, 1, 0, false);
@@ -1373,7 +1570,10 @@ mod tests {
         match out.data().get(&Tag::new(b'q', b's')) {
             Some(Value::Float(q)) => {
                 let expected = crate::qual::mean_prob_q(&[40, 40, 40, 40]) as f32;
-                assert!((q - expected).abs() < 1e-4, "qs recomputed: got {q}, want {expected}");
+                assert!(
+                    (q - expected).abs() < 1e-4,
+                    "qs recomputed: got {q}, want {expected}"
+                );
             }
             other => panic!("qs: {other:?}"),
         }
@@ -1387,8 +1587,12 @@ mod tests {
     fn update_moves_crop_keeps_polya_when_tail_survives() {
         let mut src = ubam_with_moves();
         // anchor + boundary all inside [16,26]; the split range is a sentinel.
-        src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])));
-        src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+        src.data_mut().insert(
+            Tag::new(b'p', b'a'),
+            Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])),
+        );
+        src.data_mut()
+            .insert(Tag::new(b'p', b't'), Value::Int32(30));
 
         let out = reconstruct_record(&src, 2, 6, 1, 0, true); // head-crop 2
         // A crop keeps the read identity + POD5 signal, so absolute pa stays valid.
@@ -1405,8 +1609,12 @@ mod tests {
     #[test]
     fn update_moves_split_shifts_polya_into_subread_frame() {
         let mut src = ubam_with_moves();
-        src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])));
-        src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+        src.data_mut().insert(
+            Tag::new(b'p', b'a'),
+            Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])),
+        );
+        src.data_mut()
+            .insert(Tag::new(b'p', b't'), Value::Int32(30));
 
         // split segment [3,6): kept signal window [18,26] -> shift real positions by -18.
         let out = reconstruct_record(&src, 3, 6, 2, 1, true);
@@ -1424,12 +1632,22 @@ mod tests {
     fn update_moves_drops_polya_when_tail_trimmed() {
         let mut src = ubam_with_moves();
         // anchor at 12 sits in the trimmed-off front signal (kept window is [16,26]).
-        src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![12, 10, 14, -1, -1])));
-        src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+        src.data_mut().insert(
+            Tag::new(b'p', b'a'),
+            Value::Array(Array::Int32(vec![12, 10, 14, -1, -1])),
+        );
+        src.data_mut()
+            .insert(Tag::new(b'p', b't'), Value::Int32(30));
 
         let out = reconstruct_record(&src, 2, 6, 1, 0, true); // head-crop 2
-        assert!(out.data().get(&Tag::new(b'p', b'a')).is_none(), "pa dropped when tail trimmed");
-        assert!(out.data().get(&Tag::new(b'p', b't')).is_none(), "pt dropped when tail trimmed");
+        assert!(
+            out.data().get(&Tag::new(b'p', b'a')).is_none(),
+            "pa dropped when tail trimmed"
+        );
+        assert!(
+            out.data().get(&Tag::new(b'p', b't')).is_none(),
+            "pt dropped when tail trimmed"
+        );
     }
 
     #[test]
@@ -1442,16 +1660,24 @@ mod tests {
         *src.sequence_mut() = b"ACGTA".to_vec().into(); // 5 bases
         *src.quality_scores_mut() = vec![40; 5].into();
         let d = src.data_mut();
-        d.insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![2, 1, 1, 1, 1, 1]))); // stride 2, 5 ones
+        d.insert(
+            Tag::new(b'm', b'v'),
+            Value::Array(Array::Int8(vec![2, 1, 1, 1, 1, 1])),
+        ); // stride 2, 5 ones
         d.insert(Tag::new(b't', b's'), Value::Int32(0));
         d.insert(Tag::new(b'n', b's'), Value::Int32(10));
         // 5-element pa (== read length), all real positions inside the kept window.
-        d.insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![4, 2, 6, -1, -1])));
+        d.insert(
+            Tag::new(b'p', b'a'),
+            Value::Array(Array::Int32(vec![4, 2, 6, -1, -1])),
+        );
 
         // head-crop 1 -> window [1,5): kept signal window [2,10]; pa survives.
         let out = reconstruct_record(&src, 1, 5, 1, 0, true);
         match out.data().get(&Tag::new(b'p', b'a')) {
-            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[4, 2, 6, -1, -1], "pa must not be re-sliced"),
+            Some(Value::Array(Array::Int32(v))) => {
+                assert_eq!(v, &[4, 2, 6, -1, -1], "pa must not be re-sliced")
+            }
             other => panic!("pa: {other:?}"),
         }
     }
@@ -1468,7 +1694,10 @@ mod tests {
         let d = src.data_mut();
         d.insert(Tag::new(b't', b's'), Value::Int32(10));
         d.insert(Tag::new(b'n', b's'), Value::Int32(100));
-        d.insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])));
+        d.insert(
+            Tag::new(b'p', b'a'),
+            Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])),
+        );
         d.insert(Tag::new(b'p', b't'), Value::Int32(30));
 
         let out = reconstruct_record(&src, 2, 6, 1, 0, true);
@@ -1487,8 +1716,10 @@ mod tests {
         // (exclusive) survives; an anchor at kept_end is out of the window -> drop.
         let mk = |pa: Vec<i32>| {
             let mut src = ubam_with_moves();
-            src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(pa)));
-            src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+            src.data_mut()
+                .insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(pa)));
+            src.data_mut()
+                .insert(Tag::new(b'p', b't'), Value::Int32(30));
             src
         };
         // range end == kept_end (26) -> survives, shifted by -18.
@@ -1499,7 +1730,10 @@ mod tests {
         }
         // anchor == kept_end (26) -> out of window -> dropped.
         let dropped = reconstruct_record(&mk(vec![26, 18, 24, -1, -1]), 3, 6, 2, 1, true);
-        assert!(dropped.data().get(&Tag::new(b'p', b'a')).is_none(), "anchor at exclusive boundary drops");
+        assert!(
+            dropped.data().get(&Tag::new(b'p', b'a')).is_none(),
+            "anchor at exclusive boundary drops"
+        );
     }
 
     #[test]
@@ -1510,12 +1744,26 @@ mod tests {
         use crate::trim::TrimPlan;
 
         let mk = |threads| Config {
-            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
-            filter: FilterConfig {
-                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
-                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            io: IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
             },
-            trim: TrimPlan { head: 2, tail: 2, quality: None },
+            filter: FilterConfig {
+                min_length: 1,
+                max_length: usize::MAX,
+                min_qual: 0.0,
+                max_qual: 1000.0,
+                min_gc: None,
+                max_gc: None,
+                qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan {
+                head: 2,
+                tail: 2,
+                quality: None,
+            },
             threads,
             fastq_tags: FastqTags::All,
             render_workers: 0,
@@ -1550,18 +1798,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p1 = dir.path().join("t1.bam");
         let mut sink1 = crate::io::bam::writer(Some(&p1), &header, 1, 6).unwrap();
-        run_bam(&header, recs.clone().into_iter().map(anyhow::Ok), &mut sink1, &mk(1)).unwrap();
+        run_bam(
+            &header,
+            recs.clone().into_iter().map(anyhow::Ok),
+            &mut sink1,
+            &mk(1),
+        )
+        .unwrap();
         sink1.finish().unwrap();
         let b1 = std::fs::read(&p1).unwrap();
 
         // t8 -> MT sink to a tempfile (MT writer needs an owned Write + Send).
         let p8 = dir.path().join("t8.bam");
         let mut sink8 = crate::io::bam::writer(Some(&p8), &header, 8, 6).unwrap();
-        run_bam(&header, recs.into_iter().map(anyhow::Ok), &mut sink8, &mk(8)).unwrap();
+        run_bam(
+            &header,
+            recs.into_iter().map(anyhow::Ok),
+            &mut sink8,
+            &mk(8),
+        )
+        .unwrap();
         sink8.finish().unwrap();
         let b8 = std::fs::read(&p8).unwrap();
 
-        assert_eq!(decode(&b1), decode(&b8), "t1 and t8 must produce the same record set");
+        assert_eq!(
+            decode(&b1),
+            decode(&b8),
+            "t1 and t8 must produce the same record set"
+        );
     }
 
     /// Mirrors `pipeline::fastq`'s `parallel_surfaces_write_error_without_deadlock`,
@@ -1578,25 +1842,46 @@ mod tests {
         use crate::trim::TrimPlan;
         use std::io;
 
-        struct FailAfter { limit: usize, written: usize }
+        struct FailAfter {
+            limit: usize,
+            written: usize,
+        }
 
         let cfg = Config {
-            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
-            filter: FilterConfig {
-                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
-                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            io: IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
             },
-            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            filter: FilterConfig {
+                min_length: 1,
+                max_length: usize::MAX,
+                min_qual: 0.0,
+                max_qual: 1000.0,
+                min_gc: None,
+                max_gc: None,
+                qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan {
+                head: 0,
+                tail: 0,
+                quality: None,
+            },
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
             update_moves: false,
         };
-        let recs: Vec<anyhow::Result<RecordBuf>> =
-            (0..3000).map(|_| anyhow::Ok(RecordBuf::default())).collect();
+        let recs: Vec<anyhow::Result<RecordBuf>> = (0..3000)
+            .map(|_| anyhow::Ok(RecordBuf::default()))
+            .collect();
 
-        let mut sink = FailAfter { limit: 100, written: 0 };
+        let mut sink = FailAfter {
+            limit: 100,
+            written: 0,
+        };
         let res = run_bam_parallel(
             recs.into_iter(),
             &cfg,
@@ -1610,7 +1895,10 @@ mod tests {
                 Ok(())
             },
         );
-        assert!(res.is_err(), "write error must surface as Err, and must not hang");
+        assert!(
+            res.is_err(),
+            "write error must surface as Err, and must not hang"
+        );
     }
 
     /// Mirrors `pipeline::fastq`'s `parallel_surfaces_parse_error_instead_of_dropping_it`,
@@ -1627,12 +1915,26 @@ mod tests {
         struct NullSink;
 
         let cfg = Config {
-            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
-            filter: FilterConfig {
-                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
-                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            io: IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
             },
-            trim: TrimPlan { head: 0, tail: 0, quality: None },
+            filter: FilterConfig {
+                min_length: 1,
+                max_length: usize::MAX,
+                min_qual: 0.0,
+                max_qual: 1000.0,
+                min_gc: None,
+                max_gc: None,
+                qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan {
+                head: 0,
+                tail: 0,
+                quality: None,
+            },
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -1641,7 +1943,9 @@ mod tests {
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
             (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
-        let recs = good.into_iter().chain(std::iter::once(Err(anyhow::anyhow!("bad record"))));
+        let recs = good
+            .into_iter()
+            .chain(std::iter::once(Err(anyhow::anyhow!("bad record"))));
 
         let mut sink = NullSink;
         let res = run_bam_parallel(
@@ -1651,7 +1955,10 @@ mod tests {
             |_rec, _cfg| anyhow::Ok(vec![()]),
             |_sink: &mut NullSink, _item: &()| -> io::Result<()> { Ok(()) },
         );
-        assert!(res.is_err(), "a malformed record must not be silently dropped on the parallel path");
+        assert!(
+            res.is_err(),
+            "a malformed record must not be silently dropped on the parallel path"
+        );
     }
 
     #[test]
@@ -1662,12 +1969,26 @@ mod tests {
         use crate::trim::TrimPlan;
 
         let mk = |threads| Config {
-            io: IoConfig { input: None, output: None, in_format: None, out_format: None },
-            filter: FilterConfig {
-                min_length: 1, max_length: usize::MAX, min_qual: 0.0, max_qual: 1000.0,
-                min_gc: None, max_gc: None, qual_mode: QualMode::Mean,
+            io: IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
             },
-            trim: TrimPlan { head: 2, tail: 2, quality: None },
+            filter: FilterConfig {
+                min_length: 1,
+                max_length: usize::MAX,
+                min_qual: 0.0,
+                max_qual: 1000.0,
+                min_gc: None,
+                max_gc: None,
+                qual_mode: QualMode::Mean,
+            },
+            trim: TrimPlan {
+                head: 2,
+                tail: 2,
+                quality: None,
+            },
             threads,
             fastq_tags: FastqTags::All,
             render_workers: 0,
@@ -1685,7 +2006,12 @@ mod tests {
             // corrupt an '@'-split. FASTQ records are exactly 4 lines each
             // here (no multiline), so this is a lossless re-chunking.
             let lines: Vec<&str> = s.lines().collect();
-            assert_eq!(lines.len() % 4, 0, "expected whole 4-line FASTQ records, got {} lines", lines.len());
+            assert_eq!(
+                lines.len() % 4,
+                0,
+                "expected whole 4-line FASTQ records, got {} lines",
+                lines.len()
+            );
             let mut v: Vec<String> = lines.chunks(4).map(|c| c.join("\n")).collect();
             v.sort();
             v
@@ -1696,6 +2022,10 @@ mod tests {
         let mut b = Vec::new();
         run_bam_to_fastq(recs.into_iter().map(anyhow::Ok), &mut b, &mk(8)).unwrap();
 
-        assert_eq!(sorted_records(&a), sorted_records(&b), "t1 and t8 FASTQ must match as a multiset");
+        assert_eq!(
+            sorted_records(&a),
+            sorted_records(&b),
+            "t1 and t8 FASTQ must match as a multiset"
+        );
     }
 }

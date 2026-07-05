@@ -20,14 +20,15 @@ pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
         .name()
         .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
         .unwrap_or_else(|| "<unnamed>".to_string());
-    anyhow::bail!(
-        "read {name} is aligned (mapped); chopping v1 supports unaligned BAM (uBAM) only"
-    )
+    anyhow::bail!("read {name} is aligned (mapped); chopping v1 supports unaligned BAM (uBAM) only")
 }
 
 /// Open a BAM reader; MT-bgzf when `workers > 1`. Returns the header and a Send
 /// owning `RecordBuf` iterator.
-pub fn reader(input: Option<&Path>, workers: usize) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
+pub fn reader(
+    input: Option<&Path>,
+    workers: usize,
+) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
     let inner: Box<dyn io::Read + Send> = match input {
         Some(p) => Box::new(File::open(p)?),
         None => Box::new(io::stdin()),
@@ -45,16 +46,29 @@ pub fn reader_from(
     workers: usize,
 ) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
     if workers > 1 {
-        let mt = bgzf::io::MultithreadedReader::with_worker_count(NonZero::new(workers).unwrap(), inner);
+        let mt =
+            bgzf::io::MultithreadedReader::with_worker_count(NonZero::new(workers).unwrap(), inner);
         let mut r = bam::io::Reader::from(mt);
         let header = r.read_header()?;
         let hc = header.clone();
-        Ok((header, Box::new(RecordBufIter { reader: r, header: hc })))
+        Ok((
+            header,
+            Box::new(RecordBufIter {
+                reader: r,
+                header: hc,
+            }),
+        ))
     } else {
         let mut r = bam::io::Reader::new(inner);
         let header = r.read_header()?;
         let hc = header.clone();
-        Ok((header, Box::new(RecordBufIter { reader: r, header: hc })))
+        Ok((
+            header,
+            Box::new(RecordBufIter {
+                reader: r,
+                header: hc,
+            }),
+        ))
     }
 }
 

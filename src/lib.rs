@@ -26,7 +26,13 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
 
     // Scoped so the borrow of `cfg.io.input` ends before `run_folder` needs
     // `&mut cfg` — the directory path itself is cloned out first.
-    if let Some(dir) = cfg.io.input.as_deref().filter(|p| p.is_dir()).map(|p| p.to_path_buf()) {
+    if let Some(dir) = cfg
+        .io
+        .input
+        .as_deref()
+        .filter(|p| p.is_dir())
+        .map(|p| p.to_path_buf())
+    {
         return run_folder(&dir, &mut cfg);
     }
 
@@ -97,8 +103,12 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             let (header, records) = io::bam::reader_from(source, b.decode)?;
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
-            let mut sink =
-                io::bam::writer(cfg.io.output.as_deref(), &out_header, b.encode, cfg.compression_level)?;
+            let mut sink = io::bam::writer(
+                cfg.io.output.as_deref(),
+                &out_header,
+                b.encode,
+                cfg.compression_level,
+            )?;
             cfg.render_workers = b.render;
             let stats = pipeline::run_bam(&out_header, records, &mut sink, &cfg)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
@@ -110,7 +120,11 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             return Ok(());
         }
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
-            let encode = if matches!(out_fmt, Format::FastqGz) { EncodeKind::Gzip } else { EncodeKind::None };
+            let encode = if matches!(out_fmt, Format::FastqGz) {
+                EncodeKind::Gzip
+            } else {
+                EncodeKind::None
+            };
             let b = config::thread_budget(cfg.threads, true, encode);
             // See the note in the (Bam, Bam) arm: read from the chained `source`.
             let (_header, records) = io::bam::reader_from(source, b.decode)?;
@@ -128,7 +142,11 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     }
 
     note_tags_ignored(&cfg, in_fmt, out_fmt);
-    let encode = if matches!(out_fmt, Format::FastqGz) { EncodeKind::Gzip } else { EncodeKind::None };
+    let encode = if matches!(out_fmt, Format::FastqGz) {
+        EncodeKind::Gzip
+    } else {
+        EncodeKind::None
+    };
     let b = config::thread_budget(cfg.threads, false, encode);
     let mut writer = fastq_writer(&cfg, out_fmt, b.encode)?;
     cfg.render_workers = b.render;
@@ -228,7 +246,12 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
     // read back as an input nor makes the folder look "mixed". `classify` bails if
     // nothing is left.
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
-    eprintln!("Merging {} {:?} file(s) from {}", paths.len(), family, dir.display());
+    eprintln!(
+        "Merging {} {:?} file(s) from {}",
+        paths.len(),
+        family,
+        dir.display()
+    );
     let family_fmt = match family {
         io::dir::Family::Fastq => Format::Fastq,
         io::dir::Family::Bam => Format::Bam,
@@ -246,7 +269,11 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 );
             }
             note_tags_ignored(cfg, family_fmt, out_fmt);
-            let encode = if matches!(out_fmt, Format::FastqGz) { EncodeKind::Gzip } else { EncodeKind::None };
+            let encode = if matches!(out_fmt, Format::FastqGz) {
+                EncodeKind::Gzip
+            } else {
+                EncodeKind::None
+            };
             let b = config::thread_budget(cfg.threads, false, encode);
             let mut writer = fastq_writer(cfg, out_fmt, b.encode)?;
             cfg.render_workers = b.render;
@@ -265,8 +292,12 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 let b = config::thread_budget(cfg.threads, true, EncodeKind::Bgzf);
                 let (header, records) = io::dir::bam_reader(&paths, b.decode)?;
                 let out_header = provenance_header(header);
-                let mut sink =
-                io::bam::writer(cfg.io.output.as_deref(), &out_header, b.encode, cfg.compression_level)?;
+                let mut sink = io::bam::writer(
+                    cfg.io.output.as_deref(),
+                    &out_header,
+                    b.encode,
+                    cfg.compression_level,
+                )?;
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg)?;
                 sink.finish()?;
@@ -274,7 +305,11 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 Ok(())
             }
             Format::Fastq | Format::FastqGz => {
-                let encode = if matches!(out_fmt, Format::FastqGz) { EncodeKind::Gzip } else { EncodeKind::None };
+                let encode = if matches!(out_fmt, Format::FastqGz) {
+                    EncodeKind::Gzip
+                } else {
+                    EncodeKind::None
+                };
                 let b = config::thread_budget(cfg.threads, true, encode);
                 let (_header, records) = io::dir::bam_reader(&paths, b.decode)?;
                 let mut writer = fastq_writer(cfg, out_fmt, b.encode)?;
@@ -326,7 +361,10 @@ pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
 /// Print the end-of-run summary: the kept/total count, plus a one-line advisory
 /// if any read carried a malformed per-base tag (see `has_malformed_perbase_tag`).
 fn eprint_run_summary(stats: &pipeline::Stats) {
-    eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+    eprintln!(
+        "Kept {} reads out of {}",
+        stats.output_reads, stats.input_reads
+    );
     if stats.malformed_tag_reads > 0 {
         eprintln!(
             "note: {} read(s) carried a per-base kinetics tag (ip/pw/fi/fp/ri/rp) whose \
@@ -439,7 +477,10 @@ mod tests {
         let out_header = provenance_header(header);
 
         assert!(
-            !out_header.programs().as_ref().contains_key(&b"chopping"[..]),
+            !out_header
+                .programs()
+                .as_ref()
+                .contains_key(&b"chopping"[..]),
             "expected no chopping @PG line to be added when the existing chain is dangling"
         );
     }

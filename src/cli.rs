@@ -34,7 +34,12 @@ struct Cli {
     max_length: Option<usize>,
     #[arg(short = 'q', long, default_value_t = 0.0, help_heading = "Filtering")]
     min_qual: f64,
-    #[arg(short = 'Q', long, default_value_t = 1000.0, help_heading = "Filtering")]
+    #[arg(
+        short = 'Q',
+        long,
+        default_value_t = 1000.0,
+        help_heading = "Filtering"
+    )]
     max_qual: f64,
     #[arg(short = 'g', long, help_heading = "Filtering")]
     min_gc: Option<f64>,
@@ -63,7 +68,11 @@ struct Cli {
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
-enum FormatArg { Fastq, FastqGz, Bam }
+enum FormatArg {
+    Fastq,
+    FastqGz,
+    Bam,
+}
 
 impl From<FormatArg> for Format {
     fn from(f: FormatArg) -> Self {
@@ -76,7 +85,11 @@ impl From<FormatArg> for Format {
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
-enum QualModeArg { Mean, Arithmetic, Median }
+enum QualModeArg {
+    Mean,
+    Arithmetic,
+    Median,
+}
 
 impl From<QualModeArg> for QualMode {
     fn from(m: QualModeArg) -> Self {
@@ -92,10 +105,14 @@ pub fn parse() -> anyhow::Result<Config> {
     let c = Cli::parse();
 
     // Mutual exclusion of the three quality trim ops.
-    let n_quality = [c.trim_qual.is_some(), c.best_segment.is_some(), c.split_qual.is_some()]
-        .iter()
-        .filter(|&&b| b)
-        .count();
+    let n_quality = [
+        c.trim_qual.is_some(),
+        c.best_segment.is_some(),
+        c.split_qual.is_some(),
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count();
     if n_quality > 1 {
         anyhow::bail!("--trim-qual, --best-segment and --split-qual are mutually exclusive");
     }
@@ -148,7 +165,10 @@ pub fn parse() -> anyhow::Result<Config> {
     } else if let Some(q) = c.best_segment {
         Some(QualityOp::BestSegment(q))
     } else if let Some(q) = c.split_qual {
-        Some(QualityOp::Split { cutoff: q, window: c.split_window })
+        Some(QualityOp::Split {
+            cutoff: q,
+            window: c.split_window,
+        })
     } else {
         None
     };
@@ -170,7 +190,11 @@ pub fn parse() -> anyhow::Result<Config> {
             max_gc: c.max_gc,
             qual_mode: c.qual_mode.into(),
         },
-        trim: TrimPlan { head: c.head_crop, tail: c.tail_crop, quality },
+        trim: TrimPlan {
+            head: c.head_crop,
+            tail: c.tail_crop,
+            quality,
+        },
         threads: c.threads.max(1),
         fastq_tags,
         render_workers: 0,
@@ -216,7 +240,11 @@ pub fn config_for_test_threads(
             max_gc: None,
             qual_mode: QualMode::Mean,
         },
-        trim: TrimPlan { head: head_crop, tail: tail_crop, quality: None },
+        trim: TrimPlan {
+            head: head_crop,
+            tail: tail_crop,
+            quality: None,
+        },
         threads: threads.max(1),
         fastq_tags: FastqTags::All,
         render_workers: 0,

@@ -45,5 +45,9 @@ pub fn complement(base: u8) -> u8 {
 /// only needs to count the SAME base the encoder counted — the htslib oracle
 /// confirms this matches real data.
 pub fn counting_base(base: u8, strand: u8) -> u8 {
-    if strand == b'-' { complement(base) } else { base.to_ascii_uppercase() }
+    if strand == b'-' {
+        complement(base)
+    } else {
+        base.to_ascii_uppercase()
+    }
 }

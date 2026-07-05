@@ -5,12 +5,12 @@
 // tests can't (header handling, writer generics, CLI flag plumbing).
 use assert_cmd::Command;
 use noodles_bam as bam;
-use noodles_sam::{self as sam, alignment::RecordBuf};
 use noodles_sam::alignment::io::Write as _;
 use noodles_sam::alignment::record::Flags;
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
+use noodles_sam::{self as sam, alignment::RecordBuf};
 
 fn write_fixture(path: &std::path::Path) {
     let header = sam::Header::default();
@@ -33,8 +33,14 @@ fn write_fixture(path: &std::path::Path) {
     *r2.sequence_mut() = b"CCACCCAC".to_vec().into();
     *r2.quality_scores_mut() = vec![35; 8].into();
     let data = r2.data_mut();
-    data.insert(Tag::BASE_MODIFICATIONS, Value::String(b"C+m,0,1,0;".to_vec().into()));
-    data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(vec![10, 20, 30])));
+    data.insert(
+        Tag::BASE_MODIFICATIONS,
+        Value::String(b"C+m,0,1,0;".to_vec().into()),
+    );
+    data.insert(
+        Tag::BASE_MODIFICATION_PROBABILITIES,
+        Value::Array(Array::UInt8(vec![10, 20, 30])),
+    );
     data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(8));
     writer.write_alignment_record(&header, &r2).unwrap();
 
@@ -50,7 +56,15 @@ fn bam_to_bam_end_to_end() {
 
     Command::cargo_bin("chopping")
         .unwrap()
-        .args(["--in-format", "bam", "--out-format", "bam", "--head-crop", "2", "-i"])
+        .args([
+            "--in-format",
+            "bam",
+            "--out-format",
+            "bam",
+            "--head-crop",
+            "2",
+            "-i",
+        ])
         .arg(&in_path)
         .arg("-o")
         .arg(&out_path)
@@ -62,7 +76,10 @@ fn bam_to_bam_end_to_end() {
     let header = reader.read_header().unwrap();
 
     assert!(
-        header.programs().roots().any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"chopping"),
+        header
+            .programs()
+            .roots()
+            .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"chopping"),
         "expected an @PG record with ID chopping in the output header, got {:?}",
         header.programs()
     );
@@ -75,7 +92,11 @@ fn bam_to_bam_end_to_end() {
             _ => out_records.push(buf.clone()),
         }
     }
-    assert_eq!(out_records.len(), 2, "both reads should survive --head-crop 2 (len 10, 8 > min-length)");
+    assert_eq!(
+        out_records.len(),
+        2,
+        "both reads should survive --head-crop 2 (len 10, 8 > min-length)"
+    );
 
     // Default threads (4) run the BAM pipeline unordered, so look records up by
     // name instead of assuming input order is preserved on output.
@@ -133,14 +154,30 @@ fn bam_to_bam_slices_pacbio_kinetics() {
     *r.name_mut() = Some(b"ccs1".into());
     *r.sequence_mut() = b"ACGTACGTAC".to_vec().into(); // 10 bases
     *r.quality_scores_mut() = vec![40; 10].into();
-    r.data_mut().insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8((0..10).collect())));
-    r.data_mut().insert(Tag::new(b'p', b'w'), Value::Array(Array::UInt8((100..110).collect())));
+    r.data_mut().insert(
+        Tag::new(b'i', b'p'),
+        Value::Array(Array::UInt8((0..10).collect())),
+    );
+    r.data_mut().insert(
+        Tag::new(b'p', b'w'),
+        Value::Array(Array::UInt8((100..110).collect())),
+    );
     w.write_alignment_record(&header, &r).unwrap();
     w.try_finish().unwrap();
 
     Command::cargo_bin("chopping")
         .unwrap()
-        .args(["--in-format", "bam", "--out-format", "bam", "--head-crop", "3", "--tail-crop", "2", "-i"])
+        .args([
+            "--in-format",
+            "bam",
+            "--out-format",
+            "bam",
+            "--head-crop",
+            "3",
+            "--tail-crop",
+            "2",
+            "-i",
+        ])
         .arg(&in_path)
         .arg("-o")
         .arg(&out_path)
@@ -158,7 +195,11 @@ fn bam_to_bam_slices_pacbio_kinetics() {
         Some(Value::Array(Array::UInt8(v))) => v.clone(),
         other => panic!("ip: {other:?}"),
     };
-    assert_eq!(ip, vec![3, 4, 5, 6, 7], "ip must be sliced to the trimmed window");
+    assert_eq!(
+        ip,
+        vec![3, 4, 5, 6, 7],
+        "ip must be sliced to the trimmed window"
+    );
     let pw = match buf.data().get(&Tag::new(b'p', b'w')) {
         Some(Value::Array(Array::UInt8(v))) => v.clone(),
         other => panic!("pw: {other:?}"),
@@ -184,7 +225,10 @@ fn bam_update_moves_slices_move_table() {
     *r.sequence_mut() = b"ACGTAC".to_vec().into(); // 6 bases
     *r.quality_scores_mut() = vec![40; 6].into();
     // stride 2; 6 ones (one per base) at block indices 0,1,3,4,6,7.
-    r.data_mut().insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![2, 1, 1, 0, 1, 1, 0, 1, 1])));
+    r.data_mut().insert(
+        Tag::new(b'm', b'v'),
+        Value::Array(Array::Int8(vec![2, 1, 1, 0, 1, 1, 0, 1, 1])),
+    );
     r.data_mut().insert(Tag::new(b't', b's'), Value::Int32(10));
     r.data_mut().insert(Tag::new(b'n', b's'), Value::Int32(100));
     w.write_alignment_record(&header, &r).unwrap();
@@ -192,7 +236,18 @@ fn bam_update_moves_slices_move_table() {
 
     Command::cargo_bin("chopping")
         .unwrap()
-        .args(["--in-format", "bam", "--out-format", "bam", "--update-moves", "--head-crop", "2", "-t", "1", "-i"])
+        .args([
+            "--in-format",
+            "bam",
+            "--out-format",
+            "bam",
+            "--update-moves",
+            "--head-crop",
+            "2",
+            "-t",
+            "1",
+            "-i",
+        ])
         .arg(&in_path)
         .arg("-o")
         .arg(&out_path)
@@ -235,7 +290,11 @@ fn bam_on_stdin_without_in_format_is_detected() {
 
     // Sanity: the fixture really starts with the gzip magic (i.e. it would have
     // tripped the old gz-first sniffer).
-    assert_eq!(&bam_bytes[..2], &[0x1f, 0x8b], "BAM fixture must be BGZF (gzip magic)");
+    assert_eq!(
+        &bam_bytes[..2],
+        &[0x1f, 0x8b],
+        "BAM fixture must be BGZF (gzip magic)"
+    );
 
     let out_path = dir.path().join("out.fastq");
     Command::cargo_bin("chopping")
@@ -250,6 +309,12 @@ fn bam_on_stdin_without_in_format_is_detected() {
     // Both fixture reads should convert to FASTQ (4 lines each).
     let out = std::fs::read_to_string(&out_path).unwrap();
     let lines = out.lines().count();
-    assert_eq!(lines, 8, "expected 2 FASTQ records (8 lines) from the piped BAM, got:\n{out}");
-    assert!(out.contains("@read1") && out.contains("@read2"), "missing reads: {out}");
+    assert_eq!(
+        lines, 8,
+        "expected 2 FASTQ records (8 lines) from the piped BAM, got:\n{out}"
+    );
+    assert!(
+        out.contains("@read1") && out.contains("@read2"),
+        "missing reads: {out}"
+    );
 }
