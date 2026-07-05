@@ -8,12 +8,12 @@ pub mod qual;
 pub mod record;
 pub mod trim;
 
-pub use config::Config;
-
 use std::io::{BufReader, BufWriter, Read, Write};
 
+pub use config::Config;
+use gzp::deflate::Gzip;
 use gzp::par::compress::{ParCompress, ParCompressBuilder};
-use gzp::{Compression, ZWriter, deflate::Gzip};
+use gzp::{Compression, ZWriter};
 
 /// Top-level entry point. Dispatches on the input: a directory triggers
 /// folder-merge (all read files in it merged into one output); otherwise a
@@ -436,10 +436,11 @@ fn has_dangling_program_chain(header: &noodles_sam::Header) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use noodles_sam::header::record::value::Map;
     use noodles_sam::header::record::value::map::Program;
     use noodles_sam::header::record::value::map::program::tag;
+
+    use super::*;
 
     /// Regression test for `d481c48`: a header with a dangling `@PG PP:` chain
     /// (a `PP` value that names a program ID not present in the header) used

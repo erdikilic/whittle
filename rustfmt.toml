@@ -1,0 +1,17 @@
+# Formatting configuration for `chopping`.
+#
+# `imports_granularity` and `group_imports` are rustfmt-unstable, so format with
+# the nightly toolchain: `cargo +nightly fmt`. Stable `cargo fmt` still runs
+# (it just ignores those two options and leaves import blocks as written).
+
+# Generous line width (rustfmt default is 100; we keep the roomy 100, not 80).
+max_width = 100
+
+# `Foo { x }` instead of `Foo { x: x }`.
+use_field_init_shorthand = true
+
+# Merge `use a::b; use a::c;` into `use a::{b, c};` per top-level module.
+imports_granularity = "Module"
+
+# Order import groups: std / external crates / this crate.
+group_imports = "StdExternalCrate"

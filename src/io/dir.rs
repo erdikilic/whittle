@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use noodles_sam::{self as sam, alignment::RecordBuf};
+use noodles_sam::alignment::RecordBuf;
+use noodles_sam::{self as sam};
 
 use crate::io::{Format, from_extension};
 use crate::record::ReadRecord;

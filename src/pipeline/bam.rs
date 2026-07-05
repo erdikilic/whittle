@@ -1,17 +1,17 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
-use noodles_sam::{self as sam, alignment::RecordBuf};
+use noodles_sam::{self as sam};
 use rayon::prelude::*;
 
+use super::Stats;
 use crate::config::{Config, FastqTags};
 use crate::io::fastq::{format_aux_field, format_mods_aux, write_segment, write_segment_tagged};
 use crate::{filter, mods, trim};
-
-use super::Stats;
 
 /// PacBio per-base kinetics tags: one value per SEQ base (`B` arrays), so they
 /// must be sliced in lockstep with the sequence when a read is trimmed. `ip`/`pw`
@@ -860,12 +860,13 @@ pub fn run_bam_to_fastq<W: Write + Send>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::Flags;
     use noodles_sam::alignment::record::data::field::Tag;
     use noodles_sam::alignment::record_buf::data::field::Value;
     use noodles_sam::alignment::record_buf::data::field::value::Array;
+
+    use super::*;
 
     fn ubam_with_mods(seq: &[u8], quals: Vec<u8>, mm: &[u8], ml: Vec<u8>) -> RecordBuf {
         let mut rec = RecordBuf::default();
@@ -1836,11 +1837,12 @@ mod tests {
     /// returning.
     #[test]
     fn run_bam_parallel_surfaces_write_error_without_deadlock() {
+        use std::io;
+
         use crate::config::IoConfig;
         use crate::filter::FilterConfig;
         use crate::qual::QualMode;
         use crate::trim::TrimPlan;
-        use std::io;
 
         struct FailAfter {
             limit: usize,
@@ -1906,11 +1908,12 @@ mod tests {
     /// `Err` item from the input iterator) is not silently swallowed.
     #[test]
     fn run_bam_parallel_surfaces_parse_error_instead_of_dropping_it() {
+        use std::io;
+
         use crate::config::IoConfig;
         use crate::filter::FilterConfig;
         use crate::qual::QualMode;
         use crate::trim::TrimPlan;
-        use std::io;
 
         struct NullSink;
 

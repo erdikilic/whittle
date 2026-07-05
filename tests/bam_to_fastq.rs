@@ -8,12 +8,13 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use noodles_bam as bam;
+use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::io::Write as _;
 use noodles_sam::alignment::record::Flags;
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
-use noodles_sam::{self as sam, alignment::RecordBuf};
+use noodles_sam::{self as sam};
 
 fn write_fixture(path: &Path) {
     let header = sam::Header::default();

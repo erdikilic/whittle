@@ -3,12 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
 
+use super::Stats;
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
 use crate::{filter, trim};
-
-use super::Stats;
 
 /// Single-threaded FASTQ pipeline: filter -> trim -> write each surviving segment.
 pub fn run_fastq_seq<W: Write>(
@@ -334,8 +333,9 @@ mod tests {
 
     #[test]
     fn parallel_surfaces_write_error_without_deadlock() {
-        use crate::config::IoConfig;
         use std::io::{self, Write};
+
+        use crate::config::IoConfig;
 
         struct FailAfter {
             limit: usize,
