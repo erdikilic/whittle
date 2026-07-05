@@ -21,7 +21,9 @@ pub fn parse(mm: &[u8], ml: &[u8]) -> Mods {
             while i < token.len() && token[i].is_ascii_digit() {
                 // Saturating: a corrupt over-long id must clamp, never overflow
                 // (which would panic in debug / silently wrap in release).
-                id = id.saturating_mul(10).saturating_add((token[i] - b'0') as u32);
+                id = id
+                    .saturating_mul(10)
+                    .saturating_add((token[i] - b'0') as u32);
                 i += 1;
             }
             codes.push(ModCode::Chebi(id));
@@ -51,7 +53,9 @@ pub fn parse(mm: &[u8], ml: &[u8]) -> Mods {
             while i < token.len() && token[i].is_ascii_digit() {
                 // Saturating for the same reason as the ChEBI id above; a delta
                 // this large is unreachable and gets dropped in reconstruct.
-                n = n.saturating_mul(10).saturating_add((token[i] - b'0') as usize);
+                n = n
+                    .saturating_mul(10)
+                    .saturating_add((token[i] - b'0') as usize);
                 i += 1;
                 saw = true;
             }
@@ -66,7 +70,14 @@ pub fn parse(mm: &[u8], ml: &[u8]) -> Mods {
         let group_ml = ml[ml_pos..end].to_vec();
         ml_pos = end;
 
-        groups.push(MmGroup { base, strand, codes, status, deltas, ml: group_ml });
+        groups.push(MmGroup {
+            base,
+            strand,
+            codes,
+            status,
+            deltas,
+            ml: group_ml,
+        });
     }
 
     Mods { groups }

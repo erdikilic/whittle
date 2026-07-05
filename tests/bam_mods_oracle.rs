@@ -38,8 +38,14 @@ fn write_fixture(path: &Path) {
     *rec.quality_scores_mut() = vec![40u8; 12].into();
     let data = rec.data_mut();
     // modify C occurrences 0,2,3 -> deltas 0,1,0 ; ML 3 bytes.
-    data.insert(Tag::BASE_MODIFICATIONS, Value::String(b"C+m,0,1,0;".to_vec().into()));
-    data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(vec![250, 5, 200])));
+    data.insert(
+        Tag::BASE_MODIFICATIONS,
+        Value::String(b"C+m,0,1,0;".to_vec().into()),
+    );
+    data.insert(
+        Tag::BASE_MODIFICATION_PROBABILITIES,
+        Value::Array(Array::UInt8(vec![250, 5, 200])),
+    );
     data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(12));
     w.write_alignment_record(&header, &rec).unwrap();
 }
@@ -89,7 +95,10 @@ fn trimmed_output_mods_match_oracle() {
     let mut b = got.clone();
     a.sort();
     b.sort();
-    assert_eq!(a, b, "trimmed mod set must equal original filtered to [3, len) offset by 3");
+    assert_eq!(
+        a, b,
+        "trimmed mod set must equal original filtered to [3, len) offset by 3"
+    );
 }
 
 /// Multi-mod fixture: one read carrying THREE mod groups — `C+m`, `C+h`, `A+a`
@@ -193,7 +202,10 @@ fn trimmed_output_multimod_mods_match_oracle_t8() {
     let mut b = got.clone();
     a.sort();
     b.sort();
-    assert_eq!(a, b, "multi-mod mods must survive parallel (t8) reconstruction");
+    assert_eq!(
+        a, b,
+        "multi-mod mods must survive parallel (t8) reconstruction"
+    );
 }
 
 /// Multi-record cross-check at t=8: ~200 differently-named reads (each a copy
@@ -240,7 +252,10 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
             .into_iter()
             .map(|b| b.wrapping_add(i as u8))
             .collect();
-        data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml)));
+        data.insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(ml)),
+        );
         data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(10));
         w.write_alignment_record(&header, &rec).unwrap();
     }
@@ -252,7 +267,11 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
     let (head, orig_len) = (2usize, 10usize);
     let orig = hts_mods_by_read(&input);
     let out = hts_mods_by_read(&output);
-    assert_eq!(out.len(), 200, "all 200 reads must survive the t8 parallel run");
+    assert_eq!(
+        out.len(),
+        200,
+        "all 200 reads must survive the t8 parallel run"
+    );
 
     for (name, (_, got_mods)) in &out {
         let (_, orig_mods) = orig
@@ -335,7 +354,9 @@ fn filter_offset(mods: &[ModCall], head: usize, orig_len: usize) -> Vec<ModCall>
 #[test]
 #[ignore]
 fn real_ubam_oracle_sweep() {
-    let Some(path) = std::env::var_os("CHOPPING_UBAM") else { return };
+    let Some(path) = std::env::var_os("CHOPPING_UBAM") else {
+        return;
+    };
     let input = std::path::PathBuf::from(path);
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.ubam");
@@ -345,7 +366,11 @@ fn real_ubam_oracle_sweep() {
 
     let orig = hts_mods_by_read(&input);
     let out = hts_mods_by_read(&output);
-    assert!(!out.is_empty(), "no output reads decoded from {}", output.display());
+    assert!(
+        !out.is_empty(),
+        "no output reads decoded from {}",
+        output.display()
+    );
 
     for (name, (_, got_mods)) in &out {
         let (orig_len, orig_mods) = orig
@@ -370,7 +395,9 @@ fn real_ubam_oracle_sweep() {
 #[test]
 #[ignore]
 fn real_ubam_oracle_sweep_t8() {
-    let Some(path) = std::env::var_os("CHOPPING_UBAM") else { return };
+    let Some(path) = std::env::var_os("CHOPPING_UBAM") else {
+        return;
+    };
     let input = std::path::PathBuf::from(path);
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.ubam");
@@ -380,8 +407,16 @@ fn real_ubam_oracle_sweep_t8() {
 
     let orig = hts_mods_by_read(&input);
     let out = hts_mods_by_read(&output);
-    assert!(!out.is_empty(), "no output reads decoded from {}", output.display());
-    assert_eq!(out.len(), orig.len(), "t8 run must not drop or duplicate reads");
+    assert!(
+        !out.is_empty(),
+        "no output reads decoded from {}",
+        output.display()
+    );
+    assert_eq!(
+        out.len(),
+        orig.len(),
+        "t8 run must not drop or duplicate reads"
+    );
 
     for (name, (_, got_mods)) in &out {
         let (orig_len, orig_mods) = orig

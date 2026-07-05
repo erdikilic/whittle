@@ -62,7 +62,7 @@ fn is_bgzf(sniff: &[u8]) -> bool {
         && sniff[2] == 0x08          // CM = DEFLATE
         && (sniff[3] & 0x04) != 0    // FLG.FEXTRA set
         && sniff[12] == b'B'         // first extra subfield SI1
-        && sniff[13] == b'C'         //                      SI2 -> "BC" = BGZF
+        && sniff[13] == b'C' //                      SI2 -> "BC" = BGZF
 }
 
 /// Output format from the path extension, else mirror the input format — with
@@ -92,7 +92,10 @@ mod tests {
     fn extensions() {
         assert_eq!(from_extension(Path::new("x.fastq")), Some(Format::Fastq));
         assert_eq!(from_extension(Path::new("x.fq")), Some(Format::Fastq));
-        assert_eq!(from_extension(Path::new("x.fastq.gz")), Some(Format::FastqGz));
+        assert_eq!(
+            from_extension(Path::new("x.fastq.gz")),
+            Some(Format::FastqGz)
+        );
         assert_eq!(from_extension(Path::new("x.fq.gz")), Some(Format::FastqGz));
         assert_eq!(from_extension(Path::new("x.gz")), Some(Format::FastqGz)); // bare .gz
         assert_eq!(from_extension(Path::new("x.bam")), Some(Format::Bam));
@@ -102,7 +105,10 @@ mod tests {
     #[test]
     fn stdin_sniff_falls_back_to_magic() {
         // no path -> sniff. gzip magic 1f 8b -> FastqGz; '@' -> Fastq; BAM magic -> Bam.
-        assert_eq!(detect_input(None, &[0x1f, 0x8b, 0x08]).unwrap(), Format::FastqGz);
+        assert_eq!(
+            detect_input(None, &[0x1f, 0x8b, 0x08]).unwrap(),
+            Format::FastqGz
+        );
         assert_eq!(detect_input(None, b"@read").unwrap(), Format::Fastq);
         assert_eq!(detect_input(None, b"BAM\x01").unwrap(), Format::Bam);
     }
@@ -127,14 +133,20 @@ mod tests {
         assert_eq!(detect_input(None, &bgzf).unwrap(), Format::FastqGz);
 
         // Too-short gzip-magic buffer can't be BGZF -> defaults to FastqGz.
-        assert_eq!(detect_input(None, &[0x1f, 0x8b, 0x08, 0x04]).unwrap(), Format::FastqGz);
+        assert_eq!(
+            detect_input(None, &[0x1f, 0x8b, 0x08, 0x04]).unwrap(),
+            Format::FastqGz
+        );
     }
 
     #[test]
     fn output_mirrors_input_when_no_path() {
         assert_eq!(resolve_output(None, Format::Bam), Format::Bam);
         assert_eq!(resolve_output(None, Format::Fastq), Format::Fastq);
-        assert_eq!(resolve_output(Some(Path::new("o.bam")), Format::Fastq), Format::Bam);
+        assert_eq!(
+            resolve_output(Some(Path::new("o.bam")), Format::Fastq),
+            Format::Bam
+        );
     }
 
     #[test]

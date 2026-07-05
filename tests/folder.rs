@@ -21,8 +21,10 @@ fn folder_merge_fastq_sorted_and_ignores_non_read_files() {
     let out = dir.path().join("merged.fastq");
 
     chopping()
-        .arg("-i").arg(dir.path())
-        .arg("-o").arg(&out)
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
         .args(["-H", "2", "-T", "2", "-t", "1"]) // -t 1 => deterministic order
         .assert()
         .success();
@@ -53,8 +55,10 @@ fn folder_merge_bam_two_files() {
     let out = dir.path().join("merged.bam");
 
     chopping()
-        .arg("-i").arg(dir.path())
-        .arg("-o").arg(&out)
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
         .args(["-H", "2", "-T", "2", "-t", "1"])
         .assert()
         .success();
@@ -63,7 +67,9 @@ fn folder_merge_bam_two_files() {
     let mut r = bam::io::Reader::new(File::open(&out).unwrap());
     let hdr = r.read_header().unwrap();
     assert!(
-        hdr.programs().roots().any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"chopping"),
+        hdr.programs()
+            .roots()
+            .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"chopping"),
         "expected @PG chopping in merged header"
     );
     let mut count = 0usize;
@@ -79,7 +85,8 @@ fn empty_folder_errors() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
     chopping()
-        .arg("-i").arg(dir.path())
+        .arg("-i")
+        .arg(dir.path())
         .assert()
         .failure()
         .stderr(predicates::str::contains("no FASTQ or BAM"));
@@ -94,18 +101,31 @@ fn folder_rerun_does_not_reingest_its_own_output() {
     std::fs::write(dir.path().join("a.fastq"), "@r1\nACGTACGT\n+\nIIIIIIII\n").unwrap();
     let out = dir.path().join("merged.fastq");
 
-    chopping().arg("-i").arg(dir.path()).arg("-o").arg(&out)
-        .args(["-t", "1"]).assert().success();
+    chopping()
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
+        .args(["-t", "1"])
+        .assert()
+        .success();
     let first = std::fs::read_to_string(&out).unwrap();
 
-    chopping().arg("-i").arg(dir.path()).arg("-o").arg(&out)
+    chopping()
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
         .args(["-t", "1"])
         .assert()
         .success()
         .stderr(predicate::str::contains("excluding the output file"));
     let second = std::fs::read_to_string(&out).unwrap();
 
-    assert_eq!(first, second, "rerun must produce the same output, not re-ingest it");
+    assert_eq!(
+        first, second,
+        "rerun must produce the same output, not re-ingest it"
+    );
 }
 
 #[test]
@@ -118,12 +138,22 @@ fn folder_bam_to_fastq_rerun_excludes_cross_format_output() {
     let out = dir.path().join("merged.fastq");
 
     // First run creates merged.fastq inside the BAM folder.
-    chopping().arg("-i").arg(dir.path()).arg("-o").arg(&out)
-        .args(["--out-format", "fastq", "-t", "1"]).assert().success();
+    chopping()
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
+        .args(["--out-format", "fastq", "-t", "1"])
+        .assert()
+        .success();
     let first = std::fs::read_to_string(&out).unwrap();
 
     // Rerun must succeed (not error as "mixed"), exclude the output, same result.
-    chopping().arg("-i").arg(dir.path()).arg("-o").arg(&out)
+    chopping()
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
         .args(["--out-format", "fastq", "-t", "1"])
         .assert()
         .success()
@@ -158,8 +188,10 @@ fn folder_merge_bam_warns_on_differing_read_groups() {
     let out = dir.path().join("merged.bam");
 
     chopping()
-        .arg("-i").arg(dir.path())
-        .arg("-o").arg(&out)
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
         .args(["-t", "1"])
         .assert()
         .success()

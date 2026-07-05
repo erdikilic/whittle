@@ -15,7 +15,11 @@ pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     while end > start && phred[end - 1] < cutoff {
         end -= 1;
     }
-    if end <= start { vec![] } else { vec![(start, end)] }
+    if end <= start {
+        vec![]
+    } else {
+        vec![(start, end)]
+    }
 }
 
 /// Modified Mott: the single segment with the lowest cumulative error probability.
@@ -57,7 +61,12 @@ pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
 /// Split into high-quality segments separated by runs of >= `window` low-quality
 /// bases; drop segments shorter than `min_length`. Ported from chopper
 /// SplitByLowQualityStrategy.
-pub fn split_low_quality(phred: &[u8], cutoff: u8, min_length: usize, window: usize) -> Vec<(usize, usize)> {
+pub fn split_low_quality(
+    phred: &[u8],
+    cutoff: u8,
+    min_length: usize,
+    window: usize,
+) -> Vec<(usize, usize)> {
     let window = window.max(1);
     let mut segments = Vec::new();
     let mut segment_start: Option<usize> = None;
@@ -101,12 +110,30 @@ mod tests {
     // (seq, ascii_qual) — identical bytes to chopper's trimmers.rs get_reads().
     fn reads() -> [(Vec<u8>, Vec<u8>); 6] {
         let raw = [
-            (b"AAAAAAAAAAAAAAATTTAA".to_vec(), b"&#3-G27C:(@G7B55+C4I".to_vec()),
-            (b"TTTTTTTTTTTTTTTTTTTT".to_vec(), b"77%'24)FAF9@=94'%054".to_vec()),
-            (b"AAAAAAAAAAAAAAATTTTA".to_vec(), b"'8$-BF2!C;+59->H@91#".to_vec()),
-            (b"AAAAAAAAAAAAAAAAAAAA".to_vec(), b"%,42$CH*#0+0C6=0,*6/".to_vec()),
-            (b"AAAAAAAAAAAAAAAAAAAT".to_vec(), b"-------------------J".to_vec()),
-            (b"TAAAAAAAAAAAAAAAAAAA".to_vec(), b"I-------------------".to_vec()),
+            (
+                b"AAAAAAAAAAAAAAATTTAA".to_vec(),
+                b"&#3-G27C:(@G7B55+C4I".to_vec(),
+            ),
+            (
+                b"TTTTTTTTTTTTTTTTTTTT".to_vec(),
+                b"77%'24)FAF9@=94'%054".to_vec(),
+            ),
+            (
+                b"AAAAAAAAAAAAAAATTTTA".to_vec(),
+                b"'8$-BF2!C;+59->H@91#".to_vec(),
+            ),
+            (
+                b"AAAAAAAAAAAAAAAAAAAA".to_vec(),
+                b"%,42$CH*#0+0C6=0,*6/".to_vec(),
+            ),
+            (
+                b"AAAAAAAAAAAAAAAAAAAT".to_vec(),
+                b"-------------------J".to_vec(),
+            ),
+            (
+                b"TAAAAAAAAAAAAAAAAAAA".to_vec(),
+                b"I-------------------".to_vec(),
+            ),
         ];
         raw.map(|(s, q)| (s, q.iter().map(|&b| b - 33).collect()))
     }
@@ -163,7 +190,10 @@ mod tests {
     fn split_window_tolerates_short_dips() {
         // chopper window_test: III#IIII###III with Q40=I, Q2=#
         let phred: Vec<u8> = b"III#IIII###III".iter().map(|&b| b - 33).collect();
-        assert_eq!(split_low_quality(&phred, 10, 1, 1), vec![(0, 3), (4, 8), (11, 14)]);
+        assert_eq!(
+            split_low_quality(&phred, 10, 1, 1),
+            vec![(0, 3), (4, 8), (11, 14)]
+        );
         assert_eq!(split_low_quality(&phred, 10, 1, 3), vec![(0, 8), (11, 14)]);
         assert_eq!(split_low_quality(&phred, 10, 1, 4), vec![(0, 14)]);
     }

@@ -8,12 +8,12 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use noodles_bam as bam;
-use noodles_sam::{self as sam, alignment::RecordBuf};
 use noodles_sam::alignment::io::Write as _;
 use noodles_sam::alignment::record::Flags;
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
+use noodles_sam::{self as sam, alignment::RecordBuf};
 
 fn write_fixture(path: &Path) {
     let header = sam::Header::default();
@@ -36,8 +36,14 @@ fn write_fixture(path: &Path) {
     *r2.quality_scores_mut() = vec![35; 8].into();
     let d = r2.data_mut();
     d.insert(Tag::from(*b"RG"), Value::String(b"grp1".as_slice().into()));
-    d.insert(Tag::BASE_MODIFICATIONS, Value::String(b"C+m,0,1,0;".to_vec().into()));
-    d.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(vec![10, 20, 30])));
+    d.insert(
+        Tag::BASE_MODIFICATIONS,
+        Value::String(b"C+m,0,1,0;".to_vec().into()),
+    );
+    d.insert(
+        Tag::BASE_MODIFICATION_PROBABILITIES,
+        Value::Array(Array::UInt8(vec![10, 20, 30])),
+    );
     d.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(8));
     w.write_alignment_record(&header, &r2).unwrap();
 
@@ -89,11 +95,25 @@ fn bam_to_fastq_none_is_plain() {
     let out = dir.path().join("out.fastq");
     write_fixture(&inp);
 
-    run(&["--out-format", "fastq", "--head-crop", "2", "--fastq-tags", "none"], &inp, &out);
+    run(
+        &[
+            "--out-format",
+            "fastq",
+            "--head-crop",
+            "2",
+            "--fastq-tags",
+            "none",
+        ],
+        &inp,
+        &out,
+    );
 
     let s = std::fs::read_to_string(&out).unwrap();
     assert_eq!(read2_header_line(&s), "@read2"); // no tags
-    assert!(!s.contains("MM:Z"), "mods must be dropped under none: {s:?}");
+    assert!(
+        !s.contains("MM:Z"),
+        "mods must be dropped under none: {s:?}"
+    );
 }
 
 #[test]
@@ -103,10 +123,24 @@ fn bam_to_fastq_only_mm_ml_drops_rg() {
     let out = dir.path().join("out.fastq");
     write_fixture(&inp);
 
-    run(&["--out-format", "fastq", "--head-crop", "2", "--fastq-tags", "MM,ML"], &inp, &out);
+    run(
+        &[
+            "--out-format",
+            "fastq",
+            "--head-crop",
+            "2",
+            "--fastq-tags",
+            "MM,ML",
+        ],
+        &inp,
+        &out,
+    );
 
     let s = std::fs::read_to_string(&out).unwrap();
-    assert_eq!(read2_header_line(&s), "@read2\tMM:Z:C+m,0,0;\tML:B:C,20,30\tMN:i:6");
+    assert_eq!(
+        read2_header_line(&s),
+        "@read2\tMM:Z:C+m,0,0;\tML:B:C,20,30\tMN:i:6"
+    );
 }
 
 #[test]
@@ -116,7 +150,11 @@ fn bam_to_fastq_gz_roundtrips() {
     let out = dir.path().join("out.fastq.gz");
     write_fixture(&inp);
 
-    run(&["--out-format", "fastq-gz", "--head-crop", "2", "-t", "4"], &inp, &out);
+    run(
+        &["--out-format", "fastq-gz", "--head-crop", "2", "-t", "4"],
+        &inp,
+        &out,
+    );
 
     // decode the gz and compare to the plain conversion.
     let mut gz = flate2::read::MultiGzDecoder::new(std::fs::File::open(&out).unwrap());
@@ -216,5 +254,7 @@ fn fastq_tags_on_fastq_input_prints_ignored_note() {
         .arg(&out)
         .assert()
         .success()
-        .stderr(predicates::str::contains("--fastq-tags applies only to BAM->FASTQ"));
+        .stderr(predicates::str::contains(
+            "--fastq-tags applies only to BAM->FASTQ",
+        ));
 }

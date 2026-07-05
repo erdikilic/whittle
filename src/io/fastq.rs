@@ -30,8 +30,14 @@ pub fn reader_from(
     inner: Box<dyn Read + Send>,
     gz: bool,
 ) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
-    let inner: Box<dyn Read + Send> = if gz { Box::new(MultiGzDecoder::new(inner)) } else { inner };
-    Box::new(RecordIter { reader: Reader::new(inner) })
+    let inner: Box<dyn Read + Send> = if gz {
+        Box::new(MultiGzDecoder::new(inner))
+    } else {
+        inner
+    };
+    Box::new(RecordIter {
+        reader: Reader::new(inner),
+    })
 }
 
 struct RecordIter<R: Read> {
@@ -269,36 +275,72 @@ mod tests {
 
     #[test]
     fn aux_scalar_types() {
-        assert_eq!(format_aux_field(*b"RG", &Value::String(b"grp1".as_slice().into())), b"RG:Z:grp1");
+        assert_eq!(
+            format_aux_field(*b"RG", &Value::String(b"grp1".as_slice().into())),
+            b"RG:Z:grp1"
+        );
         assert_eq!(format_aux_field(*b"NM", &Value::Int32(-3)), b"NM:i:-3");
         assert_eq!(format_aux_field(*b"Uq", &Value::UInt8(200)), b"Uq:i:200");
         assert_eq!(format_aux_field(*b"pa", &Value::Float(0.5)), b"pa:f:0.5");
         assert_eq!(format_aux_field(*b"bc", &Value::Character(b'K')), b"bc:A:K");
-        assert_eq!(format_aux_field(*b"H2", &Value::Hex(b"1AE3".as_slice().into())), b"H2:H:1AE3");
+        assert_eq!(
+            format_aux_field(*b"H2", &Value::Hex(b"1AE3".as_slice().into())),
+            b"H2:H:1AE3"
+        );
         // Every integer width serializes with SAM type code `i`, regardless of
         // signedness or size.
         assert_eq!(format_aux_field(*b"i1", &Value::Int8(-5)), b"i1:i:-5");
         assert_eq!(format_aux_field(*b"i2", &Value::Int16(-300)), b"i2:i:-300");
         assert_eq!(format_aux_field(*b"i3", &Value::UInt16(400)), b"i3:i:400");
-        assert_eq!(format_aux_field(*b"i4", &Value::UInt32(70000)), b"i4:i:70000");
+        assert_eq!(
+            format_aux_field(*b"i4", &Value::UInt32(70000)),
+            b"i4:i:70000"
+        );
     }
 
     #[test]
     fn aux_array_subtypes() {
-        assert_eq!(format_aux_field(*b"a1", &Value::Array(Array::UInt8(vec![1, 2, 3]))), b"a1:B:C,1,2,3");
-        assert_eq!(format_aux_field(*b"a2", &Value::Array(Array::Int8(vec![-1, 2]))), b"a2:B:c,-1,2");
-        assert_eq!(format_aux_field(*b"a3", &Value::Array(Array::Int16(vec![-5]))), b"a3:B:s,-5");
-        assert_eq!(format_aux_field(*b"a4", &Value::Array(Array::UInt16(vec![5]))), b"a4:B:S,5");
-        assert_eq!(format_aux_field(*b"a5", &Value::Array(Array::Int32(vec![7]))), b"a5:B:i,7");
-        assert_eq!(format_aux_field(*b"a6", &Value::Array(Array::UInt32(vec![8]))), b"a6:B:I,8");
-        assert_eq!(format_aux_field(*b"a7", &Value::Array(Array::Float(vec![1.5]))), b"a7:B:f,1.5");
+        assert_eq!(
+            format_aux_field(*b"a1", &Value::Array(Array::UInt8(vec![1, 2, 3]))),
+            b"a1:B:C,1,2,3"
+        );
+        assert_eq!(
+            format_aux_field(*b"a2", &Value::Array(Array::Int8(vec![-1, 2]))),
+            b"a2:B:c,-1,2"
+        );
+        assert_eq!(
+            format_aux_field(*b"a3", &Value::Array(Array::Int16(vec![-5]))),
+            b"a3:B:s,-5"
+        );
+        assert_eq!(
+            format_aux_field(*b"a4", &Value::Array(Array::UInt16(vec![5]))),
+            b"a4:B:S,5"
+        );
+        assert_eq!(
+            format_aux_field(*b"a5", &Value::Array(Array::Int32(vec![7]))),
+            b"a5:B:i,7"
+        );
+        assert_eq!(
+            format_aux_field(*b"a6", &Value::Array(Array::UInt32(vec![8]))),
+            b"a6:B:I,8"
+        );
+        assert_eq!(
+            format_aux_field(*b"a7", &Value::Array(Array::Float(vec![1.5]))),
+            b"a7:B:f,1.5"
+        );
     }
 
     #[test]
     fn mods_aux_layout() {
-        assert_eq!(format_mods_aux(b"C+m,0;", Some(&[10, 20]), 6), b"MM:Z:C+m,0;\tML:B:C,10,20\tMN:i:6");
+        assert_eq!(
+            format_mods_aux(b"C+m,0;", Some(&[10, 20]), 6),
+            b"MM:Z:C+m,0;\tML:B:C,10,20\tMN:i:6"
+        );
         // ML present but empty (e.g. all mods sliced away yet MM retained) -> zero-length B:C array
-        assert_eq!(format_mods_aux(b"C+m;", Some(&[]), 4), b"MM:Z:C+m;\tML:B:C\tMN:i:4");
+        assert_eq!(
+            format_mods_aux(b"C+m;", Some(&[]), 4),
+            b"MM:Z:C+m;\tML:B:C\tMN:i:4"
+        );
         // ML absent (MM-only source record) -> the ML field is omitted entirely,
         // never emitted empty, so the record stays valid.
         assert_eq!(format_mods_aux(b"C+m,0;", None, 4), b"MM:Z:C+m,0;\tMN:i:4");
@@ -307,8 +349,20 @@ mod tests {
     #[test]
     fn tagged_writer_appends_tags_after_id() {
         let mut out = Vec::new();
-        write_segment_tagged(&mut out, b"read2", b"AC", &[40, 40], 1, 0, b"\tRG:Z:grp1\tMM:Z:C+m,0;\tML:B:C,20\tMN:i:2").unwrap();
-        assert_eq!(out, b"@read2\tRG:Z:grp1\tMM:Z:C+m,0;\tML:B:C,20\tMN:i:2\nAC\n+\nII\n");
+        write_segment_tagged(
+            &mut out,
+            b"read2",
+            b"AC",
+            &[40, 40],
+            1,
+            0,
+            b"\tRG:Z:grp1\tMM:Z:C+m,0;\tML:B:C,20\tMN:i:2",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            b"@read2\tRG:Z:grp1\tMM:Z:C+m,0;\tML:B:C,20\tMN:i:2\nAC\n+\nII\n"
+        );
     }
 
     #[test]

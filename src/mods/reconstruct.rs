@@ -1,4 +1,4 @@
-use super::{counting_base, MmGroup, Mods};
+use super::{MmGroup, Mods, counting_base};
 
 pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
     let mut out = Vec::new();
@@ -132,7 +132,12 @@ mod tests {
         // seq CCCCC (C at 0,1,2,3,4). MM C+m,0,1,0 -> modified at occ 0,2,3 => abs 0,2,3, ML [a,b,c].
         // Window [1,5): drop abs 0 (outside); keep abs 2 and 3.
         // window C positions = [1,2,3,4]; widx(2)=1 -> delta 1; widx(3)=2 -> delta 0.
-        let m = reconstruct(&crate::mods::parse(b"C+m,0,1,0;", &[10, 20, 30]), b"CCCCC", 1, 5);
+        let m = reconstruct(
+            &crate::mods::parse(b"C+m,0,1,0;", &[10, 20, 30]),
+            b"CCCCC",
+            1,
+            5,
+        );
         assert_eq!(m.groups[0].deltas, vec![1, 0]);
         assert_eq!(m.groups[0].ml, vec![20, 30]);
     }
@@ -323,7 +328,9 @@ mod tests {
                 prev = o as i64;
             }
             // ML: ncodes bytes per modified position, position-major.
-            let ml: Vec<u8> = (0..occ.len() * ncodes).map(|_| rng.below(256) as u8).collect();
+            let ml: Vec<u8> = (0..occ.len() * ncodes)
+                .map(|_| rng.below(256) as u8)
+                .collect();
 
             let mut mm = b"C+".to_vec();
             mm.extend_from_slice(codes);

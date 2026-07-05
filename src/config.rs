@@ -137,7 +137,11 @@ pub fn thread_budget(total: usize, render_heavy: bool, encode: EncodeKind) -> Th
             (r, rest - r)
         }
     };
-    ThreadBudget { decode: 1, render: render.max(1), encode: encode_n.max(1) }
+    ThreadBudget {
+        decode: 1,
+        render: render.max(1),
+        encode: encode_n.max(1),
+    }
 }
 
 #[cfg(test)]
@@ -181,10 +185,38 @@ mod tests {
     #[test]
     fn thread_budget_split() {
         use EncodeKind::*;
-        assert_eq!(thread_budget(8, true, Bgzf), ThreadBudget { decode: 1, render: 4, encode: 3 });
-        assert_eq!(thread_budget(8, true, Gzip), ThreadBudget { decode: 1, render: 3, encode: 4 });
-        assert_eq!(thread_budget(8, false, Gzip), ThreadBudget { decode: 1, render: 1, encode: 6 });
-        assert_eq!(thread_budget(8, true, None), ThreadBudget { decode: 1, render: 7, encode: 1 });
+        assert_eq!(
+            thread_budget(8, true, Bgzf),
+            ThreadBudget {
+                decode: 1,
+                render: 4,
+                encode: 3
+            }
+        );
+        assert_eq!(
+            thread_budget(8, true, Gzip),
+            ThreadBudget {
+                decode: 1,
+                render: 3,
+                encode: 4
+            }
+        );
+        assert_eq!(
+            thread_budget(8, false, Gzip),
+            ThreadBudget {
+                decode: 1,
+                render: 1,
+                encode: 6
+            }
+        );
+        assert_eq!(
+            thread_budget(8, true, None),
+            ThreadBudget {
+                decode: 1,
+                render: 7,
+                encode: 1
+            }
+        );
         for t in [1usize, 2, 3, 4, 16] {
             for rh in [true, false] {
                 for e in [None, Bgzf, Gzip] {

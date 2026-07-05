@@ -19,8 +19,17 @@ pub struct TrimPlan {
 /// Fixed crop first (positional), then the chosen quality op on the cropped
 /// window, offsetting intervals back to original coordinates. Every returned
 /// segment is >= `min_length`.
-pub fn apply(seq_len: usize, phred: &[u8], plan: &TrimPlan, min_length: usize) -> Vec<(usize, usize)> {
-    debug_assert_eq!(seq_len, phred.len(), "apply: seq_len must equal phred.len()");
+pub fn apply(
+    seq_len: usize,
+    phred: &[u8],
+    plan: &TrimPlan,
+    min_length: usize,
+) -> Vec<(usize, usize)> {
+    debug_assert_eq!(
+        seq_len,
+        phred.len(),
+        "apply: seq_len must equal phred.len()"
+    );
     let start = plan.head.min(seq_len);
     let end = seq_len.saturating_sub(plan.tail).max(start);
     if start >= end {
@@ -49,7 +58,11 @@ mod tests {
     #[test]
     fn no_quality_op_is_fixed_crop() {
         let phred = vec![30u8; 20];
-        let plan = TrimPlan { head: 5, tail: 3, quality: None };
+        let plan = TrimPlan {
+            head: 5,
+            tail: 3,
+            quality: None,
+        };
         assert_eq!(apply(20, &phred, &plan, 1), vec![(5, 17)]);
     }
 
@@ -60,21 +73,33 @@ mod tests {
         let mut phred = vec![40u8; 20];
         phred[0] = 2;
         phred[1] = 2;
-        let plan = TrimPlan { head: 2, tail: 0, quality: Some(QualityOp::TrimQual(30)) };
+        let plan = TrimPlan {
+            head: 2,
+            tail: 0,
+            quality: Some(QualityOp::TrimQual(30)),
+        };
         assert_eq!(apply(20, &phred, &plan, 1), vec![(2, 20)]);
     }
 
     #[test]
     fn min_length_drops_short_segments() {
         let phred = vec![40u8; 4];
-        let plan = TrimPlan { head: 0, tail: 0, quality: None };
+        let plan = TrimPlan {
+            head: 0,
+            tail: 0,
+            quality: None,
+        };
         assert_eq!(apply(4, &phred, &plan, 5), Vec::<(usize, usize)>::new());
     }
 
     #[test]
     fn empty_when_crop_exceeds_length() {
         let phred = vec![40u8; 4];
-        let plan = TrimPlan { head: 3, tail: 3, quality: None };
+        let plan = TrimPlan {
+            head: 3,
+            tail: 3,
+            quality: None,
+        };
         assert_eq!(apply(4, &phred, &plan, 1), Vec::<(usize, usize)>::new());
     }
 }

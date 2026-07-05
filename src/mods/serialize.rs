@@ -55,8 +55,12 @@ mod tests {
         // A group with no deltas should not be emitted.
         let mut mods = parse(b"C+m,0;", &[7]);
         mods.groups.push(crate::mods::MmGroup {
-            base: b'A', strand: b'+', codes: vec![crate::mods::ModCode::Char(b'a')],
-            status: None, deltas: vec![], ml: vec![],
+            base: b'A',
+            strand: b'+',
+            codes: vec![crate::mods::ModCode::Char(b'a')],
+            status: None,
+            deltas: vec![],
+            ml: vec![],
         });
         let (mm, _) = serialize(&mods);
         assert_eq!(mm, b"C+m,0;");
