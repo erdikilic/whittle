@@ -55,6 +55,11 @@ struct Cli {
     split_qual: Option<u8>,
     #[arg(long, default_value_t = 1, help_heading = "Trimming")]
     split_window: usize,
+    /// Keep ONT signal tags consistent through trimming (slice `mv`, update
+    /// `ts`/`ns`/`sp`/`pi`) for signal-aware tools (Remora, Clair3 v2), instead
+    /// of dropping them. BAM→BAM only.
+    #[arg(long, help_heading = "Trimming")]
+    update_moves: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -167,6 +172,7 @@ pub fn parse() -> anyhow::Result<Config> {
         fastq_tags,
         render_workers: 0,
         compression_level: c.compression_level,
+        update_moves: c.update_moves,
     })
 }
 
@@ -212,5 +218,6 @@ pub fn config_for_test_threads(
         fastq_tags: FastqTags::All,
         render_workers: 0,
         compression_level: 6,
+        update_moves: false,
     }
 }
