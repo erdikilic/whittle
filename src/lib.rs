@@ -240,11 +240,10 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
     use config::EncodeKind;
     use io::Format;
 
-    // Pass the output path so `classify` excludes it up front — before its
-    // mixed-family check — so a rerun whose stale output sits inside the folder
-    // (even a cross-format one, e.g. a `.fastq` output in a BAM folder) is never
-    // read back as an input nor makes the folder look "mixed". `classify` bails if
-    // nothing is left.
+    // Pass the output path so `classify` can hard-error if `-o` names a read file
+    // inside `-i <dir>` — it could be a real input or a stale prior output, and
+    // overwriting either while merging the rest is silent data loss. The merged
+    // output must live outside the input directory.
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
     eprintln!(
         "Merging {} {:?} file(s) from {}",
