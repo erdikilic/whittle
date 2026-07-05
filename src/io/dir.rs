@@ -13,12 +13,15 @@ pub enum Family {
 }
 
 /// Classify a directory's immediate children into a single read-file family and
-/// a sorted path list. Non-read files and subdirectories are ignored, as is
-/// `exclude` (the run's output file, so it is never read back as an input — this
-/// must happen *before* the mixed-family check, or a rerun whose stale output has
-/// a different extension than the folder's reads would wrongly look "mixed").
+/// a sorted path list. Non-read files and subdirectories are ignored.
 /// Errors if the folder mixes FASTQ and BAM, or contains no read files.
-pub fn classify(dir: &Path, exclude: Option<&Path>) -> anyhow::Result<(Family, Vec<PathBuf>)> {
+///
+/// If `output` names a read file *inside* the directory, this is a hard error: we
+/// can't tell a real input from a stale prior output, and either way merging the
+/// rest and overwriting it silently loses data (this covers both `-o` pointing at
+/// a genuine input file and a rerun re-ingesting its own output). The merged
+/// output must be written to a path outside the input directory.
+pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Vec<PathBuf>)> {
     let mut fastq = Vec::new();
     let mut bam = Vec::new();
 
@@ -29,14 +32,20 @@ pub fn classify(dir: &Path, exclude: Option<&Path>) -> anyhow::Result<(Family, V
         if !path.is_file() {
             continue;
         }
-        if exclude.is_some_and(|e| crate::same_path(&path, e)) {
-            eprintln!(
-                "note: excluding the output file {} from the input set",
-                path.display()
+        let format = from_extension(&path);
+        if matches!(format, Some(Format::Fastq | Format::FastqGz | Format::Bam))
+            && output.is_some_and(|o| crate::same_path(&path, o))
+        {
+            anyhow::bail!(
+                "output {} is a read file inside the input directory {}; refusing to \
+                 overwrite it (it may be one of the inputs) — write the merged output \
+                 to a path outside {}",
+                path.display(),
+                dir.display(),
+                dir.display()
             );
-            continue;
         }
-        match from_extension(&path) {
+        match format {
             Some(Format::Fastq | Format::FastqGz) => fastq.push(path),
             Some(Format::Bam) => bam.push(path),
             None => {} // ignore non-read files
@@ -207,21 +216,39 @@ mod tests {
     }
 
     #[test]
-    fn excludes_cross_format_output_before_mixed_check() {
-        // A BAM folder with a stale `.fastq` output inside would look "mixed"; the
-        // output must be excluded up front so classify still returns Bam (this is
-        // the folder-rerun cross-format case).
+    fn errors_when_output_is_a_read_file_inside_the_dir() {
+        // `-o` pointing at a read file inside the input dir (a real input, or a
+        // stale prior output — indistinguishable) must hard-error, not silently
+        // exclude+overwrite it.
+        let d = tempfile::tempdir().unwrap();
+        touch(d.path(), "a.fastq");
+        touch(d.path(), "b.fastq");
+        let a = d.path().join("a.fastq");
+        let err = classify(d.path(), Some(a.as_path()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to overwrite"), "got: {err}");
+
+        // A non-read output (or one outside the dir) does not trip it.
+        let (fam, paths) = classify(d.path(), Some(d.path().join("notes.txt").as_path())).unwrap();
+        assert_eq!(fam, Family::Fastq);
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn output_collision_errors_before_the_mixed_check() {
+        // A BAM folder with a stale `.fastq` output would otherwise look "mixed";
+        // the output-collision error must fire first (and name the overwrite).
         let d = tempfile::tempdir().unwrap();
         touch(d.path(), "a.bam");
-        touch(d.path(), "b.bam");
         touch(d.path(), "merged.fastq");
         let out = d.path().join("merged.fastq");
-        let (fam, paths) = classify(d.path(), Some(out.as_path())).unwrap();
-        assert_eq!(fam, Family::Bam);
-        assert_eq!(
-            paths.len(),
-            2,
-            "the .fastq output must be excluded, leaving the 2 bams"
+        let err = classify(d.path(), Some(out.as_path()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refusing to overwrite"),
+            "should not be the 'mixes' error: {err}"
         );
     }
 

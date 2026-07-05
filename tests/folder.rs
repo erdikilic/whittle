@@ -93,51 +93,75 @@ fn empty_folder_errors() {
 }
 
 #[test]
-fn folder_rerun_does_not_reingest_its_own_output() {
-    // When `-o` lands inside the `-i <dir>`, a rerun must exclude the previously
-    // written output from the input set rather than merge (and truncate) it into
-    // itself.
+fn folder_output_matching_a_real_input_is_rejected_and_preserves_it() {
+    // `chopping -i dir -o dir/a.fastq` where a.fastq is a real input must
+    // hard-error, not merge the rest over a.fastq (the reported data-loss bug).
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.fastq"), "@r1\nACGTACGT\n+\nIIIIIIII\n").unwrap();
-    let out = dir.path().join("merged.fastq");
+    std::fs::write(dir.path().join("a.fastq"), "@a\nACGT\n+\nIIII\n").unwrap();
+    std::fs::write(dir.path().join("b.fastq"), "@b\nTTTT\n+\nIIII\n").unwrap();
+    let a = dir.path().join("a.fastq");
+    let before = std::fs::read(&a).unwrap();
 
     chopping()
         .arg("-i")
         .arg(dir.path())
         .arg("-o")
-        .arg(&out)
+        .arg(&a)
         .args(["-t", "1"])
         .assert()
-        .success();
-    let first = std::fs::read_to_string(&out).unwrap();
-
-    chopping()
-        .arg("-i")
-        .arg(dir.path())
-        .arg("-o")
-        .arg(&out)
-        .args(["-t", "1"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("excluding the output file"));
-    let second = std::fs::read_to_string(&out).unwrap();
-
+        .failure()
+        .stderr(predicate::str::contains("refusing to overwrite"));
     assert_eq!(
-        first, second,
-        "rerun must produce the same output, not re-ingest it"
+        std::fs::read(&a).unwrap(),
+        before,
+        "the real input file must be untouched"
     );
 }
 
 #[test]
-fn folder_bam_to_fastq_rerun_excludes_cross_format_output() {
-    // A BAM folder producing a FASTQ output *inside itself*: on rerun the stale
-    // merged.fastq must be excluded before the mixed-family check — otherwise the
-    // folder (a.bam + merged.fastq) would wrongly look "mixed" and error.
+fn folder_rerun_with_output_inside_dir_hard_errors() {
+    // When `-o` lands inside `-i <dir>`, a rerun (the output now a read file in the
+    // folder — indistinguishable from a real input) must hard-error, not overwrite.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.fastq"), "@r1\nACGTACGT\n+\nIIIIIIII\n").unwrap();
+    let out = dir.path().join("merged.fastq");
+
+    // First run: merged.fastq doesn't exist yet -> succeeds, creates it.
+    chopping()
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
+        .args(["-t", "1"])
+        .assert()
+        .success();
+    let first = std::fs::read_to_string(&out).unwrap();
+
+    // Rerun: merged.fastq now exists in the dir -> hard error, prior output kept.
+    chopping()
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
+        .args(["-t", "1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to overwrite"));
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        first,
+        "prior output preserved"
+    );
+}
+
+#[test]
+fn folder_bam_to_fastq_rerun_with_output_inside_dir_hard_errors() {
+    // BAM folder producing a FASTQ output inside itself: first run works, rerun
+    // (merged.fastq now a read file in the folder) hard-errors rather than overwrite.
     let dir = tempfile::tempdir().unwrap();
     write_ubam(&dir.path().join("a.bam"), b"r1", b"ACGTACGT", vec![40; 8]);
     let out = dir.path().join("merged.fastq");
 
-    // First run creates merged.fastq inside the BAM folder.
     chopping()
         .arg("-i")
         .arg(dir.path())
@@ -148,7 +172,6 @@ fn folder_bam_to_fastq_rerun_excludes_cross_format_output() {
         .success();
     let first = std::fs::read_to_string(&out).unwrap();
 
-    // Rerun must succeed (not error as "mixed"), exclude the output, same result.
     chopping()
         .arg("-i")
         .arg(dir.path())
@@ -156,9 +179,13 @@ fn folder_bam_to_fastq_rerun_excludes_cross_format_output() {
         .arg(&out)
         .args(["--out-format", "fastq", "-t", "1"])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("excluding the output file"));
-    assert_eq!(std::fs::read_to_string(&out).unwrap(), first);
+        .failure()
+        .stderr(predicate::str::contains("refusing to overwrite"));
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        first,
+        "prior output preserved"
+    );
 }
 
 fn write_ubam_with_rg(path: &Path, name: &[u8], rg: &str) {
