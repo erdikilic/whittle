@@ -13,9 +13,94 @@ use crate::{filter, mods, trim};
 
 use super::Stats;
 
+/// PacBio per-base kinetics tags: one value per SEQ base (`B` arrays), so they
+/// must be sliced in lockstep with the sequence when a read is trimmed. `ip`/`pw`
+/// are single-strand IPD/pulse-width; `fi`/`fp`/`ri`/`rp` are the CCS forward/
+/// reverse codec-V1 kinetics. Any *other* `B` array whose length equals the read
+/// length is also treated as per-base (structural rule) so new/custom tags are
+/// handled without a code change.
+const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] = [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp"];
+
+/// Signal-space tags that index the raw signal, not the base sequence, and so
+/// cannot be sliced in base coordinates. They go stale the moment a read is
+/// trimmed, so they are dropped once the read is actually cropped/split (ONT `mv`
+/// move table). Extend this list as other such tags surface.
+const STALE_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"mv"];
+
+/// What to do with one aux tag when producing the output window.
+enum TagAction {
+    /// Leave the tag exactly as-is.
+    Keep,
+    /// Replace it with a window-sliced value (per-base arrays).
+    Replace(Value),
+    /// Remove it (stale signal-space tags on a trimmed read).
+    Drop,
+}
+
+fn array_len(a: &Array) -> usize {
+    match a {
+        Array::Int8(v) => v.len(),
+        Array::UInt8(v) => v.len(),
+        Array::Int16(v) => v.len(),
+        Array::UInt16(v) => v.len(),
+        Array::Int32(v) => v.len(),
+        Array::UInt32(v) => v.len(),
+        Array::Float(v) => v.len(),
+    }
+}
+
+/// Slice every subtype of a `B` array to `[start, end)` (the element index is the
+/// base index for a per-base tag). Subtype-agnostic, so `B:C` (codec-V1) and `B:S`
+/// (raw frames) kinetics both work.
+fn slice_array(a: &Array, start: usize, end: usize) -> Array {
+    match a {
+        Array::Int8(v) => Array::Int8(v[start..end].to_vec()),
+        Array::UInt8(v) => Array::UInt8(v[start..end].to_vec()),
+        Array::Int16(v) => Array::Int16(v[start..end].to_vec()),
+        Array::UInt16(v) => Array::UInt16(v[start..end].to_vec()),
+        Array::Int32(v) => Array::Int32(v[start..end].to_vec()),
+        Array::UInt32(v) => Array::UInt32(v[start..end].to_vec()),
+        Array::Float(v) => Array::Float(v[start..end].to_vec()),
+    }
+}
+
+/// Decide how a non-MM/ML/MN aux tag transforms for output window `[start, end)`.
+/// `orig_len` is the source SEQ length. MM/ML/MN are handled by the dedicated mod
+/// path and must be filtered out by the caller before this is called.
+fn tag_action(tag: &[u8; 2], value: &Value, orig_len: usize, start: usize, end: usize) -> TagAction {
+    // Untrimmed window == the whole read: the record is unchanged, keep everything.
+    if start == 0 && end == orig_len {
+        return TagAction::Keep;
+    }
+    if STALE_ON_TRIM_TAGS.contains(tag) {
+        return TagAction::Drop;
+    }
+    // Per-base `B` array (known kinetics OR any array whose length matches the
+    // read): slice it to the window. A known kinetics tag whose length does NOT
+    // match is malformed — left untouched here and surfaced via
+    // `has_malformed_perbase_tag` so the run can note it.
+    if let Value::Array(arr) = value
+        && array_len(arr) == orig_len
+    {
+        return TagAction::Replace(Value::Array(slice_array(arr, start, end)));
+    }
+    TagAction::Keep
+}
+
+/// True if the record carries a *known* per-base kinetics tag whose array length
+/// disagrees with the sequence length — i.e. a malformed/unexpected per-base tag
+/// that cannot be safely sliced. Used only to emit a run-level advisory.
+pub fn has_malformed_perbase_tag(rec: &RecordBuf, seq_len: usize) -> bool {
+    rec.data().iter().any(|(tag, value)| {
+        let t = <[u8; 2]>::from(tag);
+        KNOWN_PERBASE_TAGS.contains(&t)
+            && matches!(value, Value::Array(a) if array_len(a) != seq_len)
+    })
+}
+
 /// Build one output uBAM record for interval [start,end): slice SEQ/QUAL, rebuild
-/// MM/ML/MN, suffix the name on splits. Non-mod aux tags are carried through
-/// unchanged (they ride along in the cloned RecordBuf).
+/// MM/ML/MN, slice per-base kinetics arrays, drop stale signal-space tags on trim,
+/// suffix the name on splits. Remaining aux tags ride through unchanged.
 pub fn reconstruct_record(
     src: &RecordBuf,
     start: usize,
@@ -68,6 +153,34 @@ pub fn reconstruct_record(
                 data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
                 data.remove(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH);
             }
+        }
+    }
+
+    // Per-base kinetics arrays (PacBio ip/pw/fi/fp/ri/rp, or any read-length `B`
+    // array) are sliced to the window so the trimmed record stays valid; ONT
+    // `mv`-class signal tags are dropped. Only runs when the read is actually
+    // trimmed; MM/ML/MN were handled above and are skipped here.
+    let orig_len = seq.len();
+    if start != 0 || end != orig_len {
+        let data = out.data_mut();
+        let mut to_replace: Vec<(Tag, Value)> = Vec::new();
+        let mut to_drop: Vec<Tag> = Vec::new();
+        for (tag, value) in data.iter() {
+            let t = <[u8; 2]>::from(tag);
+            if t == *b"MM" || t == *b"ML" || t == *b"MN" {
+                continue;
+            }
+            match tag_action(&t, value, orig_len, start, end) {
+                TagAction::Keep => {}
+                TagAction::Replace(v) => to_replace.push((tag, v)),
+                TagAction::Drop => to_drop.push(tag),
+            }
+        }
+        for tag in to_drop {
+            data.remove(&tag);
+        }
+        for (tag, v) in to_replace {
+            data.insert(tag, v);
         }
     }
 
@@ -139,6 +252,9 @@ fn run_bam_seq(
                 qual.len()
             );
         }
+        if has_malformed_perbase_tag(&rec, seq.len()) {
+            stats.malformed_tag_reads += 1;
+        }
         if !filter::passes(&seq, &qual, &cfg.filter) {
             continue;
         }
@@ -178,6 +294,7 @@ where
     let input_reads = AtomicU64::new(0);
     let output_reads = AtomicU64::new(0);
     let (tx, rx) = crossbeam_channel::bounded::<T>(render_workers * 4);
+    let malformed = AtomicU64::new(0);
     let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
     let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
 
@@ -214,6 +331,9 @@ where
                     }
                 };
                 input_reads.fetch_add(1, Ordering::Relaxed);
+                if has_malformed_perbase_tag(&rec, rec.sequence().as_ref().len()) {
+                    malformed.fetch_add(1, Ordering::Relaxed);
+                }
                 match render(&rec, cfg) {
                     Ok(items) => {
                         output_reads.fetch_add(items.len() as u64, Ordering::Relaxed);
@@ -242,6 +362,7 @@ where
     Ok(Stats {
         input_reads: input_reads.load(Ordering::Relaxed),
         output_reads: output_reads.load(Ordering::Relaxed),
+        malformed_tag_reads: malformed.load(Ordering::Relaxed),
     })
 }
 
@@ -308,14 +429,27 @@ fn build_fastq_tags(
     sel: &FastqTags,
 ) -> Vec<u8> {
     let mut tags = Vec::new();
+    let orig_len = seq.len();
     for (tag, value) in src.data().iter() {
         let t = <[u8; 2]>::from(tag);
         if t == *b"MM" || t == *b"ML" || t == *b"MN" {
             continue; // handled by the reconstructed block below
         }
-        if sel.carries(&t) {
-            tags.push(b'\t');
-            tags.extend_from_slice(&format_aux_field(t, value));
+        if !sel.carries(&t) {
+            continue;
+        }
+        // Same per-base slicing / stale-tag drop as the BAM→BAM path, so kinetics
+        // carried into a FASTQ header stay consistent with the trimmed sequence.
+        match tag_action(&t, value, orig_len, start, end) {
+            TagAction::Keep => {
+                tags.push(b'\t');
+                tags.extend_from_slice(&format_aux_field(t, value));
+            }
+            TagAction::Replace(v) => {
+                tags.push(b'\t');
+                tags.extend_from_slice(&format_aux_field(t, &v));
+            }
+            TagAction::Drop => {}
         }
     }
     if sel.carries_mods()
@@ -358,6 +492,9 @@ where
                 seq.len(),
                 qual.len()
             );
+        }
+        if has_malformed_perbase_tag(&rec, seq.len()) {
+            stats.malformed_tag_reads += 1;
         }
         if !filter::passes(&seq, &qual, &cfg.filter) {
             continue;
@@ -722,6 +859,114 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("MM:Z:C+m,0,1;\tMN:i:4"), "expected MM+MN, got: {s:?}");
         assert!(!s.contains("ML:B"), "MM-only record must not emit an ML field: {s:?}");
+    }
+
+    #[test]
+    fn reconstruct_record_slices_kinetics_and_drops_mv() {
+        // PacBio-style per-base kinetics (ip/pw, length == read length) must be
+        // sliced with the sequence; ONT `mv` (signal-space) must be dropped on
+        // trim; per-read RG must ride through unchanged.
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTAC".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 6].into();
+        let d = src.data_mut();
+        d.insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8(vec![10, 11, 12, 13, 14, 15])));
+        d.insert(Tag::new(b'p', b'w'), Value::Array(Array::UInt16(vec![20, 21, 22, 23, 24, 25])));
+        d.insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![5, 1, 0, 1, 0])));
+        d.insert(Tag::READ_GROUP, Value::String(b"grp".as_slice().into()));
+
+        // window [2,5): "GTA" (head-crop 2, tail-crop 1).
+        let out = reconstruct_record(&src, 2, 5, 1, 0);
+        assert_eq!(out.sequence().as_ref(), b"GTA");
+        match out.data().get(&Tag::new(b'i', b'p')) {
+            Some(Value::Array(Array::UInt8(v))) => assert_eq!(v, &[12, 13, 14]),
+            other => panic!("ip should be sliced [2,5): {other:?}"),
+        }
+        match out.data().get(&Tag::new(b'p', b'w')) {
+            Some(Value::Array(Array::UInt16(v))) => assert_eq!(v, &[22, 23, 24]),
+            other => panic!("pw should be sliced [2,5): {other:?}"),
+        }
+        assert!(out.data().get(&Tag::new(b'm', b'v')).is_none(), "mv must be dropped on trim");
+        assert!(matches!(out.data().get(&Tag::READ_GROUP), Some(Value::String(_))), "RG kept");
+    }
+
+    #[test]
+    fn reconstruct_record_slices_unknown_read_length_array_but_not_others() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGT".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 4].into();
+        // Unknown B-array whose length == read length -> sliced structurally.
+        src.data_mut().insert(Tag::new(b'z', b'z'), Value::Array(Array::Int32(vec![1, 2, 3, 4])));
+        // B-array whose length != read length -> not per-base, left alone.
+        src.data_mut().insert(Tag::new(b'x', b'y'), Value::Array(Array::UInt8(vec![9, 9])));
+
+        let out = reconstruct_record(&src, 1, 3, 1, 0); // window [1,3)
+        match out.data().get(&Tag::new(b'z', b'z')) {
+            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[2, 3]),
+            other => panic!("zz sliced: {other:?}"),
+        }
+        match out.data().get(&Tag::new(b'x', b'y')) {
+            Some(Value::Array(Array::UInt8(v))) => assert_eq!(v, &[9, 9]),
+            other => panic!("xy untouched: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconstruct_record_untrimmed_keeps_kinetics_and_mv() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGT".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 4].into();
+        src.data_mut().insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8(vec![1, 2, 3, 4])));
+        src.data_mut().insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![5, 1, 1])));
+
+        // Full window [0,4): nothing trimmed -> everything preserved verbatim.
+        let out = reconstruct_record(&src, 0, 4, 1, 0);
+        match out.data().get(&Tag::new(b'i', b'p')) {
+            Some(Value::Array(Array::UInt8(v))) => assert_eq!(v, &[1, 2, 3, 4]),
+            other => panic!("ip unchanged: {other:?}"),
+        }
+        assert!(out.data().get(&Tag::new(b'm', b'v')).is_some(), "mv kept when untrimmed");
+    }
+
+    #[test]
+    fn bam2fq_slices_kinetics_in_header() {
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        *rec.name_mut() = Some(b"r1".into());
+        *rec.sequence_mut() = b"ACGTAC".to_vec().into();
+        *rec.quality_scores_mut() = vec![40; 6].into();
+        rec.data_mut().insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8(vec![10, 11, 12, 13, 14, 15])));
+
+        let cfg = cfg_bam2fq(None, 2, FastqTags::All); // head-crop 2 -> window [2,6)
+        let mut out = Vec::new();
+        run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("ip:B:C,12,13,14,15"), "kinetics not sliced in FASTQ header: {s:?}");
+    }
+
+    #[test]
+    fn malformed_perbase_tag_detected_and_left_untouched() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGT".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 4].into();
+        // ip length 3 != read length 4 -> malformed known per-base tag.
+        src.data_mut().insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8(vec![1, 2, 3])));
+
+        assert!(has_malformed_perbase_tag(&src, 4));
+        // Can't safely slice it -> left exactly as-is.
+        let out = reconstruct_record(&src, 1, 3, 1, 0);
+        match out.data().get(&Tag::new(b'i', b'p')) {
+            Some(Value::Array(Array::UInt8(v))) => assert_eq!(v, &[1, 2, 3]),
+            other => panic!("malformed ip left as-is: {other:?}"),
+        }
     }
 
     #[test]

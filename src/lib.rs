@@ -106,7 +106,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
             // truncated BAM with a success exit code.
             sink.finish()?;
-            eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+            eprint_run_summary(&stats);
             return Ok(());
         }
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
@@ -118,7 +118,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             cfg.render_workers = b.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg)?;
             writer.finish()?;
-            eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+            eprint_run_summary(&stats);
             return Ok(());
         }
         (Format::Fastq | Format::FastqGz, Format::Bam) => {
@@ -137,7 +137,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     let records = io::fastq::reader_from(source, gz_in);
     let stats = pipeline::run_fastq(records, &mut writer, &cfg)?;
     writer.finish()?;
-    eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+    eprint_run_summary(&stats);
     Ok(())
 }
 
@@ -269,7 +269,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
             let records = io::dir::fastq_records(&paths);
             let stats = pipeline::run_fastq(records, &mut writer, cfg)?;
             writer.finish()?;
-            eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+            eprint_run_summary(&stats);
             Ok(())
         }
         io::dir::Family::Bam => match out_fmt {
@@ -286,7 +286,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg)?;
                 sink.finish()?;
-                eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+                eprint_run_summary(&stats);
                 Ok(())
             }
             Format::Fastq | Format::FastqGz => {
@@ -297,7 +297,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg)?;
                 writer.finish()?;
-                eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+                eprint_run_summary(&stats);
                 Ok(())
             }
         },
@@ -324,6 +324,19 @@ fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     match (resolve(a), resolve(b)) {
         (Some(x), Some(y)) => x == y,
         _ => false,
+    }
+}
+
+/// Print the end-of-run summary: the kept/total count, plus a one-line advisory
+/// if any read carried a malformed per-base tag (see `has_malformed_perbase_tag`).
+fn eprint_run_summary(stats: &pipeline::Stats) {
+    eprintln!("Kept {} reads out of {}", stats.output_reads, stats.input_reads);
+    if stats.malformed_tag_reads > 0 {
+        eprintln!(
+            "note: {} read(s) carried a per-base kinetics tag (ip/pw/fi/fp/ri/rp) whose \
+             length did not match the sequence; left unchanged",
+            stats.malformed_tag_reads
+        );
     }
 }
 

@@ -132,6 +132,8 @@ where
     Ok(Stats {
         input_reads: input_reads.load(Ordering::Relaxed),
         output_reads: output_reads.load(Ordering::Relaxed),
+        // FASTQ input carries no BAM per-base tags.
+        malformed_tag_reads: 0,
     })
 }
 
