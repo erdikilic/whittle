@@ -27,13 +27,18 @@ const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] = [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri"
 /// `signal_tag_updates`, not the per-base pass.
 const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 
-/// Other dorado tags that reference raw-signal or sequence coordinates but can't
-/// be reconstructed from the BAM alone (they'd need the raw signal or a re-demux),
-/// so they are dropped on any trimmed read to avoid shipping stale coordinates:
-/// `pa` (poly-A tail signal boundaries), `pt` (poly-A tail length), `bi` (barcode
-/// info, which embeds front/rear sequence positions). The barcode call itself
-/// (`BC`/`bv`) is a per-read label and rides through unchanged.
-const DROP_ON_TRIM_TAGS: [[u8; 2]; 3] = [*b"pa", *b"pt", *b"bi"];
+/// Poly-A tail tags handled together with the move table: `pa` (signal boundaries,
+/// stored in original-signal coordinates) and `pt` (tail length in bases). Under
+/// `--update-moves` they are kept/shifted when the poly-A tail survives the trim
+/// and dropped when it's cut; without it (or a malformed move table) they are
+/// dropped, since we can't relate signal to sequence.
+const POLYA_TAGS: [[u8; 2]; 2] = [*b"pa", *b"pt"];
+
+/// `bi` (barcode info) embeds front/rear SEQUENCE positions that shift under a
+/// crop and can't be reconstructed from the BAM, so it is dropped on any trimmed
+/// read. The barcode call itself (`BC`/`bv`) is a per-read label and rides
+/// through unchanged.
+const DROP_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"bi"];
 
 /// Tags dropped only when a read is SPLIT (not on a plain crop): `st` (read start
 /// time) and `du` (duration) describe the whole parent read, but a split subread
@@ -121,6 +126,52 @@ fn parent_read_id(src: &RecordBuf) -> Vec<u8> {
     }
 }
 
+/// Trim-aware handling of the poly-A tags (`pa` signal boundaries, `pt` tail
+/// length). `pa` holds absolute original-signal positions (`>= 0`; `-1`/`-2` are
+/// dorado's not-found/not-enabled sentinels, left as-is). `[kept_start, kept_end)`
+/// is the original-signal window the kept bases span. If every real `pa` position
+/// falls inside that window the tail survived, so: on a split, shift `pa` into the
+/// subread's own signal frame (its `ts` is 0) and keep `pt`; on a crop, keep both
+/// unchanged (identity + POD5 signal are unchanged, so the absolute positions stay
+/// valid). If any real position falls outside — the tail was (partly) trimmed — or
+/// there's no poly-A array, drop `pa`/`pt`.
+fn polya_updates(
+    src: &RecordBuf,
+    kept_start: i64,
+    kept_end: i64,
+    is_split: bool,
+) -> Vec<(Tag, Option<Value>)> {
+    let pa_tag = Tag::new(b'p', b'a');
+    let pt_tag = Tag::new(b'p', b't');
+    let drop_both = || vec![(pa_tag, None), (pt_tag, None)];
+
+    let pa = match src.data().get(&pa_tag) {
+        Some(Value::Array(Array::Int32(v))) => v,
+        _ => return drop_both(),
+    };
+    let has_real = pa.iter().any(|&p| p >= 0);
+    let survives = has_real
+        && pa.iter().filter(|&&p| p >= 0).all(|&p| {
+            let p = i64::from(p);
+            p >= kept_start && p <= kept_end
+        });
+    if !survives {
+        return drop_both();
+    }
+    if is_split {
+        // Re-express into the subread's own frame (subread signal 0 == kept_start;
+        // its ts is 0). Sentinels stay untouched. pt (base count) is unchanged.
+        let shifted: Vec<i32> = pa
+            .iter()
+            .map(|&p| if p >= 0 { (i64::from(p) - kept_start) as i32 } else { p })
+            .collect();
+        vec![(pa_tag, Some(Value::Array(Array::Int32(shifted))))]
+    } else {
+        // Crop: absolute original-signal positions are still valid; keep pa/pt.
+        Vec::new()
+    }
+}
+
 /// Trim-aware rewrite of the ONT signal tags for output window `[start, end)`.
 /// Returns `(tag, Some(value))` to set or `(tag, None)` to remove; empty when the
 /// read isn't trimmed. With `update_moves` off — or when the move table is
@@ -143,7 +194,11 @@ fn signal_tag_updates(
         return Vec::new(); // untrimmed: leave everything
     }
     let drop_all = || -> Vec<(Tag, Option<Value>)> {
-        SIGNAL_TAGS.iter().map(|t| (Tag::new(t[0], t[1]), None)).collect()
+        SIGNAL_TAGS
+            .iter()
+            .chain(POLYA_TAGS.iter())
+            .map(|t| (Tag::new(t[0], t[1]), None))
+            .collect()
     };
     if !update_moves {
         return drop_all();
@@ -176,10 +231,15 @@ fn signal_tag_updates(
     new_mv.extend_from_slice(&moves[block_first..block_second]);
     let mut updates = vec![(Tag::new(b'm', b'v'), Some(Value::Array(Array::Int8(new_mv))))];
 
-    // `ns = basecalled span + front trim`, matching dorado's
-    // `ns = raw_data_samples + num_trimmed_samples` (so a tail crop shrinks `ns`,
-    // a head-only crop leaves it unchanged, and a split gets the subread span).
+    // Original-signal window the kept bases span: [ts0 + block_first*stride,
+    // ts0 + block_second*stride). `ns = span + front trim` matches dorado's
+    // `ns = raw_data_samples + num_trimmed_samples` (a tail crop shrinks ns, a
+    // head-only crop leaves it unchanged, a split gets the subread span).
+    let ts0 = signal_int(src, b"ts").unwrap_or(0);
+    let kept_start = ts0 + (block_first * stride_n) as i64;
+    let kept_end = ts0 + (block_second * stride_n) as i64;
     let span = ((block_second - block_first) * stride_n) as i64;
+
     if total > 1 {
         // Split -> dorado subread: renamed, front trim reset to 0, parent linkage.
         let sp = signal_int(src, b"sp").unwrap_or(0) + (block_first * stride_n) as i64;
@@ -192,10 +252,10 @@ fn signal_tag_updates(
         updates.push((Tag::new(b'r', b'n'), Some(Value::Int32(-1))));
     } else {
         // Head/tail crop in place: keep the read identity, advance the front trim.
-        let ts = signal_int(src, b"ts").unwrap_or(0) + (block_first * stride_n) as i64;
-        updates.push((Tag::new(b't', b's'), Some(Value::Int32(ts as i32))));
-        updates.push((Tag::new(b'n', b's'), Some(Value::Int32((ts + span) as i32))));
+        updates.push((Tag::new(b't', b's'), Some(Value::Int32(kept_start as i32))));
+        updates.push((Tag::new(b'n', b's'), Some(Value::Int32((kept_start + span) as i32))));
     }
+    updates.extend(polya_updates(src, kept_start, kept_end, total > 1));
     updates
 }
 
@@ -580,8 +640,12 @@ fn build_fastq_tags(
         }
         // On trim, drop the ONT signal tags (a sliced move table is impractical in
         // a FASTQ header, and signal-aware callers consume BAM — `--update-moves`
-        // is BAM→BAM only) and the unreconstructable poly-A/barcode-coordinate tags.
-        if trimmed && (SIGNAL_TAGS.contains(&t) || DROP_ON_TRIM_TAGS.contains(&t)) {
+        // is BAM→BAM only) plus the poly-A and barcode-coordinate tags.
+        if trimmed
+            && (SIGNAL_TAGS.contains(&t)
+                || POLYA_TAGS.contains(&t)
+                || DROP_ON_TRIM_TAGS.contains(&t))
+        {
             continue;
         }
         // On a split, st/du describe the parent read, not the subread.
@@ -1296,6 +1360,57 @@ mod tests {
         }
         // Per-read metadata (RG) is untouched.
         assert!(out.data().get(&Tag::new(b'R', b'G')).is_some());
+    }
+
+    // ubam_with_moves head-crop 2 spans original-signal window [ts0+3*2, ts0+8*2]
+    // = [16, 26]; a split segment [3,6) spans [ts0+4*2, 26] = [18, 26].
+    #[test]
+    fn update_moves_crop_keeps_polya_when_tail_survives() {
+        let mut src = ubam_with_moves();
+        // anchor + boundary all inside [16,26]; the split range is a sentinel.
+        src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])));
+        src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+
+        let out = reconstruct_record(&src, 2, 6, 1, 0, true); // head-crop 2
+        // A crop keeps the read identity + POD5 signal, so absolute pa stays valid.
+        match out.data().get(&Tag::new(b'p', b'a')) {
+            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[20, 18, 24, -1, -1]),
+            other => panic!("pa should be kept as-is on a crop: {other:?}"),
+        }
+        match out.data().get(&Tag::new(b'p', b't')) {
+            Some(Value::Int32(30)) => {}
+            other => panic!("pt: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_moves_split_shifts_polya_into_subread_frame() {
+        let mut src = ubam_with_moves();
+        src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])));
+        src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+
+        // split segment [3,6): kept signal window [18,26] -> shift real positions by -18.
+        let out = reconstruct_record(&src, 3, 6, 2, 1, true);
+        match out.data().get(&Tag::new(b'p', b'a')) {
+            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[2, 0, 6, -1, -1]),
+            other => panic!("pa should shift into the subread frame: {other:?}"),
+        }
+        match out.data().get(&Tag::new(b'p', b't')) {
+            Some(Value::Int32(30)) => {} // base count unchanged
+            other => panic!("pt: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_moves_drops_polya_when_tail_trimmed() {
+        let mut src = ubam_with_moves();
+        // anchor at 12 sits in the trimmed-off front signal (kept window is [16,26]).
+        src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![12, 10, 14, -1, -1])));
+        src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+
+        let out = reconstruct_record(&src, 2, 6, 1, 0, true); // head-crop 2
+        assert!(out.data().get(&Tag::new(b'p', b'a')).is_none(), "pa dropped when tail trimmed");
+        assert!(out.data().get(&Tag::new(b'p', b't')).is_none(), "pt dropped when tail trimmed");
     }
 
     #[test]
