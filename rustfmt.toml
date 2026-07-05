@@ -21,5 +21,3 @@ hex_literal_case = "Lower"         # `0x1f`, not `0x1F`
 imports_granularity = "Module"      # merge `use a::b; use a::c;` -> `use a::{b, c};`
 group_imports = "StdExternalCrate"  # order: std / external crates / this crate
 
-# --- misc (nightly) ---
-overflow_delimited_expr = true      # let a trailing array/struct/closure arg overflow
