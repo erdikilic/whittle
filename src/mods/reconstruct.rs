@@ -30,7 +30,9 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
         let mut cursor = 0usize; // index into `positions`
 
         for (k, &d) in g.deltas.iter().enumerate() {
-            cursor += d;
+            // Saturating so a corrupt (clamped) delta can't overflow the running
+            // cursor; it just lands past the end and breaks below.
+            cursor = cursor.saturating_add(d);
             if cursor >= positions.len() {
                 break; // malformed / past end
             }
@@ -245,6 +247,128 @@ mod tests {
                 assert_eq!(
                     g.ml, exp_ml,
                     "kept ML must equal in-window positions': seq={seq:?} window=[{start},{end})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn huge_delta_does_not_overflow_cursor() {
+        // A corrupt second delta clamps to usize::MAX in `parse`; the running
+        // `cursor` in reconstruct must saturate rather than overflow (which would
+        // panic in this debug build). The unreachable position is simply dropped.
+        let m = recon(b"C+m,1,99999999999999999999;", &[5, 6], b"CCCC", 0, 4);
+        // Only the first modified C (occurrence 1 -> abs 1) survives.
+        assert_eq!(m.groups.len(), 1);
+        assert_eq!(m.groups[0].deltas, vec![1]);
+        assert_eq!(m.groups[0].ml, vec![5]);
+    }
+
+    /// Property test extending `ml_stays_byte_aligned_over_random_windows` to
+    /// MULTI-code groups (`ncodes ∈ {1, 2}`, e.g. `C+m` and `C+mh`). ML is
+    /// position-major — `ncodes` bytes per modified position — and after slicing
+    /// to a window the surviving ML must stay position-major and byte-exact: its
+    /// length equals `surviving_positions * ncodes`, and the bytes equal exactly
+    /// the in-window positions' `ncodes`-byte runs in order. This is the
+    /// misalignment class that would silently corrupt every downstream
+    /// probability for multi-mod reads, which the single-code property test
+    /// above cannot reach.
+    #[test]
+    fn ml_stays_byte_aligned_multicode_over_random_windows() {
+        struct Lcg(u64);
+        impl Lcg {
+            fn next_u64(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                self.0
+            }
+            fn below(&mut self, n: usize) -> usize {
+                ((self.next_u64() >> 33) as usize) % n
+            }
+        }
+        let mut rng = Lcg(0xdead_beef_cafe_babe);
+
+        for _ in 0..3000 {
+            let ncodes = 1 + rng.below(2); // 1 or 2
+            let codes: &[u8] = if ncodes == 1 { b"m" } else { b"mh" };
+
+            let n = 5 + rng.below(40);
+            let seq: Vec<u8> = (0..n).map(|_| b"ACGT"[rng.below(4)]).collect();
+            let c_pos: Vec<usize> = seq
+                .iter()
+                .enumerate()
+                .filter(|&(_, &b)| b == b'C')
+                .map(|(i, _)| i)
+                .collect();
+            if c_pos.is_empty() {
+                continue;
+            }
+
+            // Random subset of C occurrences to modify (ascending).
+            let mut occ = Vec::new();
+            for o in 0..c_pos.len() {
+                if rng.below(2) == 0 {
+                    occ.push(o);
+                }
+            }
+            if occ.is_empty() {
+                continue;
+            }
+            let mut deltas = Vec::new();
+            let mut prev: i64 = -1;
+            for &o in &occ {
+                deltas.push((o as i64 - prev - 1) as usize);
+                prev = o as i64;
+            }
+            // ML: ncodes bytes per modified position, position-major.
+            let ml: Vec<u8> = (0..occ.len() * ncodes).map(|_| rng.below(256) as u8).collect();
+
+            let mut mm = b"C+".to_vec();
+            mm.extend_from_slice(codes);
+            for d in &deltas {
+                mm.extend_from_slice(format!(",{d}").as_bytes());
+            }
+            mm.push(b';');
+
+            let a = rng.below(n + 1);
+            let b = rng.below(n + 1);
+            let (start, end) = if a <= b { (a, b) } else { (b, a) };
+
+            let out = recon(&mm, &ml, &seq, start, end);
+
+            // Independent expected survivors: each in-window position's ncodes-byte
+            // ML run, concatenated in order.
+            let mut exp_ml = Vec::new();
+            for (k, &o) in occ.iter().enumerate() {
+                let abs = c_pos[o];
+                if abs >= start && abs < end {
+                    exp_ml.extend_from_slice(&ml[k * ncodes..k * ncodes + ncodes]);
+                }
+            }
+
+            if exp_ml.is_empty() {
+                assert!(
+                    out.groups.is_empty(),
+                    "no survivors but a group was emitted: seq={seq:?} ncodes={ncodes}"
+                );
+            } else {
+                assert_eq!(
+                    out.groups.len(),
+                    1,
+                    "seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
+                );
+                let g = &out.groups[0];
+                assert_eq!(g.codes.len(), ncodes, "code count must be preserved");
+                assert_eq!(
+                    g.ml.len(),
+                    g.deltas.len() * ncodes,
+                    "ML must stay position-major: seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
+                );
+                assert_eq!(
+                    g.ml, exp_ml,
+                    "kept ML must equal in-window positions' runs: seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
                 );
             }
         }
