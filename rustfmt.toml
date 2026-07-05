@@ -1,17 +1,25 @@
 # Formatting configuration for `chopping`.
 #
-# `imports_granularity` and `group_imports` are rustfmt-unstable, so format with
-# the nightly toolchain: `cargo +nightly fmt`. Stable `cargo fmt` still runs
-# (it just ignores those two options and leaves import blocks as written).
+# The unstable options in the "nightly" sections require the nightly toolchain:
+# `cargo +nightly fmt`. Stable `cargo fmt` still runs and passes `--check` — it
+# simply ignores those options and leaves the affected code as written.
+#
+# Comment- and string-reflowing options (wrap_comments, format_strings,
+# format_code_in_doc_comments, normalize_comments) are deliberately NOT enabled:
+# the hand-formatted doc comments and multi-line error strings are intentional.
 
-# Generous line width (rustfmt default is 100; we keep the roomy 100, not 80).
-max_width = 100
+# --- width / general (stable) ---
+max_width = 100          # roomy (rustfmt's default; not the cramped 80)
+newline_style = "Unix"   # always LF
 
-# `Foo { x }` instead of `Foo { x: x }`.
-use_field_init_shorthand = true
+# --- expression / literal tidiness (stable) ---
+use_field_init_shorthand = true    # `Foo { x }` instead of `Foo { x: x }`
+match_block_trailing_comma = true  # trailing comma after `=> { … }` match arms
+hex_literal_case = "Lower"         # `0x1f`, not `0x1F`
 
-# Merge `use a::b; use a::c;` into `use a::{b, c};` per top-level module.
-imports_granularity = "Module"
+# --- imports (nightly) ---
+imports_granularity = "Module"      # merge `use a::b; use a::c;` -> `use a::{b, c};`
+group_imports = "StdExternalCrate"  # order: std / external crates / this crate
 
-# Order import groups: std / external crates / this crate.
-group_imports = "StdExternalCrate"
+# --- misc (nightly) ---
+overflow_delimited_expr = true      # let a trailing array/struct/closure arg overflow

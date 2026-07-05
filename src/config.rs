@@ -36,7 +36,7 @@ impl FastqTags {
                     set.insert([b[0], b[1]]);
                 }
                 Ok(FastqTags::Only(set))
-            }
+            },
         }
     }
 
@@ -135,7 +135,7 @@ pub fn thread_budget(total: usize, render_heavy: bool, encode: EncodeKind) -> Th
         (false, _) => {
             let r = (rest / 6).max(1);
             (r, rest - r)
-        }
+        },
     };
     ThreadBudget {
         decode: 1,
@@ -161,7 +161,7 @@ mod tests {
             FastqTags::Only(ref s) => {
                 assert!(s.contains(b"MM") && s.contains(b"ML") && s.contains(b"RG"));
                 assert_eq!(s.len(), 3);
-            }
+            },
             other => panic!("expected Only, got {other:?}"),
         }
     }
@@ -185,38 +185,26 @@ mod tests {
     #[test]
     fn thread_budget_split() {
         use EncodeKind::*;
-        assert_eq!(
-            thread_budget(8, true, Bgzf),
-            ThreadBudget {
-                decode: 1,
-                render: 4,
-                encode: 3
-            }
-        );
-        assert_eq!(
-            thread_budget(8, true, Gzip),
-            ThreadBudget {
-                decode: 1,
-                render: 3,
-                encode: 4
-            }
-        );
-        assert_eq!(
-            thread_budget(8, false, Gzip),
-            ThreadBudget {
-                decode: 1,
-                render: 1,
-                encode: 6
-            }
-        );
-        assert_eq!(
-            thread_budget(8, true, None),
-            ThreadBudget {
-                decode: 1,
-                render: 7,
-                encode: 1
-            }
-        );
+        assert_eq!(thread_budget(8, true, Bgzf), ThreadBudget {
+            decode: 1,
+            render: 4,
+            encode: 3
+        });
+        assert_eq!(thread_budget(8, true, Gzip), ThreadBudget {
+            decode: 1,
+            render: 3,
+            encode: 4
+        });
+        assert_eq!(thread_budget(8, false, Gzip), ThreadBudget {
+            decode: 1,
+            render: 1,
+            encode: 6
+        });
+        assert_eq!(thread_budget(8, true, None), ThreadBudget {
+            decode: 1,
+            render: 7,
+            encode: 1
+        });
         for t in [1usize, 2, 3, 4, 16] {
             for rh in [true, false] {
                 for e in [None, Bgzf, Gzip] {

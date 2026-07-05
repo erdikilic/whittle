@@ -84,7 +84,7 @@ fn perbase_slice(value: &Value, orig_len: usize, start: usize, end: usize) -> Op
     match value {
         Value::Array(arr) if array_len(arr) == orig_len => {
             Some(Value::Array(slice_array(arr, start, end)))
-        }
+        },
         _ => None,
     }
 }
@@ -102,7 +102,7 @@ fn parse_move_table(value: &Value) -> Option<(i8, &[i8])> {
             } else {
                 None
             }
-        }
+        },
         _ => None,
     }
 }
@@ -348,23 +348,23 @@ pub fn reconstruct_record(
                             Tag::BASE_MODIFICATION_PROBABILITIES,
                             Value::Array(Array::UInt8(ml)),
                         );
-                    }
+                    },
                     // Source was MM-only: drop the cloned ML so we stay MM-only
                     // rather than emit an empty (invalid) ML.
                     None => {
                         data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
-                    }
+                    },
                 }
                 data.insert(
                     Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
                     Value::Int32((end - start) as i32),
                 );
-            }
+            },
             None => {
                 data.remove(&Tag::BASE_MODIFICATIONS);
                 data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
                 data.remove(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH);
-            }
+            },
         }
     }
 
@@ -376,10 +376,10 @@ pub fn reconstruct_record(
         match val {
             Some(v) => {
                 out.data_mut().insert(tag, v);
-            }
+            },
             None => {
                 out.data_mut().remove(&tag);
-            }
+            },
         }
     }
 
@@ -585,7 +585,7 @@ where
                             *g = Some(e);
                         }
                         return;
-                    }
+                    },
                 };
                 input_reads.fetch_add(1, Ordering::Relaxed);
                 if has_malformed_perbase_tag(&rec, rec.sequence().as_ref().len()) {
@@ -597,13 +597,13 @@ where
                         for it in items {
                             let _ = tx.send(it);
                         }
-                    }
+                    },
                     Err(e) => {
                         let mut g = proc_err.lock().unwrap();
                         if g.is_none() {
                             *g = Some(e);
                         }
-                    }
+                    },
                 }
             });
         });
@@ -999,15 +999,15 @@ mod tests {
         let out = reconstruct_record(&src, 1, 4, 1, 0, false);
 
         match out.data().get(&Tag::BASE_MODIFICATIONS) {
-            Some(Value::Int32(5)) => {}
+            Some(Value::Int32(5)) => {},
             other => panic!("MM must be left untouched for a non-string value, got {other:?}"),
         }
         match out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
-            Some(Value::Array(Array::UInt8(v))) if v == &[1u8, 2, 3] => {}
+            Some(Value::Array(Array::UInt8(v))) if v == &[1u8, 2, 3] => {},
             other => panic!("ML must be left untouched, got {other:?}"),
         }
         match out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
-            Some(Value::Int32(4)) => {}
+            Some(Value::Int32(4)) => {},
             other => panic!("MN must be left untouched, got {other:?}"),
         }
     }
@@ -1194,7 +1194,7 @@ mod tests {
         );
         // MN set to the window length.
         match out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
-            Some(Value::Int32(4)) => {}
+            Some(Value::Int32(4)) => {},
             other => panic!("expected MN=4, got {other:?}"),
         }
     }
@@ -1414,11 +1414,11 @@ mod tests {
         // ts += block_first*stride = 10 + 3*2 = 16; ns = ts + span = 16 + (8-3)*2 = 26
         // (a head-only crop leaves ns unchanged).
         match out.data().get(&Tag::new(b't', b's')) {
-            Some(Value::Int32(16)) => {}
+            Some(Value::Int32(16)) => {},
             other => panic!("ts: {other:?}"),
         }
         match out.data().get(&Tag::new(b'n', b's')) {
-            Some(Value::Int32(26)) => {}
+            Some(Value::Int32(26)) => {},
             other => panic!("ns: {other:?}"),
         }
         assert!(out.data().get(&Tag::new(b's', b'p')).is_none());
@@ -1445,11 +1445,11 @@ mod tests {
         }
         // ts unchanged (no head trim): 10; ns = ts + span = 10 + (6-0)*2 = 22 (< 26).
         match out.data().get(&Tag::new(b't', b's')) {
-            Some(Value::Int32(10)) => {}
+            Some(Value::Int32(10)) => {},
             other => panic!("ts: {other:?}"),
         }
         match out.data().get(&Tag::new(b'n', b's')) {
-            Some(Value::Int32(22)) => {}
+            Some(Value::Int32(22)) => {},
             other => panic!("ns must shrink on a tail crop (dorado ns = trim + span): {other:?}"),
         }
     }
@@ -1465,15 +1465,15 @@ mod tests {
             other => panic!("s1 mv: {other:?}"),
         }
         match s1.data().get(&Tag::new(b't', b's')) {
-            Some(Value::Int32(0)) => {}
+            Some(Value::Int32(0)) => {},
             o => panic!("s1 ts should be 0: {o:?}"),
         }
         match s1.data().get(&Tag::new(b'n', b's')) {
-            Some(Value::Int32(8)) => {} // (block 4-0)*stride 2
+            Some(Value::Int32(8)) => {}, // (block 4-0)*stride 2
             o => panic!("s1 ns: {o:?}"),
         }
         match s1.data().get(&Tag::new(b's', b'p')) {
-            Some(Value::Int32(0)) => {} // block_first 0 * stride
+            Some(Value::Int32(0)) => {}, // block_first 0 * stride
             o => panic!("s1 sp: {o:?}"),
         }
         match s1.data().get(&Tag::new(b'p', b'i')) {
@@ -1482,7 +1482,7 @@ mod tests {
         }
         // dorado marks split products with read_number -1.
         match s1.data().get(&Tag::new(b'r', b'n')) {
-            Some(Value::Int32(-1)) => {}
+            Some(Value::Int32(-1)) => {},
             o => panic!("s1 rn should be -1: {o:?}"),
         }
         // st/du describe the parent read -> dropped on a split subread.
@@ -1503,11 +1503,11 @@ mod tests {
             other => panic!("s2 mv: {other:?}"),
         }
         match s2.data().get(&Tag::new(b'n', b's')) {
-            Some(Value::Int32(8)) => {} // (8-4)*2
+            Some(Value::Int32(8)) => {}, // (8-4)*2
             o => panic!("s2 ns: {o:?}"),
         }
         match s2.data().get(&Tag::new(b's', b'p')) {
-            Some(Value::Int32(8)) => {} // block_first 4 * stride 2
+            Some(Value::Int32(8)) => {}, // block_first 4 * stride 2
             o => panic!("s2 sp: {o:?}"),
         }
     }
@@ -1575,7 +1575,7 @@ mod tests {
                     (q - expected).abs() < 1e-4,
                     "qs recomputed: got {q}, want {expected}"
                 );
-            }
+            },
             other => panic!("qs: {other:?}"),
         }
         // Per-read metadata (RG) is untouched.
@@ -1602,7 +1602,7 @@ mod tests {
             other => panic!("pa should be kept as-is on a crop: {other:?}"),
         }
         match out.data().get(&Tag::new(b'p', b't')) {
-            Some(Value::Int32(30)) => {}
+            Some(Value::Int32(30)) => {},
             other => panic!("pt: {other:?}"),
         }
     }
@@ -1624,7 +1624,7 @@ mod tests {
             other => panic!("pa should shift into the subread frame: {other:?}"),
         }
         match out.data().get(&Tag::new(b'p', b't')) {
-            Some(Value::Int32(30)) => {} // base count unchanged
+            Some(Value::Int32(30)) => {}, // base count unchanged
             other => panic!("pt: {other:?}"),
         }
     }
@@ -1678,7 +1678,7 @@ mod tests {
         match out.data().get(&Tag::new(b'p', b'a')) {
             Some(Value::Array(Array::Int32(v))) => {
                 assert_eq!(v, &[4, 2, 6, -1, -1], "pa must not be re-sliced")
-            }
+            },
             other => panic!("pa: {other:?}"),
         }
     }

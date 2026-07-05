@@ -130,7 +130,7 @@ where
                             *g = Some(e);
                         }
                         return;
-                    }
+                    },
                 };
                 input_reads.fetch_add(1, Ordering::Relaxed);
                 let (out, buf) = render_record(&rec, cfg);

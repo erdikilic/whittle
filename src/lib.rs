@@ -80,7 +80,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                 let fmt = io::detect_input(in_path, &probe[..n])?;
                 source = Box::new(std::io::Cursor::new(probe[..n].to_vec()).chain(source));
                 fmt
-            }
+            },
         },
     };
     let out_fmt = cfg
@@ -118,7 +118,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             sink.finish()?;
             eprint_run_summary(&stats);
             return Ok(());
-        }
+        },
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
             let encode = if matches!(out_fmt, Format::FastqGz) {
                 EncodeKind::Gzip
@@ -134,11 +134,11 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             writer.finish()?;
             eprint_run_summary(&stats);
             return Ok(());
-        }
+        },
         (Format::Fastq | Format::FastqGz, Format::Bam) => {
             anyhow::bail!("cross-format FASTQ->BAM conversion is not supported")
-        }
-        _ => {}
+        },
+        _ => {},
     }
 
     note_tags_ignored(&cfg, in_fmt, out_fmt);
@@ -202,11 +202,11 @@ impl FastqOut {
             FastqOut::Plain(mut w) => {
                 w.flush()?;
                 Ok(())
-            }
+            },
             FastqOut::Gz(mut w) => {
                 w.finish()?;
                 Ok(())
-            }
+            },
         }
     }
 }
@@ -281,7 +281,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
             writer.finish()?;
             eprint_run_summary(&stats);
             Ok(())
-        }
+        },
         io::dir::Family::Bam => match out_fmt {
             Format::Bam => {
                 note_tags_ignored(cfg, family_fmt, out_fmt);
@@ -302,7 +302,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 sink.finish()?;
                 eprint_run_summary(&stats);
                 Ok(())
-            }
+            },
             Format::Fastq | Format::FastqGz => {
                 let encode = if matches!(out_fmt, Format::FastqGz) {
                     EncodeKind::Gzip
@@ -317,7 +317,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 writer.finish()?;
                 eprint_run_summary(&stats);
                 Ok(())
-            }
+            },
         },
     }
 }

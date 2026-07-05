@@ -49,7 +49,7 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
         match format {
             Some(Format::Fastq | Format::FastqGz) => fastq.push(path),
             Some(Format::Bam) => bam.push(path),
-            None => {} // ignore non-read files
+            None => {}, // ignore non-read files
         }
     }
 

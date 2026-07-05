@@ -77,11 +77,11 @@ fn write_head<W: Write>(
                 w.write_all(&name[..i])?;
                 write!(w, "_segment_{}", segment_idx + 1)?;
                 w.write_all(&name[i..])?;
-            }
+            },
             None => {
                 w.write_all(name)?;
                 write!(w, "_segment_{}", segment_idx + 1)?;
-            }
+            },
         }
     } else {
         w.write_all(name)?;
@@ -134,7 +134,7 @@ pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
         Value::Character(c) => {
             out.extend_from_slice(b"A:");
             out.push(*c);
-        }
+        },
         Value::Int8(n) => write!(out, "i:{n}").unwrap(),
         Value::UInt8(n) => write!(out, "i:{n}").unwrap(),
         Value::Int16(n) => write!(out, "i:{n}").unwrap(),
@@ -145,15 +145,15 @@ pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
         Value::String(s) => {
             out.extend_from_slice(b"Z:");
             out.extend_from_slice(AsRef::<[u8]>::as_ref(s));
-        }
+        },
         Value::Hex(s) => {
             out.extend_from_slice(b"H:");
             out.extend_from_slice(AsRef::<[u8]>::as_ref(s));
-        }
+        },
         Value::Array(a) => {
             out.extend_from_slice(b"B:");
             write_array(&mut out, a);
-        }
+        },
     }
     out
 }
@@ -165,43 +165,43 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
             for x in v {
                 write!(out, ",{x}").unwrap();
             }
-        }
+        },
         Array::UInt8(v) => {
             out.push(b'C');
             for x in v {
                 write!(out, ",{x}").unwrap();
             }
-        }
+        },
         Array::Int16(v) => {
             out.push(b's');
             for x in v {
                 write!(out, ",{x}").unwrap();
             }
-        }
+        },
         Array::UInt16(v) => {
             out.push(b'S');
             for x in v {
                 write!(out, ",{x}").unwrap();
             }
-        }
+        },
         Array::Int32(v) => {
             out.push(b'i');
             for x in v {
                 write!(out, ",{x}").unwrap();
             }
-        }
+        },
         Array::UInt32(v) => {
             out.push(b'I');
             for x in v {
                 write!(out, ",{x}").unwrap();
             }
-        }
+        },
         Array::Float(v) => {
             out.push(b'f');
             for x in v {
                 write!(out, ",{x}").unwrap();
             }
-        }
+        },
     }
 }
 

@@ -190,10 +190,11 @@ mod tests {
     fn split_window_tolerates_short_dips() {
         // chopper window_test: III#IIII###III with Q40=I, Q2=#
         let phred: Vec<u8> = b"III#IIII###III".iter().map(|&b| b - 33).collect();
-        assert_eq!(
-            split_low_quality(&phred, 10, 1, 1),
-            vec![(0, 3), (4, 8), (11, 14)]
-        );
+        assert_eq!(split_low_quality(&phred, 10, 1, 1), vec![
+            (0, 3),
+            (4, 8),
+            (11, 14)
+        ]);
         assert_eq!(split_low_quality(&phred, 10, 1, 3), vec![(0, 8), (11, 14)]);
         assert_eq!(split_low_quality(&phred, 10, 1, 4), vec![(0, 14)]);
     }

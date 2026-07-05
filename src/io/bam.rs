@@ -147,11 +147,11 @@ impl BamSink {
             BamSink::Single(mut w) => {
                 w.try_finish()?;
                 Ok(())
-            }
+            },
             BamSink::Multi(w) => {
                 w.into_inner().finish()?;
                 Ok(())
-            }
+            },
         }
     }
 }

@@ -42,7 +42,7 @@ pub fn apply(
         Some(QualityOp::BestSegment(q)) => best_segment(window_phred, *q),
         Some(QualityOp::Split { cutoff, window }) => {
             split_low_quality(window_phred, *cutoff, min_length, *window)
-        }
+        },
     };
     inner
         .into_iter()
