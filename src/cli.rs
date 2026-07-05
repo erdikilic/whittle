@@ -23,6 +23,10 @@ struct Cli {
     threads: usize,
     #[arg(long, default_value = "all", help_heading = "Setup")]
     fastq_tags: String,
+    /// DEFLATE compression level for compressed output (bgzf for BAM, gzip for
+    /// FASTQ.gz). Lower = faster/larger. Ignored for plain FASTQ.
+    #[arg(short = 'c', long, default_value_t = 6, help_heading = "Setup")]
+    compression_level: u8,
 
     #[arg(short = 'l', long, default_value_t = 1, help_heading = "Filtering")]
     min_length: usize,
@@ -90,6 +94,14 @@ pub fn parse() -> anyhow::Result<Config> {
     if n_quality > 1 {
         anyhow::bail!("--trim-qual, --best-segment and --split-qual are mutually exclusive");
     }
+    // bgzf (libdeflate) accepts up to 12 and gzip up to 9; cap at the common 0-9
+    // so a single flag is valid for both compressed output formats.
+    if c.compression_level > 9 {
+        anyhow::bail!(
+            "--compression-level must be between 0 and 9 (got {})",
+            c.compression_level
+        );
+    }
     let quality = if let Some(q) = c.trim_qual {
         Some(QualityOp::TrimQual(q))
     } else if let Some(q) = c.best_segment {
@@ -121,6 +133,7 @@ pub fn parse() -> anyhow::Result<Config> {
         threads: c.threads.max(1),
         fastq_tags,
         render_workers: 0,
+        compression_level: c.compression_level,
     })
 }
 
@@ -165,5 +178,6 @@ pub fn config_for_test_threads(
         threads: threads.max(1),
         fastq_tags: FastqTags::All,
         render_workers: 0,
+        compression_level: 6,
     }
 }

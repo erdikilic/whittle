@@ -123,6 +123,7 @@ See **The MM/ML/ML guarantee** below.
 | `-o`, `--output <PATH>` | Output file (omit for stdout) |
 | `--in-format`, `--out-format {fastq,fastq-gz,bam}` | Force format instead of detecting it |
 | `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`; MM/ML/MN reconstructed, others verbatim) |
+| `-c`, `--compression-level <0–9>` | DEFLATE level for compressed output — bgzf for BAM, gzip for FASTQ.gz (default 6). Lower is faster/larger; ignored for plain FASTQ |
 | `-t`, `--threads <N>` | Worker threads for the FASTQ pipeline (default 4; uBAM is single-threaded) |
 | `-l`, `--min-length <N>` | Minimum read length to keep (default 1) — also the minimum length for a *split segment* to be kept, see below |
 | `-L`, `--max-length <N>` | Maximum read length to keep |
