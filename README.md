@@ -55,7 +55,8 @@ BAM from).
 On BAM→FASTQ, aux tags are written into the FASTQ header, tab-delimited, in the
 `samtools fastq -T` / `samtools import -T` convention
 (`@read\tMM:Z:…\tML:B:C,…`). MM/ML/MN are **reconstructed** for the trimmed
-segment; every other tag is copied **verbatim**.
+segment; per-base tags are **sliced** (see below); remaining tags are copied
+**verbatim**.
 
 ```text
 --fastq-tags all     # default: carry every aux tag
@@ -64,11 +65,23 @@ segment; every other tag is copied **verbatim**.
 --fastq-tags MM,ML,RG
 ```
 
-> **Caveat:** only MM/ML/MN are trim-aware. Some other aux tags are themselves
-> position-dependent (e.g. dorado's `mv` move table, `ts`/`ns` signal-trim
-> counts); under `--fastq-tags all` they are copied verbatim and will be **stale**
-> after trimming — the same behaviour as `samtools fastq -T`. Exclude them with an
-> explicit `--fastq-tags` list if that matters for your downstream.
+### Trim-aware tag handling
+
+Trimming/splitting rewrites tags that are indexed by base position so the output
+stays internally consistent (applies to both BAM→BAM and BAM→FASTQ):
+
+- **MM/ML/MN** (base modifications) — reconstructed for the window.
+- **Per-base arrays** — sliced in lockstep with the sequence. This covers PacBio
+  base kinetics (`ip`, `pw`, `fi`, `fp`, `ri`, `rp`) and, structurally, *any* `B`
+  array whose length equals the read length. Without this a trimmed PacBio record
+  would have kinetics arrays longer than its sequence — an invalid record.
+- **Signal-space tags** that can't be expressed in base coordinates (ONT `mv`
+  move table) are **dropped** when a read is actually trimmed, since a stale value
+  misleads downstream tools. Untrimmed reads keep everything.
+- **Per-read metadata** (`RG`, `ch`, `mx`, `np`, `sn`, `qs`, …) is copied verbatim.
+
+If a known per-base tag's length doesn't match the sequence (malformed input), it
+is left untouched and the run prints a one-line advisory.
 
 ### FASTQ example
 
@@ -122,7 +135,7 @@ See **The MM/ML/ML guarantee** below.
 | `-i`, `--input <PATH>` | Input file (omit for stdin) |
 | `-o`, `--output <PATH>` | Output file (omit for stdout) |
 | `--in-format`, `--out-format {fastq,fastq-gz,bam}` | Force format instead of detecting it |
-| `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`; MM/ML/MN reconstructed, others verbatim) |
+| `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`; MM/ML/MN reconstructed, per-base kinetics sliced, `mv` dropped on trim, rest verbatim) |
 | `-c`, `--compression-level <0–9>` | DEFLATE level for compressed output — bgzf for BAM, gzip for FASTQ.gz (default 6). Lower is faster/larger; ignored for plain FASTQ |
 | `-t`, `--threads <N>` | Worker threads for the FASTQ pipeline (default 4; uBAM is single-threaded) |
 | `-l`, `--min-length <N>` | Minimum read length to keep (default 1) — also the minimum length for a *split segment* to be kept, see below |

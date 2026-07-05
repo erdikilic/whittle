@@ -8,4 +8,8 @@ pub use fastq::{run_fastq, run_fastq_seq};
 pub struct Stats {
     pub input_reads: u64,
     pub output_reads: u64,
+    /// Reads carrying a known per-base kinetics tag (ip/pw/…) whose array length
+    /// did not match the sequence length — malformed and left untouched. Surfaced
+    /// as a run-level advisory; not an error.
+    pub malformed_tag_reads: u64,
 }

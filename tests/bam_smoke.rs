@@ -121,6 +121,57 @@ fn bam_to_bam_end_to_end() {
 /// "FASTQ parse error … found 'B'". A BAM piped on stdin must now be detected and
 /// converted, exercising both BGZF sniffing and `io::bam::reader_from` (which
 /// reads from the chained probe stream instead of re-opening stdin).
+/// End-to-end: a PacBio-style uBAM with per-base kinetics (`ip`/`pw`, one value
+/// per base) must have those arrays sliced in lockstep with the sequence when the
+/// read is trimmed — otherwise the output record is invalid (array length != SEQ
+/// length) and breaks kinetics/methylation callers.
+#[test]
+fn bam_to_bam_slices_pacbio_kinetics() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("pb.bam");
+    let out_path = dir.path().join("pb_out.bam");
+
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(&in_path).unwrap());
+    w.write_header(&header).unwrap();
+    let mut r = RecordBuf::default();
+    *r.flags_mut() = Flags::UNMAPPED;
+    *r.name_mut() = Some(b"ccs1".into());
+    *r.sequence_mut() = b"ACGTACGTAC".to_vec().into(); // 10 bases
+    *r.quality_scores_mut() = vec![40; 10].into();
+    r.data_mut().insert(Tag::new(b'i', b'p'), Value::Array(Array::UInt8((0..10).collect())));
+    r.data_mut().insert(Tag::new(b'p', b'w'), Value::Array(Array::UInt8((100..110).collect())));
+    w.write_alignment_record(&header, &r).unwrap();
+    w.try_finish().unwrap();
+
+    Command::cargo_bin("chopping")
+        .unwrap()
+        .args(["--in-format", "bam", "--out-format", "bam", "--head-crop", "3", "--tail-crop", "2", "-i"])
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .assert()
+        .success();
+
+    // window [3,8): seq "TACGT"; ip -> [3,4,5,6,7]; pw -> [103,104,105,106,107].
+    let mut rdr = bam::io::Reader::new(std::fs::File::open(&out_path).unwrap());
+    let hdr = rdr.read_header().unwrap();
+    let mut buf = RecordBuf::default();
+    rdr.read_record_buf(&hdr, &mut buf).unwrap();
+
+    assert_eq!(buf.sequence().as_ref(), b"TACGT");
+    let ip = match buf.data().get(&Tag::new(b'i', b'p')) {
+        Some(Value::Array(Array::UInt8(v))) => v.clone(),
+        other => panic!("ip: {other:?}"),
+    };
+    assert_eq!(ip, vec![3, 4, 5, 6, 7], "ip must be sliced to the trimmed window");
+    let pw = match buf.data().get(&Tag::new(b'p', b'w')) {
+        Some(Value::Array(Array::UInt8(v))) => v.clone(),
+        other => panic!("pw: {other:?}"),
+    };
+    assert_eq!(pw, vec![103, 104, 105, 106, 107], "pw must be sliced too");
+}
+
 #[test]
 fn bam_on_stdin_without_in_format_is_detected() {
     let dir = tempfile::tempdir().unwrap();
