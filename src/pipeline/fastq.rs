@@ -166,6 +166,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
         let mut out = Vec::new();
@@ -184,6 +185,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         // good(3) bad(1) good(3): I I I # I I I  -> two segments (0,3),(4,7)
         let phred: Vec<u8> = b"III#III".iter().map(|&b| b - 33).collect();
@@ -206,6 +208,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
@@ -225,6 +228,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         // Owned records (ReadRecord: Clone); wrap in Ok at iteration time so each run
         // gets a fresh Send iterator. anyhow::Error is not Clone, so we can't clone a
@@ -276,6 +280,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         // Far more records than the bounded channel capacity (threads*4), so a
         // pre-fix build would deadlock instead of returning.
@@ -299,6 +304,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         let good: Vec<anyhow::Result<ReadRecord>> = (0..5)
             .map(|i| anyhow::Ok(rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10])))

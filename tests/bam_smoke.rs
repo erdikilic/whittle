@@ -172,6 +172,60 @@ fn bam_to_bam_slices_pacbio_kinetics() {
     assert_eq!(pw, vec![103, 104, 105, 106, 107], "pw must be sliced too");
 }
 
+/// End-to-end: `--update-moves` slices the ONT `mv` move table and bumps `ts`
+/// through the actual binary, so a trimmed read stays signal-mappable for
+/// Remora/Clair3 v2 instead of dropping the move table.
+#[test]
+fn bam_update_moves_slices_move_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("mv.bam");
+    let out_path = dir.path().join("mv_out.bam");
+
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(&in_path).unwrap());
+    w.write_header(&header).unwrap();
+    let mut r = RecordBuf::default();
+    *r.flags_mut() = Flags::UNMAPPED;
+    *r.name_mut() = Some(b"read1".into());
+    *r.sequence_mut() = b"ACGTAC".to_vec().into(); // 6 bases
+    *r.quality_scores_mut() = vec![40; 6].into();
+    // stride 2; 6 ones (one per base) at block indices 0,1,3,4,6,7.
+    r.data_mut().insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![2, 1, 1, 0, 1, 1, 0, 1, 1])));
+    r.data_mut().insert(Tag::new(b't', b's'), Value::Int32(10));
+    r.data_mut().insert(Tag::new(b'n', b's'), Value::Int32(100));
+    w.write_alignment_record(&header, &r).unwrap();
+    w.try_finish().unwrap();
+
+    Command::cargo_bin("chopping")
+        .unwrap()
+        .args(["--in-format", "bam", "--out-format", "bam", "--update-moves", "--head-crop", "2", "-t", "1", "-i"])
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .assert()
+        .success();
+
+    let mut rdr = bam::io::Reader::new(std::fs::File::open(&out_path).unwrap());
+    let hdr = rdr.read_header().unwrap();
+    let mut buf = RecordBuf::default();
+    rdr.read_record_buf(&hdr, &mut buf).unwrap();
+
+    assert_eq!(buf.sequence().as_ref(), b"GTAC");
+    // mv sliced to blocks [3,8): [stride] + [1,1,0,1,1].
+    match buf.data().get(&Tag::new(b'm', b'v')) {
+        Some(Value::Array(Array::Int8(v))) => assert_eq!(v, &[2, 1, 1, 0, 1, 1]),
+        other => panic!("mv not sliced: {other:?}"),
+    }
+    // ts bumped by block_first*stride = 3*2 = 6 -> 16 (any integer width).
+    let ts = match buf.data().get(&Tag::new(b't', b's')) {
+        Some(Value::Int8(n)) => i64::from(*n),
+        Some(Value::Int16(n)) => i64::from(*n),
+        Some(Value::Int32(n)) => i64::from(*n),
+        other => panic!("ts: {other:?}"),
+    };
+    assert_eq!(ts, 16, "ts must advance past the trimmed head signal");
+}
+
 #[test]
 fn bam_on_stdin_without_in_format_is_detected() {
     let dir = tempfile::tempdir().unwrap();

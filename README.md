@@ -75,10 +75,22 @@ stays internally consistent (applies to both BAM→BAM and BAM→FASTQ):
   base kinetics (`ip`, `pw`, `fi`, `fp`, `ri`, `rp`) and, structurally, *any* `B`
   array whose length equals the read length. Without this a trimmed PacBio record
   would have kinetics arrays longer than its sequence — an invalid record.
-- **Signal-space tags** that can't be expressed in base coordinates (ONT `mv`
-  move table) are **dropped** when a read is actually trimmed, since a stale value
-  misleads downstream tools. Untrimmed reads keep everything.
-- **Per-read metadata** (`RG`, `ch`, `mx`, `np`, `sn`, `qs`, …) is copied verbatim.
+- **ONT signal tags** (`mv` move table + `ts`/`ns`/`sp`/`pi`) map bases to the raw
+  signal. By default they are **dropped** on a trimmed read (a stale move table
+  misleads signal-aware tools). Pass **`--update-moves`** to instead keep them
+  consistent (BAM→BAM), so a trimmed read stays usable by Remora / Clair3 v2:
+  - a head/tail **crop** keeps the read name, slices `mv`, and advances `ts` past
+    the trimmed-off signal (`ns` unchanged — the POD5 signal is looked up by name);
+  - a `--split-qual` **split** emits dorado-style subreads (`pi` = parent id,
+    `sp` = offset into the parent signal, `ns` = subread samples, `ts` = 0), so the
+    renamed segment's signal is still locatable in POD5.
+
+  The slicing follows dorado's own `splitter::subread` (move blocks sliced by
+  stride-aligned range; `#1`s stays equal to the sequence length). BAM→FASTQ
+  always drops these tags on trim (a move table in a FASTQ header is impractical).
+- **Signal-scaling scalars** (`sm`/`sd`/`sv`) and **per-read metadata** (`RG`,
+  `ch`, `mx`, `np`, `sn`, `qs`, `dx`, …) are copied verbatim — base-trimming
+  doesn't change them.
 
 If a known per-base tag's length doesn't match the sequence (malformed input), it
 is left untouched and the run prints a one-line advisory.
@@ -151,6 +163,7 @@ See **The MM/ML/ML guarantee** below.
 | `--best-segment <Q>` | Keep only the single longest contiguous run of quality >= Q |
 | `--split-qual <Q>` | Split the read at low-quality (< Q) runs, keeping each surviving segment as its own record |
 | `--split-window <N>` | Smoothing window for `--split-qual` (default 1): a low-quality run shorter than this is tolerated rather than causing a split |
+| `--update-moves` | Keep ONT signal tags (`mv`/`ts`/`ns`/`sp`/`pi`) consistent through trimming for signal-aware tools (Remora, Clair3 v2) instead of dropping them. BAM→BAM only |
 
 `-H`/`-T` are a positional fixed crop and always run first, before any
 quality-based operation, on whatever remains of the read. `--trim-qual`,

@@ -85,6 +85,11 @@ pub struct Config {
     /// trade ratio for speed on the compression-bound BAM path. Plain FASTQ
     /// output ignores it. Validated to 0..=9 by `cli::parse`.
     pub compression_level: u8,
+    /// When true, keep ONT signal tags consistent through trimming instead of
+    /// dropping them: slice the `mv` move table and update `ts`/`ns`/`sp`/`pi`
+    /// (BAM→BAM only — see `pipeline::bam`). Default false drops `mv`/`ts`/`ns`/
+    /// `sp`/`pi` on any trimmed read.
+    pub update_moves: bool,
 }
 
 /// How a `-t` total worker budget splits across the pipeline stages. The split

@@ -21,21 +21,11 @@ use super::Stats;
 /// handled without a code change.
 const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] = [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp"];
 
-/// Signal-space tags that index the raw signal, not the base sequence, and so
-/// cannot be sliced in base coordinates. They go stale the moment a read is
-/// trimmed, so they are dropped once the read is actually cropped/split (ONT `mv`
-/// move table). Extend this list as other such tags surface.
-const STALE_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"mv"];
-
-/// What to do with one aux tag when producing the output window.
-enum TagAction {
-    /// Leave the tag exactly as-is.
-    Keep,
-    /// Replace it with a window-sliced value (per-base arrays).
-    Replace(Value),
-    /// Remove it (stale signal-space tags on a trimmed read).
-    Drop,
-}
+/// ONT signal-mapping tags: the `mv` move table plus the `ts`/`ns` sample counts
+/// and the `sp`/`pi` split linkage. On a trimmed read these are either rewritten
+/// (`--update-moves`) or dropped (default) — never left stale. Handled by
+/// `signal_tag_updates`, not the per-base pass.
+const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 
 fn array_len(a: &Array) -> usize {
     match a {
@@ -64,27 +54,127 @@ fn slice_array(a: &Array, start: usize, end: usize) -> Array {
     }
 }
 
-/// Decide how a non-MM/ML/MN aux tag transforms for output window `[start, end)`.
-/// `orig_len` is the source SEQ length. MM/ML/MN are handled by the dedicated mod
-/// path and must be filtered out by the caller before this is called.
-fn tag_action(tag: &[u8; 2], value: &Value, orig_len: usize, start: usize, end: usize) -> TagAction {
-    // Untrimmed window == the whole read: the record is unchanged, keep everything.
-    if start == 0 && end == orig_len {
-        return TagAction::Keep;
+/// A per-base `B` array (any array whose length equals the read length — this
+/// covers the known kinetics tags and any custom per-base tag) sliced to the
+/// window `[start, end)`; `None` to leave the tag unchanged. Callers must already
+/// have excluded MM/ML/MN and the signal tags. A known kinetics tag whose length
+/// does NOT match is left unchanged and surfaced via `has_malformed_perbase_tag`.
+fn perbase_slice(value: &Value, orig_len: usize, start: usize, end: usize) -> Option<Value> {
+    match value {
+        Value::Array(arr) if array_len(arr) == orig_len => {
+            Some(Value::Array(slice_array(arr, start, end)))
+        }
+        _ => None,
     }
-    if STALE_ON_TRIM_TAGS.contains(tag) {
-        return TagAction::Drop;
+}
+
+/// Parse an `mv` move table value into `(stride, moves)`. `None` unless it is a
+/// `B:c` (Int8) array with a positive stride. `moves` excludes the stride prefix;
+/// each entry corresponds to `stride` signal samples (1 = a base emitted here, so
+/// the count of 1s equals the sequence length).
+fn parse_move_table(value: &Value) -> Option<(i8, &[i8])> {
+    match value {
+        Value::Array(Array::Int8(a)) => {
+            let (stride, moves) = a.split_first()?;
+            if *stride > 0 { Some((*stride, moves)) } else { None }
+        }
+        _ => None,
     }
-    // Per-base `B` array (known kinetics OR any array whose length matches the
-    // read): slice it to the window. A known kinetics tag whose length does NOT
-    // match is malformed — left untouched here and surfaced via
-    // `has_malformed_perbase_tag` so the run can note it.
-    if let Value::Array(arr) = value
-        && array_len(arr) == orig_len
-    {
-        return TagAction::Replace(Value::Array(slice_array(arr, start, end)));
+}
+
+/// Read an integer aux tag as `i64`, regardless of stored width.
+fn signal_int(src: &RecordBuf, tag: &[u8; 2]) -> Option<i64> {
+    match src.data().get(&Tag::new(tag[0], tag[1])) {
+        Some(Value::Int8(n)) => Some(i64::from(*n)),
+        Some(Value::UInt8(n)) => Some(i64::from(*n)),
+        Some(Value::Int16(n)) => Some(i64::from(*n)),
+        Some(Value::UInt16(n)) => Some(i64::from(*n)),
+        Some(Value::Int32(n)) => Some(i64::from(*n)),
+        Some(Value::UInt32(n)) => Some(i64::from(*n)),
+        _ => None,
     }
-    TagAction::Keep
+}
+
+/// The parent read id for a subread: the source's own `pi` if it already has one
+/// (so `pi` always names the ultimate ancestor, matching dorado), else the source
+/// read name.
+fn parent_read_id(src: &RecordBuf) -> Vec<u8> {
+    match src.data().get(&Tag::new(b'p', b'i')) {
+        Some(Value::String(s)) => s.to_vec(),
+        _ => src.name().map(|n| n.to_vec()).unwrap_or_default(),
+    }
+}
+
+/// Trim-aware rewrite of the ONT signal tags for output window `[start, end)`.
+/// Returns `(tag, Some(value))` to set or `(tag, None)` to remove; empty when the
+/// read isn't trimmed. With `update_moves` off — or when the move table is
+/// missing/malformed — all five signal tags are removed. With it on, the move
+/// table is sliced by block range `moves[block_first .. block_second]`
+/// (stride-aligned, following dorado `splitter::subread`) and:
+///   - crop (`total == 1`, name kept): `mv` sliced, `ts += block_first*stride`,
+///     `ns` unchanged (still matches the by-name POD5 signal length).
+///   - split (`total > 1`, renamed): dorado subread encoding — `mv` sliced,
+///     `ts = 0`, `ns = span*stride`, `sp = parent offset`, `pi = parent id`.
+fn signal_tag_updates(
+    src: &RecordBuf,
+    seq_len: usize,
+    start: usize,
+    end: usize,
+    total: usize,
+    update_moves: bool,
+) -> Vec<(Tag, Option<Value>)> {
+    if start == 0 && end == seq_len {
+        return Vec::new(); // untrimmed: leave everything
+    }
+    let drop_all = || -> Vec<(Tag, Option<Value>)> {
+        SIGNAL_TAGS.iter().map(|t| (Tag::new(t[0], t[1]), None)).collect()
+    };
+    if !update_moves {
+        return drop_all();
+    }
+
+    // A consistent move table (1-count == sequence length) is required to slice.
+    let Some((stride, moves)) = src
+        .data()
+        .get(&Tag::new(b'm', b'v'))
+        .and_then(parse_move_table)
+    else {
+        return drop_all();
+    };
+    let ones: Vec<usize> = moves
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| **m != 0)
+        .map(|(i, _)| i)
+        .collect();
+    if ones.len() != seq_len {
+        return drop_all(); // move table inconsistent with the sequence
+    }
+
+    let stride_n = stride as usize;
+    let block_first = ones[start];
+    let block_second = if end == seq_len { moves.len() } else { ones[end] };
+
+    let mut new_mv = Vec::with_capacity(1 + block_second - block_first);
+    new_mv.push(stride);
+    new_mv.extend_from_slice(&moves[block_first..block_second]);
+    let mut updates = vec![(Tag::new(b'm', b'v'), Some(Value::Array(Array::Int8(new_mv))))];
+
+    if total > 1 {
+        // Split -> dorado subread encoding.
+        let ns = ((block_second - block_first) * stride_n) as i32;
+        let sp = signal_int(src, b"sp").unwrap_or(0) + (block_first * stride_n) as i64;
+        let pi = parent_read_id(src);
+        updates.push((Tag::new(b't', b's'), Some(Value::Int32(0))));
+        updates.push((Tag::new(b'n', b's'), Some(Value::Int32(ns))));
+        updates.push((Tag::new(b's', b'p'), Some(Value::Int32(sp as i32))));
+        updates.push((Tag::new(b'p', b'i'), Some(Value::String(pi.into()))));
+    } else {
+        // Head/tail crop in place: keep the read identity, skip more front signal.
+        let ts = signal_int(src, b"ts").unwrap_or(0) + (block_first * stride_n) as i64;
+        updates.push((Tag::new(b't', b's'), Some(Value::Int32(ts as i32))));
+    }
+    updates
 }
 
 /// True if the record carries a *known* per-base kinetics tag whose array length
@@ -107,6 +197,7 @@ pub fn reconstruct_record(
     end: usize,
     total: usize,
     idx: usize,
+    update_moves: bool,
 ) -> RecordBuf {
     let mut out = src.clone();
 
@@ -156,28 +247,35 @@ pub fn reconstruct_record(
         }
     }
 
-    // Per-base kinetics arrays (PacBio ip/pw/fi/fp/ri/rp, or any read-length `B`
-    // array) are sliced to the window so the trimmed record stays valid; ONT
-    // `mv`-class signal tags are dropped. Only runs when the read is actually
-    // trimmed; MM/ML/MN were handled above and are skipped here.
+    // ONT signal tags (mv/ts/ns/sp/pi): rewrite for the window under
+    // `--update-moves`, else drop on trim. Kept separate from the per-base pass
+    // because it decodes the move table and updates several tags together.
     let orig_len = seq.len();
+    for (tag, val) in signal_tag_updates(src, orig_len, start, end, total, update_moves) {
+        match val {
+            Some(v) => {
+                out.data_mut().insert(tag, v);
+            }
+            None => {
+                out.data_mut().remove(&tag);
+            }
+        }
+    }
+
+    // Per-base arrays (PacBio ip/pw/fi/fp/ri/rp, or any read-length `B` array) are
+    // sliced to the window so the trimmed record stays valid. MM/ML/MN and the
+    // signal tags are handled above and skipped here.
     if start != 0 || end != orig_len {
         let data = out.data_mut();
         let mut to_replace: Vec<(Tag, Value)> = Vec::new();
-        let mut to_drop: Vec<Tag> = Vec::new();
         for (tag, value) in data.iter() {
             let t = <[u8; 2]>::from(tag);
-            if t == *b"MM" || t == *b"ML" || t == *b"MN" {
+            if t == *b"MM" || t == *b"ML" || t == *b"MN" || SIGNAL_TAGS.contains(&t) {
                 continue;
             }
-            match tag_action(&t, value, orig_len, start, end) {
-                TagAction::Keep => {}
-                TagAction::Replace(v) => to_replace.push((tag, v)),
-                TagAction::Drop => to_drop.push(tag),
+            if let Some(v) = perbase_slice(value, orig_len, start, end) {
+                to_replace.push((tag, v));
             }
-        }
-        for tag in to_drop {
-            data.remove(&tag);
         }
         for (tag, v) in to_replace {
             data.insert(tag, v);
@@ -261,7 +359,7 @@ fn run_bam_seq(
         let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
         let total = intervals.len();
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
-            let out = reconstruct_record(&rec, s, e, total, idx);
+            let out = reconstruct_record(&rec, s, e, total, idx, cfg.update_moves);
             sink.write_record(header, &out)?;
             stats.output_reads += 1;
         }
@@ -410,7 +508,7 @@ pub fn run_bam(
             Ok(intervals
                 .into_iter()
                 .enumerate()
-                .map(|(idx, (s, e))| reconstruct_record(rec, s, e, total, idx))
+                .map(|(idx, (s, e))| reconstruct_record(rec, s, e, total, idx, cfg.update_moves))
                 .collect())
         },
         // write_one: encode+write on the writer thread (bgzf compress is MT).
@@ -430,26 +528,26 @@ fn build_fastq_tags(
 ) -> Vec<u8> {
     let mut tags = Vec::new();
     let orig_len = seq.len();
+    let trimmed = start != 0 || end != orig_len;
     for (tag, value) in src.data().iter() {
         let t = <[u8; 2]>::from(tag);
         if t == *b"MM" || t == *b"ML" || t == *b"MN" {
             continue; // handled by the reconstructed block below
         }
+        // BAM→FASTQ drops the ONT signal tags on trim rather than rewriting them:
+        // a sliced move table is impractical in a FASTQ header, and signal-aware
+        // callers consume BAM, not FASTQ (`--update-moves` is BAM→BAM only).
+        if trimmed && SIGNAL_TAGS.contains(&t) {
+            continue;
+        }
         if !sel.carries(&t) {
             continue;
         }
-        // Same per-base slicing / stale-tag drop as the BAM→BAM path, so kinetics
-        // carried into a FASTQ header stay consistent with the trimmed sequence.
-        match tag_action(&t, value, orig_len, start, end) {
-            TagAction::Keep => {
-                tags.push(b'\t');
-                tags.extend_from_slice(&format_aux_field(t, value));
-            }
-            TagAction::Replace(v) => {
-                tags.push(b'\t');
-                tags.extend_from_slice(&format_aux_field(t, &v));
-            }
-            TagAction::Drop => {}
+        // Per-base kinetics stay consistent with the trimmed sequence.
+        tags.push(b'\t');
+        match perbase_slice(value, orig_len, start, end) {
+            Some(v) => tags.extend_from_slice(&format_aux_field(t, &v)),
+            None => tags.extend_from_slice(&format_aux_field(t, value)),
         }
     }
     if sel.carries_mods()
@@ -599,7 +697,7 @@ mod tests {
         // seq = C C A C ; C+m modified at C occ 0 and 2 -> pos 0 and 3; ML [10,20].
         let src = ubam_with_mods(b"CCAC", vec![30, 31, 32, 33], b"C+m,0,1;", vec![10, 20]);
         // keep window [2,4): seq "AC", the modified C at pos3 survives (occ within window idx0).
-        let out = reconstruct_record(&src, 2, 4, 1, 0);
+        let out = reconstruct_record(&src, 2, 4, 1, 0, false);
 
         assert_eq!(out.sequence().as_ref(), b"AC");
         assert_eq!(out.quality_scores().as_ref(), &[32, 33]);
@@ -658,6 +756,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
 
         let result = run_bam(&header, [Ok(rec)].into_iter(), &mut sink, &cfg);
@@ -685,7 +784,7 @@ mod tests {
         data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(vec![1, 2, 3])));
         data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(4));
 
-        let out = reconstruct_record(&src, 1, 4, 1, 0);
+        let out = reconstruct_record(&src, 1, 4, 1, 0, false);
 
         match out.data().get(&Tag::BASE_MODIFICATIONS) {
             Some(Value::Int32(5)) => {}
@@ -705,7 +804,7 @@ mod tests {
     fn split_suffixes_name_and_drops_empty_mods() {
         let src = ubam_with_mods(b"CCAC", vec![30, 31, 32, 33], b"C+m,0;", vec![10]); // mod at pos0
         // segment [2,4) has no surviving C mod -> MM/ML removed entirely.
-        let out = reconstruct_record(&src, 2, 4, 2, 1);
+        let out = reconstruct_record(&src, 2, 4, 2, 1, false);
         // `.as_ref()` is ambiguous on `&BStr` (impls `AsRef<[u8]>` and `AsRef<BStr>`);
         // disambiguate with a turbofish (noodles-sam 0.85 / bstr 1.x adjustment).
         assert_eq!(AsRef::<[u8]>::as_ref(out.name().unwrap()), b"r1_segment_2");
@@ -731,6 +830,7 @@ mod tests {
             fastq_tags: tags,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         }
     }
 
@@ -821,7 +921,7 @@ mod tests {
             .insert(Tag::BASE_MODIFICATIONS, Value::String(b"C+m,0,1;".to_vec().into()));
         // deliberately no ML, no MN.
 
-        let out = reconstruct_record(&src, 0, 4, 1, 0);
+        let out = reconstruct_record(&src, 0, 4, 1, 0, false);
 
         // MM retained (both modified Cs are in-window -> "C+m,0,1;").
         let mm = match out.data().get(&Tag::BASE_MODIFICATIONS) {
@@ -878,7 +978,7 @@ mod tests {
         d.insert(Tag::READ_GROUP, Value::String(b"grp".as_slice().into()));
 
         // window [2,5): "GTA" (head-crop 2, tail-crop 1).
-        let out = reconstruct_record(&src, 2, 5, 1, 0);
+        let out = reconstruct_record(&src, 2, 5, 1, 0, false);
         assert_eq!(out.sequence().as_ref(), b"GTA");
         match out.data().get(&Tag::new(b'i', b'p')) {
             Some(Value::Array(Array::UInt8(v))) => assert_eq!(v, &[12, 13, 14]),
@@ -904,7 +1004,7 @@ mod tests {
         // B-array whose length != read length -> not per-base, left alone.
         src.data_mut().insert(Tag::new(b'x', b'y'), Value::Array(Array::UInt8(vec![9, 9])));
 
-        let out = reconstruct_record(&src, 1, 3, 1, 0); // window [1,3)
+        let out = reconstruct_record(&src, 1, 3, 1, 0, false); // window [1,3)
         match out.data().get(&Tag::new(b'z', b'z')) {
             Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[2, 3]),
             other => panic!("zz sliced: {other:?}"),
@@ -926,7 +1026,7 @@ mod tests {
         src.data_mut().insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![5, 1, 1])));
 
         // Full window [0,4): nothing trimmed -> everything preserved verbatim.
-        let out = reconstruct_record(&src, 0, 4, 1, 0);
+        let out = reconstruct_record(&src, 0, 4, 1, 0, false);
         match out.data().get(&Tag::new(b'i', b'p')) {
             Some(Value::Array(Array::UInt8(v))) => assert_eq!(v, &[1, 2, 3, 4]),
             other => panic!("ip unchanged: {other:?}"),
@@ -962,10 +1062,111 @@ mod tests {
 
         assert!(has_malformed_perbase_tag(&src, 4));
         // Can't safely slice it -> left exactly as-is.
-        let out = reconstruct_record(&src, 1, 3, 1, 0);
+        let out = reconstruct_record(&src, 1, 3, 1, 0, false);
         match out.data().get(&Tag::new(b'i', b'p')) {
             Some(Value::Array(Array::UInt8(v))) => assert_eq!(v, &[1, 2, 3]),
             other => panic!("malformed ip left as-is: {other:?}"),
+        }
+    }
+
+    // A synthetic move table: stride 2, 6 ones (one per base) at block indices
+    // 0,1,3,4,6,7 -> 8 blocks total. Shared by the --update-moves tests below.
+    fn ubam_with_moves() -> RecordBuf {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTAC".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 6].into();
+        let d = src.data_mut();
+        d.insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![2, 1, 1, 0, 1, 1, 0, 1, 1])));
+        d.insert(Tag::new(b't', b's'), Value::Int32(10));
+        d.insert(Tag::new(b'n', b's'), Value::Int32(100));
+        src
+    }
+
+    #[test]
+    fn update_moves_crop_slices_mv_and_bumps_ts() {
+        // head-crop 2 -> window [2,6), single segment, name kept.
+        let out = reconstruct_record(&ubam_with_moves(), 2, 6, 1, 0, true);
+        assert_eq!(out.sequence().as_ref(), b"GTAC");
+        assert_eq!(AsRef::<[u8]>::as_ref(out.name().unwrap()), b"r1", "crop keeps the read name");
+        // mv = [stride] + moves[ones[2]=3 .. 8] = [2] + [1,1,0,1,1].
+        match out.data().get(&Tag::new(b'm', b'v')) {
+            Some(Value::Array(Array::Int8(v))) => assert_eq!(v, &[2, 1, 1, 0, 1, 1]),
+            other => panic!("mv: {other:?}"),
+        }
+        // ts += block_first*stride = 10 + 3*2 = 16; ns unchanged.
+        match out.data().get(&Tag::new(b't', b's')) {
+            Some(Value::Int32(16)) => {}
+            other => panic!("ts: {other:?}"),
+        }
+        match out.data().get(&Tag::new(b'n', b's')) {
+            Some(Value::Int32(100)) => {}
+            other => panic!("ns must stay original on crop: {other:?}"),
+        }
+        // Crop adds no split linkage.
+        assert!(out.data().get(&Tag::new(b's', b'p')).is_none());
+        assert!(out.data().get(&Tag::new(b'p', b'i')).is_none());
+    }
+
+    #[test]
+    fn update_moves_split_emits_subread_tags() {
+        // Split into [0,3) and [3,6): each is a dorado-style subread.
+        let s1 = reconstruct_record(&ubam_with_moves(), 0, 3, 2, 0, true);
+        assert_eq!(AsRef::<[u8]>::as_ref(s1.name().unwrap()), b"r1_segment_1");
+        // mv = [2] + moves[ones[0]=0 .. ones[3]=4] = [2] + [1,1,0,1].
+        match s1.data().get(&Tag::new(b'm', b'v')) {
+            Some(Value::Array(Array::Int8(v))) => assert_eq!(v, &[2, 1, 1, 0, 1]),
+            other => panic!("s1 mv: {other:?}"),
+        }
+        match s1.data().get(&Tag::new(b't', b's')) {
+            Some(Value::Int32(0)) => {}
+            o => panic!("s1 ts should be 0: {o:?}"),
+        }
+        match s1.data().get(&Tag::new(b'n', b's')) {
+            Some(Value::Int32(8)) => {} // (block 4-0)*stride 2
+            o => panic!("s1 ns: {o:?}"),
+        }
+        match s1.data().get(&Tag::new(b's', b'p')) {
+            Some(Value::Int32(0)) => {} // block_first 0 * stride
+            o => panic!("s1 sp: {o:?}"),
+        }
+        match s1.data().get(&Tag::new(b'p', b'i')) {
+            Some(Value::String(s)) => assert_eq!(s.to_vec(), b"r1"),
+            o => panic!("s1 pi: {o:?}"),
+        }
+
+        let s2 = reconstruct_record(&ubam_with_moves(), 3, 6, 2, 1, true);
+        assert_eq!(AsRef::<[u8]>::as_ref(s2.name().unwrap()), b"r1_segment_2");
+        // mv = [2] + moves[ones[3]=4 .. 8] = [2] + [1,0,1,1].
+        match s2.data().get(&Tag::new(b'm', b'v')) {
+            Some(Value::Array(Array::Int8(v))) => assert_eq!(v, &[2, 1, 0, 1, 1]),
+            other => panic!("s2 mv: {other:?}"),
+        }
+        match s2.data().get(&Tag::new(b'n', b's')) {
+            Some(Value::Int32(8)) => {} // (8-4)*2
+            o => panic!("s2 ns: {o:?}"),
+        }
+        match s2.data().get(&Tag::new(b's', b'p')) {
+            Some(Value::Int32(8)) => {} // block_first 4 * stride 2
+            o => panic!("s2 sp: {o:?}"),
+        }
+    }
+
+    #[test]
+    fn default_drops_all_signal_tags_on_trim() {
+        let mut src = ubam_with_moves();
+        src.data_mut().insert(Tag::new(b's', b'p'), Value::Int32(5));
+        src.data_mut().insert(Tag::new(b'p', b'i'), Value::String(b"parent".as_slice().into()));
+
+        // update_moves = false + trimmed -> mv/ts/ns/sp/pi all removed.
+        let out = reconstruct_record(&src, 2, 6, 1, 0, false);
+        for t in [b"mv", b"ts", b"ns", b"sp", b"pi"] {
+            assert!(
+                out.data().get(&Tag::new(t[0], t[1])).is_none(),
+                "{} must be dropped by default on trim",
+                std::str::from_utf8(t).unwrap()
+            );
         }
     }
 
@@ -987,6 +1188,7 @@ mod tests {
             fastq_tags: FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         // 300 reads with mods so reconstruction runs on every one.
         let recs: Vec<RecordBuf> = (0..300)
@@ -1057,6 +1259,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         let recs: Vec<anyhow::Result<RecordBuf>> =
             (0..3000).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -1102,6 +1305,7 @@ mod tests {
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
             (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -1136,6 +1340,7 @@ mod tests {
             fastq_tags: FastqTags::All,
             render_workers: 0,
             compression_level: 6,
+            update_moves: false,
         };
         let recs: Vec<RecordBuf> = (0..300)
             .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))
