@@ -46,8 +46,10 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         None => match in_path.and_then(io::from_extension) {
             Some(f) => f,
             None => {
-                // A single `read()` may return fewer than 4 bytes; loop to fill.
-                let mut probe = [0u8; 4];
+                // Probe enough bytes to see a full BGZF block header (18 bytes),
+                // so a BAM read from stdin/an unknown extension is told apart from
+                // gzipped FASTQ. A single `read()` may return fewer; loop to fill.
+                let mut probe = [0u8; 18];
                 let mut n = 0;
                 while n < probe.len() {
                     let r = source.read(&mut probe[n..])?;
@@ -75,10 +77,15 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         (Format::Bam, Format::Bam) => {
             note_tags_ignored(&cfg, in_fmt, out_fmt);
             let b = config::thread_budget(cfg.threads, true, EncodeKind::Bgzf);
-            let (header, records) = io::bam::reader(in_path, b.decode)?;
+            // Read from `source` (not by re-opening `in_path`): for a stdin BAM the
+            // sniff bytes were already consumed and chained back into `source`, so
+            // re-opening stdin would drop the BGZF header. For a file, `source` is
+            // the same handle positioned at the start.
+            let (header, records) = io::bam::reader_from(source, b.decode)?;
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
-            let mut sink = io::bam::writer(cfg.io.output.as_deref(), &out_header, b.encode)?;
+            let mut sink =
+                io::bam::writer(cfg.io.output.as_deref(), &out_header, b.encode, cfg.compression_level)?;
             cfg.render_workers = b.render;
             let stats = pipeline::run_bam(&out_header, records, &mut sink, &cfg)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
@@ -92,7 +99,8 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
             let encode = if matches!(out_fmt, Format::FastqGz) { EncodeKind::Gzip } else { EncodeKind::None };
             let b = config::thread_budget(cfg.threads, true, encode);
-            let (_header, records) = io::bam::reader(in_path, b.decode)?;
+            // See the note in the (Bam, Bam) arm: read from the chained `source`.
+            let (_header, records) = io::bam::reader_from(source, b.decode)?;
             let mut writer = fastq_writer(&cfg, out_fmt, b.encode)?;
             cfg.render_workers = b.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg)?;
@@ -186,7 +194,7 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
         let w = ParCompressBuilder::<Gzip>::new()
             .num_threads(gz_workers)
             .unwrap()
-            .compression_level(Compression::new(6))
+            .compression_level(Compression::new(cfg.compression_level as u32))
             .from_writer(base);
         Ok(FastqOut::Gz(w))
     } else {
@@ -236,7 +244,8 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 let b = config::thread_budget(cfg.threads, true, EncodeKind::Bgzf);
                 let (header, records) = io::dir::bam_reader(&paths, b.decode)?;
                 let out_header = provenance_header(header);
-                let mut sink = io::bam::writer(cfg.io.output.as_deref(), &out_header, b.encode)?;
+                let mut sink =
+                io::bam::writer(cfg.io.output.as_deref(), &out_header, b.encode, cfg.compression_level)?;
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg)?;
                 sink.finish()?;

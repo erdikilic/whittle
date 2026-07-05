@@ -33,15 +33,36 @@ pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format>
     if let Some(f) = path.and_then(from_extension) {
         return Ok(f);
     }
-    if sniff.starts_with(&[0x1f, 0x8b]) {
+    // A BAM file is BGZF-compressed, which shares gzip's `1f 8b` magic, so BGZF
+    // must be recognised BEFORE the plain-gzip branch — otherwise every real BAM
+    // read from stdin or an unrecognised extension is misdetected as gzipped
+    // FASTQ (the `BAM\x01` magic only appears *after* bgzf decompression).
+    if is_bgzf(sniff) {
+        Ok(Format::Bam)
+    } else if sniff.starts_with(&[0x1f, 0x8b]) {
         Ok(Format::FastqGz)
     } else if sniff.starts_with(b"BAM\x01") {
+        // A naked (non-BGZF) BAM stream — unusual, but accept it rather than fail.
         Ok(Format::Bam)
     } else if sniff.first() == Some(&b'@') {
         Ok(Format::Fastq)
     } else {
         anyhow::bail!("cannot determine input format; pass --in-format")
     }
+}
+
+/// True if `sniff` begins with a BGZF block header: gzip magic + deflate method +
+/// the `FEXTRA` flag carrying the mandatory `BC` subfield. This distinguishes a
+/// (BGZF) BAM from a plain-gzip FASTQ, which shares the leading `1f 8b` but sets
+/// neither `FEXTRA` nor `BC`. Requires the full 18-byte block header to be present.
+fn is_bgzf(sniff: &[u8]) -> bool {
+    sniff.len() >= 18
+        && sniff[0] == 0x1f
+        && sniff[1] == 0x8b
+        && sniff[2] == 0x08          // CM = DEFLATE
+        && (sniff[3] & 0x04) != 0    // FLG.FEXTRA set
+        && sniff[12] == b'B'         // first extra subfield SI1
+        && sniff[13] == b'C'         //                      SI2 -> "BC" = BGZF
 }
 
 /// Output format from the path extension, else mirror the input format — with
@@ -84,6 +105,29 @@ mod tests {
         assert_eq!(detect_input(None, &[0x1f, 0x8b, 0x08]).unwrap(), Format::FastqGz);
         assert_eq!(detect_input(None, b"@read").unwrap(), Format::Fastq);
         assert_eq!(detect_input(None, b"BAM\x01").unwrap(), Format::Bam);
+    }
+
+    #[test]
+    fn bgzf_header_sniffs_as_bam_not_gz() {
+        // A real BAM is BGZF, which starts with the gzip magic but sets FLG.FEXTRA
+        // and carries a "BC" subfield. It must be detected as Bam, not FastqGz.
+        let mut bgzf = vec![
+            0x1f, 0x8b, 0x08, 0x04, // magic, CM=deflate, FLG=FEXTRA
+            0x00, 0x00, 0x00, 0x00, // MTIME
+            0x00, 0xff, // XFL, OS
+            0x06, 0x00, // XLEN = 6
+            b'B', b'C', 0x02, 0x00, // "BC" subfield, SLEN=2
+            0x1b, 0x00, // BSIZE
+        ];
+        assert_eq!(detect_input(None, &bgzf).unwrap(), Format::Bam);
+
+        // A plain-gzip FASTQ stream (FLG=0, no BC) must still be FastqGz even with
+        // a full-length header present.
+        bgzf[3] = 0x00; // clear FEXTRA
+        assert_eq!(detect_input(None, &bgzf).unwrap(), Format::FastqGz);
+
+        // Too-short gzip-magic buffer can't be BGZF -> defaults to FastqGz.
+        assert_eq!(detect_input(None, &[0x1f, 0x8b, 0x08, 0x04]).unwrap(), Format::FastqGz);
     }
 
     #[test]

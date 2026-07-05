@@ -32,6 +32,18 @@ pub fn reader(input: Option<&Path>, workers: usize) -> anyhow::Result<(sam::Head
         Some(p) => Box::new(File::open(p)?),
         None => Box::new(io::stdin()),
     };
+    reader_from(inner, workers)
+}
+
+/// Like `reader`, but over an already-open stream rather than a path/stdin. Used
+/// by the single-file dispatch so a stdin BAM whose first bytes were consumed for
+/// format sniffing (and chained back into `inner`) is read from the true start —
+/// re-opening `io::stdin()` would drop those already-consumed bytes. MT-bgzf when
+/// `workers > 1`.
+pub fn reader_from(
+    inner: Box<dyn io::Read + Send>,
+    workers: usize,
+) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
     if workers > 1 {
         let mt = bgzf::io::MultithreadedReader::with_worker_count(NonZero::new(workers).unwrap(), inner);
         let mut r = bam::io::Reader::from(mt);
@@ -69,19 +81,37 @@ pub enum BamSink {
     Multi(bam::io::Writer<bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>>),
 }
 
-/// Build the sink (header written), MT-bgzf when `workers > 1`.
-pub fn writer(output: Option<&Path>, header: &sam::Header, workers: usize) -> anyhow::Result<BamSink> {
+/// Build the sink (header written), MT-bgzf when `workers > 1`. `level` is the
+/// bgzf DEFLATE compression level (0-9 per the CLI, though libdeflate accepts up
+/// to 12); it is applied to both the single- and multi-threaded encoders.
+pub fn writer(
+    output: Option<&Path>,
+    header: &sam::Header,
+    workers: usize,
+    level: u8,
+) -> anyhow::Result<BamSink> {
+    let clevel = bgzf::io::writer::CompressionLevel::new(level)
+        .ok_or_else(|| anyhow::anyhow!("invalid bgzf compression level {level} (expected 0-12)"))?;
     let inner: Box<dyn Write + Send> = match output {
         Some(p) => Box::new(File::create(p)?),
         None => Box::new(io::stdout()),
     };
     if workers > 1 {
-        let mt = bgzf::io::MultithreadedWriter::with_worker_count(NonZero::new(workers).unwrap(), inner);
+        let mt = bgzf::io::multithreaded_writer::Builder::default()
+            .set_compression_level(clevel)
+            .set_worker_count(NonZero::new(workers).unwrap())
+            .build_from_writer(inner);
         let mut w = bam::io::Writer::from(mt);
         w.write_header(header)?;
         Ok(BamSink::Multi(w))
     } else {
-        let mut w = bam::io::Writer::new(inner); // single-threaded bgzf::Writer under the hood
+        // Build the single-threaded bgzf writer explicitly (rather than
+        // `bam::io::Writer::new`, which would force the default level) so `level`
+        // takes effect.
+        let bgzf_w = bgzf::io::writer::Builder::default()
+            .set_compression_level(clevel)
+            .build_from_writer(inner);
+        let mut w = bam::io::Writer::from(bgzf_w);
         w.write_header(header)?;
         Ok(BamSink::Single(w))
     }
@@ -138,7 +168,7 @@ mod tests {
 
         // Write two unmapped records through a 4-worker MT BamSink.
         let header = sam::Header::default();
-        let mut sink = writer(Some(&path), &header, 4).unwrap();
+        let mut sink = writer(Some(&path), &header, 4, 6).unwrap();
         for name in [b"r1".as_slice(), b"r2".as_slice()] {
             let mut rec = RecordBuf::default();
             *rec.flags_mut() = Flags::UNMAPPED;

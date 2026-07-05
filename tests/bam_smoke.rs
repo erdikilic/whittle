@@ -114,3 +114,37 @@ fn bam_to_bam_end_to_end() {
     };
     assert_eq!(mn, 6, "MN should equal the output segment length");
 }
+
+/// Regression test for the BGZF/gzip magic collision: a real BAM is BGZF, which
+/// begins with gzip's `1f 8b` magic, so before the fix `detect_input` sniffed a
+/// BAM on stdin (no `--in-format`) as gzipped FASTQ and failed with a misleading
+/// "FASTQ parse error … found 'B'". A BAM piped on stdin must now be detected and
+/// converted, exercising both BGZF sniffing and `io::bam::reader_from` (which
+/// reads from the chained probe stream instead of re-opening stdin).
+#[test]
+fn bam_on_stdin_without_in_format_is_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("in.bam");
+    write_fixture(&in_path);
+    let bam_bytes = std::fs::read(&in_path).unwrap();
+
+    // Sanity: the fixture really starts with the gzip magic (i.e. it would have
+    // tripped the old gz-first sniffer).
+    assert_eq!(&bam_bytes[..2], &[0x1f, 0x8b], "BAM fixture must be BGZF (gzip magic)");
+
+    let out_path = dir.path().join("out.fastq");
+    Command::cargo_bin("chopping")
+        .unwrap()
+        // No --in-format: detection must come from the piped bytes alone.
+        .args(["--out-format", "fastq", "-o"])
+        .arg(&out_path)
+        .write_stdin(bam_bytes)
+        .assert()
+        .success();
+
+    // Both fixture reads should convert to FASTQ (4 lines each).
+    let out = std::fs::read_to_string(&out_path).unwrap();
+    let lines = out.lines().count();
+    assert_eq!(lines, 8, "expected 2 FASTQ records (8 lines) from the piped BAM, got:\n{out}");
+    assert!(out.contains("@read1") && out.contains("@read2"), "missing reads: {out}");
+}

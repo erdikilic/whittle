@@ -47,7 +47,17 @@ pub fn reconstruct_record(
         match reconstruct_mods(src, &seq, start, end) {
             Some((mm_new, ml_new)) => {
                 data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm_new.into()));
-                data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml_new)));
+                match ml_new {
+                    // Source had ML: write the sliced ML.
+                    Some(ml) => {
+                        data.insert(Tag::BASE_MODIFICATION_PROBABILITIES, Value::Array(Array::UInt8(ml)));
+                    }
+                    // Source was MM-only: drop the cloned ML so we stay MM-only
+                    // rather than emit an empty (invalid) ML.
+                    None => {
+                        data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
+                    }
+                }
                 data.insert(
                     Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
                     Value::Int32((end - start) as i32),
@@ -66,18 +76,28 @@ pub fn reconstruct_record(
 
 /// Slice MM/ML to the window `[start, end)` and re-serialize. Returns `None`
 /// when the source has no `MM` tag, or when no modified position survives the
-/// window (caller drops MM/ML/MN in that case). Shared by the BAM→BAM and
-/// BAM→FASTQ paths so they cannot drift.
+/// window (caller drops MM/ML/MN in that case). The inner `Option<Vec<u8>>` is
+/// the sliced ML, or `None` when the source carried `MM` but no `ML` — ML is
+/// optional per the SAM spec, so an MM-only record must stay MM-only rather than
+/// gain a bogus empty ML. Shared by the BAM→BAM and BAM→FASTQ paths so they
+/// cannot drift.
 pub fn reconstruct_mods(
     src: &RecordBuf,
     seq: &[u8],
     start: usize,
     end: usize,
-) -> Option<(Vec<u8>, Vec<u8>)> {
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     let mm_raw = match src.data().get(&Tag::BASE_MODIFICATIONS) {
         Some(Value::String(s)) => s.to_vec(),
         _ => return None,
     };
+    // Whether the source actually carried an ML array. If it didn't, we must not
+    // emit one: declaring N modified positions with zero probabilities is an
+    // invalid record that samtools/modkit reject.
+    let ml_present = matches!(
+        src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES),
+        Some(Value::Array(Array::UInt8(_)))
+    );
     let ml_raw: Vec<u8> = match src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
         Some(Value::Array(Array::UInt8(v))) => v.clone(),
         _ => Vec::new(),
@@ -88,7 +108,7 @@ pub fn reconstruct_mods(
     if mm_new.is_empty() {
         None
     } else {
-        Some((mm_new, ml_new))
+        Some((mm_new, ml_present.then_some(ml_new)))
     }
 }
 
@@ -302,7 +322,7 @@ fn build_fastq_tags(
         && let Some((mm, ml)) = reconstruct_mods(src, seq, start, end)
     {
         tags.push(b'\t');
-        tags.extend_from_slice(&format_mods_aux(&mm, &ml, end - start));
+        tags.extend_from_slice(&format_mods_aux(&mm, ml.as_deref(), end - start));
     }
     tags
 }
@@ -488,7 +508,7 @@ mod tests {
 
         let header = sam::Header::default();
         let dir = tempfile::tempdir().unwrap();
-        let mut sink = crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, 1).unwrap();
+        let mut sink = crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, 1, 6).unwrap();
 
         let cfg = Config {
             io: IoConfig { input: None, output: None, in_format: None, out_format: None },
@@ -500,6 +520,7 @@ mod tests {
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
+            compression_level: 6,
         };
 
         let result = run_bam(&header, [Ok(rec)].into_iter(), &mut sink, &cfg);
@@ -572,6 +593,7 @@ mod tests {
             threads: 1,
             fastq_tags: tags,
             render_workers: 0,
+            compression_level: 6,
         }
     }
 
@@ -646,6 +668,62 @@ mod tests {
         assert_eq!(out, b"@plain\nACGT\n+\nIIII\n");
     }
 
+    /// Regression test: a source uBAM carrying `MM` but NO `ML` (valid — ML is
+    /// optional per the SAM spec) must be rewritten as an MM-only record, NOT gain
+    /// an empty `ML:B:C`. Pre-fix, `reconstruct_record` inserted `Array::UInt8([])`
+    /// unconditionally, producing an MM that declares modified positions with zero
+    /// probabilities — a record samtools/modkit reject as invalid.
+    #[test]
+    fn reconstruct_record_mm_without_ml_stays_mm_only() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"CCAC".to_vec().into(); // C at 0,1,3
+        *src.quality_scores_mut() = vec![40; 4].into();
+        src.data_mut()
+            .insert(Tag::BASE_MODIFICATIONS, Value::String(b"C+m,0,1;".to_vec().into()));
+        // deliberately no ML, no MN.
+
+        let out = reconstruct_record(&src, 0, 4, 1, 0);
+
+        // MM retained (both modified Cs are in-window -> "C+m,0,1;").
+        let mm = match out.data().get(&Tag::BASE_MODIFICATIONS) {
+            Some(Value::String(s)) => s.to_vec(),
+            other => panic!("expected MM retained, got {other:?}"),
+        };
+        assert_eq!(mm, b"C+m,0,1;");
+        // ML must be ABSENT — never an empty array.
+        assert!(
+            out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES).is_none(),
+            "MM-only source must not gain an ML tag"
+        );
+        // MN set to the window length.
+        match out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
+            Some(Value::Int32(4)) => {}
+            other => panic!("expected MN=4, got {other:?}"),
+        }
+    }
+
+    /// Companion for the BAM→FASTQ path: an MM-only source must emit a FASTQ
+    /// header with `MM` + `MN` but no `ML:B:C` field.
+    #[test]
+    fn bam2fq_mm_without_ml_omits_ml_field() {
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        *rec.name_mut() = Some(b"r1".into());
+        *rec.sequence_mut() = b"CCAC".to_vec().into();
+        *rec.quality_scores_mut() = vec![40; 4].into();
+        rec.data_mut()
+            .insert(Tag::BASE_MODIFICATIONS, Value::String(b"C+m,0,1;".to_vec().into()));
+
+        let cfg = cfg_bam2fq(None, 0, FastqTags::All);
+        let mut out = Vec::new();
+        run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("MM:Z:C+m,0,1;\tMN:i:4"), "expected MM+MN, got: {s:?}");
+        assert!(!s.contains("ML:B"), "MM-only record must not emit an ML field: {s:?}");
+    }
+
     #[test]
     fn run_bam_parallel_matches_sequential_as_multiset() {
         use crate::config::{FastqTags, IoConfig};
@@ -663,6 +741,7 @@ mod tests {
             threads,
             fastq_tags: FastqTags::All,
             render_workers: 0,
+            compression_level: 6,
         };
         // 300 reads with mods so reconstruction runs on every one.
         let recs: Vec<RecordBuf> = (0..300)
@@ -691,14 +770,14 @@ mod tests {
         // t1 -> single-threaded bgzf sink, written to a tempfile.
         let dir = tempfile::tempdir().unwrap();
         let p1 = dir.path().join("t1.bam");
-        let mut sink1 = crate::io::bam::writer(Some(&p1), &header, 1).unwrap();
+        let mut sink1 = crate::io::bam::writer(Some(&p1), &header, 1, 6).unwrap();
         run_bam(&header, recs.clone().into_iter().map(anyhow::Ok), &mut sink1, &mk(1)).unwrap();
         sink1.finish().unwrap();
         let b1 = std::fs::read(&p1).unwrap();
 
         // t8 -> MT sink to a tempfile (MT writer needs an owned Write + Send).
         let p8 = dir.path().join("t8.bam");
-        let mut sink8 = crate::io::bam::writer(Some(&p8), &header, 8).unwrap();
+        let mut sink8 = crate::io::bam::writer(Some(&p8), &header, 8, 6).unwrap();
         run_bam(&header, recs.into_iter().map(anyhow::Ok), &mut sink8, &mk(8)).unwrap();
         sink8.finish().unwrap();
         let b8 = std::fs::read(&p8).unwrap();
@@ -732,6 +811,7 @@ mod tests {
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
+            compression_level: 6,
         };
         let recs: Vec<anyhow::Result<RecordBuf>> =
             (0..3000).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -776,6 +856,7 @@ mod tests {
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
+            compression_level: 6,
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
             (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -809,6 +890,7 @@ mod tests {
             threads,
             fastq_tags: FastqTags::All,
             render_workers: 0,
+            compression_level: 6,
         };
         let recs: Vec<RecordBuf> = (0..300)
             .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))

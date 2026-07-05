@@ -191,14 +191,18 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
 }
 
 /// The reconstructed MM/ML/MN block as SAM aux text (no leading TAB):
-/// `MM:Z:<mm>\tML:B:C,<ml…>\tMN:i:<mn>`.
-pub fn format_mods_aux(mm: &[u8], ml: &[u8], mn: usize) -> Vec<u8> {
+/// `MM:Z:<mm>\tML:B:C,<ml…>\tMN:i:<mn>`. `ml` is `None` for an MM-only source
+/// record (ML is optional per the SAM spec), in which case the `ML:B:C` field is
+/// omitted entirely rather than emitted empty.
+pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"MM:Z:");
     out.extend_from_slice(mm);
-    out.extend_from_slice(b"\tML:B:C");
-    for b in ml {
-        write!(out, ",{b}").unwrap();
+    if let Some(ml) = ml {
+        out.extend_from_slice(b"\tML:B:C");
+        for b in ml {
+            write!(out, ",{b}").unwrap();
+        }
     }
     write!(out, "\tMN:i:{mn}").unwrap();
     out
@@ -279,9 +283,12 @@ mod tests {
 
     #[test]
     fn mods_aux_layout() {
-        assert_eq!(format_mods_aux(b"C+m,0;", &[10, 20], 6), b"MM:Z:C+m,0;\tML:B:C,10,20\tMN:i:6");
-        // empty ML -> zero-length B:C array
-        assert_eq!(format_mods_aux(b"C+m;", &[], 4), b"MM:Z:C+m;\tML:B:C\tMN:i:4");
+        assert_eq!(format_mods_aux(b"C+m,0;", Some(&[10, 20]), 6), b"MM:Z:C+m,0;\tML:B:C,10,20\tMN:i:6");
+        // ML present but empty (e.g. all mods sliced away yet MM retained) -> zero-length B:C array
+        assert_eq!(format_mods_aux(b"C+m;", Some(&[]), 4), b"MM:Z:C+m;\tML:B:C\tMN:i:4");
+        // ML absent (MM-only source record) -> the ML field is omitted entirely,
+        // never emitted empty, so the record stays valid.
+        assert_eq!(format_mods_aux(b"C+m,0;", None, 4), b"MM:Z:C+m,0;\tMN:i:4");
     }
 
     #[test]

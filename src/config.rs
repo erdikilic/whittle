@@ -80,6 +80,11 @@ pub struct Config {
     /// workload-aware budget). Set by `run`/`run_folder` from
     /// `thread_budget(..).render` before the pipeline runs.
     pub render_workers: usize,
+    /// DEFLATE compression level (0-9) for compressed output: bgzf for BAM,
+    /// gzip for FASTQ.gz. `6` is the bgzf/gzip default; lower it (e.g. 1-3) to
+    /// trade ratio for speed on the compression-bound BAM path. Plain FASTQ
+    /// output ignores it. Validated to 0..=9 by `cli::parse`.
+    pub compression_level: u8,
 }
 
 /// How a `-t` total worker budget splits across the pipeline stages. The split
