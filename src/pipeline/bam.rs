@@ -35,6 +35,14 @@ const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 /// (`BC`/`bv`) is a per-read label and rides through unchanged.
 const DROP_ON_TRIM_TAGS: [[u8; 2]; 3] = [*b"pa", *b"pt", *b"bi"];
 
+/// Tags dropped only when a read is SPLIT (not on a plain crop): `st` (read start
+/// time) and `du` (duration) describe the whole parent read, but a split subread
+/// starts later in the signal and spans less of it. Dorado recomputes both from
+/// the sample rate, which isn't carried in the BAM, so we drop them rather than
+/// ship a stale timestamp/duration. A head/tail crop keeps the same read identity,
+/// so they stay valid there.
+const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
+
 fn array_len(a: &Array) -> usize {
     match a {
         Array::Int8(v) => v.len(),
@@ -286,6 +294,14 @@ pub fn reconstruct_record(
         if src.data().get(&Tag::new(b'q', b's')).is_some() {
             let qs = crate::qual::mean_prob_q(&qual[start..end]) as f32;
             out.data_mut().insert(Tag::new(b'q', b's'), Value::Float(qs));
+        }
+    }
+
+    // st/du describe the whole parent read; on a split they no longer fit the
+    // subread (which starts later in the signal), so drop them.
+    if total > 1 {
+        for t in DROP_ON_SPLIT_TAGS {
+            out.data_mut().remove(&Tag::new(t[0], t[1]));
         }
     }
 
@@ -551,6 +567,7 @@ fn build_fastq_tags(
     seq: &[u8],
     start: usize,
     end: usize,
+    total: usize,
     sel: &FastqTags,
 ) -> Vec<u8> {
     let mut tags = Vec::new();
@@ -565,6 +582,10 @@ fn build_fastq_tags(
         // a FASTQ header, and signal-aware callers consume BAM — `--update-moves`
         // is BAM→BAM only) and the unreconstructable poly-A/barcode-coordinate tags.
         if trimmed && (SIGNAL_TAGS.contains(&t) || DROP_ON_TRIM_TAGS.contains(&t)) {
+            continue;
+        }
+        // On a split, st/du describe the parent read, not the subread.
+        if total > 1 && DROP_ON_SPLIT_TAGS.contains(&t) {
             continue;
         }
         if !sel.carries(&t) {
@@ -636,7 +657,7 @@ where
         let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
         let total = intervals.len();
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
-            let tags = build_fastq_tags(&rec, &seq, s, e, &cfg.fastq_tags);
+            let tags = build_fastq_tags(&rec, &seq, s, e, total, &cfg.fastq_tags);
             if tags.is_empty() {
                 write_segment(writer, &name, &seq[s..e], &qual[s..e], total, idx)?;
             } else {
@@ -690,7 +711,7 @@ pub fn run_bam_to_fastq<W: Write + Send>(
             let total = intervals.len();
             let mut out = Vec::with_capacity(total);
             for (idx, (s, e)) in intervals.into_iter().enumerate() {
-                let tags = build_fastq_tags(rec, &seq, s, e, &cfg.fastq_tags);
+                let tags = build_fastq_tags(rec, &seq, s, e, total, &cfg.fastq_tags);
                 let mut buf = Vec::new();
                 if tags.is_empty() {
                     write_segment(&mut buf, &name, &seq[s..e], &qual[s..e], total, idx)?;
@@ -1117,6 +1138,8 @@ mod tests {
         d.insert(Tag::new(b't', b's'), Value::Int32(10));
         // Consistent: ts0 + n_blocks*stride = 10 + 8*2 = 26.
         d.insert(Tag::new(b'n', b's'), Value::Int32(26));
+        d.insert(Tag::new(b's', b't'), Value::String(b"2024-06-21T10:00:00Z".as_slice().into()));
+        d.insert(Tag::new(b'd', b'u'), Value::Float(5.0));
         src
     }
 
@@ -1143,6 +1166,9 @@ mod tests {
         }
         assert!(out.data().get(&Tag::new(b's', b'p')).is_none());
         assert!(out.data().get(&Tag::new(b'p', b'i')).is_none());
+        // A crop keeps the read identity, so st/du stay.
+        assert!(out.data().get(&Tag::new(b's', b't')).is_some(), "st kept on crop");
+        assert!(out.data().get(&Tag::new(b'd', b'u')).is_some(), "du kept on crop");
     }
 
     #[test]
@@ -1196,6 +1222,9 @@ mod tests {
             Some(Value::Int32(-1)) => {}
             o => panic!("s1 rn should be -1: {o:?}"),
         }
+        // st/du describe the parent read -> dropped on a split subread.
+        assert!(s1.data().get(&Tag::new(b's', b't')).is_none(), "st dropped on split");
+        assert!(s1.data().get(&Tag::new(b'd', b'u')).is_none(), "du dropped on split");
 
         let s2 = reconstruct_record(&ubam_with_moves(), 3, 6, 2, 1, true);
         assert_eq!(AsRef::<[u8]>::as_ref(s2.name().unwrap()), b"r1_segment_2");

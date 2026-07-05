@@ -98,10 +98,12 @@ stays internally consistent (applies to both BAM→BAM and BAM→FASTQ):
   is kept.
 - **`qs`** (mean read qscore) is **recomputed** from the trimmed quality on a
   trimmed read (matching dorado's per-(sub)read `qs`).
+- **`st` (start time) / `du` (duration)** are kept on a crop (same read identity)
+  but **dropped on a split** — a subread starts later in the signal, and dorado
+  recomputes these from the sample rate, which isn't carried in the BAM.
 - **Signal-scaling scalars** (`sm`/`sd`/`sv`) and **per-read metadata** (`RG`,
-  `ch`, `mx`, `dx`, `st`, `du`, `fn`, `BC`, …) are copied verbatim — base-trimming
-  doesn't change them. (`st`/`du` are dorado-recomputed per subread but need the
-  sample rate, which isn't carried in the BAM, so they ride through unchanged.)
+  `ch`, `mx`, `dx`, `fn`, `BC`, …) are copied verbatim — base-trimming doesn't
+  change them.
 
 If a known per-base tag's length doesn't match the sequence (malformed input), it
 is left untouched and the run prints a one-line advisory.
