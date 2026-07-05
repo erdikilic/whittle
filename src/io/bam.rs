@@ -5,8 +5,9 @@ use std::path::Path;
 
 use noodles_bam as bam;
 use noodles_bgzf as bgzf;
+use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::io::Write as _; // write_header / write_alignment_record
-use noodles_sam::{self as sam, alignment::RecordBuf};
+use noodles_sam::{self as sam};
 
 /// A boxed, owning iterator over decoded `RecordBuf`s (or per-record errors).
 type RecordBufIterBox = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
@@ -146,20 +147,21 @@ impl BamSink {
             BamSink::Single(mut w) => {
                 w.try_finish()?;
                 Ok(())
-            }
+            },
             BamSink::Multi(w) => {
                 w.into_inner().finish()?;
                 Ok(())
-            }
+            },
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::Flags;
+
+    use super::*;
 
     #[test]
     fn unmapped_ok_mapped_rejected() {

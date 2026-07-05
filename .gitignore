@@ -1,15 +1,3 @@
-# Preliminary / evaluation — deliberately NOT tracked
-# Crate-evaluation benchmark workspace. Decisions are captured in memory and in
-# bench/RESULTS-*.md / bench/CRATE-RESEARCH.md (kept locally for reference).
-/bench/
-# ~4 GB benchmark FASTQ / fastq.gz / uBAM (regenerable via data/scripts/build.sh).
-/data/
-# Read-only clones of reference tools (chopper, Porechop_ABI, sequali).
-/clone/
-
-# Tooling state
-/.remember/
-
 # Rust build artifacts (for the trimmer code, once it lands)
 /target/
 **/target/
@@ -18,6 +6,3 @@
 .DS_Store
 *.swp
 *~
-
-# Local planning artifacts (specs/plans kept on disk, not tracked)
-docs/superpowers/

@@ -8,12 +8,12 @@ pub mod qual;
 pub mod record;
 pub mod trim;
 
-pub use config::Config;
-
 use std::io::{BufReader, BufWriter, Read, Write};
 
+pub use config::Config;
+use gzp::deflate::Gzip;
 use gzp::par::compress::{ParCompress, ParCompressBuilder};
-use gzp::{Compression, ZWriter, deflate::Gzip};
+use gzp::{Compression, ZWriter};
 
 /// Top-level entry point. Dispatches on the input: a directory triggers
 /// folder-merge (all read files in it merged into one output); otherwise a
@@ -80,7 +80,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
                 let fmt = io::detect_input(in_path, &probe[..n])?;
                 source = Box::new(std::io::Cursor::new(probe[..n].to_vec()).chain(source));
                 fmt
-            }
+            },
         },
     };
     let out_fmt = cfg
@@ -118,7 +118,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             sink.finish()?;
             eprint_run_summary(&stats);
             return Ok(());
-        }
+        },
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
             let encode = if matches!(out_fmt, Format::FastqGz) {
                 EncodeKind::Gzip
@@ -134,11 +134,11 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             writer.finish()?;
             eprint_run_summary(&stats);
             return Ok(());
-        }
+        },
         (Format::Fastq | Format::FastqGz, Format::Bam) => {
             anyhow::bail!("cross-format FASTQ->BAM conversion is not supported")
-        }
-        _ => {}
+        },
+        _ => {},
     }
 
     note_tags_ignored(&cfg, in_fmt, out_fmt);
@@ -202,11 +202,11 @@ impl FastqOut {
             FastqOut::Plain(mut w) => {
                 w.flush()?;
                 Ok(())
-            }
+            },
             FastqOut::Gz(mut w) => {
                 w.finish()?;
                 Ok(())
-            }
+            },
         }
     }
 }
@@ -281,7 +281,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
             writer.finish()?;
             eprint_run_summary(&stats);
             Ok(())
-        }
+        },
         io::dir::Family::Bam => match out_fmt {
             Format::Bam => {
                 note_tags_ignored(cfg, family_fmt, out_fmt);
@@ -302,7 +302,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 sink.finish()?;
                 eprint_run_summary(&stats);
                 Ok(())
-            }
+            },
             Format::Fastq | Format::FastqGz => {
                 let encode = if matches!(out_fmt, Format::FastqGz) {
                     EncodeKind::Gzip
@@ -317,7 +317,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 writer.finish()?;
                 eprint_run_summary(&stats);
                 Ok(())
-            }
+            },
         },
     }
 }
@@ -436,10 +436,11 @@ fn has_dangling_program_chain(header: &noodles_sam::Header) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use noodles_sam::header::record::value::Map;
     use noodles_sam::header::record::value::map::Program;
     use noodles_sam::header::record::value::map::program::tag;
+
+    use super::*;
 
     /// Regression test for `d481c48`: a header with a dangling `@PG PP:` chain
     /// (a `PP` value that names a program ID not present in the header) used

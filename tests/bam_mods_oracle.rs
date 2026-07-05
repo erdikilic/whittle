@@ -16,7 +16,6 @@ use noodles_sam::alignment::record::Flags;
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
-
 use rust_htslib::bam::{self as hts, Read as _};
 
 /// Build a one-read uBAM: seq with C's, C+m mods at chosen positions, ML bytes.

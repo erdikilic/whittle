@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use noodles_sam::{self as sam, alignment::RecordBuf};
+use noodles_sam::alignment::RecordBuf;
+use noodles_sam::{self as sam};
 
 use crate::io::{Format, from_extension};
 use crate::record::ReadRecord;
@@ -48,7 +49,7 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
         match format {
             Some(Format::Fastq | Format::FastqGz) => fastq.push(path),
             Some(Format::Bam) => bam.push(path),
-            None => {} // ignore non-read files
+            None => {}, // ignore non-read files
         }
     }
 

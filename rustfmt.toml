@@ -1,0 +1,23 @@
+# Formatting configuration for `chopping`.
+#
+# The unstable options in the "nightly" sections require the nightly toolchain:
+# `cargo +nightly fmt`. Stable `cargo fmt` still runs and passes `--check` — it
+# simply ignores those options and leaves the affected code as written.
+#
+# Comment- and string-reflowing options (wrap_comments, format_strings,
+# format_code_in_doc_comments, normalize_comments) are deliberately NOT enabled:
+# the hand-formatted doc comments and multi-line error strings are intentional.
+
+# --- width / general (stable) ---
+max_width = 100          # roomy (rustfmt's default; not the cramped 80)
+newline_style = "Unix"   # always LF
+
+# --- expression / literal tidiness (stable) ---
+use_field_init_shorthand = true    # `Foo { x }` instead of `Foo { x: x }`
+match_block_trailing_comma = true  # trailing comma after `=> { … }` match arms
+hex_literal_case = "Lower"         # `0x1f`, not `0x1F`
+
+# --- imports (nightly) ---
+imports_granularity = "Module"      # merge `use a::b; use a::c;` -> `use a::{b, c};`
+group_imports = "StdExternalCrate"  # order: std / external crates / this crate
+

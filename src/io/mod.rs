@@ -85,8 +85,9 @@ pub fn resolve_output(path: Option<&Path>, input: Format) -> Format {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
+    use super::*;
 
     #[test]
     fn extensions() {
