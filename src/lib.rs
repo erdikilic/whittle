@@ -310,6 +310,18 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
 /// name. Conservative: any resolution failure yields `false` (don't block a run
 /// on a path we can't resolve).
 fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    // When both paths already exist, an inode+device match is definitive — and it
+    // also catches hard links to one inode, which path canonicalization misses.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b))
+            && ma.dev() == mb.dev()
+            && ma.ino() == mb.ino()
+        {
+            return true;
+        }
+    }
     fn resolve(p: &std::path::Path) -> Option<std::path::PathBuf> {
         if let Ok(c) = std::fs::canonicalize(p) {
             return Some(c);

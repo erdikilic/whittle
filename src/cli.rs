@@ -117,6 +117,9 @@ pub fn parse() -> anyhow::Result<Config> {
             c.min_length
         );
     }
+    if c.min_qual.is_nan() || c.max_qual.is_nan() {
+        anyhow::bail!("--min-qual and --max-qual must be numbers (got NaN)");
+    }
     if c.min_qual > c.max_qual {
         anyhow::bail!(
             "--min-qual ({}) must not exceed --max-qual ({})",

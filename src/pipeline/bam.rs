@@ -373,7 +373,17 @@ pub fn reconstruct_record(
         let mut to_replace: Vec<(Tag, Value)> = Vec::new();
         for (tag, value) in data.iter() {
             let t = <[u8; 2]>::from(tag);
-            if t == *b"MM" || t == *b"ML" || t == *b"MN" || SIGNAL_TAGS.contains(&t) {
+            // Skip every tag with dedicated handling above (mods, signal, poly-A,
+            // and the drop-on-trim/split sets) so the structural per-base slicer
+            // can't re-slice e.g. a kept `pa` array that happens to be read-length.
+            if t == *b"MM"
+                || t == *b"ML"
+                || t == *b"MN"
+                || SIGNAL_TAGS.contains(&t)
+                || POLYA_TAGS.contains(&t)
+                || DROP_ON_TRIM_TAGS.contains(&t)
+                || DROP_ON_SPLIT_TAGS.contains(&t)
+            {
                 continue;
             }
             if let Some(v) = perbase_slice(value, orig_len, start, end) {
@@ -1411,6 +1421,55 @@ mod tests {
         let out = reconstruct_record(&src, 2, 6, 1, 0, true); // head-crop 2
         assert!(out.data().get(&Tag::new(b'p', b'a')).is_none(), "pa dropped when tail trimmed");
         assert!(out.data().get(&Tag::new(b'p', b't')).is_none(), "pt dropped when tail trimmed");
+    }
+
+    #[test]
+    fn update_moves_does_not_reslice_read_length_pa() {
+        // Regression (review F1): a pa array whose length happens to equal the read
+        // length must NOT be treated as a per-base array and sliced.
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTA".to_vec().into(); // 5 bases
+        *src.quality_scores_mut() = vec![40; 5].into();
+        let d = src.data_mut();
+        d.insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![2, 1, 1, 1, 1, 1]))); // stride 2, 5 ones
+        d.insert(Tag::new(b't', b's'), Value::Int32(0));
+        d.insert(Tag::new(b'n', b's'), Value::Int32(10));
+        // 5-element pa (== read length), all real positions inside the kept window.
+        d.insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![4, 2, 6, -1, -1])));
+
+        // head-crop 1 -> window [1,5): kept signal window [2,10]; pa survives.
+        let out = reconstruct_record(&src, 1, 5, 1, 0, true);
+        match out.data().get(&Tag::new(b'p', b'a')) {
+            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[4, 2, 6, -1, -1], "pa must not be re-sliced"),
+            other => panic!("pa: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_moves_without_move_table_drops_signal_and_polya() {
+        // --update-moves but no move table -> can't relate signal to sequence, so
+        // the signal + poly-A tags are dropped (parse_move_table -> None -> drop_all).
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTAC".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 6].into();
+        let d = src.data_mut();
+        d.insert(Tag::new(b't', b's'), Value::Int32(10));
+        d.insert(Tag::new(b'n', b's'), Value::Int32(100));
+        d.insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])));
+        d.insert(Tag::new(b'p', b't'), Value::Int32(30));
+
+        let out = reconstruct_record(&src, 2, 6, 1, 0, true);
+        for t in [b"ts", b"ns", b"pa", b"pt"] {
+            assert!(
+                out.data().get(&Tag::new(t[0], t[1])).is_none(),
+                "{} dropped when the move table is absent",
+                std::str::from_utf8(t).unwrap()
+            );
+        }
     }
 
     #[test]
