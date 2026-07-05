@@ -91,9 +91,17 @@ stays internally consistent (applies to both BAM→BAM and BAM→FASTQ):
   and `generate_read_tags` (move blocks sliced by stride-aligned range; `#1`s stays
   equal to the sequence length). BAM→FASTQ always drops these tags on trim (a move
   table in a FASTQ header is impractical).
+- **Poly-A / barcode coordinate tags** (`pa` poly-A signal boundaries, `pt` tail
+  length, `bi` barcode positions) reference signal or sequence coordinates that
+  can't be reconstructed from the BAM, so they are **dropped** on a trimmed read
+  rather than left stale. The barcode *call* (`BC`/`bv`) is a per-read label and
+  is kept.
+- **`qs`** (mean read qscore) is **recomputed** from the trimmed quality on a
+  trimmed read (matching dorado's per-(sub)read `qs`).
 - **Signal-scaling scalars** (`sm`/`sd`/`sv`) and **per-read metadata** (`RG`,
-  `ch`, `mx`, `np`, `sn`, `qs`, `dx`, …) are copied verbatim — base-trimming
-  doesn't change them.
+  `ch`, `mx`, `dx`, `st`, `du`, `fn`, `BC`, …) are copied verbatim — base-trimming
+  doesn't change them. (`st`/`du` are dorado-recomputed per subread but need the
+  sample rate, which isn't carried in the BAM, so they ride through unchanged.)
 
 If a known per-base tag's length doesn't match the sequence (malformed input), it
 is left untouched and the run prints a one-line advisory.

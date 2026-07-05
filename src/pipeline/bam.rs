@@ -27,6 +27,14 @@ const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] = [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri"
 /// `signal_tag_updates`, not the per-base pass.
 const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 
+/// Other dorado tags that reference raw-signal or sequence coordinates but can't
+/// be reconstructed from the BAM alone (they'd need the raw signal or a re-demux),
+/// so they are dropped on any trimmed read to avoid shipping stale coordinates:
+/// `pa` (poly-A tail signal boundaries), `pt` (poly-A tail length), `bi` (barcode
+/// info, which embeds front/rear sequence positions). The barcode call itself
+/// (`BC`/`bv`) is a per-read label and rides through unchanged.
+const DROP_ON_TRIM_TAGS: [[u8; 2]; 3] = [*b"pa", *b"pt", *b"bi"];
+
 fn array_len(a: &Array) -> usize {
     match a {
         Array::Int8(v) => v.len(),
@@ -268,9 +276,22 @@ pub fn reconstruct_record(
         }
     }
 
+    if start != 0 || end != orig_len {
+        // Drop position/signal tags we can't reconstruct (poly-A / barcode coords).
+        for t in DROP_ON_TRIM_TAGS {
+            out.data_mut().remove(&Tag::new(t[0], t[1]));
+        }
+        // Refresh qs (mean read qscore) from the trimmed quality — dorado
+        // recomputes it per (sub)read — but only when the source carried one.
+        if src.data().get(&Tag::new(b'q', b's')).is_some() {
+            let qs = crate::qual::mean_prob_q(&qual[start..end]) as f32;
+            out.data_mut().insert(Tag::new(b'q', b's'), Value::Float(qs));
+        }
+    }
+
     // Per-base arrays (PacBio ip/pw/fi/fp/ri/rp, or any read-length `B` array) are
-    // sliced to the window so the trimmed record stays valid. MM/ML/MN and the
-    // signal tags are handled above and skipped here.
+    // sliced to the window so the trimmed record stays valid. MM/ML/MN, the signal
+    // tags, and the dropped-on-trim tags are handled above and skipped here.
     if start != 0 || end != orig_len {
         let data = out.data_mut();
         let mut to_replace: Vec<(Tag, Value)> = Vec::new();
@@ -540,13 +561,21 @@ fn build_fastq_tags(
         if t == *b"MM" || t == *b"ML" || t == *b"MN" {
             continue; // handled by the reconstructed block below
         }
-        // BAM→FASTQ drops the ONT signal tags on trim rather than rewriting them:
-        // a sliced move table is impractical in a FASTQ header, and signal-aware
-        // callers consume BAM, not FASTQ (`--update-moves` is BAM→BAM only).
-        if trimmed && SIGNAL_TAGS.contains(&t) {
+        // On trim, drop the ONT signal tags (a sliced move table is impractical in
+        // a FASTQ header, and signal-aware callers consume BAM — `--update-moves`
+        // is BAM→BAM only) and the unreconstructable poly-A/barcode-coordinate tags.
+        if trimmed && (SIGNAL_TAGS.contains(&t) || DROP_ON_TRIM_TAGS.contains(&t)) {
             continue;
         }
         if !sel.carries(&t) {
+            continue;
+        }
+        // Refresh qs from the trimmed quality (matches the BAM→BAM path).
+        if t == *b"qs" && trimmed {
+            let ql = src.quality_scores().as_ref();
+            let qs = crate::qual::mean_prob_q(&ql[start..end]) as f32;
+            tags.push(b'\t');
+            tags.extend_from_slice(&format_aux_field(t, &Value::Float(qs)));
             continue;
         }
         // Per-base kinetics stay consistent with the trimmed sequence.
@@ -1200,6 +1229,44 @@ mod tests {
                 std::str::from_utf8(t).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn trim_drops_polya_barcode_tags_and_refreshes_qs() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTAC".to_vec().into();
+        // First two bases low quality (phred 2), the rest Q40.
+        *src.quality_scores_mut() = vec![2, 2, 40, 40, 40, 40].into();
+        let d = src.data_mut();
+        d.insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![100, 200, 300, 400, 500])));
+        d.insert(Tag::new(b'p', b't'), Value::Int32(50));
+        d.insert(Tag::new(b'b', b'i'), Value::Array(Array::Float(vec![0.9, 5.0, 20.0])));
+        d.insert(Tag::new(b'q', b's'), Value::Float(20.0)); // whole-read qs (stale after crop)
+        d.insert(Tag::new(b'R', b'G'), Value::String(b"grp".as_slice().into()));
+
+        // head-crop 2 -> window [2,6): keeps only the Q40 bases.
+        let out = reconstruct_record(&src, 2, 6, 1, 0, false);
+
+        // Unreconstructable poly-A / barcode coordinate tags are dropped.
+        for t in [b"pa", b"pt", b"bi"] {
+            assert!(
+                out.data().get(&Tag::new(t[0], t[1])).is_none(),
+                "{} must be dropped on trim",
+                std::str::from_utf8(t).unwrap()
+            );
+        }
+        // qs is recomputed from the trimmed (all-Q40) quality, not left at 20.
+        match out.data().get(&Tag::new(b'q', b's')) {
+            Some(Value::Float(q)) => {
+                let expected = crate::qual::mean_prob_q(&[40, 40, 40, 40]) as f32;
+                assert!((q - expected).abs() < 1e-4, "qs recomputed: got {q}, want {expected}");
+            }
+            other => panic!("qs: {other:?}"),
+        }
+        // Per-read metadata (RG) is untouched.
+        assert!(out.data().get(&Tag::new(b'R', b'G')).is_some());
     }
 
     #[test]
