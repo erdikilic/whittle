@@ -30,6 +30,19 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         return run_folder(&dir, &mut cfg);
     }
 
+    // Refuse to read and write the same file: `chopping` streams the input, so
+    // truncating it on `File::create` before it is fully read destroys the data
+    // (a plain FASTQ run would silently emit an empty file with a success exit).
+    if let (Some(inp), Some(outp)) = (cfg.io.input.as_deref(), cfg.io.output.as_deref())
+        && same_path(inp, outp)
+    {
+        anyhow::bail!(
+            "input and output are the same file ({}); chopping streams the input and \
+             would truncate it before reading — write to a different path",
+            outp.display()
+        );
+    }
+
     let in_path = cfg.io.input.as_deref();
 
     // Open the input (file or stdin) up front so format detection can sniff
@@ -209,7 +222,28 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
     use config::EncodeKind;
     use io::Format;
 
-    let (family, paths) = io::dir::classify(dir)?;
+    let (family, mut paths) = io::dir::classify(dir)?;
+    // Never read the output back as an input: if `-o` points inside `-i <dir>`
+    // (e.g. on a rerun where the merged file now sits in the folder), drop it
+    // from the input set so it isn't merged into — and truncated by — itself.
+    if let Some(outp) = cfg.io.output.as_deref() {
+        let before = paths.len();
+        paths.retain(|p| !same_path(p, outp));
+        if paths.len() < before {
+            eprintln!(
+                "note: excluding the output file {} from the {:?} input set in {}",
+                outp.display(),
+                family,
+                dir.display()
+            );
+        }
+    }
+    if paths.is_empty() {
+        anyhow::bail!(
+            "no input read files left in {} after excluding the output file",
+            dir.display()
+        );
+    }
     eprintln!("Merging {} {:?} file(s) from {}", paths.len(), family, dir.display());
     let family_fmt = match family {
         io::dir::Family::Fastq => Format::Fastq,
@@ -241,6 +275,9 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
         io::dir::Family::Bam => match out_fmt {
             Format::Bam => {
                 note_tags_ignored(cfg, family_fmt, out_fmt);
+                // Only the first file's header is written; warn if the others
+                // declare different read groups (relevant only for BAM output).
+                io::dir::warn_on_bam_header_mismatch(&paths);
                 let b = config::thread_budget(cfg.threads, true, EncodeKind::Bgzf);
                 let (header, records) = io::dir::bam_reader(&paths, b.decode)?;
                 let out_header = provenance_header(header);
@@ -264,6 +301,29 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 Ok(())
             }
         },
+    }
+}
+
+/// Whether two paths resolve to the same file. Canonicalizes both so symlinks
+/// and `./`-style aliasing are caught; the output usually does not exist yet, so
+/// it falls back to canonicalizing the parent directory and re-joining the file
+/// name. Conservative: any resolution failure yields `false` (don't block a run
+/// on a path we can't resolve).
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    fn resolve(p: &std::path::Path) -> Option<std::path::PathBuf> {
+        if let Ok(c) = std::fs::canonicalize(p) {
+            return Some(c);
+        }
+        let file = p.file_name()?;
+        let parent = match p.parent() {
+            Some(par) if !par.as_os_str().is_empty() => par,
+            _ => std::path::Path::new("."),
+        };
+        std::fs::canonicalize(parent).ok().map(|c| c.join(file))
+    }
+    match (resolve(a), resolve(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
     }
 }
 

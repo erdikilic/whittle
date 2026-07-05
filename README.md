@@ -199,14 +199,14 @@ surviving window:
   there's no header/tags to build a BAM record from a bare FASTQ read. The
   reverse, BAM→FASTQ, *is* supported; see [Format conversion](#format-conversion)
   above.
-- **BAM over stdin needs an explicit hint.** BAM files are BGZF-compressed,
-  which shares gzip's magic bytes (`\x1f\x8b`) with the bytes `chopping` uses
-  to auto-detect gzipped FASTQ. A `.bam` file *path* auto-detects fine (the
-  extension is checked before any byte-sniffing), but **a raw BAM stream
-  piped over stdin, with no path to check the extension of, will be
-  misdetected as gzipped FASTQ** unless you pass `--in-format bam`
-  explicitly. Plain FASTQ and `.fastq.gz` piped over stdin auto-detect
-  correctly without any hint.
+- **BAM over stdin auto-detects.** BAM files are BGZF-compressed, which shares
+  gzip's magic bytes (`\x1f\x8b`) with gzipped FASTQ. `chopping` tells them apart
+  by the BGZF block signature — the `FEXTRA` flag plus the mandatory `BC`
+  subfield — which it checks before the plain-gzip fallback. So a raw BAM stream
+  piped over stdin (e.g. `samtools view -b … | chopping`) is detected with no
+  hint, just like a `.bam` path, plain FASTQ, or `.fastq.gz`. Pass
+  `--in-format bam` only to force the interpretation of an unusual or headerless
+  stream.
 - **`--min-length` is dual-purpose.** It's both the whole-read minimum-length
   filter and the minimum length for a segment produced by `--split-qual` to
   be kept — there's no separate flag for the two.

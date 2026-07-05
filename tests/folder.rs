@@ -6,6 +6,7 @@ use noodles_bam as bam;
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::io::Write as _;
 use noodles_sam::alignment::record::Flags;
+use predicates::prelude::*;
 
 fn chopping() -> Command {
     Command::cargo_bin("chopping").unwrap()
@@ -82,4 +83,62 @@ fn empty_folder_errors() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("no FASTQ or BAM"));
+}
+
+#[test]
+fn folder_rerun_does_not_reingest_its_own_output() {
+    // When `-o` lands inside the `-i <dir>`, a rerun must exclude the previously
+    // written output from the input set rather than merge (and truncate) it into
+    // itself.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.fastq"), "@r1\nACGTACGT\n+\nIIIIIIII\n").unwrap();
+    let out = dir.path().join("merged.fastq");
+
+    chopping().arg("-i").arg(dir.path()).arg("-o").arg(&out)
+        .args(["-t", "1"]).assert().success();
+    let first = std::fs::read_to_string(&out).unwrap();
+
+    chopping().arg("-i").arg(dir.path()).arg("-o").arg(&out)
+        .args(["-t", "1"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("excluding the output file"));
+    let second = std::fs::read_to_string(&out).unwrap();
+
+    assert_eq!(first, second, "rerun must produce the same output, not re-ingest it");
+}
+
+fn write_ubam_with_rg(path: &Path, name: &[u8], rg: &str) {
+    use noodles_sam::header::record::value::Map;
+    use noodles_sam::header::record::value::map::ReadGroup;
+    let header = noodles_sam::Header::builder()
+        .add_read_group(rg, Map::<ReadGroup>::default())
+        .build();
+    let mut w = bam::io::Writer::new(File::create(path).unwrap());
+    w.write_header(&header).unwrap();
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = Flags::UNMAPPED;
+    *rec.name_mut() = Some(name.into());
+    *rec.sequence_mut() = b"ACGTACGT".to_vec().into();
+    *rec.quality_scores_mut() = vec![40u8; 8].into();
+    w.write_alignment_record(&header, &rec).unwrap();
+    w.try_finish().unwrap();
+}
+
+#[test]
+fn folder_merge_bam_warns_on_differing_read_groups() {
+    // Folder merge keeps only the first header, so records from a file declaring a
+    // different @RG would reference a read group missing from the merged output.
+    let dir = tempfile::tempdir().unwrap();
+    write_ubam_with_rg(&dir.path().join("a.bam"), b"r1", "rg_a");
+    write_ubam_with_rg(&dir.path().join("b.bam"), b"r2", "rg_b");
+    let out = dir.path().join("merged.bam");
+
+    chopping()
+        .arg("-i").arg(dir.path())
+        .arg("-o").arg(&out)
+        .args(["-t", "1"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("different @RG"));
 }

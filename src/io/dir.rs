@@ -108,6 +108,48 @@ pub fn bam_reader(paths: &[PathBuf], workers: usize) -> anyhow::Result<(sam::Hea
     Ok((header, records))
 }
 
+/// The set of `@RG` ids declared in a BAM file's header (empty if none / unreadable).
+fn bam_read_group_ids(path: &Path) -> Option<std::collections::BTreeSet<Vec<u8>>> {
+    let (header, _records) = crate::io::bam::reader(Some(path), 1).ok()?;
+    Some(header.read_groups().keys().map(|k| k.to_vec()).collect())
+}
+
+/// Name the first BAM whose `@RG` id set differs from the first file's, if any.
+/// Best-effort: files that fail to open are skipped. Used to warn that folder
+/// merge keeps only the first header.
+fn first_rg_mismatch(paths: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
+    let mut iter = paths.iter();
+    let first = iter.next()?;
+    let first_rgs = bam_read_group_ids(first)?;
+    for p in iter {
+        if let Some(rgs) = bam_read_group_ids(p)
+            && rgs != first_rgs
+        {
+            return Some((first.clone(), p.clone()));
+        }
+    }
+    None
+}
+
+/// Warn (once) if the folder's BAM files don't all share the same `@RG` set.
+/// Folder merge writes only the first file's header (samtools-cat semantics), so
+/// records from later files that carry `RG` tags for read groups absent from that
+/// header would reference `@RG` lines missing from the output. Homogeneous
+/// single-run uBAM — the intended input — shares one header and stays silent.
+/// This is a header-only pre-pass (cheap for uBAM); a future "better method"
+/// would union the `@RG`/`@PG` records into the output header instead.
+pub fn warn_on_bam_header_mismatch(paths: &[PathBuf]) {
+    if let Some((first, offender)) = first_rg_mismatch(paths) {
+        eprintln!(
+            "warning: the folder's BAM files have different @RG sets ({} vs {}); \
+             only the first file's header is written, so records from other files \
+             may reference read groups missing from the merged output header",
+            first.display(),
+            offender.display()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
