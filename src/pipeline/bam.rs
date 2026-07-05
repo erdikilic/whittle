@@ -27,6 +27,27 @@ const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] = [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri"
 /// `signal_tag_updates`, not the per-base pass.
 const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 
+/// Poly-A tail tags handled together with the move table: `pa` (signal boundaries,
+/// stored in original-signal coordinates) and `pt` (tail length in bases). Under
+/// `--update-moves` they are kept/shifted when the poly-A tail survives the trim
+/// and dropped when it's cut; without it (or a malformed move table) they are
+/// dropped, since we can't relate signal to sequence.
+const POLYA_TAGS: [[u8; 2]; 2] = [*b"pa", *b"pt"];
+
+/// `bi` (barcode info) embeds front/rear SEQUENCE positions that shift under a
+/// crop and can't be reconstructed from the BAM, so it is dropped on any trimmed
+/// read. The barcode call itself (`BC`/`bv`) is a per-read label and rides
+/// through unchanged.
+const DROP_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"bi"];
+
+/// Tags dropped only when a read is SPLIT (not on a plain crop): `st` (read start
+/// time) and `du` (duration) describe the whole parent read, but a split subread
+/// starts later in the signal and spans less of it. Dorado recomputes both from
+/// the sample rate, which isn't carried in the BAM, so we drop them rather than
+/// ship a stale timestamp/duration. A head/tail crop keeps the same read identity,
+/// so they stay valid there.
+const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
+
 fn array_len(a: &Array) -> usize {
     match a {
         Array::Int8(v) => v.len(),
@@ -105,6 +126,61 @@ fn parent_read_id(src: &RecordBuf) -> Vec<u8> {
     }
 }
 
+/// Trim-aware handling of the poly-A tags (`pa` signal boundaries, `pt` tail
+/// length). `pa` holds absolute original-signal positions (`>= 0`; `-1`/`-2` are
+/// dorado's not-found/not-enabled sentinels, left as-is). `[kept_start, kept_end)`
+/// is the original-signal window the kept bases span. If every real `pa` position
+/// falls inside that window the tail survived, so: on a split, shift `pa` into the
+/// subread's own signal frame (its `ts` is 0) and keep `pt`; on a crop, keep both
+/// unchanged (identity + POD5 signal are unchanged, so the absolute positions stay
+/// valid). If any real position falls outside — the tail was (partly) trimmed — or
+/// there's no poly-A array, drop `pa`/`pt`.
+fn polya_updates(
+    src: &RecordBuf,
+    kept_start: i64,
+    kept_end: i64,
+    is_split: bool,
+) -> Vec<(Tag, Option<Value>)> {
+    let pa_tag = Tag::new(b'p', b'a');
+    let pt_tag = Tag::new(b'p', b't');
+    let drop_both = || vec![(pa_tag, None), (pt_tag, None)];
+
+    let pa = match src.data().get(&pa_tag) {
+        Some(Value::Array(Array::Int32(v))) => v,
+        _ => return drop_both(),
+    };
+    // pa = [anchor, range0.start, range0.end, range1.start, range1.end]. dorado's
+    // poly-A signal ranges are half-open `[start, end)`: the anchor and the range
+    // starts are inclusive sample indices, so they must be `< kept_end`; the range
+    // ENDS are exclusive and may equal `kept_end` (the window's own exclusive end).
+    // Every real position must also be `>= kept_start`. Sentinels (`< 0`) skipped.
+    let has_real = pa.iter().any(|&p| p >= 0);
+    let survives = has_real
+        && pa.iter().enumerate().all(|(i, &p)| {
+            if p < 0 {
+                return true; // sentinel (NOT_FOUND / NOT_ENABLED)
+            }
+            let p = i64::from(p);
+            let within_upper = if i == 2 || i == 4 { p <= kept_end } else { p < kept_end };
+            p >= kept_start && within_upper
+        });
+    if !survives {
+        return drop_both();
+    }
+    if is_split {
+        // Re-express into the subread's own frame (subread signal 0 == kept_start;
+        // its ts is 0). Sentinels stay untouched. pt (base count) is unchanged.
+        let shifted: Vec<i32> = pa
+            .iter()
+            .map(|&p| if p >= 0 { (i64::from(p) - kept_start) as i32 } else { p })
+            .collect();
+        vec![(pa_tag, Some(Value::Array(Array::Int32(shifted))))]
+    } else {
+        // Crop: absolute original-signal positions are still valid; keep pa/pt.
+        Vec::new()
+    }
+}
+
 /// Trim-aware rewrite of the ONT signal tags for output window `[start, end)`.
 /// Returns `(tag, Some(value))` to set or `(tag, None)` to remove; empty when the
 /// read isn't trimmed. With `update_moves` off — or when the move table is
@@ -127,7 +203,11 @@ fn signal_tag_updates(
         return Vec::new(); // untrimmed: leave everything
     }
     let drop_all = || -> Vec<(Tag, Option<Value>)> {
-        SIGNAL_TAGS.iter().map(|t| (Tag::new(t[0], t[1]), None)).collect()
+        SIGNAL_TAGS
+            .iter()
+            .chain(POLYA_TAGS.iter())
+            .map(|t| (Tag::new(t[0], t[1]), None))
+            .collect()
     };
     if !update_moves {
         return drop_all();
@@ -160,10 +240,15 @@ fn signal_tag_updates(
     new_mv.extend_from_slice(&moves[block_first..block_second]);
     let mut updates = vec![(Tag::new(b'm', b'v'), Some(Value::Array(Array::Int8(new_mv))))];
 
-    // `ns = basecalled span + front trim`, matching dorado's
-    // `ns = raw_data_samples + num_trimmed_samples` (so a tail crop shrinks `ns`,
-    // a head-only crop leaves it unchanged, and a split gets the subread span).
+    // Original-signal window the kept bases span: [ts0 + block_first*stride,
+    // ts0 + block_second*stride). `ns = span + front trim` matches dorado's
+    // `ns = raw_data_samples + num_trimmed_samples` (a tail crop shrinks ns, a
+    // head-only crop leaves it unchanged, a split gets the subread span).
+    let ts0 = signal_int(src, b"ts").unwrap_or(0);
+    let kept_start = ts0 + (block_first * stride_n) as i64;
+    let kept_end = ts0 + (block_second * stride_n) as i64;
     let span = ((block_second - block_first) * stride_n) as i64;
+
     if total > 1 {
         // Split -> dorado subread: renamed, front trim reset to 0, parent linkage.
         let sp = signal_int(src, b"sp").unwrap_or(0) + (block_first * stride_n) as i64;
@@ -176,10 +261,10 @@ fn signal_tag_updates(
         updates.push((Tag::new(b'r', b'n'), Some(Value::Int32(-1))));
     } else {
         // Head/tail crop in place: keep the read identity, advance the front trim.
-        let ts = signal_int(src, b"ts").unwrap_or(0) + (block_first * stride_n) as i64;
-        updates.push((Tag::new(b't', b's'), Some(Value::Int32(ts as i32))));
-        updates.push((Tag::new(b'n', b's'), Some(Value::Int32((ts + span) as i32))));
+        updates.push((Tag::new(b't', b's'), Some(Value::Int32(kept_start as i32))));
+        updates.push((Tag::new(b'n', b's'), Some(Value::Int32((kept_start + span) as i32))));
     }
+    updates.extend(polya_updates(src, kept_start, kept_end, total > 1));
     updates
 }
 
@@ -268,15 +353,46 @@ pub fn reconstruct_record(
         }
     }
 
+    if start != 0 || end != orig_len {
+        // Drop position/signal tags we can't reconstruct (poly-A / barcode coords).
+        for t in DROP_ON_TRIM_TAGS {
+            out.data_mut().remove(&Tag::new(t[0], t[1]));
+        }
+        // Refresh qs (mean read qscore) from the trimmed quality — dorado
+        // recomputes it per (sub)read — but only when the source carried one.
+        if src.data().get(&Tag::new(b'q', b's')).is_some() {
+            let qs = crate::qual::mean_prob_q(&qual[start..end]) as f32;
+            out.data_mut().insert(Tag::new(b'q', b's'), Value::Float(qs));
+        }
+    }
+
+    // st/du describe the whole parent read; on a split they no longer fit the
+    // subread (which starts later in the signal), so drop them.
+    if total > 1 {
+        for t in DROP_ON_SPLIT_TAGS {
+            out.data_mut().remove(&Tag::new(t[0], t[1]));
+        }
+    }
+
     // Per-base arrays (PacBio ip/pw/fi/fp/ri/rp, or any read-length `B` array) are
-    // sliced to the window so the trimmed record stays valid. MM/ML/MN and the
-    // signal tags are handled above and skipped here.
+    // sliced to the window so the trimmed record stays valid. MM/ML/MN, the signal
+    // tags, and the dropped-on-trim tags are handled above and skipped here.
     if start != 0 || end != orig_len {
         let data = out.data_mut();
         let mut to_replace: Vec<(Tag, Value)> = Vec::new();
         for (tag, value) in data.iter() {
             let t = <[u8; 2]>::from(tag);
-            if t == *b"MM" || t == *b"ML" || t == *b"MN" || SIGNAL_TAGS.contains(&t) {
+            // Skip every tag with dedicated handling above (mods, signal, poly-A,
+            // and the drop-on-trim/split sets) so the structural per-base slicer
+            // can't re-slice e.g. a kept `pa` array that happens to be read-length.
+            if t == *b"MM"
+                || t == *b"ML"
+                || t == *b"MN"
+                || SIGNAL_TAGS.contains(&t)
+                || POLYA_TAGS.contains(&t)
+                || DROP_ON_TRIM_TAGS.contains(&t)
+                || DROP_ON_SPLIT_TAGS.contains(&t)
+            {
                 continue;
             }
             if let Some(v) = perbase_slice(value, orig_len, start, end) {
@@ -530,6 +646,7 @@ fn build_fastq_tags(
     seq: &[u8],
     start: usize,
     end: usize,
+    total: usize,
     sel: &FastqTags,
 ) -> Vec<u8> {
     let mut tags = Vec::new();
@@ -540,13 +657,29 @@ fn build_fastq_tags(
         if t == *b"MM" || t == *b"ML" || t == *b"MN" {
             continue; // handled by the reconstructed block below
         }
-        // BAM→FASTQ drops the ONT signal tags on trim rather than rewriting them:
-        // a sliced move table is impractical in a FASTQ header, and signal-aware
-        // callers consume BAM, not FASTQ (`--update-moves` is BAM→BAM only).
-        if trimmed && SIGNAL_TAGS.contains(&t) {
+        // On trim, drop the ONT signal tags (a sliced move table is impractical in
+        // a FASTQ header, and signal-aware callers consume BAM — `--update-moves`
+        // is BAM→BAM only) plus the poly-A and barcode-coordinate tags.
+        if trimmed
+            && (SIGNAL_TAGS.contains(&t)
+                || POLYA_TAGS.contains(&t)
+                || DROP_ON_TRIM_TAGS.contains(&t))
+        {
+            continue;
+        }
+        // On a split, st/du describe the parent read, not the subread.
+        if total > 1 && DROP_ON_SPLIT_TAGS.contains(&t) {
             continue;
         }
         if !sel.carries(&t) {
+            continue;
+        }
+        // Refresh qs from the trimmed quality (matches the BAM→BAM path).
+        if t == *b"qs" && trimmed {
+            let ql = src.quality_scores().as_ref();
+            let qs = crate::qual::mean_prob_q(&ql[start..end]) as f32;
+            tags.push(b'\t');
+            tags.extend_from_slice(&format_aux_field(t, &Value::Float(qs)));
             continue;
         }
         // Per-base kinetics stay consistent with the trimmed sequence.
@@ -607,7 +740,7 @@ where
         let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
         let total = intervals.len();
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
-            let tags = build_fastq_tags(&rec, &seq, s, e, &cfg.fastq_tags);
+            let tags = build_fastq_tags(&rec, &seq, s, e, total, &cfg.fastq_tags);
             if tags.is_empty() {
                 write_segment(writer, &name, &seq[s..e], &qual[s..e], total, idx)?;
             } else {
@@ -661,7 +794,7 @@ pub fn run_bam_to_fastq<W: Write + Send>(
             let total = intervals.len();
             let mut out = Vec::with_capacity(total);
             for (idx, (s, e)) in intervals.into_iter().enumerate() {
-                let tags = build_fastq_tags(rec, &seq, s, e, &cfg.fastq_tags);
+                let tags = build_fastq_tags(rec, &seq, s, e, total, &cfg.fastq_tags);
                 let mut buf = Vec::new();
                 if tags.is_empty() {
                     write_segment(&mut buf, &name, &seq[s..e], &qual[s..e], total, idx)?;
@@ -1088,6 +1221,8 @@ mod tests {
         d.insert(Tag::new(b't', b's'), Value::Int32(10));
         // Consistent: ts0 + n_blocks*stride = 10 + 8*2 = 26.
         d.insert(Tag::new(b'n', b's'), Value::Int32(26));
+        d.insert(Tag::new(b's', b't'), Value::String(b"2024-06-21T10:00:00Z".as_slice().into()));
+        d.insert(Tag::new(b'd', b'u'), Value::Float(5.0));
         src
     }
 
@@ -1114,6 +1249,9 @@ mod tests {
         }
         assert!(out.data().get(&Tag::new(b's', b'p')).is_none());
         assert!(out.data().get(&Tag::new(b'p', b'i')).is_none());
+        // A crop keeps the read identity, so st/du stay.
+        assert!(out.data().get(&Tag::new(b's', b't')).is_some(), "st kept on crop");
+        assert!(out.data().get(&Tag::new(b'd', b'u')).is_some(), "du kept on crop");
     }
 
     #[test]
@@ -1167,6 +1305,9 @@ mod tests {
             Some(Value::Int32(-1)) => {}
             o => panic!("s1 rn should be -1: {o:?}"),
         }
+        // st/du describe the parent read -> dropped on a split subread.
+        assert!(s1.data().get(&Tag::new(b's', b't')).is_none(), "st dropped on split");
+        assert!(s1.data().get(&Tag::new(b'd', b'u')).is_none(), "du dropped on split");
 
         let s2 = reconstruct_record(&ubam_with_moves(), 3, 6, 2, 1, true);
         assert_eq!(AsRef::<[u8]>::as_ref(s2.name().unwrap()), b"r1_segment_2");
@@ -1200,6 +1341,165 @@ mod tests {
                 std::str::from_utf8(t).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn trim_drops_polya_barcode_tags_and_refreshes_qs() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTAC".to_vec().into();
+        // First two bases low quality (phred 2), the rest Q40.
+        *src.quality_scores_mut() = vec![2, 2, 40, 40, 40, 40].into();
+        let d = src.data_mut();
+        d.insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![100, 200, 300, 400, 500])));
+        d.insert(Tag::new(b'p', b't'), Value::Int32(50));
+        d.insert(Tag::new(b'b', b'i'), Value::Array(Array::Float(vec![0.9, 5.0, 20.0])));
+        d.insert(Tag::new(b'q', b's'), Value::Float(20.0)); // whole-read qs (stale after crop)
+        d.insert(Tag::new(b'R', b'G'), Value::String(b"grp".as_slice().into()));
+
+        // head-crop 2 -> window [2,6): keeps only the Q40 bases.
+        let out = reconstruct_record(&src, 2, 6, 1, 0, false);
+
+        // Unreconstructable poly-A / barcode coordinate tags are dropped.
+        for t in [b"pa", b"pt", b"bi"] {
+            assert!(
+                out.data().get(&Tag::new(t[0], t[1])).is_none(),
+                "{} must be dropped on trim",
+                std::str::from_utf8(t).unwrap()
+            );
+        }
+        // qs is recomputed from the trimmed (all-Q40) quality, not left at 20.
+        match out.data().get(&Tag::new(b'q', b's')) {
+            Some(Value::Float(q)) => {
+                let expected = crate::qual::mean_prob_q(&[40, 40, 40, 40]) as f32;
+                assert!((q - expected).abs() < 1e-4, "qs recomputed: got {q}, want {expected}");
+            }
+            other => panic!("qs: {other:?}"),
+        }
+        // Per-read metadata (RG) is untouched.
+        assert!(out.data().get(&Tag::new(b'R', b'G')).is_some());
+    }
+
+    // ubam_with_moves head-crop 2 spans original-signal window [ts0+3*2, ts0+8*2]
+    // = [16, 26]; a split segment [3,6) spans [ts0+4*2, 26] = [18, 26].
+    #[test]
+    fn update_moves_crop_keeps_polya_when_tail_survives() {
+        let mut src = ubam_with_moves();
+        // anchor + boundary all inside [16,26]; the split range is a sentinel.
+        src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])));
+        src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+
+        let out = reconstruct_record(&src, 2, 6, 1, 0, true); // head-crop 2
+        // A crop keeps the read identity + POD5 signal, so absolute pa stays valid.
+        match out.data().get(&Tag::new(b'p', b'a')) {
+            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[20, 18, 24, -1, -1]),
+            other => panic!("pa should be kept as-is on a crop: {other:?}"),
+        }
+        match out.data().get(&Tag::new(b'p', b't')) {
+            Some(Value::Int32(30)) => {}
+            other => panic!("pt: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_moves_split_shifts_polya_into_subread_frame() {
+        let mut src = ubam_with_moves();
+        src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])));
+        src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+
+        // split segment [3,6): kept signal window [18,26] -> shift real positions by -18.
+        let out = reconstruct_record(&src, 3, 6, 2, 1, true);
+        match out.data().get(&Tag::new(b'p', b'a')) {
+            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[2, 0, 6, -1, -1]),
+            other => panic!("pa should shift into the subread frame: {other:?}"),
+        }
+        match out.data().get(&Tag::new(b'p', b't')) {
+            Some(Value::Int32(30)) => {} // base count unchanged
+            other => panic!("pt: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_moves_drops_polya_when_tail_trimmed() {
+        let mut src = ubam_with_moves();
+        // anchor at 12 sits in the trimmed-off front signal (kept window is [16,26]).
+        src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![12, 10, 14, -1, -1])));
+        src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+
+        let out = reconstruct_record(&src, 2, 6, 1, 0, true); // head-crop 2
+        assert!(out.data().get(&Tag::new(b'p', b'a')).is_none(), "pa dropped when tail trimmed");
+        assert!(out.data().get(&Tag::new(b'p', b't')).is_none(), "pt dropped when tail trimmed");
+    }
+
+    #[test]
+    fn update_moves_does_not_reslice_read_length_pa() {
+        // Regression (review F1): a pa array whose length happens to equal the read
+        // length must NOT be treated as a per-base array and sliced.
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTA".to_vec().into(); // 5 bases
+        *src.quality_scores_mut() = vec![40; 5].into();
+        let d = src.data_mut();
+        d.insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![2, 1, 1, 1, 1, 1]))); // stride 2, 5 ones
+        d.insert(Tag::new(b't', b's'), Value::Int32(0));
+        d.insert(Tag::new(b'n', b's'), Value::Int32(10));
+        // 5-element pa (== read length), all real positions inside the kept window.
+        d.insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![4, 2, 6, -1, -1])));
+
+        // head-crop 1 -> window [1,5): kept signal window [2,10]; pa survives.
+        let out = reconstruct_record(&src, 1, 5, 1, 0, true);
+        match out.data().get(&Tag::new(b'p', b'a')) {
+            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[4, 2, 6, -1, -1], "pa must not be re-sliced"),
+            other => panic!("pa: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_moves_without_move_table_drops_signal_and_polya() {
+        // --update-moves but no move table -> can't relate signal to sequence, so
+        // the signal + poly-A tags are dropped (parse_move_table -> None -> drop_all).
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTAC".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 6].into();
+        let d = src.data_mut();
+        d.insert(Tag::new(b't', b's'), Value::Int32(10));
+        d.insert(Tag::new(b'n', b's'), Value::Int32(100));
+        d.insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(vec![20, 18, 24, -1, -1])));
+        d.insert(Tag::new(b'p', b't'), Value::Int32(30));
+
+        let out = reconstruct_record(&src, 2, 6, 1, 0, true);
+        for t in [b"ts", b"ns", b"pa", b"pt"] {
+            assert!(
+                out.data().get(&Tag::new(t[0], t[1])).is_none(),
+                "{} dropped when the move table is absent",
+                std::str::from_utf8(t).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn update_moves_polya_boundary_end_inclusive_anchor_exclusive() {
+        // split [3,6): kept window [18,26). A range END exactly at kept_end
+        // (exclusive) survives; an anchor at kept_end is out of the window -> drop.
+        let mk = |pa: Vec<i32>| {
+            let mut src = ubam_with_moves();
+            src.data_mut().insert(Tag::new(b'p', b'a'), Value::Array(Array::Int32(pa)));
+            src.data_mut().insert(Tag::new(b'p', b't'), Value::Int32(30));
+            src
+        };
+        // range end == kept_end (26) -> survives, shifted by -18.
+        let kept = reconstruct_record(&mk(vec![20, 18, 26, -1, -1]), 3, 6, 2, 1, true);
+        match kept.data().get(&Tag::new(b'p', b'a')) {
+            Some(Value::Array(Array::Int32(v))) => assert_eq!(v, &[2, 0, 8, -1, -1]),
+            other => panic!("range-end at kept_end should survive: {other:?}"),
+        }
+        // anchor == kept_end (26) -> out of window -> dropped.
+        let dropped = reconstruct_record(&mk(vec![26, 18, 24, -1, -1]), 3, 6, 2, 1, true);
+        assert!(dropped.data().get(&Tag::new(b'p', b'a')).is_none(), "anchor at exclusive boundary drops");
     }
 
     #[test]

@@ -86,6 +86,40 @@ fn out_of_range_gc_bound_errors() {
 }
 
 #[test]
+fn nan_quality_bound_errors() {
+    // NaN slips past `min > max` (every NaN comparison is false) and would silently
+    // disable quality filtering; it must be rejected explicitly.
+    chopping()
+        .args(["--min-qual", "nan", "--in-format", "fastq"])
+        .write_stdin("@r1\nACGT\n+\nIIII\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NaN"));
+}
+
+#[test]
+#[cfg(unix)]
+fn hard_linked_input_output_is_rejected_and_preserves_input() {
+    // Two hard links to one inode canonicalize to distinct paths, so only the
+    // inode+device check catches this — otherwise File::create truncates the input.
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+    let output = dir.path().join("out.fastq");
+    std::fs::write(&input, "@r1\nACGT\n+\nIIII\n@r2\nTTTT\n+\nIIII\n").unwrap();
+    std::fs::hard_link(&input, &output).unwrap();
+    let before = std::fs::read(&input).unwrap();
+
+    chopping()
+        .arg("-i").arg(&input)
+        .arg("-o").arg(&output)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("same file"));
+
+    assert_eq!(std::fs::read(&input).unwrap(), before, "hard-linked input must be preserved");
+}
+
+#[test]
 fn gz_output_roundtrips() {
     use std::io::Read;
     let dir = tempfile::tempdir().unwrap();

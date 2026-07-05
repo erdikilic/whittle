@@ -91,9 +91,23 @@ stays internally consistent (applies to both BAM→BAM and BAM→FASTQ):
   and `generate_read_tags` (move blocks sliced by stride-aligned range; `#1`s stays
   equal to the sequence length). BAM→FASTQ always drops these tags on trim (a move
   table in a FASTQ header is impractical).
+- **Poly-A tags** (`pa` signal boundaries, `pt` tail length in bases). `pa` holds
+  absolute original-signal positions, so under `--update-moves` they're **kept**
+  when the tail survives the trim: a crop leaves them valid as-is, a split shifts
+  `pa` into the subread's own signal frame. If the trim cuts into the tail (any
+  `pa` position falls outside the kept signal window), both are **dropped**.
+  Without `--update-moves` (or a malformed move table) they're dropped.
+- **`bi`** (barcode info) embeds front/rear sequence positions that shift under a
+  crop, so it's **dropped** on trim. The barcode *call* (`BC`/`bv`) is a per-read
+  label and is kept.
+- **`qs`** (mean read qscore) is **recomputed** from the trimmed quality on a
+  trimmed read (matching dorado's per-(sub)read `qs`).
+- **`st` (start time) / `du` (duration)** are kept on a crop (same read identity)
+  but **dropped on a split** — a subread starts later in the signal, and dorado
+  recomputes these from the sample rate, which isn't carried in the BAM.
 - **Signal-scaling scalars** (`sm`/`sd`/`sv`) and **per-read metadata** (`RG`,
-  `ch`, `mx`, `np`, `sn`, `qs`, `dx`, …) are copied verbatim — base-trimming
-  doesn't change them.
+  `ch`, `mx`, `dx`, `fn`, `BC`, …) are copied verbatim — base-trimming doesn't
+  change them.
 
 If a known per-base tag's length doesn't match the sequence (malformed input), it
 is left untouched and the run prints a one-line advisory.
@@ -152,7 +166,7 @@ See **The MM/ML/ML guarantee** below.
 | `--in-format`, `--out-format {fastq,fastq-gz,bam}` | Force format instead of detecting it |
 | `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`; MM/ML/MN reconstructed, per-base kinetics sliced, `mv` dropped on trim, rest verbatim) |
 | `-c`, `--compression-level <0–9>` | DEFLATE level for compressed output — bgzf for BAM, gzip for FASTQ.gz (default 6). Lower is faster/larger; ignored for plain FASTQ |
-| `-t`, `--threads <N>` | Worker threads for the FASTQ pipeline (default 4; uBAM is single-threaded) |
+| `-t`, `--threads <N>` | Total worker threads (default 4), split workload-aware across the decode/render/encode stages; applies to both the FASTQ and uBAM pipelines |
 | `-l`, `--min-length <N>` | Minimum read length to keep (default 1) — also the minimum length for a *split segment* to be kept, see below |
 | `-L`, `--max-length <N>` | Maximum read length to keep |
 | `-q`, `--min-qual <F>` | Minimum read quality to keep (default 0) |
