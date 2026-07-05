@@ -79,15 +79,18 @@ stays internally consistent (applies to both BAM→BAM and BAM→FASTQ):
   signal. By default they are **dropped** on a trimmed read (a stale move table
   misleads signal-aware tools). Pass **`--update-moves`** to instead keep them
   consistent (BAM→BAM), so a trimmed read stays usable by Remora / Clair3 v2:
-  - a head/tail **crop** keeps the read name, slices `mv`, and advances `ts` past
-    the trimmed-off signal (`ns` unchanged — the POD5 signal is looked up by name);
+  - a head/tail **crop** keeps the read name, slices `mv`, advances `ts` past the
+    trimmed-off front signal, and sets `ns = ts + span` (dorado's `ns = trim +
+    basecalled-span`, so a head-only crop leaves `ns` unchanged and a tail crop
+    shrinks it);
   - a `--split-qual` **split** emits dorado-style subreads (`pi` = parent id,
-    `sp` = offset into the parent signal, `ns` = subread samples, `ts` = 0), so the
-    renamed segment's signal is still locatable in POD5.
+    `sp` = offset into the parent signal, `ns` = subread span, `ts` = 0, `rn` = -1),
+    so the renamed segment's signal is still locatable in POD5.
 
-  The slicing follows dorado's own `splitter::subread` (move blocks sliced by
-  stride-aligned range; `#1`s stays equal to the sequence length). BAM→FASTQ
-  always drops these tags on trim (a move table in a FASTQ header is impractical).
+  The `mv`/`ts`/`ns`/`sp`/`pi`/`rn` values follow dorado's own `splitter::subread`
+  and `generate_read_tags` (move blocks sliced by stride-aligned range; `#1`s stays
+  equal to the sequence length). BAM→FASTQ always drops these tags on trim (a move
+  table in a FASTQ header is impractical).
 - **Signal-scaling scalars** (`sm`/`sd`/`sv`) and **per-read metadata** (`RG`,
   `ch`, `mx`, `np`, `sn`, `qs`, `dx`, …) are copied verbatim — base-trimming
   doesn't change them.

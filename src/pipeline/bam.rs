@@ -160,19 +160,25 @@ fn signal_tag_updates(
     new_mv.extend_from_slice(&moves[block_first..block_second]);
     let mut updates = vec![(Tag::new(b'm', b'v'), Some(Value::Array(Array::Int8(new_mv))))];
 
+    // `ns = basecalled span + front trim`, matching dorado's
+    // `ns = raw_data_samples + num_trimmed_samples` (so a tail crop shrinks `ns`,
+    // a head-only crop leaves it unchanged, and a split gets the subread span).
+    let span = ((block_second - block_first) * stride_n) as i64;
     if total > 1 {
-        // Split -> dorado subread encoding.
-        let ns = ((block_second - block_first) * stride_n) as i32;
+        // Split -> dorado subread: renamed, front trim reset to 0, parent linkage.
         let sp = signal_int(src, b"sp").unwrap_or(0) + (block_first * stride_n) as i64;
         let pi = parent_read_id(src);
         updates.push((Tag::new(b't', b's'), Some(Value::Int32(0))));
-        updates.push((Tag::new(b'n', b's'), Some(Value::Int32(ns))));
+        updates.push((Tag::new(b'n', b's'), Some(Value::Int32(span as i32))));
         updates.push((Tag::new(b's', b'p'), Some(Value::Int32(sp as i32))));
         updates.push((Tag::new(b'p', b'i'), Some(Value::String(pi.into()))));
+        // Dorado marks split products with read_number -1.
+        updates.push((Tag::new(b'r', b'n'), Some(Value::Int32(-1))));
     } else {
-        // Head/tail crop in place: keep the read identity, skip more front signal.
+        // Head/tail crop in place: keep the read identity, advance the front trim.
         let ts = signal_int(src, b"ts").unwrap_or(0) + (block_first * stride_n) as i64;
         updates.push((Tag::new(b't', b's'), Some(Value::Int32(ts as i32))));
+        updates.push((Tag::new(b'n', b's'), Some(Value::Int32((ts + span) as i32))));
     }
     updates
 }
@@ -1080,33 +1086,54 @@ mod tests {
         let d = src.data_mut();
         d.insert(Tag::new(b'm', b'v'), Value::Array(Array::Int8(vec![2, 1, 1, 0, 1, 1, 0, 1, 1])));
         d.insert(Tag::new(b't', b's'), Value::Int32(10));
-        d.insert(Tag::new(b'n', b's'), Value::Int32(100));
+        // Consistent: ts0 + n_blocks*stride = 10 + 8*2 = 26.
+        d.insert(Tag::new(b'n', b's'), Value::Int32(26));
         src
     }
 
     #[test]
-    fn update_moves_crop_slices_mv_and_bumps_ts() {
-        // head-crop 2 -> window [2,6), single segment, name kept.
+    fn update_moves_head_crop_slices_mv_bumps_ts_keeps_ns() {
+        // head-crop 2 -> window [2,6): block_first=ones[2]=3, block_second=8.
         let out = reconstruct_record(&ubam_with_moves(), 2, 6, 1, 0, true);
         assert_eq!(out.sequence().as_ref(), b"GTAC");
         assert_eq!(AsRef::<[u8]>::as_ref(out.name().unwrap()), b"r1", "crop keeps the read name");
-        // mv = [stride] + moves[ones[2]=3 .. 8] = [2] + [1,1,0,1,1].
+        // mv = [stride] + moves[3 .. 8] = [2] + [1,1,0,1,1].
         match out.data().get(&Tag::new(b'm', b'v')) {
             Some(Value::Array(Array::Int8(v))) => assert_eq!(v, &[2, 1, 1, 0, 1, 1]),
             other => panic!("mv: {other:?}"),
         }
-        // ts += block_first*stride = 10 + 3*2 = 16; ns unchanged.
+        // ts += block_first*stride = 10 + 3*2 = 16; ns = ts + span = 16 + (8-3)*2 = 26
+        // (a head-only crop leaves ns unchanged).
         match out.data().get(&Tag::new(b't', b's')) {
             Some(Value::Int32(16)) => {}
             other => panic!("ts: {other:?}"),
         }
         match out.data().get(&Tag::new(b'n', b's')) {
-            Some(Value::Int32(100)) => {}
-            other => panic!("ns must stay original on crop: {other:?}"),
+            Some(Value::Int32(26)) => {}
+            other => panic!("ns: {other:?}"),
         }
-        // Crop adds no split linkage.
         assert!(out.data().get(&Tag::new(b's', b'p')).is_none());
         assert!(out.data().get(&Tag::new(b'p', b'i')).is_none());
+    }
+
+    #[test]
+    fn update_moves_tail_crop_shrinks_ns() {
+        // tail-crop 2 -> window [0,4): block_first=ones[0]=0, block_second=ones[4]=6.
+        let out = reconstruct_record(&ubam_with_moves(), 0, 4, 1, 0, true);
+        // mv = [stride] + moves[0 .. 6] = [2] + [1,1,0,1,1,0].
+        match out.data().get(&Tag::new(b'm', b'v')) {
+            Some(Value::Array(Array::Int8(v))) => assert_eq!(v, &[2, 1, 1, 0, 1, 1, 0]),
+            other => panic!("mv: {other:?}"),
+        }
+        // ts unchanged (no head trim): 10; ns = ts + span = 10 + (6-0)*2 = 22 (< 26).
+        match out.data().get(&Tag::new(b't', b's')) {
+            Some(Value::Int32(10)) => {}
+            other => panic!("ts: {other:?}"),
+        }
+        match out.data().get(&Tag::new(b'n', b's')) {
+            Some(Value::Int32(22)) => {}
+            other => panic!("ns must shrink on a tail crop (dorado ns = trim + span): {other:?}"),
+        }
     }
 
     #[test]
@@ -1134,6 +1161,11 @@ mod tests {
         match s1.data().get(&Tag::new(b'p', b'i')) {
             Some(Value::String(s)) => assert_eq!(s.to_vec(), b"r1"),
             o => panic!("s1 pi: {o:?}"),
+        }
+        // dorado marks split products with read_number -1.
+        match s1.data().get(&Tag::new(b'r', b'n')) {
+            Some(Value::Int32(-1)) => {}
+            o => panic!("s1 rn should be -1: {o:?}"),
         }
 
         let s2 = reconstruct_record(&ubam_with_moves(), 3, 6, 2, 1, true);
