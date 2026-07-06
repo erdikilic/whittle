@@ -185,7 +185,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         );
         tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
-        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref()) {
+        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref(), cfg.adapter_sample) {
             tracing::info!("{line}");
         }
     } else if obs.is_bar() {
@@ -529,7 +529,7 @@ fn run_folder(
         );
         tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
-        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref()) {
+        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref(), cfg.adapter_sample) {
             tracing::info!("{line}");
         }
     } else if obs.is_bar() {
@@ -782,12 +782,22 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
 /// line entirely for an off run (same convention as the other banner-line
 /// helpers being pure/unit-testable). Reports the adapter count, `trim +
 /// split` vs `ends-only` mode (`AdapterConfig::split`), the end-match error
-/// rate, and the end-zone size in bp.
-fn adapter_banner_line(adapters: Option<&crate::adapter::AdapterConfig>) -> Option<String> {
+/// rate, the end-zone size in bp, and (via `adapter_sample`, i.e.
+/// `cfg.adapter_sample`) whether presence detection will sample the input —
+/// `sample {N}` when active, `sample off` when `N == 0` disables detection.
+fn adapter_banner_line(
+    adapters: Option<&crate::adapter::AdapterConfig>,
+    adapter_sample: usize,
+) -> Option<String> {
     let a = adapters?;
     let mode = if a.split { "trim + split" } else { "ends-only" };
+    let sample = if adapter_sample > 0 {
+        format!("sample {adapter_sample}")
+    } else {
+        "sample off".to_string()
+    };
     Some(format!(
-        "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp",
+        "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp · {sample}",
         a.adapters.len(),
         a.error_rate,
         a.end_size
@@ -1286,7 +1296,7 @@ mod tests {
 
     #[test]
     fn adapter_banner_line_none_when_off_and_describes_when_on() {
-        assert!(adapter_banner_line(None).is_none());
+        assert!(adapter_banner_line(None, 10000).is_none());
         let cfg = AdapterConfig {
             adapters: vec![Adapter {
                 name: "a".into(),
@@ -1297,11 +1307,15 @@ mod tests {
             end_size: 150,
             split: true,
         };
-        let line = adapter_banner_line(Some(&cfg)).unwrap();
+        let line = adapter_banner_line(Some(&cfg), 10000).unwrap();
         assert!(line.contains("1 sequences"));
         assert!(line.contains("trim + split"));
         assert!(line.contains("error 0.20"));
         assert!(line.contains("end-zone 150 bp"));
+        assert!(line.contains("sample 10000"));
+
+        let off_line = adapter_banner_line(Some(&cfg), 0).unwrap();
+        assert!(off_line.contains("sample off"));
     }
 
     #[test]
@@ -1317,7 +1331,7 @@ mod tests {
             split: false,
         };
         assert!(
-            adapter_banner_line(Some(&cfg))
+            adapter_banner_line(Some(&cfg), 10000)
                 .unwrap()
                 .contains("ends-only")
         );

@@ -191,6 +191,7 @@ See **The MM/ML/ML guarantee** below.
 | `--adapter-error-rate <F>` | End-match error tolerance as a fraction of adapter length (default 0.2); interior/chimera-split hits use half this budget |
 | `--adapter-end-size <N>` | Bases at each read end searched for a terminal adapter (default 150) |
 | `--adapter-ends-only` | Trim adapters at read ends only; never split on an interior adapter |
+| `--adapter-sample <N>` | Reads to sample for adapter presence detection (default 10000); trimming then runs only against adapters actually found in the sample (faster, fewer spurious trims). `0` disables detection and trims against the full set. Inputs under 100 reads always skip detection, regardless of this setting |
 | `-v`, `-vv` | Increase logging detail: `-v` = debug, `-vv` = trace (default: info). See **Logging & progress** below |
 | `--quiet` | Silence progress and the info-level summary; warnings and errors still print |
 
@@ -291,6 +292,20 @@ as quality- and `-H`/`-T`-trimming: on uBAM, `MM`/`ML`/`MN` are rebuilt for
 every resulting window or segment (see **The MM/ML/MN guarantee** above),
 and the rest of the trim-aware tag handling (per-base kinetics,
 `--update-moves`, etc.) applies identically.
+
+### Presence detection
+
+Adapter/preset catalogs (especially `--adapter-preset ont`, over a hundred
+sequences) usually contain far more entries than are actually present in a
+given run. By default `whittle` samples the first `--adapter-sample <N>`
+reads (default 10000), checks which of the configured adapters actually
+match within that sample, and trims the rest of the input against only that
+reduced set — same error-rate/end-size settings, fewer adapters to search
+per read, and no spurious low-confidence trims from catalog entries that
+were never in the data to begin with. Pass `--adapter-sample 0` to disable
+detection and trim against the full configured set, unconditionally. Inputs
+under 100 reads always skip detection (too few reads to sample reliably)
+and fall back to the full set regardless of `--adapter-sample`.
 
 ### The built-in ONT catalog
 
