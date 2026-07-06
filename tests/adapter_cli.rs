@@ -198,6 +198,83 @@ fn tiny_input_skips_detection() {
     );
 }
 
+// The key correctness guarantee (Phase 1.5 spec): detection only ever *drops*
+// adapters that don't act, so trimming a present adapter with detection ON
+// must be byte-identical to trimming with detection OFF (`--adapter-sample
+// 0`, i.e. the full set). Here one adapter is present and several absent
+// adapters are C/G-rich 20mers that cannot match the G/T-only present
+// adapter or the A-run insert -- neither forward nor reverse-complement --
+// within the default edit-distance budget (k_end = floor(0.2 * 20) = 4):
+// each absent sequence has >= 5 C's AND >= 5 G's, so both it and its
+// revcomp need >= 5 edits to align anywhere in a read that contains no C at
+// all, which exceeds k_end. That was confirmed empirically too: the
+// detection run's stderr reports all 3 absent adapters dropped (see below).
+#[test]
+fn detection_output_equals_full_set_for_present_adapter() {
+    let present = "GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
+    let absent = [
+        "CCCCGGGGCCCCGGGGCCCC", // 12 C, 8 G
+        "ACGACGACGACGACGACGAC", // 7 C, 6 G
+        "CCGGCCGGCCGGCCGGCCGG", // 10 C, 10 G
+    ];
+    let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40bp
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fa, ">present\n{present}").unwrap();
+    for (i, seq) in absent.iter().enumerate() {
+        writeln!(fa, ">absent{i}\n{seq}").unwrap();
+    }
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    for i in 0..200 {
+        writeln!(fq, "@r{i}\n{present}{insert}\n+\n{}", "I".repeat(60)).unwrap();
+    }
+
+    let run = |extra_args: &[&str]| {
+        // `-t 1`: pin single-threaded so output order is deterministic (the
+        // parallel writer path lands records in arrival order, not input
+        // order, for `threads > 1` -- see `pipeline::fastq::run`). That
+        // nondeterminism is orthogonal to what this test checks, so it must
+        // be controlled for to get a meaningful byte comparison.
+        let mut args = vec![
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+            "-t",
+            "1",
+        ];
+        args.extend_from_slice(extra_args);
+        Command::cargo_bin("whittle")
+            .unwrap()
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    };
+
+    // Detection ON (default sampling): drops the 3 absent adapters.
+    let detect_on = run(&[]);
+    // Detection OFF: trims against the full 4-adapter set.
+    let detect_off = run(&["--adapter-sample", "0"]);
+
+    assert!(
+        !detect_on.is_empty(),
+        "detection-on output must be non-empty"
+    );
+    let detect_on_str = String::from_utf8(detect_on.clone()).unwrap();
+    assert!(
+        detect_on_str.contains(insert),
+        "detection-on output should keep the insert: {detect_on_str}"
+    );
+    assert_eq!(
+        detect_on, detect_off,
+        "trimming a present adapter must be byte-identical whether detection \
+         is on (drops absent adapters) or off (uses the full set), since \
+         detection only removes adapters that don't act"
+    );
+}
+
 #[test]
 fn no_adapter_flag_is_byte_identical() {
     let mut fq = tempfile::NamedTempFile::new().unwrap();

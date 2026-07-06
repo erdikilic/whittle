@@ -359,7 +359,7 @@ where
             );
             kept
         };
-        let mut reduced = ac.clone();
+        let mut reduced = ac;
         reduced.adapters = kept;
         cfg.adapters = Some(reduced);
     }
