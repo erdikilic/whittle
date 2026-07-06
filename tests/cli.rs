@@ -146,6 +146,40 @@ fn hard_linked_input_output_is_rejected_and_preserves_input() {
 }
 
 #[test]
+fn quiet_suppresses_summary_but_keeps_stdout() {
+    // A minimal FASTQ over stdin; default run prints the "Kept" summary to stderr.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .arg("--quiet")
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("@r1"))
+        .stderr(predicate::str::contains("Kept").not());
+}
+
+#[test]
+fn default_run_prints_summary_to_stderr() {
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Kept 1 reads out of 1"));
+}
+
+#[test]
+fn over_spec_threads_warns() {
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .args(["-t", "100000"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("exceeds").and(predicate::str::contains("using")));
+}
+
+#[test]
 fn gz_output_roundtrips() {
     use std::io::Read;
     let dir = tempfile::tempdir().unwrap();

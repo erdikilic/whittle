@@ -19,14 +19,22 @@ struct Cli {
     in_format: Option<FormatArg>,
     #[arg(long, value_enum, help_heading = "Setup")]
     out_format: Option<FormatArg>,
-    #[arg(short = 't', long, default_value_t = 4, help_heading = "Setup")]
-    threads: usize,
+    /// Worker threads (default: all detected CPUs; values above the CPU count are clamped).
+    #[arg(short = 't', long, help_heading = "Setup")]
+    threads: Option<usize>,
     #[arg(long, default_value = "all", help_heading = "Setup")]
     fastq_tags: String,
     /// DEFLATE compression level for compressed output (bgzf for BAM, gzip for
     /// FASTQ.gz). Lower = faster/larger. Ignored for plain FASTQ.
     #[arg(short = 'c', long, default_value_t = 6, help_heading = "Setup")]
     compression_level: u8,
+
+    /// Increase logging detail: -v = debug, -vv = trace. Overridden by WHITTLE_LOG.
+    #[arg(short = 'v', long, action = clap::ArgAction::Count, help_heading = "Logging")]
+    verbose: u8,
+    /// Silence progress and info output; warnings and errors still print.
+    #[arg(long, conflicts_with = "verbose", help_heading = "Logging")]
+    quiet: bool,
 
     #[arg(short = 'l', long, default_value_t = 1, help_heading = "Filtering")]
     min_length: usize,
@@ -174,6 +182,15 @@ pub fn parse() -> anyhow::Result<Config> {
     };
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
 
+    let ncpu = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let threads = crate::config::resolve_threads(c.threads, ncpu);
+    let threads_clamped = match c.threads {
+        Some(n) if n > ncpu => Some((n, ncpu)),
+        _ => None,
+    };
+
     Ok(Config {
         io: IoConfig {
             input: c.input,
@@ -195,11 +212,14 @@ pub fn parse() -> anyhow::Result<Config> {
             tail: c.tail_crop,
             quality,
         },
-        threads: c.threads.max(1),
+        threads,
         fastq_tags,
         render_workers: 0,
         compression_level: c.compression_level,
         update_moves: c.update_moves,
+        verbosity: c.verbose,
+        quiet: c.quiet,
+        threads_clamped,
     })
 }
 
@@ -250,5 +270,8 @@ pub fn config_for_test_threads(
         render_workers: 0,
         compression_level: 6,
         update_moves: false,
+        verbosity: 0,
+        quiet: true,
+        threads_clamped: None,
     }
 }
