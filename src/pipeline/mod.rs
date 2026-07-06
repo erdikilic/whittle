@@ -32,7 +32,7 @@ pub struct Counters {
     pub dropped_trimmed: AtomicU64,
     /// Input reads that produced at least one output segment — bumped once per
     /// input read (not once per segment, unlike `output_reads`, which a
-    /// `--split-qual` run can bump several times for one input read). Exists
+    /// `--qual-split` run can bump several times for one input read). Exists
     /// solely so `snapshot`'s `debug_assert_eq!` can check that every input
     /// read is accounted for by exactly one of "dropped" or "produced output".
     pub reads_with_output: AtomicU64,

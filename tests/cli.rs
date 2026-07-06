@@ -28,9 +28,9 @@ fn head_tail_crop_over_stdin() {
 fn mutually_exclusive_quality_ops_error() {
     whittle()
         .args([
-            "--trim-qual",
+            "--qual-trim",
             "10",
-            "--best-segment",
+            "--qual-best-segment",
             "10",
             "--in-format",
             "fastq",
