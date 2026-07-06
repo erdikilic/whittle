@@ -1,9 +1,10 @@
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use rayon::prelude::*;
 
-use super::Stats;
+use super::{Counters, Stats};
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
@@ -14,11 +15,11 @@ pub fn run_fastq_seq<W: Write>(
     records: impl Iterator<Item = anyhow::Result<ReadRecord>>,
     writer: &mut W,
     cfg: &Config,
+    counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
-    let mut stats = Stats::default();
     for rec in records {
         let rec = rec?;
-        stats.input_reads += 1;
+        counters.input_reads.fetch_add(1, Ordering::Relaxed);
         if !filter::passes(&rec.seq, &rec.qual, &cfg.filter) {
             continue;
         }
@@ -33,10 +34,14 @@ pub fn run_fastq_seq<W: Write>(
                 total,
                 idx,
             )?;
-            stats.output_reads += 1;
+            counters.output_reads.fetch_add(1, Ordering::Relaxed);
         }
     }
-    Ok(stats)
+    Ok(Stats {
+        input_reads: counters.input_reads.load(Ordering::Relaxed),
+        output_reads: counters.output_reads.load(Ordering::Relaxed),
+        malformed_tag_reads: 0,
+    })
 }
 
 /// Format the surviving segments of one record into an owned FASTQ byte buffer.
@@ -76,13 +81,18 @@ fn render_record(rec: &ReadRecord, cfg: &Config) -> (u64, Vec<u8>) {
 /// keeps draining so producer threads never block on the bounded channel,
 /// surfacing the error once the scope joins (matching the sequential path's
 /// fail behavior, just at end-of-run instead of mid-stream).
-pub fn run_fastq<W, I>(records: I, writer: &mut W, cfg: &Config) -> anyhow::Result<Stats>
+pub fn run_fastq<W, I>(
+    records: I,
+    writer: &mut W,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<Stats>
 where
     W: Write + Send,
     I: Iterator<Item = anyhow::Result<ReadRecord>> + Send,
 {
     if cfg.threads <= 1 {
-        return run_fastq_seq(records, writer, cfg);
+        return run_fastq_seq(records, writer, cfg, counters);
     }
 
     let render_workers = if cfg.render_workers >= 1 {
@@ -93,8 +103,6 @@ where
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(render_workers)
         .build()?;
-    let input_reads = AtomicU64::new(0);
-    let output_reads = AtomicU64::new(0);
     let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(render_workers * 4);
 
     let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
@@ -132,10 +140,10 @@ where
                         return;
                     },
                 };
-                input_reads.fetch_add(1, Ordering::Relaxed);
+                counters.input_reads.fetch_add(1, Ordering::Relaxed);
                 let (out, buf) = render_record(&rec, cfg);
                 if out > 0 {
-                    output_reads.fetch_add(out, Ordering::Relaxed);
+                    counters.output_reads.fetch_add(out, Ordering::Relaxed);
                     let _ = tx.send(buf);
                 }
             });
@@ -150,8 +158,8 @@ where
         return Err(e.into());
     }
     Ok(Stats {
-        input_reads: input_reads.load(Ordering::Relaxed),
-        output_reads: output_reads.load(Ordering::Relaxed),
+        input_reads: counters.input_reads.load(Ordering::Relaxed),
+        output_reads: counters.output_reads.load(Ordering::Relaxed),
         // FASTQ input carries no BAM per-base tags.
         malformed_tag_reads: 0,
     })
@@ -186,6 +194,52 @@ mod tests {
     }
 
     #[test]
+    fn shared_counters_reflect_totals() {
+        use std::sync::Arc;
+
+        use crate::pipeline::Counters;
+        let cfg = Config {
+            io: crate::config::IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
+            filter: base_filter(),
+            trim: TrimPlan {
+                head: 1,
+                tail: 1,
+                quality: None,
+            },
+            threads: 1,
+            fastq_tags: crate::config::FastqTags::All,
+            render_workers: 0,
+            compression_level: 6,
+            update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
+        };
+        let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
+        let mut out = Vec::new();
+        let counters = Arc::new(Counters::default());
+        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg, &counters).unwrap();
+        assert_eq!((stats.input_reads, stats.output_reads), (1, 1));
+        assert_eq!(
+            counters
+                .input_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            counters
+                .output_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
     fn fixed_crop_writes_one_segment() {
         let cfg = Config {
             io: crate::config::IoConfig {
@@ -211,7 +265,13 @@ mod tests {
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
         let mut out = Vec::new();
-        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg).unwrap();
+        let stats = run_fastq_seq(
+            recs.into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         assert_eq!(out, b"@r1\nCG\n+\nII\n");
         assert_eq!((stats.input_reads, stats.output_reads), (1, 1));
     }
@@ -247,7 +307,13 @@ mod tests {
         let phred: Vec<u8> = b"III#III".iter().map(|&b| b - 33).collect();
         let recs = vec![Ok(rec("r1", b"AAATAAA", phred))];
         let mut out = Vec::new();
-        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg).unwrap();
+        let stats = run_fastq_seq(
+            recs.into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         assert_eq!(
             out,
             b"@r1_segment_1\nAAA\n+\nIII\n@r1_segment_2\nAAA\n+\nIII\n"
@@ -283,7 +349,13 @@ mod tests {
         };
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
-        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg).unwrap();
+        let stats = run_fastq_seq(
+            recs.into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         assert!(out.is_empty());
         assert_eq!((stats.input_reads, stats.output_reads), (1, 0));
     }
@@ -325,11 +397,18 @@ mod tests {
             recs.clone().into_iter().map(anyhow::Ok),
             &mut seq_out,
             &mk(1),
+            &Arc::new(Counters::default()),
         )
         .unwrap();
 
         let mut par_out = Vec::new();
-        run_fastq(recs.into_iter().map(anyhow::Ok), &mut par_out, &mk(4)).unwrap();
+        run_fastq(
+            recs.into_iter().map(anyhow::Ok),
+            &mut par_out,
+            &mk(4),
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
 
         let sort_records = |bytes: &[u8]| {
             let mut v: Vec<Vec<u8>> = bytes
@@ -397,7 +476,12 @@ mod tests {
             limit: 100,
             written: 0,
         };
-        let res = run_fastq(recs.into_iter().map(anyhow::Ok), &mut w, &cfg);
+        let res = run_fastq(
+            recs.into_iter().map(anyhow::Ok),
+            &mut w,
+            &cfg,
+            &Arc::new(Counters::default()),
+        );
         assert!(
             res.is_err(),
             "write error must surface as Err, and must not hang"
@@ -438,7 +522,7 @@ mod tests {
             .chain(std::iter::once(Err(anyhow::anyhow!("bad record"))));
 
         let mut out = Vec::new();
-        let res = run_fastq(recs, &mut out, &cfg);
+        let res = run_fastq(recs, &mut out, &cfg, &Arc::new(Counters::default()));
         assert!(
             res.is_err(),
             "a malformed record must not be silently dropped on the parallel path"
