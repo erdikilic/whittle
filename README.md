@@ -1,6 +1,6 @@
-# chopping
+# whittle
 
-A tag-aware long-read (ONT/PacBio) trimmer. `chopping` filters and trims
+A tag-aware long-read (ONT/PacBio) trimmer. `whittle` filters and trims
 FASTQ and unaligned BAM (uBAM) reads the same way tools like `chopper` do —
 but when the input is uBAM, it also **recomputes the `MM`/`ML`/`MN`
 base-modification tags** so a trimmed or split read's methylation calls stay
@@ -12,21 +12,21 @@ correct instead of silently drifting out of register with the sequence.
 cargo build --release
 ```
 
-The binary is written to `target/release/chopping`. Building links against
+The binary is written to `target/release/whittle`. Building links against
 `noodles-bgzf`'s `libdeflate` backend for BAM I/O, so no external `htslib` is
 required to build or run (an optional `rust-htslib`-based test dependency is
 dev-only, used by the oracle tests described below).
 
 ## Usage
 
-`chopping` reads from `-i/--input` (or stdin) and writes to `-o/--output` (or
+`whittle` reads from `-i/--input` (or stdin) and writes to `-o/--output` (or
 stdout). Format is detected from the file extension, or sniffed from the
 first bytes when reading a stream; it can also be forced with
 `--in-format`/`--out-format {fastq,fastq-gz,bam}`.
 
 **Output is plain FASTQ by default — it is never auto-compressed.** A `.gz`
 input does not imply gzipped output: with no `-o` extension and no
-`--out-format`, `chopping` always writes plain FASTQ (this matters most on
+`--out-format`, `whittle` always writes plain FASTQ (this matters most on
 stdout, where silently emitting gzip bytes would be surprising and is also
 slower). Gzip output only happens when you ask for it explicitly, either via
 an `-o` path ending in `.gz` (e.g. `out.fastq.gz`, `out.fq.gz`, or a bare
@@ -37,7 +37,7 @@ instead of a single-threaded bottleneck.
 
 ### Format conversion
 
-`chopping` auto-detects formats from file extensions (or `--in-format` /
+`whittle` auto-detects formats from file extensions (or `--in-format` /
 `--out-format`). Supported conversions:
 
 | input → output | FASTQ | FASTQ.gz | BAM |
@@ -115,7 +115,7 @@ is left untouched and the run prints a one-line advisory.
 ### FASTQ example
 
 ```bash
-chopping -i reads.fastq.gz -o trimmed.fastq.gz \
+whittle -i reads.fastq.gz -o trimmed.fastq.gz \
   -l 500 -q 10 \
   -H 20 -T 20 \
   --trim-qual 8 \
@@ -131,7 +131,7 @@ worker threads (`-t`).
 ### Folder input
 
 `-i` accepts a single file **or a directory**. When given a directory,
-`chopping` merges every read file directly in it (`.fastq`/`.fq`/
+`whittle` merges every read file directly in it (`.fastq`/`.fq`/
 `.fastq.gz`/`.fq.gz`, or `.bam`) — in sorted filename order — into one
 trimmed output (`-o` file or stdout). The folder must be one format (all
 FASTQ-family, or all BAM); non-recursive (subdirectories are ignored); a
@@ -140,13 +140,13 @@ per file by extension, so `--in-format` has no effect on a directory input
 (`--out-format`/`-o`'s extension still control the output).
 
 ```bash
-chopping -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-qual 10
+whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-qual 10
 ```
 
 ### uBAM example
 
 ```bash
-chopping -i reads.ubam.bam -o trimmed.ubam.bam \
+whittle -i reads.ubam.bam -o trimmed.ubam.bam \
   -l 1000 \
   -H 10 -T 10 \
   --split-qual 9 --split-window 50
@@ -200,7 +200,7 @@ touching these tags produces a BAM that decodes to nonsense: `MM`'s
 skip-counts still refer to base occurrences in the *original* sequence, not
 the trimmed one.
 
-`chopping` treats this as a first-class part of trimming: for **every**
+`whittle` treats this as a first-class part of trimming: for **every**
 output uBAM read — head/tail-cropped, quality-trimmed, or split into several
 segments — the `MM` and `ML` tags are rebuilt from scratch against the
 output window, renumbering skip-counts and re-slicing probability bytes so
@@ -211,8 +211,8 @@ removed every modified base from a read. Everything else in the record
 unchanged.
 
 This is validated by two decode-equivalence tests that independently
-re-decode `chopping`'s output with `rust-htslib`'s `basemods_iter()` (a
-separate MM/ML implementation from the one `chopping` uses to write) and
+re-decode `whittle`'s output with `rust-htslib`'s `basemods_iter()` (a
+separate MM/ML implementation from the one `whittle` uses to write) and
 assert the decoded calls match the original read's calls filtered to the
 surviving window:
 
@@ -222,7 +222,7 @@ surviving window:
   default; opt in with a real uBAM:
 
   ```bash
-  CHOPPING_UBAM=/path/to/real.ubam \
+  WHITTLE_UBAM=/path/to/real.ubam \
     cargo test --test bam_mods_oracle -- --ignored
   ```
 
@@ -231,22 +231,22 @@ surviving window:
 
 ## v1 limitations
 
-- **uBAM only — aligned BAM is refused.** `chopping` checks the unmapped
+- **uBAM only — aligned BAM is refused.** `whittle` checks the unmapped
   flag on every record and errors out (naming the offending read) if it
   finds an aligned one. There is no support for trimming alignments in
   place, adjusting CIGAR/POS, or otherwise handling mapped reads.
 - **No contamination filtering.** There is no minimap2-based adapter/barcode/
-  host-contamination screen (unlike e.g. Porechop_ABI). `chopping` only
+  host-contamination screen (unlike e.g. Porechop_ABI). `whittle` only
   filters and trims by length, quality, and GC content.
 - **No FASTQ→BAM conversion.** FASTQ in, BAM out is explicitly rejected —
   there's no header/tags to build a BAM record from a bare FASTQ read. The
   reverse, BAM→FASTQ, *is* supported; see [Format conversion](#format-conversion)
   above.
 - **BAM over stdin auto-detects.** BAM files are BGZF-compressed, which shares
-  gzip's magic bytes (`\x1f\x8b`) with gzipped FASTQ. `chopping` tells them apart
+  gzip's magic bytes (`\x1f\x8b`) with gzipped FASTQ. `whittle` tells them apart
   by the BGZF block signature — the `FEXTRA` flag plus the mandatory `BC`
   subfield — which it checks before the plain-gzip fallback. So a raw BAM stream
-  piped over stdin (e.g. `samtools view -b … | chopping`) is detected with no
+  piped over stdin (e.g. `samtools view -b … | whittle`) is detected with no
   hint, just like a `.bam` path, plain FASTQ, or `.fastq.gz`. Pass
   `--in-format bam` only to force the interpretation of an unusual or headerless
   stream.

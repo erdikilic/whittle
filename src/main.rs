@@ -1,4 +1,4 @@
 fn main() -> anyhow::Result<()> {
-    let cfg = chopping::cli::parse()?;
-    chopping::run(cfg)
+    let cfg = whittle::cli::parse()?;
+    whittle::run(cfg)
 }

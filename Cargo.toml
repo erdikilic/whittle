@@ -1,16 +1,16 @@
 [package]
-name = "chopping"
+name = "whittle"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Tag-aware long-read trimmer (ONT/PacBio): FASTQ/uBAM trimming + splitting with MM/ML reconstruction"
 
 [[bin]]
-name = "chopping"
+name = "whittle"
 path = "src/main.rs"
 
 [lib]
-name = "chopping"
+name = "whittle"
 path = "src/lib.rs"
 
 [dependencies]

@@ -13,8 +13,8 @@ use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 
-fn chopping() -> Command {
-    Command::cargo_bin("chopping").unwrap()
+fn whittle() -> Command {
+    Command::cargo_bin("whittle").unwrap()
 }
 
 #[test]
@@ -32,7 +32,7 @@ fn plain_output_by_default_even_with_gz_input() {
 
     // No -o, no --out-format: with the old "mirror the input format"
     // behavior this would silently gzip-compress stdout. It must not.
-    let assert = chopping()
+    let assert = whittle()
         .arg("-i")
         .arg(&input)
         .args(["-H", "2", "-T", "2", "-t", "4"])
@@ -62,7 +62,7 @@ fn explicit_gz_output_roundtrips_through_parallel_encoder() {
 
     // -t 4: exercise gzp's multi-threaded encoder, not just the trivial
     // single-thread case.
-    chopping()
+    whittle()
         .arg("-i")
         .arg(&input)
         .arg("-o")

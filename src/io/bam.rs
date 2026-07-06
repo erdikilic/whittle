@@ -21,7 +21,7 @@ pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
         .name()
         .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
         .unwrap_or_else(|| "<unnamed>".to_string());
-    anyhow::bail!("read {name} is aligned (mapped); chopping v1 supports unaligned BAM (uBAM) only")
+    anyhow::bail!("read {name} is aligned (mapped); whittle v1 supports unaligned BAM (uBAM) only")
 }
 
 /// Open a BAM reader; MT-bgzf when `workers > 1`. Returns the header and a Send

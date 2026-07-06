@@ -1,13 +1,13 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-fn chopping() -> Command {
-    Command::cargo_bin("chopping").unwrap()
+fn whittle() -> Command {
+    Command::cargo_bin("whittle").unwrap()
 }
 
 #[test]
 fn head_tail_crop_over_stdin() {
-    chopping()
+    whittle()
         .args([
             "--head-crop",
             "1",
@@ -24,7 +24,7 @@ fn head_tail_crop_over_stdin() {
 
 #[test]
 fn mutually_exclusive_quality_ops_error() {
-    chopping()
+    whittle()
         .args([
             "--trim-qual",
             "10",
@@ -41,7 +41,7 @@ fn mutually_exclusive_quality_ops_error() {
 
 #[test]
 fn min_length_filters() {
-    chopping()
+    whittle()
         .args(["--min-length", "10", "--in-format", "fastq"])
         .write_stdin("@short\nACGT\n+\nIIII\n")
         .assert()
@@ -59,7 +59,7 @@ fn same_input_output_file_is_rejected_and_preserves_input() {
     std::fs::write(&path, "@r1\nACGT\n+\nIIII\n@r2\nTTTT\n+\nIIII\n").unwrap();
     let before = std::fs::read(&path).unwrap();
 
-    chopping()
+    whittle()
         .arg("-i")
         .arg(&path)
         .arg("-o")
@@ -77,7 +77,7 @@ fn same_input_output_file_is_rejected_and_preserves_input() {
 
 #[test]
 fn contradictory_length_bounds_error() {
-    chopping()
+    whittle()
         .args(["-l", "10", "-L", "5", "--in-format", "fastq"])
         .write_stdin("@r1\nACGTACGTAC\n+\nIIIIIIIIII\n")
         .assert()
@@ -87,7 +87,7 @@ fn contradictory_length_bounds_error() {
 
 #[test]
 fn contradictory_qual_bounds_error() {
-    chopping()
+    whittle()
         .args(["-q", "30", "-Q", "20", "--in-format", "fastq"])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
         .assert()
@@ -97,7 +97,7 @@ fn contradictory_qual_bounds_error() {
 
 #[test]
 fn out_of_range_gc_bound_errors() {
-    chopping()
+    whittle()
         .args(["--min-gc", "2", "--in-format", "fastq"])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
         .assert()
@@ -109,7 +109,7 @@ fn out_of_range_gc_bound_errors() {
 fn nan_quality_bound_errors() {
     // NaN slips past `min > max` (every NaN comparison is false) and would silently
     // disable quality filtering; it must be rejected explicitly.
-    chopping()
+    whittle()
         .args(["--min-qual", "nan", "--in-format", "fastq"])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
         .assert()
@@ -129,7 +129,7 @@ fn hard_linked_input_output_is_rejected_and_preserves_input() {
     std::fs::hard_link(&input, &output).unwrap();
     let before = std::fs::read(&input).unwrap();
 
-    chopping()
+    whittle()
         .arg("-i")
         .arg(&input)
         .arg("-o")
@@ -150,7 +150,7 @@ fn gz_output_roundtrips() {
     use std::io::Read;
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.fastq.gz");
-    chopping()
+    whittle()
         .args(["--in-format", "fastq", "-o"])
         .arg(&out)
         .write_stdin("@r1\nACGT\n+\nIIII\n")

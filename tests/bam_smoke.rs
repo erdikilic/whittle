@@ -1,4 +1,4 @@
-// End-to-end regression test for the uBAM pipeline: drives the compiled `chopping`
+// End-to-end regression test for the uBAM pipeline: drives the compiled `whittle`
 // binary over a real on-disk BAM file (reader -> provenance_header -> run_bam ->
 // writer), rather than exercising `reconstruct_record` directly against synthetic
 // `RecordBuf`s the way `pipeline::bam_tests` does. Catches wiring bugs that unit
@@ -55,7 +55,7 @@ fn bam_to_bam_end_to_end() {
     let out_path = dir.path().join("out.bam");
     write_fixture(&in_path);
 
-    Command::cargo_bin("chopping")
+    Command::cargo_bin("whittle")
         .unwrap()
         .args([
             "--in-format",
@@ -80,8 +80,8 @@ fn bam_to_bam_end_to_end() {
         header
             .programs()
             .roots()
-            .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"chopping"),
-        "expected an @PG record with ID chopping in the output header, got {:?}",
+            .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"whittle"),
+        "expected an @PG record with ID whittle in the output header, got {:?}",
         header.programs()
     );
 
@@ -166,7 +166,7 @@ fn bam_to_bam_slices_pacbio_kinetics() {
     w.write_alignment_record(&header, &r).unwrap();
     w.try_finish().unwrap();
 
-    Command::cargo_bin("chopping")
+    Command::cargo_bin("whittle")
         .unwrap()
         .args([
             "--in-format",
@@ -235,7 +235,7 @@ fn bam_update_moves_slices_move_table() {
     w.write_alignment_record(&header, &r).unwrap();
     w.try_finish().unwrap();
 
-    Command::cargo_bin("chopping")
+    Command::cargo_bin("whittle")
         .unwrap()
         .args([
             "--in-format",
@@ -298,7 +298,7 @@ fn bam_on_stdin_without_in_format_is_detected() {
     );
 
     let out_path = dir.path().join("out.fastq");
-    Command::cargo_bin("chopping")
+    Command::cargo_bin("whittle")
         .unwrap()
         // No --in-format: detection must come from the piped bytes alone.
         .args(["--out-format", "fastq", "-o"])

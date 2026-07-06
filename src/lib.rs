@@ -36,14 +36,14 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         return run_folder(&dir, &mut cfg);
     }
 
-    // Refuse to read and write the same file: `chopping` streams the input, so
+    // Refuse to read and write the same file: `whittle` streams the input, so
     // truncating it on `File::create` before it is fully read destroys the data
     // (a plain FASTQ run would silently emit an empty file with a success exit).
     if let (Some(inp), Some(outp)) = (cfg.io.input.as_deref(), cfg.io.output.as_deref())
         && same_path(inp, outp)
     {
         anyhow::bail!(
-            "input and output are the same file ({}); chopping streams the input and \
+            "input and output are the same file ({}); whittle streams the input and \
              would truncate it before reading — write to a different path",
             outp.display()
         );
@@ -385,7 +385,7 @@ fn note_tags_ignored(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) {
     }
 }
 
-/// Append an `@PG` provenance record (`ID:chopping`, program name + version) to a
+/// Append an `@PG` provenance record (`ID:whittle`, program name + version) to a
 /// cloned header before writing. Best-effort: `Programs::add` can fail (e.g. on a
 /// duplicate ID), in which case the header is written unchanged — the `@PG` line
 /// is cosmetic and must never block record output.
@@ -407,12 +407,12 @@ fn provenance_header(mut header: noodles_sam::Header) -> noodles_sam::Header {
     }
 
     let program = Map::<Program>::builder()
-        .insert(tag::NAME, "chopping")
+        .insert(tag::NAME, "whittle")
         .insert(tag::VERSION, env!("CARGO_PKG_VERSION"))
         .build();
 
     if let Ok(program) = program {
-        let _ = header.programs_mut().add("chopping", program);
+        let _ = header.programs_mut().add("whittle", program);
     }
 
     header
@@ -472,24 +472,21 @@ mod tests {
         // -> `has_cycle`, which indexes the program map with the `PP` id
         // and panics when that id isn't a key (`ghost` isn't present here).
         // Post-fix, `provenance_header` must return without panicking, and
-        // since the chain is dangling it must skip adding the `chopping`
+        // since the chain is dangling it must skip adding the `whittle`
         // `@PG` line entirely.
         let out_header = provenance_header(header);
 
         assert!(
-            !out_header
-                .programs()
-                .as_ref()
-                .contains_key(&b"chopping"[..]),
-            "expected no chopping @PG line to be added when the existing chain is dangling"
+            !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
+            "expected no whittle @PG line to be added when the existing chain is dangling"
         );
     }
 
     /// Companion positive-path test: a plain header with no dangling `@PG`
-    /// chain must still get the `chopping` provenance record added, so the
+    /// chain must still get the `whittle` provenance record added, so the
     /// dangling-chain guard doesn't accidentally suppress the common case.
     #[test]
-    fn provenance_header_adds_chopping_program_on_clean_header() {
+    fn provenance_header_adds_whittle_program_on_clean_header() {
         let header = noodles_sam::Header::default();
         assert!(!has_dangling_program_chain(&header));
 
@@ -499,8 +496,8 @@ mod tests {
             out_header
                 .programs()
                 .roots()
-                .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"chopping"),
-            "expected an @PG record with ID chopping in the output header, got {:?}",
+                .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"whittle"),
+            "expected an @PG record with ID whittle in the output header, got {:?}",
             out_header.programs()
         );
     }

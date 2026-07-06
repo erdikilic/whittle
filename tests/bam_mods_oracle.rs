@@ -1,5 +1,5 @@
 // Decode-equivalence oracle: build a synthetic uBAM fixture with known C+m mods,
-// head-crop it via `chopping::run`, then decode BOTH the original and our output
+// head-crop it via `whittle::run`, then decode BOTH the original and our output
 // with rust-htslib's `basemods_iter()` (an independent implementation of MM/ML
 // decoding). Assert the output's per-position (canonical, modified, strand, qual)
 // set equals the original's mods filtered to [start, len) and offset by `start`.
@@ -78,8 +78,8 @@ fn trimmed_output_mods_match_oracle() {
     write_fixture(&input);
 
     // Trim the first 3 bases (head-crop 3) via the library run().
-    let cfg = chopping::cli::config_for_test(&input, &output, 3, 0);
-    chopping::run(cfg).unwrap();
+    let cfg = whittle::cli::config_for_test(&input, &output, 3, 0);
+    whittle::run(cfg).unwrap();
 
     let original = hts_mods(&input);
     let start = 3usize;
@@ -138,8 +138,8 @@ fn trimmed_output_multimod_mods_match_oracle() {
     write_fixture_multimod(&input);
 
     // head-crop 2, tail-crop 2 -> surviving window [2, 8) on the length-10 read.
-    let cfg = chopping::cli::config_for_test(&input, &output, 2, 2);
-    chopping::run(cfg).unwrap();
+    let cfg = whittle::cli::config_for_test(&input, &output, 2, 2);
+    whittle::run(cfg).unwrap();
 
     let (head, tail, len) = (2usize, 2usize, 10usize);
     let tail_start = len - tail;
@@ -171,7 +171,7 @@ fn trimmed_output_multimod_mods_match_oracle() {
 
 /// Threaded (t=8) variant of `trimmed_output_multimod_mods_match_oracle`: same
 /// fixture, same head/tail crop, but driven through the parallel BAM dispatch
-/// (`cfg.threads = 8`) via `config_for_test_threads`. `chopping::run` builds a
+/// (`cfg.threads = 8`) via `config_for_test_threads`. `whittle::run` builds a
 /// rayon pool regardless of record count, so this still exercises the
 /// unordered render -> bounded-channel -> MT-bgzf-writer path end to end; the
 /// assertion body is identical to the t1 oracle (order-independent by
@@ -184,8 +184,8 @@ fn trimmed_output_multimod_mods_match_oracle_t8() {
     let output = dir.path().join("out.ubam");
     write_fixture_multimod(&input);
 
-    let cfg = chopping::cli::config_for_test_threads(&input, &output, 2, 2, 8);
-    chopping::run(cfg).unwrap();
+    let cfg = whittle::cli::config_for_test_threads(&input, &output, 2, 2, 8);
+    whittle::run(cfg).unwrap();
 
     let (head, tail, len) = (2usize, 2usize, 10usize);
     let tail_start = len - tail;
@@ -260,8 +260,8 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
     }
     w.try_finish().unwrap();
 
-    let cfg = chopping::cli::config_for_test_threads(&input, &output, 2, 2, 8);
-    chopping::run(cfg).unwrap();
+    let cfg = whittle::cli::config_for_test_threads(&input, &output, 2, 2, 8);
+    whittle::run(cfg).unwrap();
 
     let (head, orig_len) = (2usize, 10usize);
     let orig = hts_mods_by_read(&input);
@@ -287,7 +287,7 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
 
 // --- Real-data sweep (Task 7) -----------------------------------------------
 //
-// Everything below is only exercised when `CHOPPING_UBAM` points at a real
+// Everything below is only exercised when `WHITTLE_UBAM` points at a real
 // uBAM (e.g. one of the HG002 subsets under `data/`, or any unaligned BAM with
 // MM/ML). It runs a fixed head=10/tail=10 crop — small enough that any real
 // long read survives with exactly one output segment, so output read names
@@ -348,20 +348,20 @@ fn filter_offset(mods: &[ModCall], head: usize, orig_len: usize) -> Vec<ModCall>
 }
 
 // Runs only when a real uBAM is provided, e.g.:
-//   CHOPPING_UBAM=data/short_eqread/short_eqread.bam \
+//   WHITTLE_UBAM=data/short_eqread/short_eqread.bam \
 //     cargo test --test bam_mods_oracle -- --ignored
 #[test]
 #[ignore]
 fn real_ubam_oracle_sweep() {
-    let Some(path) = std::env::var_os("CHOPPING_UBAM") else {
+    let Some(path) = std::env::var_os("WHITTLE_UBAM") else {
         return;
     };
     let input = std::path::PathBuf::from(path);
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.ubam");
 
-    let cfg = chopping::cli::config_for_test(&input, &output, 10, 10);
-    chopping::run(cfg).unwrap();
+    let cfg = whittle::cli::config_for_test(&input, &output, 10, 10);
+    whittle::run(cfg).unwrap();
 
     let orig = hts_mods_by_read(&input);
     let out = hts_mods_by_read(&output);
@@ -389,20 +389,20 @@ fn real_ubam_oracle_sweep() {
 /// Reads are matched by name (the parallel path is unordered), so this is a
 /// real-world-scale spot-check that `-t 8` produces byte-valid, mod-correct
 /// output on genuine ONT/dorado data, not just the small synthetic fixtures.
-//   CHOPPING_UBAM=data/short_eqread/short_eqread.bam \
+//   WHITTLE_UBAM=data/short_eqread/short_eqread.bam \
 //     cargo test --test bam_mods_oracle -- --ignored
 #[test]
 #[ignore]
 fn real_ubam_oracle_sweep_t8() {
-    let Some(path) = std::env::var_os("CHOPPING_UBAM") else {
+    let Some(path) = std::env::var_os("WHITTLE_UBAM") else {
         return;
     };
     let input = std::path::PathBuf::from(path);
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.ubam");
 
-    let cfg = chopping::cli::config_for_test_threads(&input, &output, 10, 10, 8);
-    chopping::run(cfg).unwrap();
+    let cfg = whittle::cli::config_for_test_threads(&input, &output, 10, 10, 8);
+    whittle::run(cfg).unwrap();
 
     let orig = hts_mods_by_read(&input);
     let out = hts_mods_by_read(&output);
