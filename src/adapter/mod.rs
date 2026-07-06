@@ -89,17 +89,20 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
         } else {
             // Ends-only: search only the two end-zones, never the interior.
             // A terminal 5' hit has `h.start <= end_size` but its `h.end` can
-            // extend up to `end_size + len`, so the head zone must be that
-            // wide (not just `end_size`) or a straddling terminal adapter
-            // would be missed entirely. Symmetric for the tail zone.
-            let head_end = (end_size + len).min(n);
+            // extend up to `end_size + len + k_end`: `sassy::search` allows up
+            // to `k_end` edits INCLUDING INSERTIONS, and an insertion lengthens
+            // the matched TEXT span beyond the pattern length. So the head
+            // zone must be `end_size + len + k_end` wide, or a terminal hit
+            // with indel errors near the boundary would be under-trimmed or
+            // missed entirely. Symmetric for the tail zone.
+            let head_end = (end_size + len + k_end).min(n);
             for h in hits(&mut searcher, &ad.seq, &window[..head_end], k_end) {
                 // Zone starts at 0, so h's coords are already window coords.
                 if h.start <= end_size && matches!(ad.end, End::Five | End::Both) {
                     lo = lo.max(h.end);
                 }
             }
-            let tail_start = n.saturating_sub(end_size + len);
+            let tail_start = n.saturating_sub(end_size + len + k_end);
             for h in hits(&mut searcher, &ad.seq, &window[tail_start..], k_end) {
                 let (s, e) = (tail_start + h.start, tail_start + h.end);
                 if e >= n.saturating_sub(end_size) && matches!(ad.end, End::Three | End::Both) {
@@ -391,5 +394,68 @@ mod segment_tests {
             vec![(0, w.len())],
             "cost 4 hit is above k_mid=3 and must not split the read"
         );
+    }
+
+    #[test]
+    fn ends_only_equals_split_on_indel_terminal_adapter() {
+        // A terminal 5' adapter copy with a 6 bp INSERTION spliced into its
+        // middle: the matched TEXT span (26 bp) is 6 bp longer than the
+        // pattern (20 bp), because sassy's edit budget `k_end` covers
+        // insertions, not just substitutions. This is the exact shape of the
+        // bug: the old ends-only zone (`end_size + len` = 24) is too narrow
+        // to contain the full match (which ends at 28), while the fixed zone
+        // (`end_size + len + k_end` = 30) does contain it and matches
+        // split-mode's (whole-window) result exactly.
+        //
+        // Construction (verified empirically, see probe run below):
+        //   adapter = 20 bp; extra = 6 bp foreign splice inserted after the
+        //   first 10 bp of a copy of `adapter`, giving a 26 bp copy at [2,28).
+        //   error_rate=0.3, len=20 -> k_end = floor(0.3*20) = 6.
+        //
+        // sassy finds TWO cost-6 hits for this copy: a short one (2,18) that
+        // only accounts for the first ~16 bp (skips the spliced tail via
+        // deletions) and the full one (2,28) that spans the whole spliced
+        // copy via a genuine 6 bp insertion. Split-mode sees both hits and
+        // takes the max `h.end` (28) for the terminal-5' boundary. The old
+        // ends-only zone (0..24) only contains the short hit (2,18) — the
+        // full hit's end (28) is beyond it — so old ends-only under-trims to
+        // 18, leaving 10 residual adapter bases. The fixed zone (0..30)
+        // contains both hits, so ends-only matches split-mode exactly.
+        let adapter = b"AAAACCCCGGGGTTTTACGT"; // 20 bp
+        let extra = b"CTGACT"; // 6 bp splice, foreign bases -> forces insertion
+        let mut copy = adapter[..10].to_vec();
+        copy.extend_from_slice(extra);
+        copy.extend_from_slice(&adapter[10..]); // copy = 26 bp
+
+        let mut w = b"AA".to_vec(); // 2 bp prefix -> copy occupies [2, 28)
+        w.extend_from_slice(&copy);
+        w.extend_from_slice(b"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"); // 30 bp clean insert tail
+
+        let c_split = AdapterConfig {
+            adapters: vec![ad("five", adapter, End::Five)],
+            error_rate: 0.3,
+            end_size: 4,
+            split: true,
+        };
+        let c_ends_only = AdapterConfig {
+            split: false,
+            ..c_split.clone()
+        };
+
+        let split_segs = adapter_segments(&w, &c_split);
+        let ends_only_segs = adapter_segments(&w, &c_ends_only);
+
+        assert_eq!(
+            split_segs,
+            vec![(28, w.len())],
+            "split-mode finds the full 26bp indel-bearing hit and trims to 28"
+        );
+        assert_eq!(
+            ends_only_segs, split_segs,
+            "ends-only must match split-mode exactly: the end-zone must be wide \
+             enough (end_size + len + k_end) to contain the full indel-lengthened hit"
+        );
+        // Adapter bases actually removed, not just nominally "equal but empty".
+        assert_eq!(ends_only_segs[0].0, 28);
     }
 }
