@@ -70,7 +70,11 @@ mod tests {
         let v = parse_catalog(tsv);
         assert_eq!(v.len(), 2, "duplicate sequence collapsed");
         assert_eq!(v[0].name, "A");
-        assert_eq!(v[0].end, End::Both, "5' + 3' of the same sequence merges to Both");
+        assert_eq!(
+            v[0].end,
+            End::Both,
+            "5' + 3' of the same sequence merges to Both"
+        );
         assert_eq!(v[1].end, End::Three);
     }
 
@@ -82,7 +86,11 @@ mod tests {
             .iter()
             .find(|a| a.seq == b"ACTTGCCTGTCGCTCTATCTTC")
             .expect("shared seq present");
-        assert_eq!(e.end, End::Both, "shared 5'/3' sequence must be searchable at both ends");
+        assert_eq!(
+            e.end,
+            End::Both,
+            "shared 5'/3' sequence must be searchable at both ends"
+        );
     }
 
     #[test]

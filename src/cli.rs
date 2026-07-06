@@ -210,7 +210,16 @@ pub fn parse() -> anyhow::Result<Config> {
         adapter_seqs.extend(crate::adapter::preset::preset_ont());
     }
     if let Some(path) = &c.adapter_fasta {
-        adapter_seqs.extend(read_adapter_fasta(path)?);
+        let from_fasta = read_adapter_fasta(path)?;
+        if from_fasta.is_empty() {
+            anyhow::bail!(
+                "--adapter-fasta {}: no usable adapters (all entries were empty, \
+                 shorter than the {}-bp minimum, or non-ACGT)",
+                path.display(),
+                crate::adapter::MIN_PATTERN_LEN
+            );
+        }
+        adapter_seqs.extend(from_fasta);
     }
     let adapters = if adapter_seqs.is_empty() {
         if c.adapter_ends_only {
