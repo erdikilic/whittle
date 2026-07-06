@@ -20,11 +20,21 @@ pub fn run_fastq_seq<W: Write>(
     for rec in records {
         let rec = rec?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
-        if !filter::passes(&rec.seq, &rec.qual, &cfg.filter) {
+        counters
+            .input_bases
+            .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
+        if let Some(reason) = filter::check(&rec.seq, &rec.qual, &cfg.filter) {
+            counters.record_filter_drop(reason);
             continue;
         }
         let intervals = trim::apply(rec.seq.len(), &rec.qual, &cfg.trim, cfg.filter.min_length);
+        if intervals.is_empty() {
+            counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
         let total = intervals.len();
+        counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+        let mut out_bases = 0u64;
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
             write_segment(
                 writer,
@@ -35,25 +45,34 @@ pub fn run_fastq_seq<W: Write>(
                 idx,
             )?;
             counters.output_reads.fetch_add(1, Ordering::Relaxed);
+            out_bases += (e - s) as u64;
         }
+        counters
+            .output_bases
+            .fetch_add(out_bases, Ordering::Relaxed);
     }
-    Ok(Stats {
-        input_reads: counters.input_reads.load(Ordering::Relaxed),
-        output_reads: counters.output_reads.load(Ordering::Relaxed),
-        malformed_tag_reads: 0,
-    })
+    Ok(counters.snapshot(0))
 }
 
 /// Format the surviving segments of one record into an owned FASTQ byte buffer.
-/// Returns the number of segments written alongside the buffer.
-fn render_record(rec: &ReadRecord, cfg: &Config) -> (u64, Vec<u8>) {
-    if !filter::passes(&rec.seq, &rec.qual, &cfg.filter) {
-        return (0, Vec::new());
+/// Returns the number of segments written and their total base count, alongside
+/// the buffer. Bumps the matching `counters.dropped_*` reason when the record
+/// produces no segments (filtered, or trimmed away to nothing).
+fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> (u64, u64, Vec<u8>) {
+    if let Some(reason) = filter::check(&rec.seq, &rec.qual, &cfg.filter) {
+        counters.record_filter_drop(reason);
+        return (0, 0, Vec::new());
     }
     let intervals = trim::apply(rec.seq.len(), &rec.qual, &cfg.trim, cfg.filter.min_length);
+    if intervals.is_empty() {
+        counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
+        return (0, 0, Vec::new());
+    }
     let total = intervals.len();
+    counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
     let mut buf = Vec::new();
     let mut out = 0u64;
+    let mut out_bases = 0u64;
     for (idx, (s, e)) in intervals.into_iter().enumerate() {
         write_segment(
             &mut buf,
@@ -65,8 +84,9 @@ fn render_record(rec: &ReadRecord, cfg: &Config) -> (u64, Vec<u8>) {
         )
         .unwrap();
         out += 1;
+        out_bases += (e - s) as u64;
     }
-    (out, buf)
+    (out, out_bases, buf)
 }
 
 /// Threads-aware FASTQ pipeline entry point. Sequential (and output-order
@@ -141,9 +161,15 @@ where
                     },
                 };
                 counters.input_reads.fetch_add(1, Ordering::Relaxed);
-                let (out, buf) = render_record(&rec, cfg);
+                counters
+                    .input_bases
+                    .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
+                let (out, out_bases, buf) = render_record(&rec, cfg, counters);
                 if out > 0 {
                     counters.output_reads.fetch_add(out, Ordering::Relaxed);
+                    counters
+                        .output_bases
+                        .fetch_add(out_bases, Ordering::Relaxed);
                     let _ = tx.send(buf);
                 }
             });
@@ -157,12 +183,8 @@ where
     if let Some(e) = write_err.lock().unwrap().take() {
         return Err(e.into());
     }
-    Ok(Stats {
-        input_reads: counters.input_reads.load(Ordering::Relaxed),
-        output_reads: counters.output_reads.load(Ordering::Relaxed),
-        // FASTQ input carries no BAM per-base tags.
-        malformed_tag_reads: 0,
-    })
+    // FASTQ input carries no BAM per-base tags.
+    Ok(counters.snapshot(0))
 }
 
 #[cfg(test)]
@@ -358,6 +380,86 @@ mod tests {
         .unwrap();
         assert!(out.is_empty());
         assert_eq!((stats.input_reads, stats.output_reads), (1, 0));
+    }
+
+    #[test]
+    fn too_short_read_bumps_dropped_short_counter() {
+        let mut f = base_filter();
+        f.min_length = 10;
+        let cfg = Config {
+            io: crate::config::IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
+            filter: f,
+            trim: TrimPlan {
+                head: 0,
+                tail: 0,
+                quality: None,
+            },
+            threads: 1,
+            fastq_tags: crate::config::FastqTags::All,
+            render_workers: 0,
+            compression_level: 6,
+            update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
+        };
+        let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
+        let mut out = Vec::new();
+        let counters = Arc::new(Counters::default());
+        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg, &counters).unwrap();
+        assert_eq!(stats.dropped_short, 1);
+        assert_eq!(stats.dropped_trimmed, 0);
+        assert_eq!(
+            counters
+                .dropped_short
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn trimmed_to_nothing_bumps_dropped_trimmed_counter() {
+        // Passes the filter (4 bases, min_length 1), but a head-crop of 10
+        // exceeds the read length, so `trim::apply` returns no intervals.
+        let cfg = Config {
+            io: crate::config::IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
+            filter: base_filter(),
+            trim: TrimPlan {
+                head: 10,
+                tail: 0,
+                quality: None,
+            },
+            threads: 1,
+            fastq_tags: crate::config::FastqTags::All,
+            render_workers: 0,
+            compression_level: 6,
+            update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
+        };
+        let recs = vec![Ok(rec("r1", b"ACGT", vec![40; 4]))];
+        let mut out = Vec::new();
+        let stats = run_fastq_seq(
+            recs.into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        assert!(out.is_empty());
+        assert_eq!(stats.dropped_trimmed, 1);
+        assert_eq!(stats.dropped_short, 0);
     }
 
     #[test]

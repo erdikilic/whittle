@@ -149,7 +149,7 @@ fn hard_linked_input_output_is_rejected_and_preserves_input() {
 
 #[test]
 fn quiet_suppresses_summary_but_keeps_stdout() {
-    // A minimal FASTQ over stdin; default run prints the "Kept" summary to stderr.
+    // A minimal FASTQ over stdin; default run prints the "Summary:" line to stderr.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .arg("--quiet")
@@ -157,17 +157,17 @@ fn quiet_suppresses_summary_but_keeps_stdout() {
         .assert()
         .success()
         .stdout(predicate::str::contains("@r1"))
-        .stderr(predicate::str::contains("Kept").not());
+        .stderr(predicate::str::contains("Summary:").not());
 }
 
 #[test]
 fn default_run_prints_summary_to_stderr() {
     let input = "@r1\nACGT\n+\nIIII\n";
-    whittle()
-        .write_stdin(input)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Kept 1 reads out of 1"));
+    whittle().write_stdin(input).assert().success().stderr(
+        predicate::str::contains("Summary:")
+            .and(predicate::str::contains("input reads"))
+            .and(predicate::str::contains("output reads")),
+    );
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn verbose_shows_phase_timing() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("processing")); // phase timing line appears at DEBUG
+        .stderr(predicate::str::contains("Processing")); // phase timing line appears at DEBUG
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn default_hides_debug() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("processing").not());
+        .stderr(predicate::str::contains("Processing").not());
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn quiet_beats_whittle_log() {
         .assert()
         .success()
         .stdout(predicate::str::contains("@r1"))
-        .stderr(predicate::str::contains("Kept").not());
+        .stderr(predicate::str::contains("Summary:").not());
 }
 
 #[test]
@@ -225,7 +225,130 @@ fn whittle_log_overrides_verbosity_when_not_quiet() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("processing"));
+        .stderr(predicate::str::contains("Processing"));
+}
+
+#[test]
+fn line_mode_banner_and_closer_appear_in_order() {
+    // assert_cmd captures stderr to a pipe (non-tty), so this always runs in
+    // line mode regardless of verbosity — the full startup banner plus the
+    // Completed closer should appear, in order.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle().write_stdin(input).assert().success().stderr(
+        predicate::str::contains("whittle ")
+            .and(predicate::str::contains("Command:"))
+            .and(predicate::str::contains("Trimming"))
+            .and(predicate::str::contains("Input: <stdin>"))
+            .and(predicate::str::contains("Output: <stdout>"))
+            .and(predicate::str::contains("Threads:"))
+            .and(predicate::str::contains("Filters:"))
+            .and(predicate::str::contains("Summary:"))
+            .and(predicate::str::contains("Completed in")),
+    );
+}
+
+#[test]
+fn failure_path_prints_a_single_failed_after_line() {
+    // The reworked `main.rs` failure path must print one clean "Failed after
+    // ...: <message>" line via tracing (not a second, differently-formatted
+    // anyhow dump from the default `fn main() -> anyhow::Result<()>` pattern).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reads.fastq");
+    std::fs::write(&path, "@r1\nACGT\n+\nIIII\n").unwrap();
+
+    whittle()
+        .arg("-i")
+        .arg(&path)
+        .arg("-o")
+        .arg(&path)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("Failed after").and(predicate::str::contains("same file")),
+        );
+}
+
+#[test]
+fn banner_version_and_command_come_first_in_line_mode() {
+    // Regression: `whittle {version}` and `Command: ...` must be the very
+    // first lines emitted — even before the resolved-config banner — so a
+    // reader can always find them at the top regardless of what warnings (or
+    // an early hard error) follow.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    let assert = whittle().write_stdin(input).assert().success();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let version_pos = stderr.find("whittle ").expect("version line missing");
+    let command_pos = stderr.find("Command:").expect("command line missing");
+    let operation_pos = stderr.find("Trimming").expect("operation line missing");
+    assert!(
+        version_pos < command_pos && command_pos < operation_pos,
+        "expected version, then Command:, then the operation line, in order: {stderr:?}"
+    );
+}
+
+#[test]
+fn non_tty_stderr_has_no_ansi_escapes() {
+    // assert_cmd captures stderr to a pipe (never a TTY), so a normal run must
+    // carry zero ANSI escape bytes — coloring a redirected/non-interactive
+    // stream is exactly the bug this guards against.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("\u{1b}").not());
+}
+
+#[test]
+fn all_dropped_run_warns() {
+    // Every read fails an unreachable min-qual bound: nothing survives, but
+    // the run itself still succeeds — the all-dropped guardrail WARN must
+    // fire so this doesn't silently look like a clean empty-output run.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .args(["-q", "50", "--in-format", "fastq"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("No reads survived")
+                .and(predicate::str::contains("input reads were dropped")),
+        );
+}
+
+#[test]
+fn empty_input_warns() {
+    // Zero input reads (not an error) must still surface the empty-input
+    // guardrail WARN rather than a silent, unremarkable "0 in, 0 out" summary.
+    whittle()
+        .args(["--in-format", "fastq"])
+        .write_stdin("")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Input contained no reads"));
+}
+
+#[test]
+fn sequential_threads_label_for_dash_t_1() {
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .args(["-t", "1"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Threads: 1 (sequential)"));
+}
+
+#[test]
+fn bam_to_fastq_conversion_phrasing() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("o.fastq");
+    whittle()
+        .args(["-i", "data/short_eqread/short_eqread.bam", "-o"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Converting BAM to FASTQ"));
 }
 
 #[test]

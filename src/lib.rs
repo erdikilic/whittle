@@ -9,7 +9,7 @@ pub mod qual;
 pub mod record;
 pub mod trim;
 
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 
 pub use config::Config;
 use gzp::deflate::Gzip;
@@ -22,15 +22,10 @@ use gzp::{Compression, ZWriter};
 ///
 /// `obs` drives progress + end-of-run output; library callers pass `ProgressHandle::disabled()`.
 pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
-    use config::EncodeKind;
     use io::Format;
 
     let mut cfg = cfg;
     let setup_start = std::time::Instant::now();
-
-    if let Some((requested, ncpu)) = cfg.threads_clamped {
-        tracing::warn!("requested -t {requested} exceeds {ncpu} available CPUs; using {ncpu}");
-    }
 
     // Scoped so the borrow of `cfg.io.input` ends before `run_folder` needs
     // `&mut cfg` — the directory path itself is cloned out first.
@@ -109,15 +104,108 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             },
         },
     };
+
+    // Advisory only: an explicit --in-format always wins for actual detection
+    // (this never changes behavior), but it usually signals a mistake when it
+    // disagrees with the file's own extension — e.g. `--in-format bam` on a
+    // `.fastq` file. Extension-only check: skipped for stdin / no-extension.
+    // The warning itself fires later, after the banner (see the comment above
+    // the consolidated warnings block below) — only the detection runs here.
+    let mismatch_warn = if let Some(forced) = cfg.io.in_format
+        && let Some(detected) = in_path.and_then(io::from_extension)
+        && detected != forced
+    {
+        Some(format!(
+            "--in-format {} but the file extension looks like {}",
+            forced.label(),
+            detected.label()
+        ))
+    } else {
+        None
+    };
+
     let out_fmt = cfg
         .io
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
+    // Hard-error before any writer/output file is created: dumping BAM or
+    // gzipped bytes into an interactive terminal is never useful and almost
+    // always means the user forgot `-o`/a redirect.
+    guard_stdout_binary(&cfg, out_fmt)?;
+
+    // Advisory only: no trimming, a pass-through filter, and no format
+    // conversion means the run just re-emits (almost) the same reads it read —
+    // usually not what was intended. Skipped for a conversion-only run
+    // (in_fmt != out_fmt), which is legitimate on its own. Warning deferred to
+    // the consolidated block below, same as `mismatch_warn` above.
+    let no_trim = cfg.trim.head == 0 && cfg.trim.tail == 0 && cfg.trim.quality.is_none();
+    let pass_through_filter = cfg.filter.min_length <= 1
+        && cfg.filter.max_length == usize::MAX
+        && cfg.filter.min_qual <= 0.0
+        && cfg.filter.max_qual >= 1000.0
+        && cfg.filter.min_gc.is_none()
+        && cfg.filter.max_gc.is_none();
+    let no_op_warn = no_trim && pass_through_filter && in_fmt == out_fmt;
+
     tracing::debug!(
-        "input opened, format {in_fmt:?} -> {out_fmt:?} detected in {:?}",
-        setup_start.elapsed()
+        "Detected {} input in {}",
+        in_fmt.label(),
+        obs::human_dur(setup_start.elapsed())
     );
+
+    // Resolved once, here, so the banner's Threads line and the actual dispatch
+    // arm below agree on the same split — recomputing per arm risked the banner
+    // showing one number and the pipeline running another.
+    let budget = config::thread_budget(
+        cfg.threads,
+        matches!(in_fmt, Format::Bam),
+        encode_kind_for(out_fmt),
+    );
+    let out_desc = output_desc(cfg.io.output.as_deref());
+
+    if obs.shows_lines() {
+        tracing::info!("{}", operation_line(in_fmt, out_fmt));
+        match (in_path, total) {
+            (Some(p), Some(size)) => {
+                tracing::info!("Input: {} ({})", p.display(), obs::human_bytes(size));
+            },
+            (Some(p), None) => tracing::info!("Input: {}", p.display()),
+            (None, _) => tracing::info!("Input: <stdin>"),
+        }
+        tracing::info!(
+            "{}",
+            output_banner_line(
+                cfg.io.output.as_deref(),
+                out_fmt,
+                cfg.compression_level,
+                budget.encode
+            )
+        );
+        tracing::info!("{}", threads_banner_line(cfg.threads, budget));
+        tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
+    } else if obs.is_bar() {
+        tracing::info!(
+            "{} ({} threads)",
+            operation_line(in_fmt, out_fmt),
+            cfg.threads
+        );
+    }
+
+    // Warnings fire after the resolved-config banner (not before it, and not
+    // interleaved with it) — `whittle {version}`/`Command: ...` (printed by
+    // `main` before `run` is even called) and the banner above are meant to be
+    // the first things a reader sees; only then do clamp/mismatch/no-op
+    // advisories follow, ahead of the live progress/summary.
+    if let Some((requested, ncpu)) = cfg.threads_clamped {
+        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
+    }
+    if let Some(msg) = mismatch_warn {
+        tracing::warn!("{msg}");
+    }
+    if no_op_warn {
+        tracing::warn!("No trimming or filtering options set; output will mostly mirror the input");
+    }
 
     obs.start(total, counters.clone());
 
@@ -126,10 +214,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // Stages run concurrently internally (read/trim/write overlap across
     // threads), so this is a phase boundary, not a CPU-time split.
     let t0 = std::time::Instant::now();
-    tracing::debug!(
-        "processing {in_fmt:?} -> {out_fmt:?} with {} threads",
-        cfg.threads
-    );
+    tracing::debug!("Processing {}, {} threads", in_fmt.label(), cfg.threads);
 
     // BAM dispatch happens before creating/truncating the output file, and so
     // do the FASTQ->BAM rejection and the BAM->FASTQ conversion, so a rejected
@@ -138,46 +223,39 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     match (in_fmt, out_fmt) {
         (Format::Bam, Format::Bam) => {
             note_tags_ignored(&cfg, in_fmt, out_fmt);
-            let b = config::thread_budget(cfg.threads, true, EncodeKind::Bgzf);
             // Read from `source` (not by re-opening `in_path`): for a stdin BAM the
             // sniff bytes were already consumed and chained back into `source`, so
             // re-opening stdin would drop the BGZF header. For a file, `source` is
             // the same handle positioned at the start.
-            let (header, records) = io::bam::reader_from(source, b.decode)?;
+            let (header, records) = io::bam::reader_from(source, budget.decode)?;
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
             let mut sink = io::bam::writer(
                 cfg.io.output.as_deref(),
                 &out_header,
-                b.encode,
+                budget.encode,
                 cfg.compression_level,
             )?;
-            cfg.render_workers = b.render;
+            cfg.render_workers = budget.render;
             let stats = pipeline::run_bam(&out_header, records, &mut sink, &cfg, &counters)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded — an I/O
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
             // truncated BAM with a success exit code.
             sink.finish()?;
-            tracing::debug!("processing finished in {:?}", t0.elapsed());
-            obs.finish(&stats);
+            tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
+            obs.finish(&stats, &out_desc);
             return Ok(());
         },
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
-            let encode = if matches!(out_fmt, Format::FastqGz) {
-                EncodeKind::Gzip
-            } else {
-                EncodeKind::None
-            };
-            let b = config::thread_budget(cfg.threads, true, encode);
             // See the note in the (Bam, Bam) arm: read from the chained `source`.
-            let (_header, records) = io::bam::reader_from(source, b.decode)?;
-            let mut writer = fastq_writer(&cfg, out_fmt, b.encode)?;
-            cfg.render_workers = b.render;
+            let (_header, records) = io::bam::reader_from(source, budget.decode)?;
+            let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
+            cfg.render_workers = budget.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
             writer.finish()?;
-            tracing::debug!("processing finished in {:?}", t0.elapsed());
-            obs.finish(&stats);
+            tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
+            obs.finish(&stats, &out_desc);
             return Ok(());
         },
         (Format::Fastq | Format::FastqGz, Format::Bam) => {
@@ -187,21 +265,15 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     }
 
     note_tags_ignored(&cfg, in_fmt, out_fmt);
-    let encode = if matches!(out_fmt, Format::FastqGz) {
-        EncodeKind::Gzip
-    } else {
-        EncodeKind::None
-    };
-    let b = config::thread_budget(cfg.threads, false, encode);
-    let mut writer = fastq_writer(&cfg, out_fmt, b.encode)?;
-    cfg.render_workers = b.render;
+    let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
+    cfg.render_workers = budget.render;
 
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
     let stats = pipeline::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
-    tracing::debug!("processing finished in {:?}", t0.elapsed());
-    obs.finish(&stats);
+    tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
+    obs.finish(&stats, &out_desc);
     Ok(())
 }
 
@@ -279,6 +351,34 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
     }
 }
 
+/// True iff writing `fmt`'s bytes to stdout would dump binary (BAM) or gzip
+/// (FASTQ.gz) data into an interactive terminal — never useful output, and
+/// almost always a forgotten `-o`/redirect. Plain FASTQ text is always fine.
+/// Pure (no I/O) so it's trivial to unit-test without a real TTY.
+fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bool) -> bool {
+    output_is_stdout && stdout_is_tty && matches!(fmt, io::Format::Bam | io::Format::FastqGz)
+}
+
+/// Hard-error before any writer/output file is created if `out_fmt` would land
+/// binary/gzip bytes on an interactive stdout (see `binary_to_terminal`).
+/// Shared by `run`'s single-file path and `run_folder`.
+fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> {
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    if binary_to_terminal(cfg.io.output.is_none(), out_fmt, stdout_is_tty) {
+        let ext = match out_fmt {
+            io::Format::Bam => "bam",
+            io::Format::FastqGz => "fastq.gz",
+            io::Format::Fastq => "fastq", // unreachable via binary_to_terminal, kept exhaustive
+        };
+        anyhow::bail!(
+            "refusing to write {} to a terminal — redirect to a file/pipe (e.g. `> out.{ext}`) \
+             or pass -o",
+            out_fmt.label()
+        );
+    }
+    Ok(())
+}
+
 /// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
 /// then merge all its read files into a single trimmed output using the same
 /// pipelines as the single-file path.
@@ -287,7 +387,6 @@ fn run_folder(
     cfg: &mut Config,
     obs: &mut obs::ProgressHandle,
 ) -> anyhow::Result<()> {
-    use config::EncodeKind;
     use io::Format;
 
     // Pass the output path so `classify` can hard-error if `-o` names a read file
@@ -295,12 +394,6 @@ fn run_folder(
     // overwriting either while merging the rest is silent data loss. The merged
     // output must live outside the input directory.
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
-    tracing::info!(
-        "Merging {} {:?} file(s) from {}",
-        paths.len(),
-        family,
-        dir.display()
-    );
     let family_fmt = match family {
         io::dir::Family::Fastq => Format::Fastq,
         io::dir::Family::Bam => Format::Bam,
@@ -310,12 +403,64 @@ fn run_folder(
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
 
+    // Hard-error before any writer/output file is created (see `run`'s
+    // matching guard for the single-file path).
+    guard_stdout_binary(cfg, out_fmt)?;
+
+    // Resolved once, here, so the banner's Threads line and the actual dispatch
+    // arm below agree on the same split (see the matching comment in `run`).
+    let budget = config::thread_budget(
+        cfg.threads,
+        matches!(family, io::dir::Family::Bam),
+        encode_kind_for(out_fmt),
+    );
+    let out_desc = output_desc(cfg.io.output.as_deref());
+
+    if obs.shows_lines() {
+        tracing::info!("{}", operation_line(family_fmt, out_fmt));
+        let total_bytes: u64 = paths
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        tracing::info!(
+            "Input: {} {} files, {}",
+            paths.len(),
+            family_fmt.label(),
+            obs::human_bytes(total_bytes)
+        );
+        tracing::info!(
+            "{}",
+            output_banner_line(
+                cfg.io.output.as_deref(),
+                out_fmt,
+                cfg.compression_level,
+                budget.encode
+            )
+        );
+        tracing::info!("{}", threads_banner_line(cfg.threads, budget));
+        tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
+    } else if obs.is_bar() {
+        tracing::info!(
+            "{} ({} threads)",
+            operation_line(family_fmt, out_fmt),
+            cfg.threads
+        );
+    }
+
+    // See the matching comment in `run`: the clamp warning fires after the
+    // banner, not before it.
+    if let Some((requested, ncpu)) = cfg.threads_clamped {
+        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
+    }
+
     let counters = std::sync::Arc::new(pipeline::Counters::default());
     obs.start(None, counters.clone());
 
     let t0 = std::time::Instant::now();
     tracing::debug!(
-        "processing folder {family:?} -> {out_fmt:?} with {} threads",
+        "Processing folder ({}), {} threads",
+        family_fmt.label(),
         cfg.threads
     );
 
@@ -327,19 +472,13 @@ fn run_folder(
                 );
             }
             note_tags_ignored(cfg, family_fmt, out_fmt);
-            let encode = if matches!(out_fmt, Format::FastqGz) {
-                EncodeKind::Gzip
-            } else {
-                EncodeKind::None
-            };
-            let b = config::thread_budget(cfg.threads, false, encode);
-            let mut writer = fastq_writer(cfg, out_fmt, b.encode)?;
-            cfg.render_workers = b.render;
+            let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
+            cfg.render_workers = budget.render;
             let records = io::dir::fastq_records(&paths);
             let stats = pipeline::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
-            tracing::debug!("processing finished in {:?}", t0.elapsed());
-            obs.finish(&stats);
+            tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
+            obs.finish(&stats, &out_desc);
             Ok(())
         },
         io::dir::Family::Bam => match out_fmt {
@@ -348,39 +487,243 @@ fn run_folder(
                 // Only the first file's header is written; warn if the others
                 // declare different read groups (relevant only for BAM output).
                 io::dir::warn_on_bam_header_mismatch(&paths);
-                let b = config::thread_budget(cfg.threads, true, EncodeKind::Bgzf);
-                let (header, records) = io::dir::bam_reader(&paths, b.decode)?;
+                let (header, records) = io::dir::bam_reader(&paths, budget.decode)?;
                 let out_header = provenance_header(header);
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
                     &out_header,
-                    b.encode,
+                    budget.encode,
                     cfg.compression_level,
                 )?;
-                cfg.render_workers = b.render;
+                cfg.render_workers = budget.render;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
-                tracing::debug!("processing finished in {:?}", t0.elapsed());
-                obs.finish(&stats);
+                tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
+                obs.finish(&stats, &out_desc);
                 Ok(())
             },
             Format::Fastq | Format::FastqGz => {
-                let encode = if matches!(out_fmt, Format::FastqGz) {
-                    EncodeKind::Gzip
-                } else {
-                    EncodeKind::None
-                };
-                let b = config::thread_budget(cfg.threads, true, encode);
-                let (_header, records) = io::dir::bam_reader(&paths, b.decode)?;
-                let mut writer = fastq_writer(cfg, out_fmt, b.encode)?;
-                cfg.render_workers = b.render;
+                let (_header, records) = io::dir::bam_reader(&paths, budget.decode)?;
+                let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
+                cfg.render_workers = budget.render;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
                 writer.finish()?;
-                tracing::debug!("processing finished in {:?}", t0.elapsed());
-                obs.finish(&stats);
+                tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
+                obs.finish(&stats, &out_desc);
                 Ok(())
             },
         },
+    }
+}
+
+/// The output compression stage's weight for a given output format — `Bgzf` for
+/// BAM (always bgzf-compressed), `Gzip` for `FASTQ.gz`, `None` for plain FASTQ.
+/// Paired with `render_heavy` (`in_fmt == Format::Bam`, or the folder-mode
+/// equivalent), this is everything `config::thread_budget` needs; both call sites
+/// (`run`, `run_folder`) resolve their budget from this exactly once, before the
+/// startup banner, and reuse it for the actual pipeline dispatch below.
+fn encode_kind_for(out_fmt: io::Format) -> config::EncodeKind {
+    match out_fmt {
+        io::Format::Bam => config::EncodeKind::Bgzf,
+        io::Format::FastqGz => config::EncodeKind::Gzip,
+        io::Format::Fastq => config::EncodeKind::None,
+    }
+}
+
+/// The startup banner's operation line (LINE mode's item 3 / BAR mode's own
+/// one-liner build on the same wording): `Trimming FASTQ` when input and output
+/// share a `Format::family` — including a `FASTQ` -> `FASTQ.gz` run, which is a
+/// compression change, not a format conversion — else `Converting {in_label} to
+/// {out_label}` (e.g. `Converting BAM to FASTQ`) for a genuine cross-family
+/// conversion.
+fn operation_line(in_fmt: io::Format, out_fmt: io::Format) -> String {
+    if in_fmt.family() == out_fmt.family() {
+        format!("Trimming {}", in_fmt.family())
+    } else {
+        format!("Converting {} to {}", in_fmt.label(), out_fmt.label())
+    }
+}
+
+/// The startup banner's `Output: ...` line: `Output: <stdout>` when writing to
+/// stdout (no compression detail — see Batch 2 spec), else `Output: {path}`, with
+/// `(gzip|bgzf level {level}, {encode_workers} workers)` appended for compressed
+/// output formats (gzip for `FASTQ.gz`, bgzf for BAM; plain FASTQ gets no suffix).
+fn output_banner_line(
+    output: Option<&std::path::Path>,
+    out_fmt: io::Format,
+    level: u8,
+    encode_workers: usize,
+) -> String {
+    let Some(path) = output else {
+        return "Output: <stdout>".to_string();
+    };
+    let mut line = format!("Output: {}", path.display());
+    match out_fmt {
+        io::Format::Bam => {
+            line.push_str(&format!(" (bgzf level {level}, {encode_workers} workers)"));
+        },
+        io::Format::FastqGz => {
+            line.push_str(&format!(" (gzip level {level}, {encode_workers} workers)"));
+        },
+        io::Format::Fastq => {},
+    }
+    line
+}
+
+/// The startup banner's `Threads: ...` line: the resolved `-t`/auto worker
+/// count (`threads`) as the header, with the per-stage split (mapping the
+/// `ThreadBudget`'s internal stage names — decode/render/encode — onto the
+/// pipeline-stage vocabulary shown to the user: read/trim/write) in
+/// parentheses: `Threads: 8 (read 1, trim 4, write 3)`. Deliberately *not*
+/// `b.total()`: that per-stage sum can exceed `threads` (each stage is floored
+/// at >= 1 even when the overall total is 1 — see `ThreadBudget::total`'s
+/// doc), which read as a confusing second, larger "total" next to the `-t`
+/// value the user actually asked for.
+///
+/// `threads <= 1` instead prints `Threads: 1 (sequential)`: `thread_budget`
+/// still floors `render`/`encode` at >= 1 each even at a total of 1, so the
+/// read/trim/write split would show e.g. `(read 1, trim 1, write 1)` — three
+/// threads' worth of detail for a run that is, in fact, single-threaded.
+fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> String {
+    if threads <= 1 {
+        return "Threads: 1 (sequential)".to_string();
+    }
+    format!(
+        "Threads: {threads} (read {}, trim {}, write {})",
+        b.decode, b.render, b.encode
+    )
+}
+
+/// Lowercase label for a `QualMode`, used only in the startup banner's Filters
+/// line (`{qual_mode} quality >=...`).
+fn qual_mode_label(mode: qual::QualMode) -> &'static str {
+    match mode {
+        qual::QualMode::Mean => "mean",
+        qual::QualMode::Arithmetic => "arithmetic",
+        qual::QualMode::Median => "median",
+    }
+}
+
+/// The startup banner's `Filters: ...; trim: ...` line, built from the resolved
+/// `FilterConfig` + `TrimPlan`. Pure (no I/O), so it's unit-testable directly.
+/// Shows only *active* (non-default) clauses/ops — a fresh-defaults run (no
+/// filters, no trim) reads as `Filters: none; trim: none` rather than
+/// spelling out every no-op threshold (e.g. `mean quality >=0`).
+///
+/// Filters clause: `length >={min}` only if `min_length > 1`, plus ` <={max}`
+/// only if `max_length != usize::MAX`; `{qual_mode} quality >={min}` only if
+/// `min_qual > 0.0`, plus ` <={max}` only if `max_qual < 1000.0`; `GC
+/// {min}-{max}` only if either GC bound was set. `none` if nothing above fired.
+///
+/// Trim clause: `head {N}, tail {N}` only if either crop is non-zero, plus the
+/// configured quality op's own wording, joined with a comma; `none` if neither
+/// a crop nor a quality op is set.
+fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -> String {
+    let mut filters = Vec::new();
+
+    let length_active = filter.min_length > 1 || filter.max_length != usize::MAX;
+    if length_active {
+        let mut length = String::new();
+        if filter.min_length > 1 {
+            length.push_str(&format!(">={}", filter.min_length));
+        }
+        if filter.max_length != usize::MAX {
+            if !length.is_empty() {
+                length.push(' ');
+            }
+            length.push_str(&format!("<={}", filter.max_length));
+        }
+        filters.push(format!("length {length}"));
+    }
+
+    let qual_active = filter.min_qual > 0.0 || filter.max_qual < 1000.0;
+    if qual_active {
+        let mut quality = format!("{} quality", qual_mode_label(filter.qual_mode));
+        if filter.min_qual > 0.0 {
+            quality.push_str(&format!(" >={}", filter.min_qual));
+        }
+        if filter.max_qual < 1000.0 {
+            quality.push_str(&format!(" <={}", filter.max_qual));
+        }
+        filters.push(quality);
+    }
+
+    if filter.min_gc.is_some() || filter.max_gc.is_some() {
+        filters.push(format!(
+            "GC {}-{}",
+            filter.min_gc.unwrap_or(0.0),
+            filter.max_gc.unwrap_or(1.0)
+        ));
+    }
+
+    let filters_str = if filters.is_empty() {
+        "none".to_string()
+    } else {
+        filters.join("; ")
+    };
+
+    let mut trim_parts = Vec::new();
+    if trim.head > 0 || trim.tail > 0 {
+        trim_parts.push(format!("head {}, tail {}", trim.head, trim.tail));
+    }
+    if let Some(op) = &trim.quality {
+        trim_parts.push(match op {
+            trim::QualityOp::TrimQual(q) => format!("trim quality <{q}"),
+            trim::QualityOp::BestSegment(q) => format!("best segment >={q}"),
+            trim::QualityOp::Split { cutoff, .. } => format!("split quality <{cutoff}"),
+        });
+    }
+    let trim_str = if trim_parts.is_empty() {
+        "none".to_string()
+    } else {
+        trim_parts.join(", ")
+    };
+
+    format!("Filters: {filters_str}; trim: {trim_str}")
+}
+
+/// Shell-quote a single argument the way Python's `shlex.quote` does: bare when
+/// non-empty and every character is in the POSIX-shell-safe set
+/// (`[A-Za-z0-9_@%+=:,./-]`); otherwise wrapped in single quotes, with any
+/// embedded single quote escaped as `'\''` (close the quote, an escaped literal
+/// quote, reopen the quote). An empty argument is never safe bare (it would
+/// vanish when re-run), so it renders as `''`.
+pub(crate) fn shell_quote(arg: &str) -> String {
+    let is_safe = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
+    if !arg.is_empty() && arg.chars().all(is_safe) {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// The startup banner's `Command: ...` line: the real process argv, space-joined
+/// and each argument shell-quoted via `shell_quote` so the line can be copied
+/// back out and re-run verbatim. Takes `OsStr`-like items (the caller passes
+/// `std::env::args_os()`, NOT `args()` — the latter panics on non-UTF-8 argv) and
+/// lossily converts each to `str` here, at the one seam that must never panic on
+/// a malformed argv. Generic over the argument iterator so it's unit-testable
+/// without touching the real process argv.
+pub fn command_line<I, S>(args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let joined = args
+        .into_iter()
+        .map(|a| shell_quote(&a.as_ref().to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("Command: {joined}")
+}
+
+/// The output path (or `<stdout>`) shown in both the startup banner's `Output:`
+/// line and the end-of-run `Completed`/closer line — the two bookend on the same
+/// text so a reader can match them up at a glance.
+fn output_desc(output: Option<&std::path::Path>) -> String {
+    match output {
+        Some(p) => p.display().to_string(),
+        None => "<stdout>".to_string(),
     }
 }
 
@@ -426,7 +769,9 @@ pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
 fn note_tags_ignored(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) {
     if !matches!(cfg.fastq_tags, config::FastqTags::All) {
         tracing::warn!(
-            "note: --fastq-tags applies only to BAM->FASTQ output; ignored for {in_fmt:?}->{out_fmt:?}"
+            "--fastq-tags applies only to BAM-to-FASTQ output; ignored for {} to {}",
+            in_fmt.label(),
+            out_fmt.label()
         );
     }
 }
@@ -488,6 +833,35 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn binary_to_terminal_flags_bam_on_a_tty_stdout() {
+        assert!(binary_to_terminal(true, io::Format::Bam, true));
+    }
+
+    #[test]
+    fn binary_to_terminal_flags_fastq_gz_on_a_tty_stdout() {
+        assert!(binary_to_terminal(true, io::Format::FastqGz, true));
+    }
+
+    #[test]
+    fn binary_to_terminal_allows_plain_fastq() {
+        // Plain text FASTQ on a terminal is normal/expected output.
+        assert!(!binary_to_terminal(true, io::Format::Fastq, true));
+    }
+
+    #[test]
+    fn binary_to_terminal_allows_when_output_file_given() {
+        // -o was given, so `output_is_stdout` is false regardless of format.
+        assert!(!binary_to_terminal(false, io::Format::Bam, true));
+    }
+
+    #[test]
+    fn binary_to_terminal_allows_when_not_a_tty() {
+        // Redirected to a file/pipe: not a terminal, so it's fine.
+        assert!(!binary_to_terminal(true, io::Format::Bam, false));
+        assert!(!binary_to_terminal(true, io::Format::FastqGz, false));
+    }
+
     /// Regression test for `d481c48`: a header with a dangling `@PG PP:` chain
     /// (a `PP` value that names a program ID not present in the header) used
     /// to panic inside `noodles_sam::header::Programs::add` — called via
@@ -546,5 +920,299 @@ mod tests {
             "expected an @PG record with ID whittle in the output header, got {:?}",
             out_header.programs()
         );
+    }
+
+    #[test]
+    fn encode_kind_for_maps_output_format() {
+        assert_eq!(encode_kind_for(io::Format::Bam), config::EncodeKind::Bgzf);
+        assert_eq!(
+            encode_kind_for(io::Format::FastqGz),
+            config::EncodeKind::Gzip
+        );
+        assert_eq!(encode_kind_for(io::Format::Fastq), config::EncodeKind::None);
+    }
+
+    #[test]
+    fn operation_line_collapses_matching_families() {
+        assert_eq!(
+            operation_line(io::Format::Fastq, io::Format::Fastq),
+            "Trimming FASTQ"
+        );
+        // FASTQ -> FASTQ.gz shares the FASTQ family (a compression change, not
+        // a format conversion), so it collapses too rather than reading as an
+        // "X to X" conversion.
+        assert_eq!(
+            operation_line(io::Format::Fastq, io::Format::FastqGz),
+            "Trimming FASTQ"
+        );
+    }
+
+    #[test]
+    fn operation_line_converting_wording_for_cross_family() {
+        assert_eq!(
+            operation_line(io::Format::Bam, io::Format::Fastq),
+            "Converting BAM to FASTQ"
+        );
+    }
+
+    #[test]
+    fn output_banner_line_stdout_has_no_compression_detail() {
+        // Even for a format that would otherwise show a compression suffix.
+        assert_eq!(
+            output_banner_line(None, io::Format::Bam, 6, 3),
+            "Output: <stdout>"
+        );
+    }
+
+    #[test]
+    fn output_banner_line_plain_fastq_has_no_suffix() {
+        let p = std::path::Path::new("/tmp/out.fastq");
+        assert_eq!(
+            output_banner_line(Some(p), io::Format::Fastq, 6, 3),
+            "Output: /tmp/out.fastq"
+        );
+    }
+
+    #[test]
+    fn output_banner_line_appends_compression_detail() {
+        let p = std::path::Path::new("/tmp/out.fastq.gz");
+        assert_eq!(
+            output_banner_line(Some(p), io::Format::FastqGz, 6, 4),
+            "Output: /tmp/out.fastq.gz (gzip level 6, 4 workers)"
+        );
+        let p = std::path::Path::new("/tmp/out.bam");
+        assert_eq!(
+            output_banner_line(Some(p), io::Format::Bam, 3, 5),
+            "Output: /tmp/out.bam (bgzf level 3, 5 workers)"
+        );
+    }
+
+    #[test]
+    fn output_desc_stdout_vs_path() {
+        assert_eq!(output_desc(None), "<stdout>");
+        assert_eq!(
+            output_desc(Some(std::path::Path::new("/tmp/out.fastq"))),
+            "/tmp/out.fastq"
+        );
+    }
+
+    #[test]
+    fn threads_banner_line_shows_requested_threads_not_the_stage_sum() {
+        let b = config::thread_budget(8, true, config::EncodeKind::Bgzf);
+        assert_eq!(
+            threads_banner_line(8, b),
+            format!(
+                "Threads: 8 (read {}, trim {}, write {})",
+                b.decode, b.render, b.encode
+            )
+        );
+        // Concrete figure too, so a change in `thread_budget`'s split is noticed here.
+        assert_eq!(
+            threads_banner_line(8, b),
+            "Threads: 8 (read 1, trim 4, write 3)"
+        );
+    }
+
+    #[test]
+    fn threads_banner_line_header_is_requested_even_when_stage_sum_differs() {
+        // Regression for the confusing pre-fix wording: `render_heavy=true` with
+        // `EncodeKind::None` sums to 9 (1 decode + 7 render + 1 encode) for a
+        // requested `-t 8` — the header must still read the requested 8, not
+        // that 9-thread stage sum.
+        let b = config::thread_budget(8, true, config::EncodeKind::None);
+        assert_eq!(b.total(), 9);
+        assert_eq!(
+            threads_banner_line(8, b),
+            "Threads: 8 (read 1, trim 7, write 1)"
+        );
+    }
+
+    #[test]
+    fn threads_banner_line_sequential_for_one_or_fewer() {
+        // `-t 1` (or `-t 0`, which `resolve_threads` floors to 1): the
+        // read/trim/write split would otherwise show e.g. "(read 1, trim 1,
+        // write 1)" for what is actually a single-threaded run — collapse it
+        // to a plain "sequential" label instead.
+        let b = config::thread_budget(1, true, config::EncodeKind::Bgzf);
+        assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");
+    }
+
+    fn base_filter() -> filter::FilterConfig {
+        filter::FilterConfig {
+            min_length: 1,
+            max_length: usize::MAX,
+            min_qual: 0.0,
+            max_qual: 1000.0,
+            min_gc: None,
+            max_gc: None,
+            qual_mode: qual::QualMode::Mean,
+        }
+    }
+
+    fn base_trim() -> trim::TrimPlan {
+        trim::TrimPlan {
+            head: 0,
+            tail: 0,
+            quality: None,
+        }
+    }
+
+    #[test]
+    fn filters_and_trim_line_defaults() {
+        // All-default filter/trim: no active clause, so it reads "none" rather
+        // than spelling out no-op thresholds like "mean quality >=0".
+        assert_eq!(
+            filters_and_trim_line(&base_filter(), &base_trim()),
+            "Filters: none; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_min_length_active() {
+        let mut f = base_filter();
+        f.min_length = 500;
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: length >=500; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_max_length_active() {
+        let mut f = base_filter();
+        f.max_length = 10_000;
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: length <=10000; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_min_qual_active() {
+        let mut f = base_filter();
+        f.min_qual = 10.0;
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: mean quality >=10; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_max_qual_active() {
+        let mut f = base_filter();
+        f.max_qual = 40.0;
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: mean quality <=40; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_gc_active() {
+        let mut f = base_filter();
+        f.min_gc = Some(0.3);
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: GC 0.3-1; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_trim_active() {
+        let mut t = base_trim();
+        t.head = 5;
+        assert_eq!(
+            filters_and_trim_line(&base_filter(), &t),
+            "Filters: none; trim: head 5, tail 0"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_all_bounds_set() {
+        let mut f = base_filter();
+        f.min_length = 200;
+        f.max_length = 10_000;
+        f.min_qual = 8.0;
+        f.max_qual = 30.0;
+        f.min_gc = Some(0.4);
+        f.max_gc = Some(0.6);
+        f.qual_mode = qual::QualMode::Median;
+
+        let mut t = base_trim();
+        t.head = 10;
+        t.tail = 5;
+        t.quality = Some(trim::QualityOp::TrimQual(12));
+
+        assert_eq!(
+            filters_and_trim_line(&f, &t),
+            "Filters: length >=200 <=10000; median quality >=8 <=30; GC 0.4-0.6; \
+             trim: head 10, tail 5, trim quality <12"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_quality_ops() {
+        let f = base_filter();
+        let mut t = base_trim();
+
+        t.quality = Some(trim::QualityOp::BestSegment(20));
+        assert!(filters_and_trim_line(&f, &t).ends_with("trim: best segment >=20"));
+
+        t.quality = Some(trim::QualityOp::Split {
+            cutoff: 15,
+            window: 50,
+        });
+        assert!(filters_and_trim_line(&f, &t).ends_with("trim: split quality <15"));
+
+        // head/tail-only (no quality op): no trailing quality-op clause.
+        t.quality = None;
+        t.head = 3;
+        t.tail = 0;
+        assert!(filters_and_trim_line(&f, &t).ends_with("trim: head 3, tail 0"));
+    }
+
+    #[test]
+    fn command_line_quotes_only_unsafe_args() {
+        assert_eq!(
+            command_line(["whittle", "-i", "in.fastq", "-o", "out.fastq"]),
+            "Command: whittle -i in.fastq -o out.fastq"
+        );
+        assert_eq!(
+            command_line(["whittle", "-i", "my reads.fastq"]),
+            "Command: whittle -i 'my reads.fastq'"
+        );
+    }
+
+    #[test]
+    fn shell_quote_leaves_plain_args_bare() {
+        assert_eq!(shell_quote("whittle"), "whittle");
+        assert_eq!(shell_quote("-i"), "-i");
+        assert_eq!(shell_quote("in.fastq"), "in.fastq");
+        assert_eq!(
+            shell_quote("path/to/file_1.0.fq.gz"),
+            "path/to/file_1.0.fq.gz"
+        );
+    }
+
+    #[test]
+    fn shell_quote_wraps_args_with_spaces() {
+        assert_eq!(shell_quote("my reads.fastq"), "'my reads.fastq'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("it's here.fastq"), r"'it'\''s here.fastq'");
+    }
+
+    #[test]
+    fn shell_quote_wraps_shell_metacharacters() {
+        assert_eq!(shell_quote("$HOME"), "'$HOME'");
+        assert_eq!(shell_quote("a;b"), "'a;b'");
+    }
+
+    #[test]
+    fn shell_quote_wraps_empty_string() {
+        // Bare would vanish entirely when the line is re-run.
+        assert_eq!(shell_quote(""), "''");
     }
 }
