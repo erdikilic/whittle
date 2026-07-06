@@ -58,7 +58,7 @@ impl<R: Read> Iterator for RecordIter<R> {
 
 /// Write the `@`-prefixed header id for a segment (no trailing newline, no tags).
 /// On splits (`total_segments > 1`) the id gets a `_segment_N` suffix inserted
-/// before any space-separated description, matching chopper's convention.
+/// before any space-separated description.
 fn write_head<W: Write>(
     w: &mut W,
     name: &[u8],

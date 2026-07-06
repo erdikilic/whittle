@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 /// Precomputed 10^(-q/10) for every possible Phred byte. Sizing to the full u8
-/// range means any quality byte indexes safely (ported from chopper's PHRED_LUT).
+/// range means any quality byte indexes safely.
 static PHRED_LUT: LazyLock<[f64; 256]> = LazyLock::new(|| {
     let mut lut = [0.0f64; 256];
     for (i, v) in lut.iter_mut().enumerate() {
@@ -15,7 +15,8 @@ pub fn phred_to_prob(q: u8) -> f64 {
     PHRED_LUT[q as usize]
 }
 
-/// Error-probability mean quality: the ONT-standard "read Q" (chopper's ave_qual).
+/// Error-probability mean quality: the ONT-standard "read Q" — the mean per-base
+/// error probability converted back to a Phred score.
 pub fn mean_prob_q(phred: &[u8]) -> f64 {
     if phred.is_empty() {
         return 0.0;
@@ -87,9 +88,9 @@ mod tests {
         assert!((phred_to_prob(30) - 0.001).abs() < 1e-12);
     }
 
-    // Values ported from chopper's ave_qual test, but inputs are RAW phred (no +33).
+    // Known-good values for the error-probability mean; inputs are RAW phred (no +33).
     #[test]
-    fn mean_prob_q_matches_chopper() {
+    fn mean_prob_q_known_values() {
         assert!((mean_prob_q(&[10]) - 10.0).abs() < 1e-9);
         assert!((mean_prob_q(&[10, 11, 12]) - 10.923583702678473).abs() < 1e-9);
         assert!((mean_prob_q(&[10, 11, 12, 20, 30, 40, 50]) - 14.408827647036087).abs() < 1e-9);
