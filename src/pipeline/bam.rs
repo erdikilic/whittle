@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use noodles_sam::alignment::RecordBuf;
@@ -8,7 +9,7 @@ use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 use rayon::prelude::*;
 
-use super::Stats;
+use super::{Counters, Stats};
 use crate::config::{Config, FastqTags};
 use crate::io::fastq::{format_aux_field, format_mods_aux, write_segment, write_segment_tagged};
 use crate::{filter, mods, trim};
@@ -482,12 +483,13 @@ fn run_bam_seq(
     records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
     sink: &mut crate::io::bam::BamSink,
     cfg: &Config,
+    counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
-    let mut stats = Stats::default();
+    let mut malformed_tag_reads = 0u64;
     for rec in records {
         let rec = rec?;
         crate::io::bam::ensure_unaligned(&rec)?;
-        stats.input_reads += 1;
+        counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
         let seq = rec.sequence().as_ref().to_vec();
         let qual = rec.quality_scores().as_ref().to_vec();
@@ -504,7 +506,7 @@ fn run_bam_seq(
             );
         }
         if has_malformed_perbase_tag(&rec, seq.len()) {
-            stats.malformed_tag_reads += 1;
+            malformed_tag_reads += 1;
         }
         if !filter::passes(&seq, &qual, &cfg.filter) {
             continue;
@@ -514,10 +516,14 @@ fn run_bam_seq(
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
             let out = reconstruct_record(&rec, s, e, total, idx, cfg.update_moves);
             sink.write_record(header, &out)?;
-            stats.output_reads += 1;
+            counters.output_reads.fetch_add(1, Ordering::Relaxed);
         }
     }
-    Ok(stats)
+    Ok(Stats {
+        input_reads: counters.input_reads.load(Ordering::Relaxed),
+        output_reads: counters.output_reads.load(Ordering::Relaxed),
+        malformed_tag_reads,
+    })
 }
 
 /// Shared parallel driver: reader iterator -> rayon pool (render) -> bounded
@@ -533,6 +539,7 @@ fn run_bam_parallel<T, S, Render, WriteOne>(
     sink: &mut S,
     render: Render,
     write_one: WriteOne,
+    counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
 where
     T: Send,
@@ -548,8 +555,6 @@ where
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(render_workers)
         .build()?;
-    let input_reads = AtomicU64::new(0);
-    let output_reads = AtomicU64::new(0);
     let (tx, rx) = crossbeam_channel::bounded::<T>(render_workers * 4);
     let malformed = AtomicU64::new(0);
     let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
@@ -587,13 +592,15 @@ where
                         return;
                     },
                 };
-                input_reads.fetch_add(1, Ordering::Relaxed);
+                counters.input_reads.fetch_add(1, Ordering::Relaxed);
                 if has_malformed_perbase_tag(&rec, rec.sequence().as_ref().len()) {
                     malformed.fetch_add(1, Ordering::Relaxed);
                 }
                 match render(&rec, cfg) {
                     Ok(items) => {
-                        output_reads.fetch_add(items.len() as u64, Ordering::Relaxed);
+                        counters
+                            .output_reads
+                            .fetch_add(items.len() as u64, Ordering::Relaxed);
                         for it in items {
                             let _ = tx.send(it);
                         }
@@ -617,8 +624,8 @@ where
         return Err(e.into());
     }
     Ok(Stats {
-        input_reads: input_reads.load(Ordering::Relaxed),
-        output_reads: output_reads.load(Ordering::Relaxed),
+        input_reads: counters.input_reads.load(Ordering::Relaxed),
+        output_reads: counters.output_reads.load(Ordering::Relaxed),
         malformed_tag_reads: malformed.load(Ordering::Relaxed),
     })
 }
@@ -634,9 +641,10 @@ pub fn run_bam(
     records: impl Iterator<Item = anyhow::Result<RecordBuf>> + Send,
     sink: &mut crate::io::bam::BamSink,
     cfg: &Config,
+    counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
     if cfg.threads <= 1 {
-        return run_bam_seq(header, records, sink, cfg);
+        return run_bam_seq(header, records, sink, cfg, counters);
     }
     run_bam_parallel(
         records,
@@ -672,6 +680,7 @@ pub fn run_bam(
         },
         // write_one: encode+write on the writer thread (bgzf compress is MT).
         |sink, rec| sink.write_record(header, rec),
+        counters,
     )
 }
 
@@ -743,15 +752,16 @@ fn run_bam_to_fastq_seq<W>(
     records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
     writer: &mut W,
     cfg: &Config,
+    counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
 where
     W: Write,
 {
-    let mut stats = Stats::default();
+    let mut malformed_tag_reads = 0u64;
     for rec in records {
         let rec = rec?;
         crate::io::bam::ensure_unaligned(&rec)?;
-        stats.input_reads += 1;
+        counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
         let seq = rec.sequence().as_ref().to_vec();
         let qual = rec.quality_scores().as_ref().to_vec();
@@ -768,7 +778,7 @@ where
             );
         }
         if has_malformed_perbase_tag(&rec, seq.len()) {
-            stats.malformed_tag_reads += 1;
+            malformed_tag_reads += 1;
         }
         if !filter::passes(&seq, &qual, &cfg.filter) {
             continue;
@@ -783,10 +793,14 @@ where
             } else {
                 write_segment_tagged(writer, &name, &seq[s..e], &qual[s..e], total, idx, &tags)?;
             }
-            stats.output_reads += 1;
+            counters.output_reads.fetch_add(1, Ordering::Relaxed);
         }
     }
-    Ok(stats)
+    Ok(Stats {
+        input_reads: counters.input_reads.load(Ordering::Relaxed),
+        output_reads: counters.output_reads.load(Ordering::Relaxed),
+        malformed_tag_reads,
+    })
 }
 
 /// Threads-aware uBAM→FASTQ pipeline entry point: refuse aligned reads, filter,
@@ -801,9 +815,10 @@ pub fn run_bam_to_fastq<W: Write + Send>(
     records: impl Iterator<Item = anyhow::Result<RecordBuf>> + Send,
     writer: &mut W,
     cfg: &Config,
+    counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
     if cfg.threads <= 1 {
-        return run_bam_to_fastq_seq(records, writer, cfg);
+        return run_bam_to_fastq_seq(records, writer, cfg, counters);
     }
     run_bam_parallel(
         records,
@@ -855,6 +870,7 @@ pub fn run_bam_to_fastq<W: Write + Send>(
         },
         // write_one: append rendered bytes to the FastqOut writer.
         |w, buf| w.write_all(buf),
+        counters,
     )
 }
 
@@ -968,7 +984,13 @@ mod tests {
             threads_clamped: None,
         };
 
-        let result = run_bam(&header, [Ok(rec)].into_iter(), &mut sink, &cfg);
+        let result = run_bam(
+            &header,
+            [Ok(rec)].into_iter(),
+            &mut sink,
+            &cfg,
+            &Arc::new(Counters::default()),
+        );
         assert!(
             result.is_err(),
             "SEQ/QUAL length mismatch must error, not panic"
@@ -1089,8 +1111,13 @@ mod tests {
     fn bam2fq_all_carries_rg_and_reconstructed_mods() {
         let cfg = cfg_bam2fq(None, 2, FastqTags::All);
         let mut out = Vec::new();
-        let stats =
-            run_bam_to_fastq([Ok(read2_with_mods_and_rg())].into_iter(), &mut out, &cfg).unwrap();
+        let stats = run_bam_to_fastq(
+            [Ok(read2_with_mods_and_rg())].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         assert_eq!((stats.input_reads, stats.output_reads), (1, 1));
         let s = String::from_utf8(out).unwrap();
         // header carries RG verbatim + reconstructed mod block; seq head-cropped by 2.
@@ -1105,7 +1132,13 @@ mod tests {
     fn bam2fq_only_mm_ml_drops_rg() {
         let cfg = cfg_bam2fq(None, 2, FastqTags::parse("MM,ML").unwrap());
         let mut out = Vec::new();
-        run_bam_to_fastq([Ok(read2_with_mods_and_rg())].into_iter(), &mut out, &cfg).unwrap();
+        run_bam_to_fastq(
+            [Ok(read2_with_mods_and_rg())].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(!s.contains("RG:Z"), "RG must be dropped: {s:?}");
         assert!(
@@ -1118,7 +1151,13 @@ mod tests {
     fn bam2fq_none_is_plain_fastq() {
         let cfg = cfg_bam2fq(None, 2, FastqTags::None);
         let mut out = Vec::new();
-        run_bam_to_fastq([Ok(read2_with_mods_and_rg())].into_iter(), &mut out, &cfg).unwrap();
+        run_bam_to_fastq(
+            [Ok(read2_with_mods_and_rg())].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         assert_eq!(out, b"@r1\nACCCAC\n+\nDDDDDD\n"); // 35+33 = 'D'
     }
 
@@ -1138,7 +1177,13 @@ mod tests {
         rec.data_mut()
             .insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(4));
         let mut out = Vec::new();
-        let stats = run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
+        let stats = run_bam_to_fastq(
+            [Ok(rec)].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         assert_eq!(stats.output_reads, 2);
         let s = String::from_utf8(out).unwrap();
         // segment 1 = [0,2) "CC" keeps abs-0 mod; segment 2 = [3,4) "C" keeps abs-3 mod.
@@ -1161,7 +1206,13 @@ mod tests {
         *rec.quality_scores_mut() = vec![40; 4].into();
         let cfg = cfg_bam2fq(None, 0, FastqTags::All);
         let mut out = Vec::new();
-        run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
+        run_bam_to_fastq(
+            [Ok(rec)].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         assert_eq!(out, b"@plain\nACGT\n+\nIIII\n");
     }
 
@@ -1221,7 +1272,13 @@ mod tests {
 
         let cfg = cfg_bam2fq(None, 0, FastqTags::All);
         let mut out = Vec::new();
-        run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
+        run_bam_to_fastq(
+            [Ok(rec)].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(
             s.contains("MM:Z:C+m,0,1;\tMN:i:4"),
@@ -1348,7 +1405,13 @@ mod tests {
 
         let cfg = cfg_bam2fq(None, 2, FastqTags::All); // head-crop 2 -> window [2,6)
         let mut out = Vec::new();
-        run_bam_to_fastq([Ok(rec)].into_iter(), &mut out, &cfg).unwrap();
+        run_bam_to_fastq(
+            [Ok(rec)].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(
             s.contains("ip:B:C,12,13,14,15"),
@@ -1813,6 +1876,7 @@ mod tests {
             recs.clone().into_iter().map(anyhow::Ok),
             &mut sink1,
             &mk(1),
+            &Arc::new(Counters::default()),
         )
         .unwrap();
         sink1.finish().unwrap();
@@ -1826,6 +1890,7 @@ mod tests {
             recs.into_iter().map(anyhow::Ok),
             &mut sink8,
             &mk(8),
+            &Arc::new(Counters::default()),
         )
         .unwrap();
         sink8.finish().unwrap();
@@ -1908,6 +1973,7 @@ mod tests {
                 sink.written += 1;
                 Ok(())
             },
+            &Arc::new(Counters::default()),
         );
         assert!(
             res.is_err(),
@@ -1972,6 +2038,7 @@ mod tests {
             &mut sink,
             |_rec, _cfg| anyhow::Ok(vec![()]),
             |_sink: &mut NullSink, _item: &()| -> io::Result<()> { Ok(()) },
+            &Arc::new(Counters::default()),
         );
         assert!(
             res.is_err(),
@@ -2039,9 +2106,21 @@ mod tests {
         };
 
         let mut a = Vec::new();
-        run_bam_to_fastq(recs.clone().into_iter().map(anyhow::Ok), &mut a, &mk(1)).unwrap();
+        run_bam_to_fastq(
+            recs.clone().into_iter().map(anyhow::Ok),
+            &mut a,
+            &mk(1),
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
         let mut b = Vec::new();
-        run_bam_to_fastq(recs.into_iter().map(anyhow::Ok), &mut b, &mk(8)).unwrap();
+        run_bam_to_fastq(
+            recs.into_iter().map(anyhow::Ok),
+            &mut b,
+            &mk(8),
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
 
         assert_eq!(
             sorted_records(&a),

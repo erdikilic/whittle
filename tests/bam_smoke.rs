@@ -57,6 +57,7 @@ fn bam_to_bam_end_to_end() {
 
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "--in-format",
             "bam",
@@ -168,6 +169,7 @@ fn bam_to_bam_slices_pacbio_kinetics() {
 
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "--in-format",
             "bam",
@@ -237,6 +239,7 @@ fn bam_update_moves_slices_move_table() {
 
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "--in-format",
             "bam",
@@ -300,6 +303,7 @@ fn bam_on_stdin_without_in_format_is_detected() {
     let out_path = dir.path().join("out.fastq");
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         // No --in-format: detection must come from the piped bytes alone.
         .args(["--out-format", "fastq", "-o"])
         .arg(&out_path)

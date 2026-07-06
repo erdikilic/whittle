@@ -19,11 +19,14 @@ use gzp::{Compression, ZWriter};
 /// Top-level entry point. Dispatches on the input: a directory triggers
 /// folder-merge (all read files in it merged into one output); otherwise a
 /// single file / stdin is trimmed. FASTQ and unaligned BAM are supported.
-pub fn run(cfg: Config, obs: &obs::ProgressHandle) -> anyhow::Result<()> {
+///
+/// `obs` drives progress + end-of-run output; library callers pass `ProgressHandle::disabled()`.
+pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     use config::EncodeKind;
     use io::Format;
 
     let mut cfg = cfg;
+    let setup_start = std::time::Instant::now();
 
     if let Some((requested, ncpu)) = cfg.threads_clamped {
         tracing::warn!("requested -t {requested} exceeds {ncpu} available CPUs; using {ncpu}");
@@ -56,13 +59,31 @@ pub fn run(cfg: Config, obs: &obs::ProgressHandle) -> anyhow::Result<()> {
 
     let in_path = cfg.io.input.as_deref();
 
+    // Total input bytes, when known (a real file), drives a determinate
+    // progress bar with %/ETA; stdin has no metadata, so it stays `None` and
+    // renders a spinner instead (see `obs::ProgressHandle::start`).
+    let total: Option<u64> = in_path
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len());
+
+    // Created here (before the reader) so the same `Arc` can be shared into
+    // `CountingReader` below, then cloned again for the pipeline call and
+    // `obs.start`.
+    let counters = std::sync::Arc::new(pipeline::Counters::default());
+
     // Open the input (file or stdin) up front so format detection can sniff
     // its first bytes without losing them: any bytes consumed while sniffing
     // get prepended back via a Cursor+chain before the FASTQ reader is built.
+    // Wrapped in `CountingReader` here, innermost, so it counts actual bytes
+    // pulled from the file/stdin — the sniff bytes are counted once when
+    // first read; re-serving them from the in-memory `Cursor` below does not
+    // double-count them.
     let raw: Box<dyn Read + Send> = match in_path {
         Some(p) => Box::new(std::fs::File::open(p)?),
         None => Box::new(std::io::stdin()),
     };
+    let raw: Box<dyn Read + Send> =
+        Box::new(io::counting::CountingReader::new(raw, counters.clone()));
     let mut source: Box<dyn Read + Send> = Box::new(BufReader::new(raw));
 
     let in_fmt = match cfg.io.in_format {
@@ -93,6 +114,23 @@ pub fn run(cfg: Config, obs: &obs::ProgressHandle) -> anyhow::Result<()> {
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
+    tracing::debug!(
+        "input opened, format {in_fmt:?} -> {out_fmt:?} detected in {:?}",
+        setup_start.elapsed()
+    );
+
+    obs.start(total, counters.clone());
+
+    // Coarse wall-clock timer for the processing phase (dispatch below); each
+    // arm logs elapsed time from this point just before its own `obs.finish`.
+    // Stages run concurrently internally (read/trim/write overlap across
+    // threads), so this is a phase boundary, not a CPU-time split.
+    let t0 = std::time::Instant::now();
+    tracing::debug!(
+        "processing {in_fmt:?} -> {out_fmt:?} with {} threads",
+        cfg.threads
+    );
+
     // BAM dispatch happens before creating/truncating the output file, and so
     // do the FASTQ->BAM rejection and the BAM->FASTQ conversion, so a rejected
     // run never leaves a stray 0-byte file behind. Only the (Fastq*, Fastq*)
@@ -115,12 +153,13 @@ pub fn run(cfg: Config, obs: &obs::ProgressHandle) -> anyhow::Result<()> {
                 cfg.compression_level,
             )?;
             cfg.render_workers = b.render;
-            let stats = pipeline::run_bam(&out_header, records, &mut sink, &cfg)?;
+            let stats = pipeline::run_bam(&out_header, records, &mut sink, &cfg, &counters)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded — an I/O
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
             // truncated BAM with a success exit code.
             sink.finish()?;
+            tracing::debug!("processing finished in {:?}", t0.elapsed());
             obs.finish(&stats);
             return Ok(());
         },
@@ -135,8 +174,9 @@ pub fn run(cfg: Config, obs: &obs::ProgressHandle) -> anyhow::Result<()> {
             let (_header, records) = io::bam::reader_from(source, b.decode)?;
             let mut writer = fastq_writer(&cfg, out_fmt, b.encode)?;
             cfg.render_workers = b.render;
-            let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg)?;
+            let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
             writer.finish()?;
+            tracing::debug!("processing finished in {:?}", t0.elapsed());
             obs.finish(&stats);
             return Ok(());
         },
@@ -158,8 +198,9 @@ pub fn run(cfg: Config, obs: &obs::ProgressHandle) -> anyhow::Result<()> {
 
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
-    let stats = pipeline::run_fastq(records, &mut writer, &cfg)?;
+    let stats = pipeline::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
+    tracing::debug!("processing finished in {:?}", t0.elapsed());
     obs.finish(&stats);
     Ok(())
 }
@@ -244,7 +285,7 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
 fn run_folder(
     dir: &std::path::Path,
     cfg: &mut Config,
-    obs: &obs::ProgressHandle,
+    obs: &mut obs::ProgressHandle,
 ) -> anyhow::Result<()> {
     use config::EncodeKind;
     use io::Format;
@@ -269,6 +310,15 @@ fn run_folder(
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
 
+    let counters = std::sync::Arc::new(pipeline::Counters::default());
+    obs.start(None, counters.clone());
+
+    let t0 = std::time::Instant::now();
+    tracing::debug!(
+        "processing folder {family:?} -> {out_fmt:?} with {} threads",
+        cfg.threads
+    );
+
     match family {
         io::dir::Family::Fastq => {
             if matches!(out_fmt, Format::Bam) {
@@ -286,8 +336,9 @@ fn run_folder(
             let mut writer = fastq_writer(cfg, out_fmt, b.encode)?;
             cfg.render_workers = b.render;
             let records = io::dir::fastq_records(&paths);
-            let stats = pipeline::run_fastq(records, &mut writer, cfg)?;
+            let stats = pipeline::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
+            tracing::debug!("processing finished in {:?}", t0.elapsed());
             obs.finish(&stats);
             Ok(())
         },
@@ -307,8 +358,9 @@ fn run_folder(
                     cfg.compression_level,
                 )?;
                 cfg.render_workers = b.render;
-                let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg)?;
+                let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
+                tracing::debug!("processing finished in {:?}", t0.elapsed());
                 obs.finish(&stats);
                 Ok(())
             },
@@ -322,8 +374,9 @@ fn run_folder(
                 let (_header, records) = io::dir::bam_reader(&paths, b.decode)?;
                 let mut writer = fastq_writer(cfg, out_fmt, b.encode)?;
                 cfg.render_workers = b.render;
-                let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg)?;
+                let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
                 writer.finish()?;
+                tracing::debug!("processing finished in {:?}", t0.elapsed());
                 obs.finish(&stats);
                 Ok(())
             },

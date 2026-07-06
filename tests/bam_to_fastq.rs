@@ -54,6 +54,7 @@ fn write_fixture(path: &Path) {
 fn run(args: &[&str], input: &Path, output: &Path) {
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args(args)
         .arg("-i")
         .arg(input)
@@ -249,6 +250,7 @@ fn fastq_tags_on_fastq_input_prints_ignored_note() {
 
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args(["--fastq-tags", "none", "-i"])
         .arg(&inp)
         .arg("-o")
