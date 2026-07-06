@@ -19,7 +19,9 @@ use gzp::{Compression, ZWriter};
 /// Top-level entry point. Dispatches on the input: a directory triggers
 /// folder-merge (all read files in it merged into one output); otherwise a
 /// single file / stdin is trimmed. FASTQ and unaligned BAM are supported.
-pub fn run(cfg: Config, obs: &obs::ProgressHandle) -> anyhow::Result<()> {
+///
+/// `obs` drives progress + end-of-run output; library callers pass `ProgressHandle::disabled()`.
+pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     use config::EncodeKind;
     use io::Format;
 
@@ -94,6 +96,7 @@ pub fn run(cfg: Config, obs: &obs::ProgressHandle) -> anyhow::Result<()> {
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
     let counters = std::sync::Arc::new(pipeline::Counters::default());
+    obs.start(None, counters.clone());
 
     // BAM dispatch happens before creating/truncating the output file, and so
     // do the FASTQ->BAM rejection and the BAM->FASTQ conversion, so a rejected
@@ -246,7 +249,7 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
 fn run_folder(
     dir: &std::path::Path,
     cfg: &mut Config,
-    obs: &obs::ProgressHandle,
+    obs: &mut obs::ProgressHandle,
 ) -> anyhow::Result<()> {
     use config::EncodeKind;
     use io::Format;
@@ -272,6 +275,7 @@ fn run_folder(
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
 
     let counters = std::sync::Arc::new(pipeline::Counters::default());
+    obs.start(None, counters.clone());
 
     match family {
         io::dir::Family::Fastq => {
