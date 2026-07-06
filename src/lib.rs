@@ -147,7 +147,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         && cfg.filter.max_qual >= 1000.0
         && cfg.filter.min_gc.is_none()
         && cfg.filter.max_gc.is_none();
-    let no_op_warn = no_trim && pass_through_filter && in_fmt == out_fmt;
+    let no_op_warn = no_trim && pass_through_filter && cfg.adapters.is_none() && in_fmt == out_fmt;
 
     tracing::debug!(
         "Detected {} input in {}",
@@ -185,6 +185,9 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         );
         tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
+        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref()) {
+            tracing::info!("{line}");
+        }
     } else if obs.is_bar() {
         tracing::info!(
             "{} ({} threads)",
@@ -441,6 +444,9 @@ fn run_folder(
         );
         tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
+        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref()) {
+            tracing::info!("{line}");
+        }
     } else if obs.is_bar() {
         tracing::info!(
             "{} ({} threads)",
@@ -683,6 +689,23 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
     format!("Filters: {filters_str}; trim: {trim_str}")
 }
 
+/// The startup banner's `Adapters: ...` line, shown only when adapter trimming
+/// is active — `None` when `cfg.adapters` is unset, so callers can skip the
+/// line entirely for an off run (same convention as the other banner-line
+/// helpers being pure/unit-testable). Reports the adapter count, `trim +
+/// split` vs `ends-only` mode (`AdapterConfig::split`), the end-match error
+/// rate, and the end-zone size in bp.
+fn adapter_banner_line(adapters: Option<&crate::adapter::AdapterConfig>) -> Option<String> {
+    let a = adapters?;
+    let mode = if a.split { "trim + split" } else { "ends-only" };
+    Some(format!(
+        "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp",
+        a.adapters.len(),
+        a.error_rate,
+        a.end_size
+    ))
+}
+
 /// Shell-quote a single argument the way Python's `shlex.quote` does: bare when
 /// non-empty and every character is in the POSIX-shell-safe set
 /// (`[A-Za-z0-9_@%+=:,./-]`); otherwise wrapped in single quotes, with any
@@ -833,6 +856,7 @@ mod tests {
     use noodles_sam::header::record::value::map::program::tag;
 
     use super::*;
+    use crate::adapter::{Adapter, AdapterConfig, End};
 
     #[test]
     fn binary_to_terminal_flags_bam_on_a_tty_stdout() {
@@ -1170,6 +1194,45 @@ mod tests {
         t.head = 3;
         t.tail = 0;
         assert!(filters_and_trim_line(&f, &t).ends_with("trim: head 3, tail 0"));
+    }
+
+    #[test]
+    fn adapter_banner_line_none_when_off_and_describes_when_on() {
+        assert!(adapter_banner_line(None).is_none());
+        let cfg = AdapterConfig {
+            adapters: vec![Adapter {
+                name: "a".into(),
+                seq: b"ACGTACGTACGT".to_vec(),
+                end: End::Both,
+            }],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let line = adapter_banner_line(Some(&cfg)).unwrap();
+        assert!(line.contains("1 sequences"));
+        assert!(line.contains("trim + split"));
+        assert!(line.contains("error 0.20"));
+        assert!(line.contains("end-zone 150 bp"));
+    }
+
+    #[test]
+    fn adapter_banner_line_ends_only_when_split_disabled() {
+        let cfg = AdapterConfig {
+            adapters: vec![Adapter {
+                name: "a".into(),
+                seq: b"ACGTACGTACGT".to_vec(),
+                end: End::Both,
+            }],
+            error_rate: 0.2,
+            end_size: 150,
+            split: false,
+        };
+        assert!(
+            adapter_banner_line(Some(&cfg))
+                .unwrap()
+                .contains("ends-only")
+        );
     }
 
     #[test]
