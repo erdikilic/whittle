@@ -492,6 +492,9 @@ fn run_bam_seq(
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
         let seq = rec.sequence().as_ref().to_vec();
+        counters
+            .input_bases
+            .fetch_add(seq.len() as u64, Ordering::Relaxed);
         let qual = rec.quality_scores().as_ref().to_vec();
         if qual.len() != seq.len() {
             let name = rec
@@ -513,15 +516,22 @@ fn run_bam_seq(
         }
         let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
         let total = intervals.len();
+        let mut out_bases = 0u64;
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
             let out = reconstruct_record(&rec, s, e, total, idx, cfg.update_moves);
             sink.write_record(header, &out)?;
             counters.output_reads.fetch_add(1, Ordering::Relaxed);
+            out_bases += (e - s) as u64;
         }
+        counters
+            .output_bases
+            .fetch_add(out_bases, Ordering::Relaxed);
     }
     Ok(Stats {
         input_reads: counters.input_reads.load(Ordering::Relaxed),
         output_reads: counters.output_reads.load(Ordering::Relaxed),
+        input_bases: counters.input_bases.load(Ordering::Relaxed),
+        output_bases: counters.output_bases.load(Ordering::Relaxed),
         malformed_tag_reads,
     })
 }
@@ -544,7 +554,11 @@ fn run_bam_parallel<T, S, Render, WriteOne>(
 where
     T: Send,
     S: Send,
-    Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
+    // `Render` returns the surviving segments alongside their total base count
+    // (segments can be `RecordBuf`s or rendered FASTQ byte buffers, so the base
+    // count can't be recovered generically from `T` itself — the caller sums it
+    // from the same intervals it renders from).
+    Render: Fn(&RecordBuf, &Config) -> anyhow::Result<(Vec<T>, u64)> + Sync,
     WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
 {
     let render_workers = if cfg.render_workers >= 1 {
@@ -593,14 +607,20 @@ where
                     },
                 };
                 counters.input_reads.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .input_bases
+                    .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
                 if has_malformed_perbase_tag(&rec, rec.sequence().as_ref().len()) {
                     malformed.fetch_add(1, Ordering::Relaxed);
                 }
                 match render(&rec, cfg) {
-                    Ok(items) => {
+                    Ok((items, out_bases)) => {
                         counters
                             .output_reads
                             .fetch_add(items.len() as u64, Ordering::Relaxed);
+                        counters
+                            .output_bases
+                            .fetch_add(out_bases, Ordering::Relaxed);
                         for it in items {
                             let _ = tx.send(it);
                         }
@@ -626,6 +646,8 @@ where
     Ok(Stats {
         input_reads: counters.input_reads.load(Ordering::Relaxed),
         output_reads: counters.output_reads.load(Ordering::Relaxed),
+        input_bases: counters.input_bases.load(Ordering::Relaxed),
+        output_bases: counters.output_bases.load(Ordering::Relaxed),
         malformed_tag_reads: malformed.load(Ordering::Relaxed),
     })
 }
@@ -650,7 +672,7 @@ pub fn run_bam(
         records,
         cfg,
         sink,
-        // render: per-record guards + filter + trim + reconstruct -> Vec<RecordBuf>
+        // render: per-record guards + filter + trim + reconstruct -> (Vec<RecordBuf>, output bases)
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
             let seq = rec.sequence().as_ref().to_vec();
@@ -668,15 +690,17 @@ pub fn run_bam(
                 );
             }
             if !filter::passes(&seq, &qual, &cfg.filter) {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), 0));
             }
             let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
             let total = intervals.len();
-            Ok(intervals
+            let out_bases: u64 = intervals.iter().map(|&(s, e)| (e - s) as u64).sum();
+            let items = intervals
                 .into_iter()
                 .enumerate()
                 .map(|(idx, (s, e))| reconstruct_record(rec, s, e, total, idx, cfg.update_moves))
-                .collect())
+                .collect();
+            Ok((items, out_bases))
         },
         // write_one: encode+write on the writer thread (bgzf compress is MT).
         |sink, rec| sink.write_record(header, rec),
@@ -764,6 +788,9 @@ where
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
         let seq = rec.sequence().as_ref().to_vec();
+        counters
+            .input_bases
+            .fetch_add(seq.len() as u64, Ordering::Relaxed);
         let qual = rec.quality_scores().as_ref().to_vec();
         if qual.len() != seq.len() {
             let name = rec
@@ -786,6 +813,7 @@ where
         let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
         let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
         let total = intervals.len();
+        let mut out_bases = 0u64;
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
             let tags = build_fastq_tags(&rec, &seq, s, e, total, &cfg.fastq_tags);
             if tags.is_empty() {
@@ -794,11 +822,17 @@ where
                 write_segment_tagged(writer, &name, &seq[s..e], &qual[s..e], total, idx, &tags)?;
             }
             counters.output_reads.fetch_add(1, Ordering::Relaxed);
+            out_bases += (e - s) as u64;
         }
+        counters
+            .output_bases
+            .fetch_add(out_bases, Ordering::Relaxed);
     }
     Ok(Stats {
         input_reads: counters.input_reads.load(Ordering::Relaxed),
         output_reads: counters.output_reads.load(Ordering::Relaxed),
+        input_bases: counters.input_bases.load(Ordering::Relaxed),
+        output_bases: counters.output_bases.load(Ordering::Relaxed),
         malformed_tag_reads,
     })
 }
@@ -824,7 +858,7 @@ pub fn run_bam_to_fastq<W: Write + Send>(
         records,
         cfg,
         writer,
-        // render: guards + filter + trim -> Vec<Vec<u8>> (rendered FASTQ segments)
+        // render: guards + filter + trim -> (Vec<Vec<u8>>, output bases) (rendered FASTQ segments)
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
             let seq = rec.sequence().as_ref().to_vec();
@@ -842,12 +876,13 @@ pub fn run_bam_to_fastq<W: Write + Send>(
                 );
             }
             if !filter::passes(&seq, &qual, &cfg.filter) {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), 0));
             }
             let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
             let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
             let total = intervals.len();
             let mut out = Vec::with_capacity(total);
+            let mut out_bases = 0u64;
             for (idx, (s, e)) in intervals.into_iter().enumerate() {
                 let tags = build_fastq_tags(rec, &seq, s, e, total, &cfg.fastq_tags);
                 let mut buf = Vec::new();
@@ -865,8 +900,9 @@ pub fn run_bam_to_fastq<W: Write + Send>(
                     )?;
                 }
                 out.push(buf);
+                out_bases += (e - s) as u64;
             }
-            Ok(out)
+            Ok((out, out_bases))
         },
         // write_one: append rendered bytes to the FastqOut writer.
         |w, buf| w.write_all(buf),
@@ -1965,7 +2001,7 @@ mod tests {
             recs.into_iter(),
             &cfg,
             &mut sink,
-            |_rec, _cfg| anyhow::Ok(vec![()]),
+            |_rec, _cfg| anyhow::Ok((vec![()], 0)),
             |sink, _item: &()| -> io::Result<()> {
                 if sink.written >= sink.limit {
                     return Err(io::Error::new(io::ErrorKind::BrokenPipe, "boom"));
@@ -2036,7 +2072,7 @@ mod tests {
             recs,
             &cfg,
             &mut sink,
-            |_rec, _cfg| anyhow::Ok(vec![()]),
+            |_rec, _cfg| anyhow::Ok((vec![()], 0)),
             |_sink: &mut NullSink, _item: &()| -> io::Result<()> { Ok(()) },
             &Arc::new(Counters::default()),
         );

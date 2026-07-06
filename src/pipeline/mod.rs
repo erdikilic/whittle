@@ -12,12 +12,21 @@ pub struct Counters {
     pub input_reads: AtomicU64,
     pub output_reads: AtomicU64,
     pub bytes_read: AtomicU64,
+    /// Sum of SEQ lengths (bases) across every input read, regardless of
+    /// whether it survives filtering/trimming.
+    pub input_bases: AtomicU64,
+    /// Sum of surviving segment lengths (bases) actually written to output.
+    pub output_bases: AtomicU64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Stats {
     pub input_reads: u64,
     pub output_reads: u64,
+    /// Sum of SEQ lengths (bases) across every input read.
+    pub input_bases: u64,
+    /// Sum of surviving segment lengths (bases) actually written to output.
+    pub output_bases: u64,
     /// Reads carrying a known per-base kinetics tag (ip/pw/…) whose array length
     /// did not match the sequence length — malformed and left untouched. Surfaced
     /// as a run-level advisory; not an error.

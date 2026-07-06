@@ -20,11 +20,15 @@ pub fn run_fastq_seq<W: Write>(
     for rec in records {
         let rec = rec?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
+        counters
+            .input_bases
+            .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
         if !filter::passes(&rec.seq, &rec.qual, &cfg.filter) {
             continue;
         }
         let intervals = trim::apply(rec.seq.len(), &rec.qual, &cfg.trim, cfg.filter.min_length);
         let total = intervals.len();
+        let mut out_bases = 0u64;
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
             write_segment(
                 writer,
@@ -35,25 +39,33 @@ pub fn run_fastq_seq<W: Write>(
                 idx,
             )?;
             counters.output_reads.fetch_add(1, Ordering::Relaxed);
+            out_bases += (e - s) as u64;
         }
+        counters
+            .output_bases
+            .fetch_add(out_bases, Ordering::Relaxed);
     }
     Ok(Stats {
         input_reads: counters.input_reads.load(Ordering::Relaxed),
         output_reads: counters.output_reads.load(Ordering::Relaxed),
+        input_bases: counters.input_bases.load(Ordering::Relaxed),
+        output_bases: counters.output_bases.load(Ordering::Relaxed),
         malformed_tag_reads: 0,
     })
 }
 
 /// Format the surviving segments of one record into an owned FASTQ byte buffer.
-/// Returns the number of segments written alongside the buffer.
-fn render_record(rec: &ReadRecord, cfg: &Config) -> (u64, Vec<u8>) {
+/// Returns the number of segments written and their total base count, alongside
+/// the buffer.
+fn render_record(rec: &ReadRecord, cfg: &Config) -> (u64, u64, Vec<u8>) {
     if !filter::passes(&rec.seq, &rec.qual, &cfg.filter) {
-        return (0, Vec::new());
+        return (0, 0, Vec::new());
     }
     let intervals = trim::apply(rec.seq.len(), &rec.qual, &cfg.trim, cfg.filter.min_length);
     let total = intervals.len();
     let mut buf = Vec::new();
     let mut out = 0u64;
+    let mut out_bases = 0u64;
     for (idx, (s, e)) in intervals.into_iter().enumerate() {
         write_segment(
             &mut buf,
@@ -65,8 +77,9 @@ fn render_record(rec: &ReadRecord, cfg: &Config) -> (u64, Vec<u8>) {
         )
         .unwrap();
         out += 1;
+        out_bases += (e - s) as u64;
     }
-    (out, buf)
+    (out, out_bases, buf)
 }
 
 /// Threads-aware FASTQ pipeline entry point. Sequential (and output-order
@@ -141,9 +154,15 @@ where
                     },
                 };
                 counters.input_reads.fetch_add(1, Ordering::Relaxed);
-                let (out, buf) = render_record(&rec, cfg);
+                counters
+                    .input_bases
+                    .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
+                let (out, out_bases, buf) = render_record(&rec, cfg);
                 if out > 0 {
                     counters.output_reads.fetch_add(out, Ordering::Relaxed);
+                    counters
+                        .output_bases
+                        .fetch_add(out_bases, Ordering::Relaxed);
                     let _ = tx.send(buf);
                 }
             });
@@ -160,6 +179,8 @@ where
     Ok(Stats {
         input_reads: counters.input_reads.load(Ordering::Relaxed),
         output_reads: counters.output_reads.load(Ordering::Relaxed),
+        input_bases: counters.input_bases.load(Ordering::Relaxed),
+        output_bases: counters.output_bases.load(Ordering::Relaxed),
         // FASTQ input carries no BAM per-base tags.
         malformed_tag_reads: 0,
     })

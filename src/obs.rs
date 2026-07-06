@@ -294,6 +294,10 @@ impl ProgressHandle {
         let elapsed = self.start.take().map(|start| start.elapsed());
         tracing::info!("{}", summary_line(stats, elapsed));
 
+        if let Some(line) = bases_line(stats) {
+            tracing::info!("{}", line);
+        }
+
         if stats.malformed_tag_reads > 0 {
             tracing::warn!(
                 "Note: {} read(s) carried a per-base kinetics tag (ip/pw/fi/fp/ri/rp) whose \
@@ -433,6 +437,40 @@ fn summary_line(stats: &Stats, elapsed: Option<Duration>) -> String {
         msg.push_str(&format!(" in {}", human_dur(d)));
     }
     msg
+}
+
+/// Human-readable base count for the yield summary's `Bases:` line: `12.4 Gbp`,
+/// `460.0 Mbp`, `8.2 kbp`, `500 bp`. Decimal (1000-based) tiers, always one
+/// decimal place above the `bp` tier — unlike `human_bytes`, there's no
+/// "round to a whole number above 10" step, since a fixed one-decimal figure
+/// reads more consistently across the Gbp-scale totals this line is built for.
+fn human_bases(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.1} Gbp", n as f64 / 1_000_000_000.0)
+    } else if n >= 1_000_000 {
+        format!("{:.1} Mbp", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1} kbp", n as f64 / 1_000.0)
+    } else {
+        format!("{n} bp")
+    }
+}
+
+/// The end-of-run yield line: `Bases: 12.4 Gbp in, 11.9 Gbp out (95.8% kept)`.
+/// Sits between `summary_line` and the malformed-tag/`Completed` lines (see
+/// `finish`). `None` when `input_bases` is 0 (no bases were ever counted, e.g.
+/// a library caller that never wired up the byte-level counters) — there is no
+/// meaningful kept-percentage to report in that case.
+fn bases_line(stats: &Stats) -> Option<String> {
+    if stats.input_bases == 0 {
+        return None;
+    }
+    let pct = 100.0 * stats.output_bases as f64 / stats.input_bases as f64;
+    Some(format!(
+        "Bases: {} in, {} out ({pct:.1}% kept)",
+        human_bases(stats.input_bases),
+        human_bases(stats.output_bases),
+    ))
 }
 
 /// Human-readable duration for the summary/debug/closer lines: `420ms`, `1.42s`,
@@ -644,6 +682,8 @@ mod tests {
         let stats = Stats {
             input_reads: 1,
             output_reads: 3,
+            input_bases: 0,
+            output_bases: 0,
             malformed_tag_reads: 0,
         };
         let s = summary_line(&stats, Some(Duration::from_secs(2)));
@@ -657,12 +697,49 @@ mod tests {
         let stats = Stats {
             input_reads: 5,
             output_reads: 5,
+            input_bases: 0,
+            output_bases: 0,
             malformed_tag_reads: 0,
         };
         assert_eq!(
             summary_line(&stats, None),
             "Summary: 5 input reads, 5 output reads"
         );
+    }
+
+    #[test]
+    fn human_bases_formats_magnitudes() {
+        assert_eq!(human_bases(12_400_000_000), "12.4 Gbp");
+        assert_eq!(human_bases(460_000_000), "460.0 Mbp");
+        assert_eq!(human_bases(8_240), "8.2 kbp");
+        assert_eq!(human_bases(500), "500 bp");
+    }
+
+    #[test]
+    fn bases_line_reports_kept_percentage() {
+        let stats = Stats {
+            input_reads: 1,
+            output_reads: 1,
+            input_bases: 12_400_000_000,
+            output_bases: 11_900_000_000,
+            malformed_tag_reads: 0,
+        };
+        assert_eq!(
+            bases_line(&stats).unwrap(),
+            "Bases: 12.4 Gbp in, 11.9 Gbp out (96.0% kept)"
+        );
+    }
+
+    #[test]
+    fn bases_line_omitted_when_input_bases_zero() {
+        let stats = Stats {
+            input_reads: 0,
+            output_reads: 0,
+            input_bases: 0,
+            output_bases: 0,
+            malformed_tag_reads: 0,
+        };
+        assert_eq!(bases_line(&stats), None);
     }
 
     #[test]
