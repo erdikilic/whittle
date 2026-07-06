@@ -88,7 +88,7 @@ stays internally consistent (applies to both BAM→BAM and BAM→FASTQ):
     trimmed-off front signal, and sets `ns = ts + span` (dorado's `ns = trim +
     basecalled-span`, so a head-only crop leaves `ns` unchanged and a tail crop
     shrinks it);
-  - a `--split-qual` **split** emits dorado-style subreads (`pi` = parent id,
+  - a `--qual-split` **split** emits dorado-style subreads (`pi` = parent id,
     `sp` = offset into the parent signal, `ns` = subread span, `ts` = 0, `rn` = -1),
     so the renamed segment's signal is still locatable in POD5.
 
@@ -123,13 +123,13 @@ is left untouched and the run prints a one-line advisory.
 whittle -i reads.fastq.gz -o trimmed.fastq.gz \
   -l 500 -q 10 \
   -H 20 -T 20 \
-  --trim-qual 8 \
+  --qual-trim 8 \
   -t 8
 ```
 
 The length/quality/GC filters (`-l`/`-q`) are applied to the whole read
 first; then trimming runs — cropping 20 bases off each end (`-H`/`-T`) and
-trimming any remaining low-quality edges below Q8 (`--trim-qual`); each
+trimming any remaining low-quality edges below Q8 (`--qual-trim`); each
 resulting output segment must still satisfy `-l`/`--min-length` — all using 8
 worker threads (`-t`).
 
@@ -145,7 +145,7 @@ per file by extension, so `--in-format` has no effect on a directory input
 (`--out-format`/`-o`'s extension still control the output).
 
 ```bash
-whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-qual 10
+whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --qual-trim 10
 ```
 
 ### uBAM example
@@ -154,7 +154,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-qual 10
 whittle -i reads.ubam.bam -o trimmed.ubam.bam \
   -l 1000 \
   -H 10 -T 10 \
-  --split-qual 9 --split-window 50
+  --qual-split 9 --qual-split-window 50
 ```
 
 Same filtering/trimming model, but for unaligned BAM: `MM`, `ML`, and `MN`
@@ -181,17 +181,22 @@ See **The MM/ML/ML guarantee** below.
 | `-m`, `--qual-mode {mean,arithmetic,median}` | How a read's quality is summarized for `-q`/`-Q` (default `mean`, the ONT-standard error-probability mean; `arithmetic` averages Phred scores directly; `median` is the Phred median) |
 | `-H`, `--head-crop <N>` | Trim N bases off the start of every read |
 | `-T`, `--tail-crop <N>` | Trim N bases off the end of every read |
-| `--trim-qual <Q>` | Trim low-quality bases off both ends down to the first/last base >= Q |
-| `--best-segment <Q>` | Keep only the single longest contiguous run of quality >= Q |
-| `--split-qual <Q>` | Split the read at low-quality (< Q) runs, keeping each surviving segment as its own record |
-| `--split-window <N>` | Smoothing window for `--split-qual` (default 1): a low-quality run shorter than this is tolerated rather than causing a split |
+| `--qual-trim <Q>` | Trim low-quality bases off both ends down to the first/last base >= Q |
+| `--qual-best-segment <Q>` | Keep only the single longest contiguous run of quality >= Q |
+| `--qual-split <Q>` | Split the read at low-quality (< Q) runs, keeping each surviving segment as its own record |
+| `--qual-split-window <N>` | Smoothing window for `--qual-split` (default 1): a low-quality run shorter than this is tolerated rather than causing a split |
 | `--update-moves` | Keep ONT signal tags (`mv`/`ts`/`ns`/`sp`/`pi`) consistent through trimming for signal-aware tools (Remora, Clair3 v2) instead of dropping them. BAM→BAM only |
+| `-a`, `--adapter-fasta <FILE>` | Custom adapter/primer FASTA (sequences < 6 bp are skipped with a warning). Enables adapter trimming. See **Adapter trimming** below |
+| `--adapter-preset {ont}` | Use the built-in ONT catalog instead of (or alongside) `--adapter-fasta`. Enables adapter trimming |
+| `--adapter-error-rate <F>` | End-match error tolerance as a fraction of adapter length (default 0.2); interior/chimera-split hits use half this budget |
+| `--adapter-end-size <N>` | Bases at each read end searched for a terminal adapter (default 150) |
+| `--adapter-ends-only` | Trim adapters at read ends only; never split on an interior adapter |
 | `-v`, `-vv` | Increase logging detail: `-v` = debug, `-vv` = trace (default: info). See **Logging & progress** below |
 | `--quiet` | Silence progress and the info-level summary; warnings and errors still print |
 
 `-H`/`-T` are a positional fixed crop and always run first, before any
-quality-based operation, on whatever remains of the read. `--trim-qual`,
-`--best-segment`, and `--split-qual` are three different quality-trimming
+quality-based operation, on whatever remains of the read. `--qual-trim`,
+`--qual-best-segment`, and `--qual-split` are three different quality-trimming
 strategies and are **mutually exclusive** — pass at most one.
 
 When a read is split into segments, each surviving segment's name gets a
@@ -247,15 +252,94 @@ surviving window:
   This runs a fixed head/tail crop over every read in the file and checks
   every output read's modification calls against the original, read by read.
 
+## Adapter trimming
+
+Adapter trimming is **opt-in and off by default** — every existing invocation
+of `whittle` behaves exactly as before. Turn it on with `-a`/`--adapter-fasta
+<FILE>` (your own adapter/primer sequences, one per FASTA record — each must
+be >= 6 bp; shorter entries are skipped with a warning) and/or
+`--adapter-preset ont` (the built-in ONT catalog, below); the two can be
+combined, and either one alone is enough to enable the feature.
+
+Once enabled, every adapter is searched for on **both strands** (each
+sequence is also matched reverse-complemented, so it's found regardless of
+read orientation), and `whittle` does two things per read:
+
+- **Terminal trimming** — an adapter matching within `--adapter-end-size`
+  bases of an end (default 150) is trimmed off, walking the keep-boundary
+  inward past the match.
+- **Chimera splitting** — an adapter matching in the read's interior (away
+  from both ends) is treated as a chimera junction: the read is split there,
+  the adapter excised, and each surviving side kept as its own segment. Pass
+  `--adapter-ends-only` to disable this and only trim ends.
+
+Catalog entries tagged 5'/3'/both only gate which end is checked for a
+*terminal* trim — any adapter can still trigger an interior split, since a
+front/rear adapter sequence found mid-read is itself the chimera signal.
+Custom `--adapter-fasta` sequences are always checked at both ends.
+
+Interior/chimera hits use a **stricter, derived error budget** than terminal
+hits: `--adapter-error-rate` (default 0.2, i.e. 20% of the adapter's length)
+sets the terminal-match tolerance, while an interior match must fall within
+*half* that fraction to trigger a split — so a marginal end-match still
+trims, but only a tight match splits a read in two.
+
+Trimming/splitting on adapters flows through the same tag-rewrite machinery
+as quality- and `-H`/`-T`-trimming: on uBAM, `MM`/`ML`/`MN` are rebuilt for
+every resulting window or segment (see **The MM/ML/MN guarantee** above),
+and the rest of the trim-aware tag handling (per-base kinetics,
+`--update-moves`, etc.) applies identically.
+
+### The built-in ONT catalog
+
+`--adapter-preset ont` loads `src/adapter/ont_catalog.tsv` — a catalog
+assembled for `whittle` (not vendored from another project) from
+ONT-published primary sources: dorado's `adapter_primer_kits.cpp` (kit-14
+ligation adapters plus legacy chemistry), Porechop's `adapters.py` (legacy
+adapters and the 96 barcode sequences), and qcat's kit definitions. It
+covers ligation adapters (kit-14 and legacy), the rapid adapter, direct-RNA
+adapters, PCR/cDNA and 10X primers, barcode flanking sequences, and all 96
+native/PCR/rapid barcodes — 124 sequences total after de-duplication (one
+pair of entries across sources shares an identical sequence and is folded
+together). A barcode is one shared 24 bp oligo across kit families;
+`whittle`'s reverse-complement search covers the native orientation without
+needing a separate flank+revcomp catalog entry. Sequences shorter than 11 bp
+(a handful of construction-only flank fragments) are never searched
+standalone, since a pattern that short would match almost anywhere.
+
+### Example
+
+```bash
+whittle -i reads.fastq.gz -o trimmed.fastq.gz --adapter-preset ont -t 8
+```
+
+Or supply your own sequences instead of (or alongside) the built-in catalog:
+
+```bash
+whittle -i reads.fastq.gz -o trimmed.fastq.gz \
+  --adapter-fasta my_adapters.fasta --adapter-error-rate 0.15
+```
+
+### Build requirement
+
+Adapter matching uses [`sassy`](https://crates.io/crates/sassy) for
+approximate (edit-distance) search, which needs its AVX2 SIMD path on
+x86-64: `.cargo/config.toml` sets `target-cpu=x86-64-v3` automatically for
+`cfg(target_arch = "x86_64")` builds (aarch64 uses NEON by default, no flag
+needed). Building `whittle` requires Rust >= 1.91.
+
 ## v1 limitations
 
 - **uBAM only — aligned BAM is refused.** `whittle` checks the unmapped
   flag on every record and errors out (naming the offending read) if it
   finds an aligned one. There is no support for trimming alignments in
   place, adjusting CIGAR/POS, or otherwise handling mapped reads.
-- **No contamination filtering.** There is no minimap2-based adapter/barcode/
-  host-contamination screen (unlike e.g. Porechop_ABI). `whittle` only
-  filters and trims by length, quality, and GC content.
+- **No contamination filtering or ab-initio adapter detection.** Adapter
+  trimming (`-a`/`--adapter-preset`, see **Adapter trimming** above) matches
+  a known catalog by approximate search; there is no minimap2-based
+  host-contamination screen, and `whittle` does not infer unrecognized
+  adapter sequences or auto-detect adapter presence (unlike e.g.
+  Porechop_ABI).
 - **No FASTQ→BAM conversion.** FASTQ in, BAM out is explicitly rejected —
   there's no header/tags to build a BAM record from a bare FASTQ read. The
   reverse, BAM→FASTQ, *is* supported; see [Format conversion](#format-conversion)
@@ -269,10 +353,10 @@ surviving window:
   `--in-format bam` only to force the interpretation of an unusual or headerless
   stream.
 - **`--min-length` is dual-purpose.** It's both the whole-read minimum-length
-  filter and the minimum length for a segment produced by `--split-qual` to
+  filter and the minimum length for a segment produced by `--qual-split` to
   be kept — there's no separate flag for the two.
 - **The three quality-trim operations are mutually exclusive.** Pick one of
-  `--trim-qual`, `--best-segment`, `--split-qual` (or none, for filtering
+  `--qual-trim`, `--qual-best-segment`, `--qual-split` (or none, for filtering
   only). `-H`/`-T` fixed crop is independent of all three and always
   composes with whichever one you pick, running first.
 

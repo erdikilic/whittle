@@ -43,6 +43,7 @@ pub const MIN_PATTERN_LEN: usize = 11;
 /// Compute adapter keep-segments for `window`:
 ///   - terminal hits within `end_size` of an end trim that end inward;
 ///   - interior hits (stricter `k_mid`) excise and split.
+///
 /// Returns `[start,end)` spans in `window` coordinates.
 pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
     let n = window.len();
@@ -96,11 +97,11 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
     cuts.sort_unstable();
     let mut merged: Vec<(usize, usize)> = Vec::new();
     for (s, e) in cuts {
-        if let Some(last) = merged.last_mut() {
-            if s <= last.1 {
-                last.1 = last.1.max(e);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && s <= last.1
+        {
+            last.1 = last.1.max(e);
+            continue;
         }
         merged.push((s, e));
     }

@@ -1,5 +1,5 @@
-use sassy::profiles::Dna;
 use sassy::Searcher;
+use sassy::profiles::Dna;
 
 /// Reusable DNA searcher (searches a pattern against both strands of the text).
 pub type DnaSearcher = Searcher<Dna>;
@@ -66,7 +66,13 @@ mod tests {
     fn tolerates_one_mismatch_within_budget() {
         let mut s = new_searcher();
         // one substitution (pos 5, C->A) in AAAACCCCGGGG; revcomp absent from text.
-        assert_eq!(hits(&mut s, b"AAAACCCCGGGG", b"TTAAAACACCGGGGTT", 1).len(), 1);
-        assert_eq!(hits(&mut s, b"AAAACCCCGGGG", b"TTAAAACACCGGGGTT", 0).len(), 0);
+        assert_eq!(
+            hits(&mut s, b"AAAACCCCGGGG", b"TTAAAACACCGGGGTT", 1).len(),
+            1
+        );
+        assert_eq!(
+            hits(&mut s, b"AAAACCCCGGGG", b"TTAAAACACCGGGGTT", 0).len(),
+            0
+        );
     }
 }
