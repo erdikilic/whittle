@@ -75,6 +75,26 @@ fn fastq_end_adapter_is_trimmed() {
 }
 
 #[test]
+fn adapter_fasta_with_no_usable_entries_errors() {
+    // only a too-short entry -> skipped -> zero usable adapters.
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fa, ">short\nACGT").unwrap();
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fq, "@r1\nACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIII").unwrap();
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no usable adapters"));
+}
+
+#[test]
 fn no_adapter_flag_is_byte_identical() {
     let mut fq = tempfile::NamedTempFile::new().unwrap();
     write!(fq, "@r1\nACGTACGTACGT\n+\nIIIIIIIIIIII\n").unwrap();
