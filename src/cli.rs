@@ -90,6 +90,10 @@ struct Cli {
     /// Trim adapters at read ends only; never split on interior adapters.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
+    /// Reads to sample to detect which adapters are present (0 = disable; trim
+    /// against the full set). Only used when adapter trimming is active.
+    #[arg(long, default_value_t = 10000, help_heading = "Adapter trimming")]
+    adapter_sample: usize,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -280,6 +284,7 @@ pub fn parse() -> anyhow::Result<Config> {
         threads,
         fastq_tags,
         render_workers: 0,
+        adapter_sample: c.adapter_sample,
         compression_level: c.compression_level,
         update_moves: c.update_moves,
         verbosity: c.verbose,
@@ -375,6 +380,7 @@ pub fn config_for_test_threads(
         threads: threads.max(1),
         fastq_tags: FastqTags::All,
         render_workers: 0,
+        adapter_sample: 0,
         compression_level: 6,
         update_moves: false,
         verbosity: 0,

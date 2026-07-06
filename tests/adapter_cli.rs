@@ -28,6 +28,16 @@ fn adapter_help_lists_flags() {
 }
 
 #[test]
+fn adapter_sample_flag_listed() {
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .args(["--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--adapter-sample"));
+}
+
+#[test]
 fn rejects_out_of_range_error_rate() {
     // error-rate is only validated when an adapter source is active.
     Command::cargo_bin("whittle")
