@@ -269,6 +269,89 @@ fn failure_path_prints_a_single_failed_after_line() {
 }
 
 #[test]
+fn banner_version_and_command_come_first_in_line_mode() {
+    // Regression: `whittle {version}` and `Command: ...` must be the very
+    // first lines emitted — even before the resolved-config banner — so a
+    // reader can always find them at the top regardless of what warnings (or
+    // an early hard error) follow.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    let assert = whittle().write_stdin(input).assert().success();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let version_pos = stderr.find("whittle ").expect("version line missing");
+    let command_pos = stderr.find("Command:").expect("command line missing");
+    let operation_pos = stderr.find("Trimming").expect("operation line missing");
+    assert!(
+        version_pos < command_pos && command_pos < operation_pos,
+        "expected version, then Command:, then the operation line, in order: {stderr:?}"
+    );
+}
+
+#[test]
+fn non_tty_stderr_has_no_ansi_escapes() {
+    // assert_cmd captures stderr to a pipe (never a TTY), so a normal run must
+    // carry zero ANSI escape bytes — coloring a redirected/non-interactive
+    // stream is exactly the bug this guards against.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("\u{1b}").not());
+}
+
+#[test]
+fn all_dropped_run_warns() {
+    // Every read fails an unreachable min-qual bound: nothing survives, but
+    // the run itself still succeeds — the all-dropped guardrail WARN must
+    // fire so this doesn't silently look like a clean empty-output run.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .args(["-q", "50", "--in-format", "fastq"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("No reads survived")
+                .and(predicate::str::contains("input reads were dropped")),
+        );
+}
+
+#[test]
+fn empty_input_warns() {
+    // Zero input reads (not an error) must still surface the empty-input
+    // guardrail WARN rather than a silent, unremarkable "0 in, 0 out" summary.
+    whittle()
+        .args(["--in-format", "fastq"])
+        .write_stdin("")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Input contained no reads"));
+}
+
+#[test]
+fn sequential_threads_label_for_dash_t_1() {
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .args(["-t", "1"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Threads: 1 (sequential)"));
+}
+
+#[test]
+fn bam_to_fastq_conversion_phrasing() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("o.fastq");
+    whittle()
+        .args(["-i", "data/short_eqread/short_eqread.bam", "-o"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Converting BAM to FASTQ"));
+}
+
+#[test]
 fn gz_output_roundtrips() {
     use std::io::Read;
     let dir = tempfile::tempdir().unwrap();

@@ -33,6 +33,7 @@ pub fn run_fastq_seq<W: Write>(
             continue;
         }
         let total = intervals.len();
+        counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
         let mut out_bases = 0u64;
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
             write_segment(
@@ -68,6 +69,7 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> (u64, u
         return (0, 0, Vec::new());
     }
     let total = intervals.len();
+    counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
     let mut buf = Vec::new();
     let mut out = 0u64;
     let mut out_bases = 0u64;

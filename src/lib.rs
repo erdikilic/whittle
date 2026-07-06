@@ -27,10 +27,6 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let mut cfg = cfg;
     let setup_start = std::time::Instant::now();
 
-    if let Some((requested, ncpu)) = cfg.threads_clamped {
-        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
-    }
-
     // Scoped so the borrow of `cfg.io.input` ends before `run_folder` needs
     // `&mut cfg` — the directory path itself is cloned out first.
     if let Some(dir) = cfg
@@ -113,16 +109,20 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // (this never changes behavior), but it usually signals a mistake when it
     // disagrees with the file's own extension — e.g. `--in-format bam` on a
     // `.fastq` file. Extension-only check: skipped for stdin / no-extension.
-    if let Some(forced) = cfg.io.in_format
+    // The warning itself fires later, after the banner (see the comment above
+    // the consolidated warnings block below) — only the detection runs here.
+    let mismatch_warn = if let Some(forced) = cfg.io.in_format
         && let Some(detected) = in_path.and_then(io::from_extension)
         && detected != forced
     {
-        tracing::warn!(
+        Some(format!(
             "--in-format {} but the file extension looks like {}",
             forced.label(),
             detected.label()
-        );
-    }
+        ))
+    } else {
+        None
+    };
 
     let out_fmt = cfg
         .io
@@ -137,7 +137,8 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // Advisory only: no trimming, a pass-through filter, and no format
     // conversion means the run just re-emits (almost) the same reads it read —
     // usually not what was intended. Skipped for a conversion-only run
-    // (in_fmt != out_fmt), which is legitimate on its own.
+    // (in_fmt != out_fmt), which is legitimate on its own. Warning deferred to
+    // the consolidated block below, same as `mismatch_warn` above.
     let no_trim = cfg.trim.head == 0 && cfg.trim.tail == 0 && cfg.trim.quality.is_none();
     let pass_through_filter = cfg.filter.min_length <= 1
         && cfg.filter.max_length == usize::MAX
@@ -145,9 +146,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         && cfg.filter.max_qual >= 1000.0
         && cfg.filter.min_gc.is_none()
         && cfg.filter.max_gc.is_none();
-    if no_trim && pass_through_filter && in_fmt == out_fmt {
-        tracing::warn!("No trimming or filtering options set; output will mostly mirror the input");
-    }
+    let no_op_warn = no_trim && pass_through_filter && in_fmt == out_fmt;
 
     tracing::debug!(
         "Detected {} input in {}",
@@ -166,9 +165,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let out_desc = output_desc(cfg.io.output.as_deref());
 
     if obs.shows_lines() {
-        tracing::info!("whittle {}", env!("CARGO_PKG_VERSION"));
-        tracing::info!("{}", command_line(std::env::args()));
-        tracing::info!("{}", trimming_banner_line(in_fmt, out_fmt));
+        tracing::info!("{}", operation_line(in_fmt, out_fmt));
         match (in_path, total) {
             (Some(p), Some(size)) => {
                 tracing::info!("Input: {} ({})", p.display(), obs::human_bytes(size));
@@ -189,11 +186,25 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
     } else if obs.is_bar() {
         tracing::info!(
-            "Trimming {} to {} ({} threads)",
-            in_fmt.label(),
-            out_fmt.label(),
+            "{} ({} threads)",
+            operation_line(in_fmt, out_fmt),
             cfg.threads
         );
+    }
+
+    // Warnings fire after the resolved-config banner (not before it, and not
+    // interleaved with it) — `whittle {version}`/`Command: ...` (printed by
+    // `main` before `run` is even called) and the banner above are meant to be
+    // the first things a reader sees; only then do clamp/mismatch/no-op
+    // advisories follow, ahead of the live progress/summary.
+    if let Some((requested, ncpu)) = cfg.threads_clamped {
+        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
+    }
+    if let Some(msg) = mismatch_warn {
+        tracing::warn!("{msg}");
+    }
+    if no_op_warn {
+        tracing::warn!("No trimming or filtering options set; output will mostly mirror the input");
     }
 
     obs.start(total, counters.clone());
@@ -406,9 +417,7 @@ fn run_folder(
     let out_desc = output_desc(cfg.io.output.as_deref());
 
     if obs.shows_lines() {
-        tracing::info!("whittle {}", env!("CARGO_PKG_VERSION"));
-        tracing::info!("{}", command_line(std::env::args()));
-        tracing::info!("{}", trimming_banner_line(family_fmt, out_fmt));
+        tracing::info!("{}", operation_line(family_fmt, out_fmt));
         let total_bytes: u64 = paths
             .iter()
             .filter_map(|p| std::fs::metadata(p).ok())
@@ -433,11 +442,16 @@ fn run_folder(
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
     } else if obs.is_bar() {
         tracing::info!(
-            "Trimming {} to {} ({} threads)",
-            family_fmt.label(),
-            out_fmt.label(),
+            "{} ({} threads)",
+            operation_line(family_fmt, out_fmt),
             cfg.threads
         );
+    }
+
+    // See the matching comment in `run`: the clamp warning fires after the
+    // banner, not before it.
+    if let Some((requested, ncpu)) = cfg.threads_clamped {
+        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
     }
 
     let counters = std::sync::Arc::new(pipeline::Counters::default());
@@ -516,15 +530,17 @@ fn encode_kind_for(out_fmt: io::Format) -> config::EncodeKind {
     }
 }
 
-/// The startup banner's `Trimming ...` line (LINE mode's item 3 / BAR mode's own
-/// one-liner builds on the same wording): `Trimming FASTQ to BAM`, or just
-/// `Trimming FASTQ` when the input and output formats match (a conversion-free
-/// run — showing "X to X" would be noise).
-fn trimming_banner_line(in_fmt: io::Format, out_fmt: io::Format) -> String {
-    if in_fmt == out_fmt {
-        format!("Trimming {}", in_fmt.label())
+/// The startup banner's operation line (LINE mode's item 3 / BAR mode's own
+/// one-liner build on the same wording): `Trimming FASTQ` when input and output
+/// share a `Format::family` — including a `FASTQ` -> `FASTQ.gz` run, which is a
+/// compression change, not a format conversion — else `Converting {in_label} to
+/// {out_label}` (e.g. `Converting BAM to FASTQ`) for a genuine cross-family
+/// conversion.
+fn operation_line(in_fmt: io::Format, out_fmt: io::Format) -> String {
+    if in_fmt.family() == out_fmt.family() {
+        format!("Trimming {}", in_fmt.family())
     } else {
-        format!("Trimming {} to {}", in_fmt.label(), out_fmt.label())
+        format!("Converting {} to {}", in_fmt.label(), out_fmt.label())
     }
 }
 
@@ -563,7 +579,15 @@ fn output_banner_line(
 /// at >= 1 even when the overall total is 1 — see `ThreadBudget::total`'s
 /// doc), which read as a confusing second, larger "total" next to the `-t`
 /// value the user actually asked for.
+///
+/// `threads <= 1` instead prints `Threads: 1 (sequential)`: `thread_budget`
+/// still floors `render`/`encode` at >= 1 each even at a total of 1, so the
+/// read/trim/write split would show e.g. `(read 1, trim 1, write 1)` — three
+/// threads' worth of detail for a run that is, in fact, single-threaded.
 fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> String {
+    if threads <= 1 {
+        return "Threads: 1 (sequential)".to_string();
+    }
     format!(
         "Threads: {threads} (read {}, trim {}, write {})",
         b.decode, b.render, b.encode
@@ -658,25 +682,36 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
     format!("Filters: {filters_str}; trim: {trim_str}")
 }
 
-/// The startup banner's `Command: ...` line: `std::env::args()`, space-joined,
-/// single-quoting any argument that contains whitespace so a run can be copied
-/// back out verbatim. Generic over the argument iterator so it's unit-testable
+/// Shell-quote a single argument the way Python's `shlex.quote` does: bare when
+/// non-empty and every character is in the POSIX-shell-safe set
+/// (`[A-Za-z0-9_@%+=:,./-]`); otherwise wrapped in single quotes, with any
+/// embedded single quote escaped as `'\''` (close the quote, an escaped literal
+/// quote, reopen the quote). An empty argument is never safe bare (it would
+/// vanish when re-run), so it renders as `''`.
+pub(crate) fn shell_quote(arg: &str) -> String {
+    let is_safe = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
+    if !arg.is_empty() && arg.chars().all(is_safe) {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// The startup banner's `Command: ...` line: the real process argv, space-joined
+/// and each argument shell-quoted via `shell_quote` so the line can be copied
+/// back out and re-run verbatim. Takes `OsStr`-like items (the caller passes
+/// `std::env::args_os()`, NOT `args()` — the latter panics on non-UTF-8 argv) and
+/// lossily converts each to `str` here, at the one seam that must never panic on
+/// a malformed argv. Generic over the argument iterator so it's unit-testable
 /// without touching the real process argv.
-fn command_line<I, S>(args: I) -> String
+pub fn command_line<I, S>(args: I) -> String
 where
     I: IntoIterator<Item = S>,
-    S: AsRef<str>,
+    S: AsRef<std::ffi::OsStr>,
 {
     let joined = args
         .into_iter()
-        .map(|a| {
-            let a = a.as_ref();
-            if a.chars().any(char::is_whitespace) {
-                format!("'{a}'")
-            } else {
-                a.to_string()
-            }
-        })
+        .map(|a| shell_quote(&a.as_ref().to_string_lossy()))
         .collect::<Vec<_>>()
         .join(" ");
     format!("Command: {joined}")
@@ -734,7 +769,7 @@ pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
 fn note_tags_ignored(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) {
     if !matches!(cfg.fastq_tags, config::FastqTags::All) {
         tracing::warn!(
-            "Note: --fastq-tags applies only to BAM-to-FASTQ output; ignored for {} to {}",
+            "--fastq-tags applies only to BAM-to-FASTQ output; ignored for {} to {}",
             in_fmt.label(),
             out_fmt.label()
         );
@@ -898,14 +933,25 @@ mod tests {
     }
 
     #[test]
-    fn trimming_banner_line_collapses_matching_formats() {
+    fn operation_line_collapses_matching_families() {
         assert_eq!(
-            trimming_banner_line(io::Format::Fastq, io::Format::Fastq),
+            operation_line(io::Format::Fastq, io::Format::Fastq),
             "Trimming FASTQ"
         );
+        // FASTQ -> FASTQ.gz shares the FASTQ family (a compression change, not
+        // a format conversion), so it collapses too rather than reading as an
+        // "X to X" conversion.
         assert_eq!(
-            trimming_banner_line(io::Format::Bam, io::Format::Fastq),
-            "Trimming BAM to FASTQ"
+            operation_line(io::Format::Fastq, io::Format::FastqGz),
+            "Trimming FASTQ"
+        );
+    }
+
+    #[test]
+    fn operation_line_converting_wording_for_cross_family() {
+        assert_eq!(
+            operation_line(io::Format::Bam, io::Format::Fastq),
+            "Converting BAM to FASTQ"
         );
     }
 
@@ -979,6 +1025,16 @@ mod tests {
             threads_banner_line(8, b),
             "Threads: 8 (read 1, trim 7, write 1)"
         );
+    }
+
+    #[test]
+    fn threads_banner_line_sequential_for_one_or_fewer() {
+        // `-t 1` (or `-t 0`, which `resolve_threads` floors to 1): the
+        // read/trim/write split would otherwise show e.g. "(read 1, trim 1,
+        // write 1)" for what is actually a single-threaded run — collapse it
+        // to a plain "sequential" label instead.
+        let b = config::thread_budget(1, true, config::EncodeKind::Bgzf);
+        assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");
     }
 
     fn base_filter() -> filter::FilterConfig {
@@ -1116,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn command_line_quotes_only_args_with_whitespace() {
+    fn command_line_quotes_only_unsafe_args() {
         assert_eq!(
             command_line(["whittle", "-i", "in.fastq", "-o", "out.fastq"]),
             "Command: whittle -i in.fastq -o out.fastq"
@@ -1125,5 +1181,38 @@ mod tests {
             command_line(["whittle", "-i", "my reads.fastq"]),
             "Command: whittle -i 'my reads.fastq'"
         );
+    }
+
+    #[test]
+    fn shell_quote_leaves_plain_args_bare() {
+        assert_eq!(shell_quote("whittle"), "whittle");
+        assert_eq!(shell_quote("-i"), "-i");
+        assert_eq!(shell_quote("in.fastq"), "in.fastq");
+        assert_eq!(
+            shell_quote("path/to/file_1.0.fq.gz"),
+            "path/to/file_1.0.fq.gz"
+        );
+    }
+
+    #[test]
+    fn shell_quote_wraps_args_with_spaces() {
+        assert_eq!(shell_quote("my reads.fastq"), "'my reads.fastq'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("it's here.fastq"), r"'it'\''s here.fastq'");
+    }
+
+    #[test]
+    fn shell_quote_wraps_shell_metacharacters() {
+        assert_eq!(shell_quote("$HOME"), "'$HOME'");
+        assert_eq!(shell_quote("a;b"), "'a;b'");
+    }
+
+    #[test]
+    fn shell_quote_wraps_empty_string() {
+        // Bare would vanish entirely when the line is re-run.
+        assert_eq!(shell_quote(""), "''");
     }
 }

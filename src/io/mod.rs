@@ -21,6 +21,18 @@ impl Format {
             Format::Bam => "BAM",
         }
     }
+
+    /// Coarse format family, used to decide whether an (in, out) pair reads as
+    /// a "conversion" in the startup banner's operation line: the two FASTQ
+    /// variants collapse to the same `"FASTQ"` family (a `Fastq` ->
+    /// `FastqGz` run is a compression change, not a format conversion), while
+    /// `Bam` is its own family.
+    pub fn family(&self) -> &'static str {
+        match self {
+            Format::Fastq | Format::FastqGz => "FASTQ",
+            Format::Bam => "BAM",
+        }
+    }
 }
 
 /// Extension-based detection. Recognises `.fastq`/`.fq`, the `.gz` variants, and `.bam`.
@@ -106,6 +118,13 @@ mod tests {
         assert_eq!(Format::Fastq.label(), "FASTQ");
         assert_eq!(Format::FastqGz.label(), "FASTQ.gz");
         assert_eq!(Format::Bam.label(), "BAM");
+    }
+
+    #[test]
+    fn format_families() {
+        assert_eq!(Format::Fastq.family(), "FASTQ");
+        assert_eq!(Format::FastqGz.family(), "FASTQ");
+        assert_eq!(Format::Bam.family(), "BAM");
     }
 
     #[test]

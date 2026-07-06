@@ -521,6 +521,7 @@ fn run_bam_seq(
             continue;
         }
         let total = intervals.len();
+        counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
         let mut out_bases = 0u64;
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
             let out = reconstruct_record(&rec, s, e, total, idx, cfg.update_moves);
@@ -692,6 +693,7 @@ pub fn run_bam(
                 return Ok((Vec::new(), 0));
             }
             let total = intervals.len();
+            counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
             let out_bases: u64 = intervals.iter().map(|&(s, e)| (e - s) as u64).sum();
             let items = intervals
                 .into_iter()
@@ -816,6 +818,7 @@ where
             continue;
         }
         let total = intervals.len();
+        counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
         let mut out_bases = 0u64;
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
             let tags = build_fastq_tags(&rec, &seq, s, e, total, &cfg.fastq_tags);
@@ -883,6 +886,7 @@ pub fn run_bam_to_fastq<W: Write + Send>(
                 return Ok((Vec::new(), 0));
             }
             let total = intervals.len();
+            counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
             let mut out = Vec::with_capacity(total);
             let mut out_bases = 0u64;
             for (idx, (s, e)) in intervals.into_iter().enumerate() {

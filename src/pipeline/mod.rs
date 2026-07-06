@@ -30,6 +30,12 @@ pub struct Counters {
     pub dropped_high_qual: AtomicU64,
     pub dropped_gc: AtomicU64,
     pub dropped_trimmed: AtomicU64,
+    /// Input reads that produced at least one output segment — bumped once per
+    /// input read (not once per segment, unlike `output_reads`, which a
+    /// `--split-qual` run can bump several times for one input read). Exists
+    /// solely so `snapshot`'s `debug_assert_eq!` can check that every input
+    /// read is accounted for by exactly one of "dropped" or "produced output".
+    pub reads_with_output: AtomicU64,
 }
 
 impl Counters {
@@ -50,18 +56,46 @@ impl Counters {
     /// paths track it, and the parallel BAM path accumulates it in its own
     /// local atomic rather than in `Counters`.
     pub fn snapshot(&self, malformed_tag_reads: u64) -> Stats {
+        let input_reads = self.input_reads.load(Ordering::Relaxed);
+        let dropped_short = self.dropped_short.load(Ordering::Relaxed);
+        let dropped_long = self.dropped_long.load(Ordering::Relaxed);
+        let dropped_low_qual = self.dropped_low_qual.load(Ordering::Relaxed);
+        let dropped_high_qual = self.dropped_high_qual.load(Ordering::Relaxed);
+        let dropped_gc = self.dropped_gc.load(Ordering::Relaxed);
+        let dropped_trimmed = self.dropped_trimmed.load(Ordering::Relaxed);
+        let reads_with_output = self.reads_with_output.load(Ordering::Relaxed);
+
+        // Every input read is either dropped (counted under exactly one of the
+        // reasons above) or produced at least one output segment (counted once
+        // in `reads_with_output`, regardless of how many segments it split
+        // into) — never both, never neither. A future pipeline path that adds
+        // a `continue`/early return without bumping one of these counters
+        // would silently under/over-count the summary; this catches that in
+        // debug builds instead of shipping a quietly-wrong report.
+        debug_assert_eq!(
+            dropped_short
+                + dropped_long
+                + dropped_low_qual
+                + dropped_high_qual
+                + dropped_gc
+                + dropped_trimmed
+                + reads_with_output,
+            input_reads,
+            "every input read must be either dropped or have produced output"
+        );
+
         Stats {
-            input_reads: self.input_reads.load(Ordering::Relaxed),
+            input_reads,
             output_reads: self.output_reads.load(Ordering::Relaxed),
             input_bases: self.input_bases.load(Ordering::Relaxed),
             output_bases: self.output_bases.load(Ordering::Relaxed),
             malformed_tag_reads,
-            dropped_short: self.dropped_short.load(Ordering::Relaxed),
-            dropped_long: self.dropped_long.load(Ordering::Relaxed),
-            dropped_low_qual: self.dropped_low_qual.load(Ordering::Relaxed),
-            dropped_high_qual: self.dropped_high_qual.load(Ordering::Relaxed),
-            dropped_gc: self.dropped_gc.load(Ordering::Relaxed),
-            dropped_trimmed: self.dropped_trimmed.load(Ordering::Relaxed),
+            dropped_short,
+            dropped_long,
+            dropped_low_qual,
+            dropped_high_qual,
+            dropped_gc,
+            dropped_trimmed,
         }
     }
 }

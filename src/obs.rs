@@ -333,9 +333,22 @@ impl ProgressHandle {
 
         if stats.malformed_tag_reads > 0 {
             tracing::warn!(
-                "Note: {} read(s) carried a per-base kinetics tag (ip/pw/fi/fp/ri/rp) whose \
+                "{} read(s) carried a per-base kinetics tag (ip/pw/fi/fp/ri/rp) whose \
                  length did not match the sequence; left unchanged",
                 stats.malformed_tag_reads
+            );
+        }
+
+        // Guardrail warnings: an empty input and an all-dropped run both exit
+        // successfully (neither is an error), but both are almost always a
+        // mistake worth flagging loudly rather than letting a clean "Summary: 0
+        // input reads, 0 output reads" line slip by unnoticed.
+        if stats.input_reads == 0 {
+            tracing::warn!("Input contained no reads");
+        } else if stats.output_reads == 0 {
+            tracing::warn!(
+                "No reads survived — all {} input reads were dropped",
+                commas(stats.input_reads)
             );
         }
 
@@ -358,6 +371,20 @@ impl Drop for ProgressHandle {
     }
 }
 
+/// Pure mode-selection logic (see `init`'s mode-selection doc): extracted so it's
+/// unit-testable without mutating real process env (`WHITTLE_LOG`), which would
+/// race across parallel test threads — the real entry point, `init`, is a thin
+/// wrapper reading the actual TTY/env state.
+fn select_mode(quiet: bool, tty: bool, verbosity: u8, whittle_log_set: bool) -> Mode {
+    if quiet {
+        Mode::Off
+    } else if tty && verbosity == 0 && !whittle_log_set {
+        Mode::Bar
+    } else {
+        Mode::Line
+    }
+}
+
 /// Install the global subscriber and return the progress handle. Call once, in the binary.
 ///
 /// Precedence: `--quiet` always wins (WARN, regardless of `WHITTLE_LOG`); otherwise a
@@ -365,31 +392,30 @@ impl Drop for ProgressHandle {
 /// `verbosity`.
 ///
 /// Mode selection (never both bar and line log in the same run):
-/// `quiet -> Off`; `!quiet && tty && verbosity==0 -> Bar`; otherwise (`-v`/`-vv` on a
-/// TTY, or any non-TTY run) `-> Line`.
+/// `quiet -> Off`; `!quiet && tty && verbosity==0 && WHITTLE_LOG unset/empty -> Bar`;
+/// otherwise (`-v`/`-vv` on a TTY, a non-empty `WHITTLE_LOG`, or any non-TTY run)
+/// `-> Line`. A non-empty `WHITTLE_LOG` forces line mode even on a TTY at the
+/// default verbosity — otherwise its debug/trace lines would interleave with a
+/// live bar instead of the level filter alone controlling verbosity.
 pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
+    let whittle_log = std::env::var("WHITTLE_LOG").ok().filter(|s| !s.is_empty());
     let filter = if quiet {
         EnvFilter::new(level_from(verbosity, true).to_string())
     } else {
-        match std::env::var("WHITTLE_LOG") {
-            Ok(s) if !s.is_empty() => EnvFilter::new(s),
-            _ => EnvFilter::new(level_from(verbosity, false).to_string()),
+        match &whittle_log {
+            Some(s) => EnvFilter::new(s.clone()),
+            None => EnvFilter::new(level_from(verbosity, false).to_string()),
         }
     };
     let multi = MultiProgress::new();
     let tty = io::stderr().is_terminal();
-    let mode = if quiet {
-        Mode::Off
-    } else if tty && verbosity == 0 {
-        Mode::Bar
-    } else {
-        Mode::Line
-    };
+    let mode = select_mode(quiet, tty, verbosity, whittle_log.is_some());
     tracing_subscriber::registry()
         .with(filter)
         .with(
             fmt::layer()
                 .event_format(WhittleFormat { color: tty })
+                .with_ansi(tty)
                 .with_writer(MpWriter {
                     multi: multi.clone(),
                 }),
@@ -720,6 +746,37 @@ mod tests {
         // quiet wins over verbosity
         assert_eq!(level_from(0, true), LevelFilter::WARN);
         assert_eq!(level_from(3, true), LevelFilter::WARN);
+    }
+
+    #[test]
+    fn select_mode_quiet_always_off() {
+        // quiet wins regardless of tty/verbosity/WHITTLE_LOG.
+        assert_eq!(select_mode(true, true, 0, false), Mode::Off);
+        assert_eq!(select_mode(true, false, 2, true), Mode::Off);
+    }
+
+    #[test]
+    fn select_mode_default_tty_is_bar() {
+        assert_eq!(select_mode(false, true, 0, false), Mode::Bar);
+    }
+
+    #[test]
+    fn select_mode_non_tty_is_always_line() {
+        assert_eq!(select_mode(false, false, 0, false), Mode::Line);
+    }
+
+    #[test]
+    fn select_mode_verbose_tty_is_line() {
+        assert_eq!(select_mode(false, true, 1, false), Mode::Line);
+    }
+
+    #[test]
+    fn select_mode_whittle_log_forces_line_even_on_a_bar_eligible_tty() {
+        // A non-empty WHITTLE_LOG must force line mode even at the default
+        // verbosity on a TTY (otherwise its debug/trace lines would interleave
+        // with a live bar instead of the level filter alone controlling
+        // verbosity).
+        assert_eq!(select_mode(false, true, 0, true), Mode::Line);
     }
 
     #[test]
