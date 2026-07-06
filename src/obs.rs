@@ -24,10 +24,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use tracing_subscriber::fmt::MakeWriter;
+use tracing::{Event, Subscriber};
 use tracing_subscriber::fmt::format::Writer;
-use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -43,12 +44,32 @@ const SPINNER_TICK: Duration = Duration::from_millis(120);
 /// prompt; it only actually logs once this much time has elapsed.
 const LOG_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Local wall-clock timestamp `[YYYY-MM-DD HH:MM:SS]`, via `jiff`.
-struct LocalStamp;
+/// Custom event formatter: `[YYYY-MM-DD HH:MM:SS] [LEVEL] Message`, with a
+/// bracketed local wall-clock timestamp (via `jiff`) AND a bracketed level.
+/// Plain (no ANSI) — the stock formatter's ` INFO`-padded, unbracketed level is
+/// what this replaces. `Level`'s `Display` yields `INFO`/`WARN`/`DEBUG`/`TRACE`/
+/// `ERROR`, so the level renders as `[INFO]` etc.
+struct WhittleFormat;
 
-impl FormatTime for LocalStamp {
-    fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
-        write!(w, "[{}]", jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S"))
+impl<S, N> FormatEvent<S, N> for WhittleFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut w: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        write!(
+            w,
+            "[{}] [{}] ",
+            jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S"),
+            event.metadata().level()
+        )?;
+        ctx.field_format().format_fields(w.by_ref(), event)?;
+        writeln!(w)
     }
 }
 
@@ -186,7 +207,7 @@ impl ProgressHandle {
                             if total.is_some() {
                                 pb.set_position(by);
                             }
-                            pb.set_message(bar_message(ir, by, total, start.elapsed()));
+                            pb.set_message(bar_message(ir, by, start.elapsed()));
                         }
                     },
                     Mode::Line => {
@@ -299,10 +320,7 @@ pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
         .with(filter)
         .with(
             fmt::layer()
-                .with_timer(LocalStamp)
-                .with_level(true)
-                .with_target(false)
-                .with_ansi(tty)
+                .event_format(WhittleFormat)
                 .with_writer(MpWriter {
                     multi: multi.clone(),
                 }),
@@ -367,23 +385,13 @@ fn fmt_hms(d: Duration) -> String {
 
 /// Bar-mode message (the bar/spinner itself already draws elapsed, `%`, and ETA off
 /// its own template — see `ProgressStyle` in `start()` — so this covers only the data
-/// fields): `145k of 154k reads, 53 MB/s`. The "of <estimated total>" clause is only
-/// shown when `total` (input bytes) is known, by extrapolating from the read/byte
-/// ratio seen so far; a `None`/zero total (e.g. stdin, or folder-merge mode where byte
-/// counting isn't wired up) drops it. `bytes == 0` likewise drops the MB/s field
-/// rather than render a misleading rate.
-fn bar_message(input_reads: u64, bytes: u64, total: Option<u64>, elapsed: Duration) -> String {
-    let mut s = match total.filter(|&t| t > 0 && bytes > 0) {
-        Some(t) => {
-            let est_total = input_reads as f64 * (t as f64 / bytes as f64);
-            format!(
-                "{} of {} reads",
-                human_count(input_reads),
-                human_count(est_total.round() as u64)
-            )
-        },
-        None => format!("{} reads", human_count(input_reads)),
-    };
+/// fields): `145k reads, 53 MB/s`. Shows just the processed read count — no invented
+/// "of <total>" clause, since only total *bytes* are known up front, never total
+/// *reads*; the byte-based `%`/ETA (drawn by the bar template) convey real progress.
+/// `bytes == 0` (e.g. folder-merge mode where byte counting isn't wired up) drops the
+/// MB/s field rather than render a misleading rate.
+fn bar_message(input_reads: u64, bytes: u64, elapsed: Duration) -> String {
+    let mut s = format!("{} reads", human_count(input_reads));
     if bytes > 0 {
         let secs = elapsed.as_secs_f64().max(1e-3);
         let mbps = (bytes as f64 / 1_000_000.0) / secs;
@@ -520,22 +528,20 @@ mod tests {
     }
 
     #[test]
-    fn bar_message_without_total_has_no_of_clause() {
-        let s = bar_message(145_000, 0, None, Duration::from_secs(60));
+    fn bar_message_without_bytes_is_just_the_read_count() {
+        let s = bar_message(145_000, 0, Duration::from_secs(60));
         assert_eq!(s, "145k reads");
     }
 
     #[test]
-    fn bar_message_with_total_shows_estimated_total_and_rate() {
-        let s = bar_message(
-            145_000,
-            50_000_000,
-            Some(100_000_000),
-            Duration::from_secs(60),
-        );
-        assert!(s.contains("145k of"));
-        assert!(s.contains("reads"));
+    fn bar_message_with_bytes_adds_rate_but_never_a_total() {
+        let s = bar_message(145_000, 50_000_000, Duration::from_secs(60));
+        assert!(s.starts_with("145k reads"));
         assert!(s.contains("MB/s"));
+        assert!(
+            !s.contains(" of "),
+            "must not invent a total-reads figure: {s}"
+        );
         assert!(!s.contains('%'), "bar draws % itself via the template: {s}");
     }
 }
