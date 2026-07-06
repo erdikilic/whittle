@@ -2,7 +2,7 @@
 name = "whittle"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 description = "Tag-aware long-read (ONT/PacBio) trimmer for FASTQ/uBAM that reconstructs MM/ML base-modification tags on every trim and split"
 
 [[bin]]
