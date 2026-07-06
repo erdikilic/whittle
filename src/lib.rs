@@ -567,6 +567,7 @@ fn run_folder(
             let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
             let records = io::dir::fastq_records(&paths);
+            let records = maybe_reduce_adapters(records, cfg, |r| r.seq.as_slice())?;
             let stats = pipeline::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
             tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
@@ -580,6 +581,7 @@ fn run_folder(
                 // declare different read groups (relevant only for BAM output).
                 io::dir::warn_on_bam_header_mismatch(&paths);
                 let (header, records) = io::dir::bam_reader(&paths, budget.decode)?;
+                let records = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))?;
                 let out_header = provenance_header(header);
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
@@ -596,6 +598,7 @@ fn run_folder(
             },
             Format::Fastq | Format::FastqGz => {
                 let (_header, records) = io::dir::bam_reader(&paths, budget.decode)?;
+                let records = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))?;
                 let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
                 cfg.render_workers = budget.render;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;

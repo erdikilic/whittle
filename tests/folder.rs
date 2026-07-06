@@ -207,6 +207,72 @@ fn write_ubam_with_rg(path: &Path, name: &[u8], rg: &str) {
     w.try_finish().unwrap();
 }
 
+// Folder-merge mirror of `adapter_cli::detection_keeps_present_drops_absent_and_still_trims`:
+// two FASTQ files (100 reads each) all carrying adapter `present`, merged by
+// `-i <dir>`. Detection samples the MERGED stream, so it must still see all
+// 200 reads and keep only `present` out of the 2-adapter FASTA.
+#[test]
+fn folder_merge_adapter_detection_keeps_present_and_trims() {
+    let present = "GGGGTTTTGGGGTTTTGGGG"; // 20bp present adapter
+    let absent = "ACGACGACGACGACGACGAC"; // 20bp never in the reads
+    let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40bp
+    let dir = tempfile::tempdir().unwrap();
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_fmt(
+        &mut fa,
+        format_args!(">present\n{present}\n>absent\n{absent}\n"),
+    )
+    .unwrap();
+
+    let mut a = String::new();
+    for i in 0..100 {
+        a.push_str(&format!(
+            "@r{i}\n{present}{insert}\n+\n{}\n",
+            "I".repeat(60)
+        ));
+    }
+    std::fs::write(dir.path().join("a.fastq"), a).unwrap();
+    let mut b = String::new();
+    for i in 100..200 {
+        b.push_str(&format!(
+            "@r{i}\n{present}{insert}\n+\n{}\n",
+            "I".repeat(60)
+        ));
+    }
+    std::fs::write(dir.path().join("b.fastq"), b).unwrap();
+
+    let out = dir.path().join("merged.fastq");
+    let res = whittle()
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
+        .args([
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+            "-v",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8_lossy(&res.get_output().stderr).into_owned();
+    assert!(stderr.contains("kept 1 of 2 adapters"), "stderr: {stderr}");
+
+    let got = std::fs::read_to_string(&out).unwrap();
+    assert!(got.contains(insert), "insert kept");
+    assert!(
+        !got.contains(&format!("{present}{insert}")),
+        "present adapter trimmed off in merged output"
+    );
+    assert_eq!(
+        got.matches("@r").count(),
+        200,
+        "all 200 merged reads present"
+    );
+}
+
 #[test]
 fn folder_merge_bam_warns_on_differing_read_groups() {
     // Folder merge keeps only the first header, so records from a file declaring a
