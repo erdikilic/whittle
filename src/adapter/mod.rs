@@ -40,6 +40,36 @@ pub struct AdapterConfig {
 /// construction anchors, not standalone patterns.
 pub const MIN_PATTERN_LEN: usize = 11;
 
+/// Terminal classification of a hit: which end (if any) it trims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Terminal {
+    Five,
+    Three,
+    None,
+}
+
+/// Classify a hit at window coords `[start, end)` in a length-`n` window.
+/// A hit eligible for BOTH ends (short read, overlapping end-zones) trims
+/// toward the NEARER end, so the adapter + its shorter outboard flank is
+/// removed — never the insert between two ends.
+fn classify_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: End) -> Terminal {
+    let near5 = start <= end_size && matches!(tag, End::Five | End::Both);
+    let near3 = end >= n.saturating_sub(end_size) && matches!(tag, End::Three | End::Both);
+    match (near5, near3) {
+        (true, true) => {
+            // dist to 5' start = `start`; dist to 3' end = `n - end`.
+            if start <= n - end {
+                Terminal::Five
+            } else {
+                Terminal::Three
+            }
+        },
+        (true, false) => Terminal::Five,
+        (false, true) => Terminal::Three,
+        (false, false) => Terminal::None,
+    }
+}
+
 /// Compute adapter keep-segments for `window`:
 ///   - terminal hits within `end_size` of an end trim that end inward;
 ///   - interior hits (stricter `k_mid`) excise and split.
@@ -75,15 +105,14 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
             // Whole-window search: terminal hits trim, interior hits (within
             // k_mid) collect for splitting.
             for h in hits(&mut searcher, &ad.seq, window, k_end) {
-                let near5 = h.start <= end_size && matches!(ad.end, End::Five | End::Both);
-                let near3 =
-                    h.end >= n.saturating_sub(end_size) && matches!(ad.end, End::Three | End::Both);
-                if near5 {
-                    lo = lo.max(h.end);
-                } else if near3 {
-                    hi = hi.min(h.start);
-                } else if h.cost <= k_mid {
-                    interior.push((h.start, h.end));
+                match classify_terminal(h.start, h.end, n, end_size, ad.end) {
+                    Terminal::Five => lo = lo.max(h.end),
+                    Terminal::Three => hi = hi.min(h.start),
+                    Terminal::None => {
+                        if h.cost <= k_mid {
+                            interior.push((h.start, h.end));
+                        }
+                    },
                 }
             }
         } else {
@@ -98,14 +127,14 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
             let head_end = (end_size + len + k_end).min(n);
             for h in hits(&mut searcher, &ad.seq, &window[..head_end], k_end) {
                 // Zone starts at 0, so h's coords are already window coords.
-                if h.start <= end_size && matches!(ad.end, End::Five | End::Both) {
+                if classify_terminal(h.start, h.end, n, end_size, ad.end) == Terminal::Five {
                     lo = lo.max(h.end);
                 }
             }
             let tail_start = n.saturating_sub(end_size + len + k_end);
             for h in hits(&mut searcher, &ad.seq, &window[tail_start..], k_end) {
                 let (s, e) = (tail_start + h.start, tail_start + h.end);
-                if e >= n.saturating_sub(end_size) && matches!(ad.end, End::Three | End::Both) {
+                if classify_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
                     hi = hi.min(s);
                 }
             }
@@ -457,5 +486,84 @@ mod segment_tests {
         );
         // Adapter bases actually removed, not just nominally "equal but empty".
         assert_eq!(ends_only_segs[0].0, 28);
+    }
+
+    #[test]
+    fn three_prime_both_adapter_on_short_read_trims_tail_not_whole_read() {
+        // 40bp insert + 20bp adapter at the 3' end; End::Both; end_size >= n so both
+        // zones overlap. Must keep the insert [0,40), NOT drop the read.
+        let adapter = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only (no A/C to collide with insert)
+        let mut w = vec![b'A'; 40];
+        w.extend_from_slice(adapter);
+        let split = AdapterConfig {
+            adapters: vec![ad("a", adapter, End::Both)],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let ends = AdapterConfig {
+            split: false,
+            ..split.clone()
+        };
+        assert_eq!(adapter_segments(&w, &split), vec![(0, 40)], "split mode");
+        assert_eq!(adapter_segments(&w, &ends), vec![(0, 40)], "ends-only mode");
+    }
+
+    #[test]
+    fn five_prime_both_adapter_on_short_read_trims_head() {
+        let adapter = b"GGGGTTTTGGGGTTTTGGGG";
+        let mut w = adapter.to_vec();
+        w.extend_from_slice(&[b'A'; 40]); // adapter [0,20) + 40bp insert
+        let split = AdapterConfig {
+            adapters: vec![ad("a", adapter, End::Both)],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        assert_eq!(adapter_segments(&w, &split), vec![(20, 60)]);
+    }
+
+    #[test]
+    fn both_adapters_at_both_ends_keep_middle() {
+        // [20bp adapter][40bp insert][20bp adapter], End::Both, short read.
+        //
+        // `new_searcher()` builds a `Searcher::<Dna>::new_rc()`, which matches
+        // a pattern on BOTH the forward and reverse-complement strands of the
+        // window. Two pitfalls to dodge when picking a5/a3, both found
+        // empirically via a probe on `search::hits` directly:
+        //
+        // 1. a3 must not equal (or nearly equal) revcomp(a5), or searching for
+        //    a5 finds a second hit at a3's location. revcomp(a5) here is
+        //    "CCCCAAAACCCCAAAACCCC" (swap G<->C, T<->A — this particular
+        //    string is its own reverse since it's block-palindromic).
+        // 2. a3 must NOT use a self-complementary 2-letter block alphabet
+        //    (i.e. only {A,T} or only {C,G}), or its own reverse-complement
+        //    lands back in the same 2-letter alphabet and produces a cheap
+        //    *shifted* self-collision against the neighboring insert. A first
+        //    attempt using a3 = "CCCCGGGGCCCCGGGGCCCC" (a {C,G} alphabet)
+        //    failed exactly this way: revcomp(a3) = "GGGGCCCCGGGGCCCCGGGG"
+        //    (still {C,G}), and a hit shifted 4bp left into the T-insert
+        //    (text "TTTT" + a3[0:16)) matched revcomp(a3) at cost 4 (only the
+        //    leading TTTT-vs-GGGG substitutions differ) — exactly at the
+        //    k_end = floor(0.2*20) = 4 budget, silently widening the trim.
+        //
+        // Using a3 with a purine-only {A,G} alphabet sidesteps both: its
+        // revcomp lands in the disjoint pyrimidine alphabet {T,C}, so no
+        // shifted self-collision is possible, and it differs from revcomp(a5)
+        // in all 20 positions (checked empirically: only the true (60,80)
+        // cost-0 hit is found, no spurious extras).
+        let a5 = b"GGGGTTTTGGGGTTTTGGGG";
+        let a3 = b"AAAAGGGGAAAAGGGGAAAA"; // A/G only (purine): NOT self-complementary, NOT revcomp(a5)
+        let mut w = a5.to_vec();
+        w.extend_from_slice(&[b'T'; 40]); // insert bytes don't match either adapter's revcomp
+        w.extend_from_slice(a3);
+        let cfg = AdapterConfig {
+            adapters: vec![ad("a5", a5, End::Both), ad("a3", a3, End::Both)],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let segs = adapter_segments(&w, &cfg);
+        assert_eq!(segs, vec![(20, 60)]);
     }
 }
