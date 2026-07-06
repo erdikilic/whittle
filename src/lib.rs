@@ -185,7 +185,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         );
         tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
-        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref()) {
+        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref(), cfg.adapter_sample) {
             tracing::info!("{line}");
         }
     } else if obs.is_bar() {
@@ -232,6 +232,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             // re-opening stdin would drop the BGZF header. For a file, `source` is
             // the same handle positioned at the start.
             let (header, records) = io::bam::reader_from(source, budget.decode)?;
+            let records = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))?;
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
             let mut sink = io::bam::writer(
@@ -254,6 +255,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
             // See the note in the (Bam, Bam) arm: read from the chained `source`.
             let (_header, records) = io::bam::reader_from(source, budget.decode)?;
+            let records = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))?;
             let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
@@ -274,11 +276,105 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
 
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
+    let records = maybe_reduce_adapters(records, &mut cfg, |r| r.seq.as_slice())?;
     let stats = pipeline::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
     tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
     obs.finish(&stats, &out_desc);
     Ok(())
+}
+
+/// The noodles `RecordBuf` SEQ accessor: the base bytes (A/C/G/T/...), the same
+/// ones `pipeline/bam.rs` slices via `rec.sequence().as_ref()`. Kept as a named
+/// `fn` (rather than an inline closure per call site) so it can be passed as
+/// `seq_of` to `maybe_reduce_adapters` from both BAM dispatch arms.
+fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
+    rec.sequence().as_ref()
+}
+
+/// If adapter trimming is active and `cfg.adapter_sample > 0`, buffer up to
+/// `adapter_sample` records, detect which adapters are actually present in the
+/// sample, and reduce `cfg.adapters` to that set — unless detection keeps zero
+/// adapters, in which case it falls back to the full set (an empty prefix
+/// result more likely means an unrepresentative sample than a truly
+/// adapter-free run). Returns `buffered ++ rest` (the buffered prefix is empty
+/// when detection is off, so the returned iterator is a no-op wrapper in that
+/// case). `seq_of` extracts a record's SEQ.
+fn maybe_reduce_adapters<R, I, F>(
+    mut records: I,
+    cfg: &mut Config,
+    // Explicit HRTB so the returned SEQ borrows the record arg (elision may not
+    // link them on its own).
+    seq_of: F,
+) -> anyhow::Result<impl Iterator<Item = anyhow::Result<R>> + Send + use<R, I, F>>
+where
+    // `+ Send` / `R: Send`: the FASTQ and BAM pipelines' parallel paths require a
+    // `Send` record iterator. `seq_of` is only used inside this fn (not captured
+    // by the returned iterator), so it needs no `Send` bound.
+    I: Iterator<Item = anyhow::Result<R>> + Send,
+    R: Send,
+    F: for<'a> Fn(&'a R) -> &'a [u8],
+{
+    let mut sample: Vec<R> = Vec::new();
+    if let Some(ac) = cfg.adapters.clone()
+        && cfg.adapter_sample > 0
+    {
+        for _ in 0..cfg.adapter_sample {
+            match records.next() {
+                Some(Ok(r)) => sample.push(r),
+                Some(Err(e)) => return Err(e),
+                None => break,
+            }
+        }
+        let s = sample.len();
+        let full = ac.adapters.len();
+        let kept = if s < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION {
+            tracing::info!(
+                "Adapter presence: only {s} reads (< {}); using all {full} adapters",
+                crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+            );
+            ac.adapters.clone()
+        } else {
+            let seqs: Vec<&[u8]> = sample.iter().map(&seq_of).collect();
+            let detected = crate::adapter::detect::present(
+                &seqs,
+                &ac.adapters,
+                ac.error_rate,
+                ac.end_size,
+                ac.split,
+                crate::adapter::detect::presence_min(s),
+            );
+            if detected.is_empty() {
+                tracing::warn!(
+                    "Adapter presence: no adapters detected in the first {s} sampled reads; using all {full} \
+                     (the sampled prefix may be unrepresentative — pass --adapter-sample 0 to always use the full set)"
+                );
+                ac.adapters.clone()
+            } else {
+                let names: Vec<&str> = detected.iter().take(12).map(|a| a.name.as_str()).collect();
+                let more = detected.len().saturating_sub(names.len());
+                tracing::info!(
+                    "Adapter presence: sampled {s} reads, kept {} of {full} adapters{}{}",
+                    detected.len(),
+                    if names.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", names.join(", "))
+                    },
+                    if more > 0 {
+                        format!(" +{more} more")
+                    } else {
+                        String::new()
+                    },
+                );
+                detected
+            }
+        };
+        let mut reduced = ac;
+        reduced.adapters = kept;
+        cfg.adapters = Some(reduced);
+    }
+    Ok(sample.into_iter().map(anyhow::Ok).chain(records))
 }
 
 /// FASTQ output writer: either a plain buffered writer, or a `gzp` parallel
@@ -444,7 +540,7 @@ fn run_folder(
         );
         tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
-        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref()) {
+        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref(), cfg.adapter_sample) {
             tracing::info!("{line}");
         }
     } else if obs.is_bar() {
@@ -482,6 +578,7 @@ fn run_folder(
             let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
             let records = io::dir::fastq_records(&paths);
+            let records = maybe_reduce_adapters(records, cfg, |r| r.seq.as_slice())?;
             let stats = pipeline::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
             tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
@@ -495,6 +592,7 @@ fn run_folder(
                 // declare different read groups (relevant only for BAM output).
                 io::dir::warn_on_bam_header_mismatch(&paths);
                 let (header, records) = io::dir::bam_reader(&paths, budget.decode)?;
+                let records = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))?;
                 let out_header = provenance_header(header);
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
@@ -511,6 +609,7 @@ fn run_folder(
             },
             Format::Fastq | Format::FastqGz => {
                 let (_header, records) = io::dir::bam_reader(&paths, budget.decode)?;
+                let records = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))?;
                 let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
                 cfg.render_workers = budget.render;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
@@ -694,12 +793,22 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
 /// line entirely for an off run (same convention as the other banner-line
 /// helpers being pure/unit-testable). Reports the adapter count, `trim +
 /// split` vs `ends-only` mode (`AdapterConfig::split`), the end-match error
-/// rate, and the end-zone size in bp.
-fn adapter_banner_line(adapters: Option<&crate::adapter::AdapterConfig>) -> Option<String> {
+/// rate, the end-zone size in bp, and (via `adapter_sample`, i.e.
+/// `cfg.adapter_sample`) whether presence detection will sample the input —
+/// `sample {N}` when active, `sample off` when `N == 0` disables detection.
+fn adapter_banner_line(
+    adapters: Option<&crate::adapter::AdapterConfig>,
+    adapter_sample: usize,
+) -> Option<String> {
     let a = adapters?;
     let mode = if a.split { "trim + split" } else { "ends-only" };
+    let sample = if adapter_sample > 0 {
+        format!("sample {adapter_sample}")
+    } else {
+        "sample off".to_string()
+    };
     Some(format!(
-        "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp",
+        "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp · {sample}",
         a.adapters.len(),
         a.error_rate,
         a.end_size
@@ -1198,7 +1307,7 @@ mod tests {
 
     #[test]
     fn adapter_banner_line_none_when_off_and_describes_when_on() {
-        assert!(adapter_banner_line(None).is_none());
+        assert!(adapter_banner_line(None, 10000).is_none());
         let cfg = AdapterConfig {
             adapters: vec![Adapter {
                 name: "a".into(),
@@ -1209,11 +1318,15 @@ mod tests {
             end_size: 150,
             split: true,
         };
-        let line = adapter_banner_line(Some(&cfg)).unwrap();
+        let line = adapter_banner_line(Some(&cfg), 10000).unwrap();
         assert!(line.contains("1 sequences"));
         assert!(line.contains("trim + split"));
         assert!(line.contains("error 0.20"));
         assert!(line.contains("end-zone 150 bp"));
+        assert!(line.contains("sample 10000"));
+
+        let off_line = adapter_banner_line(Some(&cfg), 0).unwrap();
+        assert!(off_line.contains("sample off"));
     }
 
     #[test]
@@ -1229,7 +1342,7 @@ mod tests {
             split: false,
         };
         assert!(
-            adapter_banner_line(Some(&cfg))
+            adapter_banner_line(Some(&cfg), 10000)
                 .unwrap()
                 .contains("ends-only")
         );

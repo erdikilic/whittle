@@ -90,6 +90,12 @@ struct Cli {
     /// Trim adapters at read ends only; never split on interior adapters.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
+    /// Reads to sample to detect which adapters are present, reducing the set
+    /// trimmed against (opt-in speed optimization). 0 = off (default, trim against
+    /// the full set); a value >= 100 enables detection. Preset-only (ignored with
+    /// --adapter-fasta).
+    #[arg(long, default_value_t = 0, help_heading = "Adapter trimming")]
+    adapter_sample: usize,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -238,6 +244,21 @@ pub fn parse() -> anyhow::Result<Config> {
         if c.adapter_end_size == 0 {
             anyhow::bail!("--adapter-end-size must be >= 1");
         }
+        if c.adapter_sample != 0
+            && c.adapter_sample < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+        {
+            anyhow::bail!(
+                "--adapter-sample ({}) must be 0 (disable detection) or at least {} \
+                 (smaller samples are too few for reliable detection)",
+                c.adapter_sample,
+                crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+            );
+        }
+        if c.adapter_fasta.is_some() && c.adapter_sample > 0 {
+            eprintln!(
+                "[WARN] --adapter-sample is ignored with --adapter-fasta (presence detection is preset-only)"
+            );
+        }
         Some(crate::adapter::AdapterConfig {
             adapters: adapter_seqs,
             error_rate: c.adapter_error_rate,
@@ -253,6 +274,15 @@ pub fn parse() -> anyhow::Result<Config> {
     let threads_clamped = match c.threads {
         Some(n) if n > ncpu => Some((n, ncpu)),
         _ => None,
+    };
+
+    // Presence detection is preset-only: a user-supplied --adapter-fasta is a
+    // curated set that should all be searched, and sampling could wrongly drop a
+    // rare custom adapter. So detection is disabled whenever a FASTA is provided.
+    let adapter_sample = if c.adapter_fasta.is_some() {
+        0
+    } else {
+        c.adapter_sample
     };
 
     Ok(Config {
@@ -280,6 +310,7 @@ pub fn parse() -> anyhow::Result<Config> {
         threads,
         fastq_tags,
         render_workers: 0,
+        adapter_sample,
         compression_level: c.compression_level,
         update_moves: c.update_moves,
         verbosity: c.verbose,
@@ -375,6 +406,7 @@ pub fn config_for_test_threads(
         threads: threads.max(1),
         fastq_tags: FastqTags::All,
         render_workers: 0,
+        adapter_sample: 0,
         compression_level: 6,
         update_moves: false,
         verbosity: 0,

@@ -191,6 +191,7 @@ See **The MM/ML/ML guarantee** below.
 | `--adapter-error-rate <F>` | End-match error tolerance as a fraction of adapter length (default 0.2); interior/chimera-split hits use half this budget |
 | `--adapter-end-size <N>` | Bases at each read end searched for a terminal adapter (default 150) |
 | `--adapter-ends-only` | Trim adapters at read ends only; never split on an interior adapter |
+| `--adapter-sample <N>` | Opt-in speed optimization: reads to sample (the first N, not random) for adapter presence detection with `--adapter-preset`; trimming then runs only against adapters actually found in the sample (faster, fewer spurious trims), falling back to the full set if detection finds none. **Default `0`: detection is off and every run trims against the full configured set** (always correct). Set to a value >= 100 to opt in (anything from 1-99 is rejected at startup — smaller samples are too few for reliable detection). Always forced back to `0` when `--adapter-fasta` is given — a custom FASTA is searched in full (a WARN is printed if you also pass a positive `--adapter-sample` in that case, since it's ignored). Separately, an input that supplies fewer than 100 reads to sample skips detection and uses the full set, regardless of this setting |
 | `-v`, `-vv` | Increase logging detail: `-v` = debug, `-vv` = trace (default: info). See **Logging & progress** below |
 | `--quiet` | Silence progress and the info-level summary; warnings and errors still print |
 
@@ -291,6 +292,47 @@ as quality- and `-H`/`-T`-trimming: on uBAM, `MM`/`ML`/`MN` are rebuilt for
 every resulting window or segment (see **The MM/ML/MN guarantee** above),
 and the rest of the trim-aware tag handling (per-base kinetics,
 `--update-moves`, etc.) applies identically.
+
+### Presence detection
+
+Adapter/preset catalogs (especially `--adapter-preset ont`, over a hundred
+sequences) usually contain far more entries than are actually present in a
+given run. Presence detection is an **opt-in speed optimization**: pass
+`--adapter-sample <N>` (N >= 100) and `whittle` samples the first `N` reads —
+the leading prefix, not a random draw — checks which of the configured
+adapters actually match within that sample, and trims the rest of the input
+against only that reduced set — same error-rate/end-size settings, fewer
+adapters to search per read, and no spurious low-confidence trims from
+catalog entries that were never in the data to begin with.
+
+**By default (`--adapter-sample 0`, i.e. the flag omitted) detection is off**
+and every run trims against the full configured set — slower on a large
+catalog, but always correct regardless of read order or an unrepresentative
+prefix. Opt in explicitly with `--adapter-sample <N>` when you want the
+speedup and are comfortable with the sampling tradeoff below.
+
+Detection is **preset-only**: it is automatically forced back to `0` whenever
+a custom `--adapter-fasta` is given, since a user-supplied FASTA is a curated
+set that should always be searched in full — sampling could otherwise drop a
+rare custom adapter. If you also pass a positive `--adapter-sample` alongside
+`--adapter-fasta`, `whittle` prints a `[WARN]` that the value is being
+ignored, rather than silently dropping the request.
+
+`--adapter-sample` only accepts `0` (the default, detection off) or a value
+>= 100; anything from 1-99 is rejected at startup, since a sample that small
+is too few reads for reliable detection — silently falling back to the full
+set would be surprising, so `whittle` refuses the flag instead. This is a
+separate concern from the input itself being small: even with a valid
+`--adapter-sample N` opted into, if the input supplies **fewer than 100
+reads** to sample, detection is skipped for that run and the full configured
+set is used, regardless of the flag's value.
+
+Because the sample is a prefix rather than a random draw, ordered data (e.g. a
+run of clean reads before any adapted ones) can look adapter-free during
+detection even though adapters are present later in the file. To guard
+against this, if detection keeps **zero** adapters, `whittle` falls back to
+the full configured set (logged as a warning) instead of silently disabling
+trimming for the rest of the run.
 
 ### The built-in ONT catalog
 

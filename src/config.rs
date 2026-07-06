@@ -83,6 +83,10 @@ pub struct Config {
     /// workload-aware budget). Set by `run`/`run_folder` from
     /// `thread_budget(..).render` before the pipeline runs.
     pub render_workers: usize,
+    /// Reads to sample for adapter-presence detection before trimming the full
+    /// dataset. `0` disables detection (trim against the full active set).
+    /// Only meaningful when `adapters` is `Some`.
+    pub adapter_sample: usize,
     /// DEFLATE compression level (0-9) for compressed output: bgzf for BAM,
     /// gzip for FASTQ.gz. `6` is the bgzf/gzip default; lower it (e.g. 1-3) to
     /// trade ratio for speed on the compression-bound BAM path. Plain FASTQ
