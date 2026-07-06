@@ -1,0 +1,4 @@
+# sassy's SIMD (AVX2) requires x86-64-v3 (Haswell/2015+) on x86-64; without this
+# the crate fails to build. aarch64 uses NEON by default and needs no flag.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=x86-64-v3"]
