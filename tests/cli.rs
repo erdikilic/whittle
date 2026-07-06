@@ -180,6 +180,27 @@ fn over_spec_threads_warns() {
 }
 
 #[test]
+fn verbose_shows_phase_timing() {
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .arg("-v")
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("processing")); // phase timing line appears at DEBUG
+}
+
+#[test]
+fn default_hides_debug() {
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("processing").not());
+}
+
+#[test]
 fn gz_output_roundtrips() {
     use std::io::Read;
     let dir = tempfile::tempdir().unwrap();

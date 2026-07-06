@@ -26,6 +26,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     use io::Format;
 
     let mut cfg = cfg;
+    let setup_start = std::time::Instant::now();
 
     if let Some((requested, ncpu)) = cfg.threads_clamped {
         tracing::warn!("requested -t {requested} exceeds {ncpu} available CPUs; using {ncpu}");
@@ -113,7 +114,22 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
+    tracing::debug!(
+        "input opened, format {in_fmt:?} -> {out_fmt:?} detected in {:?}",
+        setup_start.elapsed()
+    );
+
     obs.start(total, counters.clone());
+
+    // Coarse wall-clock timer for the processing phase (dispatch below); each
+    // arm logs elapsed time from this point just before its own `obs.finish`.
+    // Stages run concurrently internally (read/trim/write overlap across
+    // threads), so this is a phase boundary, not a CPU-time split.
+    let t0 = std::time::Instant::now();
+    tracing::debug!(
+        "processing {in_fmt:?} -> {out_fmt:?} with {} threads",
+        cfg.threads
+    );
 
     // BAM dispatch happens before creating/truncating the output file, and so
     // do the FASTQ->BAM rejection and the BAM->FASTQ conversion, so a rejected
@@ -143,6 +159,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
             // truncated BAM with a success exit code.
             sink.finish()?;
+            tracing::debug!("processing finished in {:?}", t0.elapsed());
             obs.finish(&stats);
             return Ok(());
         },
@@ -159,6 +176,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             cfg.render_workers = b.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
             writer.finish()?;
+            tracing::debug!("processing finished in {:?}", t0.elapsed());
             obs.finish(&stats);
             return Ok(());
         },
@@ -182,6 +200,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let records = io::fastq::reader_from(source, gz_in);
     let stats = pipeline::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
+    tracing::debug!("processing finished in {:?}", t0.elapsed());
     obs.finish(&stats);
     Ok(())
 }
@@ -294,6 +313,12 @@ fn run_folder(
     let counters = std::sync::Arc::new(pipeline::Counters::default());
     obs.start(None, counters.clone());
 
+    let t0 = std::time::Instant::now();
+    tracing::debug!(
+        "processing folder {family:?} -> {out_fmt:?} with {} threads",
+        cfg.threads
+    );
+
     match family {
         io::dir::Family::Fastq => {
             if matches!(out_fmt, Format::Bam) {
@@ -313,6 +338,7 @@ fn run_folder(
             let records = io::dir::fastq_records(&paths);
             let stats = pipeline::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
+            tracing::debug!("processing finished in {:?}", t0.elapsed());
             obs.finish(&stats);
             Ok(())
         },
@@ -334,6 +360,7 @@ fn run_folder(
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
+                tracing::debug!("processing finished in {:?}", t0.elapsed());
                 obs.finish(&stats);
                 Ok(())
             },
@@ -349,6 +376,7 @@ fn run_folder(
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
                 writer.finish()?;
+                tracing::debug!("processing finished in {:?}", t0.elapsed());
                 obs.finish(&stats);
                 Ok(())
             },
