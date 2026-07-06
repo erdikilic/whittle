@@ -58,13 +58,31 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
 
     let in_path = cfg.io.input.as_deref();
 
+    // Total input bytes, when known (a real file), drives a determinate
+    // progress bar with %/ETA; stdin has no metadata, so it stays `None` and
+    // renders a spinner instead (see `obs::ProgressHandle::start`).
+    let total: Option<u64> = in_path
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len());
+
+    // Created here (before the reader) so the same `Arc` can be shared into
+    // `CountingReader` below, then cloned again for the pipeline call and
+    // `obs.start`.
+    let counters = std::sync::Arc::new(pipeline::Counters::default());
+
     // Open the input (file or stdin) up front so format detection can sniff
     // its first bytes without losing them: any bytes consumed while sniffing
     // get prepended back via a Cursor+chain before the FASTQ reader is built.
+    // Wrapped in `CountingReader` here, innermost, so it counts actual bytes
+    // pulled from the file/stdin — the sniff bytes are counted once when
+    // first read; re-serving them from the in-memory `Cursor` below does not
+    // double-count them.
     let raw: Box<dyn Read + Send> = match in_path {
         Some(p) => Box::new(std::fs::File::open(p)?),
         None => Box::new(std::io::stdin()),
     };
+    let raw: Box<dyn Read + Send> =
+        Box::new(io::counting::CountingReader::new(raw, counters.clone()));
     let mut source: Box<dyn Read + Send> = Box::new(BufReader::new(raw));
 
     let in_fmt = match cfg.io.in_format {
@@ -95,8 +113,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
-    let counters = std::sync::Arc::new(pipeline::Counters::default());
-    obs.start(None, counters.clone());
+    obs.start(total, counters.clone());
 
     // BAM dispatch happens before creating/truncating the output file, and so
     // do the FASTQ->BAM rejection and the BAM->FASTQ conversion, so a rejected

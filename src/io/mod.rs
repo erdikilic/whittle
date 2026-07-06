@@ -1,4 +1,5 @@
 pub mod bam;
+pub mod counting;
 pub mod dir;
 pub mod fastq;
 
