@@ -1,0 +1,153 @@
+# whittle ONT adapter/primer/barcode catalog — our own, assembled from primary sources (2026-07-06)
+# Columns: id <TAB> category <TAB> end <TAB> sequence <TAB> kits <TAB> source
+#   end: 5 = front/read-start, 3 = rear/read-end, both = search at either end
+#        (every sequence is also searched reverse-complemented, so opposite-strand reads are covered)
+#   category: ligation-adapter | rapid-adapter | rna-adapter | primer | flank | barcode
+# Sources (verbatim, cross-verified): dorado adapter_primer_kits.cpp + utils/barcode_kits.cpp
+#   (nanoporetech/dorado, kit-14 authoritative); Porechop porechop/adapters.py (legacy + 96 barcodes);
+#   qcat kit YAMLs. Barcodes BC25/50/96 (Porechop) confirmed present in dorado. Sequences are ONT-
+#   published facts; catalog assembled independently for whittle. See spec: adapter-trimming design.
+#
+# Barcode DEDUP rule: a barcode number is ONE shared 24 bp oligo across native/PCR/rapid kits; the
+# families differ only by FLANK + orientation (native uses the reverse-complement). We store the
+# canonical FORWARD oligo once (BC01..BC96) and rely on whittle's built-in reverse-complement search
+# for the native orientation. Trimming through the flanks removes the barcode regardless of number.
+#
+# id	category	end	sequence	kits	source
+
+# --- Ligation Y-adapter (two chemistry generations; keep BOTH) ---
+LSK114_front	ligation-adapter	5	CCTGTACTTCGTTCAGTTACGTATTGC	SQK-LSK114 and all *114 (PCS/RAD/ULK/NBD/PCB/RBK/16S)	dorado:adapter_primer_kits.cpp(LSK110)
+LSK114_rear	ligation-adapter	3	AGCAATACGTAACTGAAC	SQK-LSK114 and all *114	dorado:adapter_primer_kits.cpp(LSK110)
+LSK109_front	ligation-adapter	5	AATGTACTTCGTTCAGTTACGTATTGCT	SQK-LSK108/109, NSK007 (kit 9/10)	porechop:adapters.py(SQK-NSK007_Y_Top)
+LSK109_rear	ligation-adapter	3	GCAATACGTAACTGAACGAAGT	SQK-LSK108/109, NSK007 (kit 9/10)	porechop:adapters.py(SQK-NSK007_Y_Bottom)
+
+# --- Rapid adapter (also the 3' flank of rapid-barcoding kits) ---
+RAD	rapid-adapter	both	GTTTTCGCATTTATCGTGAAACGCTTTCGCGTTTTTCGTGCGCCGCTTCA	SQK-RAD004/RAD114, ULK114, RBK*	dorado:adapter_primer_kits.cpp(RAD) / porechop(Rapid_adapter)
+
+# --- Direct RNA ---
+RNA004_rear	rna-adapter	3	GGTTGTTTCTGTTGGTGCTG	SQK-RNA004, RNA004-XL, DRB004	dorado:adapter_primer_kits.cpp(RNA004)
+
+# --- Primers (PCR / cDNA / 10X) ---
+cDNA_front	primer	5	TTTCTGTTGGTGCTGATATTGCTGGG	SQK-LSK114 cDNA	dorado:adapter_primer_kits.cpp(cDNA)
+cDNA_rear	primer	3	ACTTGCCTGTCGCTCTATCTTCTTT	SQK-LSK114 cDNA	dorado:adapter_primer_kits.cpp(cDNA)
+PCS110_front	primer	5	TTTCTGTTGGTGCTGATATTGCTTT	SQK-PCS114, PCB114	dorado:adapter_primer_kits.cpp(PCS110)
+PCS110_rear	primer	3	ACTTGCCTGTCGCTCTATCTTCAGAGGAGAGTCCGCCGCCCGCAAGTTTT	SQK-PCS114, PCB114	dorado:adapter_primer_kits.cpp(PCS110)
+GEN10X_front	primer	5	CTACACGACGCTCTTCCGATCT	SQK-LSK114 (10X)	dorado:adapter_primer_kits.cpp(GEN10X)
+GEN10X_rear	primer	3	GTACTCTGCGTTGATACCACTGCTT	SQK-LSK114 (10X)	dorado:adapter_primer_kits.cpp(GEN10X)
+PCR1_front	primer	5	ACTTGCCTGTCGCTCTATCTTC	PCR/cDNA (legacy)	porechop:adapters.py(PCR_1)
+PCR1_rear	primer	3	GAAGATAGAGCGACAGGCAAGT	PCR/cDNA (legacy)	porechop:adapters.py(PCR_1)
+PCR2_front	primer	5	TTTCTGTTGGTGCTGATATTGC	PCR/cDNA (legacy)	porechop:adapters.py(PCR_2)
+PCR2_rear	primer	3	GCAATATCAGCACCAACAGAAA	PCR/cDNA (legacy)	porechop:adapters.py(PCR_2)
+cDNA_SSP	primer	5	TTTCTGTTGGTGCTGATATTGCTGCCATTACGGCCGGG	cDNA SSP (legacy)	porechop:adapters.py(cDNA_SSP)
+
+# --- Barcode flanks (dorado kit-14 constants; trimming through a flank removes the barcode) ---
+NB_front	flank	5	ATTGCTAAGGTTAA	native barcoding (NBD*)	dorado:barcode_kits.cpp(NB_1st_FRONT)
+NB_rear	flank	3	CAGCACCT	native barcoding (NBD*)	dorado:barcode_kits.cpp(NB_1st_REAR)
+PBC_front	flank	5	GGTGCTG	PCR barcoding (PBC/BC*)	dorado:barcode_kits.cpp(BC_1st_FRONT)
+PBC_rear	flank	3	TTAACCTTTCTGTTGGTGCTGATATTGC	PCR barcoding (PBC/BC*)	dorado:barcode_kits.cpp(BC_1st_REAR)
+RBK4_front	flank	5	GCTTGGGTGTTTAACC	rapid barcoding v4 / kit14 (RBK*)	dorado:barcode_kits.cpp(RBK4_FRONT)
+RBK_front_legacy	flank	5	TATTGCT	rapid barcoding (RBK001)	dorado:barcode_kits.cpp(RBK_FRONT)
+RLB_front	flank	5	CCGTGAC	rapid lig barcoding (RLB/RAB/LWB)	dorado:barcode_kits.cpp(RLB_FRONT)
+RLB_rear	flank	3	CGTTTTTCGTGCGCCGCTTC	rapid lig barcoding (RLB)	dorado:barcode_kits.cpp(RLB_REAR)
+RAB_16S_rear1	flank	3	AGAGTTTGATCATGGCTCAG	16S barcoding (RAB/16S)	dorado:barcode_kits.cpp(RAB_1st_REAR)
+RAB_16S_rear2	flank	3	CGGTTACCTTGTTACGACTT	16S barcoding (RAB/16S)	dorado:barcode_kits.cpp(RAB_2nd_REAR)
+LWB_rear1	flank	3	ACTTGCCTGTCGCTCTATCTTC	ligation/PCR barcoding (LWB)	dorado:barcode_kits.cpp(LWB_1st_REAR)
+MAB_rear	flank	3	CCATATCCGTGTCGCCCTT	MAB	dorado:barcode_kits.cpp(MAB_REAR)
+
+# --- Barcodes (96 canonical forward oligos; searched + reverse-complemented at both ends) ---
+BC01	barcode	both	AAGAAAGTTGTCGGTGTCTTTGTG	NBD/PBC/RBK	porechop+dorado
+BC02	barcode	both	TCGATTCCGTTTGTAGTCGTCTGT	NBD/PBC/RBK	porechop+dorado
+BC03	barcode	both	GAGTCTTGTGTCCCAGTTACCAGG	NBD/PBC/RBK	porechop+dorado
+BC04	barcode	both	TTCGGATTCTATCGTGTTTCCCTA	NBD/PBC/RBK	porechop+dorado
+BC05	barcode	both	CTTGTCCAGGGTTTGTGTAACCTT	NBD/PBC/RBK	porechop+dorado
+BC06	barcode	both	TTCTCGCAAAGGCAGAAAGTAGTC	NBD/PBC/RBK	porechop+dorado
+BC07	barcode	both	GTGTTACCGTGGGAATGAATCCTT	NBD/PBC/RBK	porechop+dorado
+BC08	barcode	both	TTCAGGGAACAAACCAAGTTACGT	NBD/PBC/RBK	porechop+dorado
+BC09	barcode	both	AACTAGGCACAGCGAGTCTTGGTT	NBD/PBC/RBK	porechop+dorado
+BC10	barcode	both	AAGCGTTGAAACCTTTGTCCTCTC	NBD/PBC/RBK	porechop+dorado
+BC11	barcode	both	GTTTCATCTATCGGAGGGAATGGA	NBD/PBC/RBK	porechop+dorado
+BC12	barcode	both	CAGGTAGAAAGAAGCAGAATCGGA	NBD/PBC/RBK	porechop+dorado
+BC13	barcode	both	AGAACGACTTCCATACTCGTGTGA	NBD/PBC/RBK	porechop+dorado
+BC14	barcode	both	AACGAGTCTCTTGGGACCCATAGA	NBD/PBC/RBK	porechop+dorado
+BC15	barcode	both	AGGTCTACCTCGCTAACACCACTG	NBD/PBC/RBK	porechop+dorado
+BC16	barcode	both	CGTCAACTGACAGTGGTTCGTACT	NBD/PBC/RBK	porechop+dorado
+BC17	barcode	both	ACCCTCCAGGAAAGTACCTCTGAT	NBD/PBC/RBK	porechop+dorado
+BC18	barcode	both	CCAAACCCAACAACCTAGATAGGC	NBD/PBC/RBK	porechop+dorado
+BC19	barcode	both	GTTCCTCGTGCAGTGTCAAGAGAT	NBD/PBC/RBK	porechop+dorado
+BC20	barcode	both	TTGCGTCCTGTTACGAGAACTCAT	NBD/PBC/RBK	porechop+dorado
+BC21	barcode	both	GAGCCTCTCATTGTCCGTTCTCTA	NBD/PBC/RBK	porechop+dorado
+BC22	barcode	both	ACCACTGCCATGTATCAAAGTACG	NBD/PBC/RBK	porechop+dorado
+BC23	barcode	both	CTTACTACCCAGTGAACCTCCTCG	NBD/PBC/RBK	porechop+dorado
+BC24	barcode	both	GCATAGTTCTGCATGATGGGTTAG	NBD/PBC/RBK	porechop+dorado
+BC25	barcode	both	GTAAGTTGGGTATGCAACGCAATG	NBD/PBC/RBK	porechop+dorado
+BC26	barcode	both	CATACAGCGACTACGCATTCTCAT	NBD/PBC/RBK	porechop+dorado
+BC27	barcode	both	CGACGGTTAGATTCACCTCTTACA	NBD/PBC/RBK	porechop+dorado
+BC28	barcode	both	TGAAACCTAAGAAGGCACCGTATC	NBD/PBC/RBK	porechop+dorado
+BC29	barcode	both	CTAGACACCTTGGGTTGACAGACC	NBD/PBC/RBK	porechop+dorado
+BC30	barcode	both	TCAGTGAGGATCTACTTCGACCCA	NBD/PBC/RBK	porechop+dorado
+BC31	barcode	both	TGCGTACAGCAATCAGTTACATTG	NBD/PBC/RBK	porechop+dorado
+BC32	barcode	both	CCAGTAGAAGTCCGACAACGTCAT	NBD/PBC/RBK	porechop+dorado
+BC33	barcode	both	CAGACTTGGTACGGTTGGGTAACT	NBD/PBC/RBK	porechop+dorado
+BC34	barcode	both	GGACGAAGAACTCAAGTCAAAGGC	NBD/PBC/RBK	porechop+dorado
+BC35	barcode	both	CTACTTACGAAGCTGAGGGACTGC	NBD/PBC/RBK	porechop+dorado
+BC36	barcode	both	ATGTCCCAGTTAGAGGAGGAAACA	NBD/PBC/RBK	porechop+dorado
+BC37	barcode	both	GCTTGCGATTGATGCTTAGTATCA	NBD/PBC/RBK	porechop+dorado
+BC38	barcode	both	ACCACAGGAGGACGATACAGAGAA	NBD/PBC/RBK	porechop+dorado
+BC39	barcode	both	CCACAGTGTCAACTAGAGCCTCTC	NBD/PBC/RBK	porechop+dorado
+BC40	barcode	both	TAGTTTGGATGACCAAGGATAGCC	NBD/PBC/RBK	porechop+dorado
+BC41	barcode	both	GGAGTTCGTCCAGAGAAGTACACG	NBD/PBC/RBK	porechop+dorado
+BC42	barcode	both	CTACGTGTAAGGCATACCTGCCAG	NBD/PBC/RBK	porechop+dorado
+BC43	barcode	both	CTTTCGTTGTTGACTCGACGGTAG	NBD/PBC/RBK	porechop+dorado
+BC44	barcode	both	AGTAGAAAGGGTTCCTTCCCACTC	NBD/PBC/RBK	porechop+dorado
+BC45	barcode	both	GATCCAACAGAGATGCCTTCAGTG	NBD/PBC/RBK	porechop+dorado
+BC46	barcode	both	GCTGTGTTCCACTTCATTCTCCTG	NBD/PBC/RBK	porechop+dorado
+BC47	barcode	both	GTGCAACTTTCCCACAGGTAGTTC	NBD/PBC/RBK	porechop+dorado
+BC48	barcode	both	CATCTGGAACGTGGTACACCTGTA	NBD/PBC/RBK	porechop+dorado
+BC49	barcode	both	ACTGGTGCAGCTTTGAACATCTAG	NBD/PBC/RBK	porechop+dorado
+BC50	barcode	both	ATGGACTTTGGTAACTTCCTGCGT	NBD/PBC/RBK	porechop+dorado
+BC51	barcode	both	GTTGAATGAGCCTACTGGGTCCTC	NBD/PBC/RBK	porechop+dorado
+BC52	barcode	both	TGAGAGACAAGATTGTTCGTGGAC	NBD/PBC/RBK	porechop+dorado
+BC53	barcode	both	AGATTCAGACCGTCTCATGCAAAG	NBD/PBC/RBK	porechop+dorado
+BC54	barcode	both	CAAGAGCTTTGACTAAGGAGCATG	NBD/PBC/RBK	porechop+dorado
+BC55	barcode	both	TGGAAGATGAGACCCTGATCTACG	NBD/PBC/RBK	porechop+dorado
+BC56	barcode	both	TCACTACTCAACAGGTGGCATGAA	NBD/PBC/RBK	porechop+dorado
+BC57	barcode	both	GCTAGGTCAATCTCCTTCGGAAGT	NBD/PBC/RBK	porechop+dorado
+BC58	barcode	both	CAGGTTACTCCTCCGTGAGTCTGA	NBD/PBC/RBK	porechop+dorado
+BC59	barcode	both	TCAATCAAGAAGGGAAAGCAAGGT	NBD/PBC/RBK	porechop+dorado
+BC60	barcode	both	CATGTTCAACCAAGGCTTCTATGG	NBD/PBC/RBK	porechop+dorado
+BC61	barcode	both	AGAGGGTACTATGTGCCTCAGCAC	NBD/PBC/RBK	porechop+dorado
+BC62	barcode	both	CACCCACACTTACTTCAGGACGTA	NBD/PBC/RBK	porechop+dorado
+BC63	barcode	both	TTCTGAAGTTCCTGGGTCTTGAAC	NBD/PBC/RBK	porechop+dorado
+BC64	barcode	both	GACAGACACCGTTCATCGACTTTC	NBD/PBC/RBK	porechop+dorado
+BC65	barcode	both	TTCTCAGTCTTCCTCCAGACAAGG	NBD/PBC/RBK	porechop+dorado
+BC66	barcode	both	CCGATCCTTGTGGCTTCTAACTTC	NBD/PBC/RBK	porechop+dorado
+BC67	barcode	both	GTTTGTCATACTCGTGTGCTCACC	NBD/PBC/RBK	porechop+dorado
+BC68	barcode	both	GAATCTAAGCAAACACGAAGGTGG	NBD/PBC/RBK	porechop+dorado
+BC69	barcode	both	TACAGTCCGAGCCTCATGTGATCT	NBD/PBC/RBK	porechop+dorado
+BC70	barcode	both	ACCGAGATCCTACGAATGGAGTGT	NBD/PBC/RBK	porechop+dorado
+BC71	barcode	both	CCTGGGAGCATCAGGTAGTAACAG	NBD/PBC/RBK	porechop+dorado
+BC72	barcode	both	TAGCTGACTGTCTTCCATACCGAC	NBD/PBC/RBK	porechop+dorado
+BC73	barcode	both	AAGAAACAGGATGACAGAACCCTC	NBD/PBC/RBK	porechop+dorado
+BC74	barcode	both	TACAAGCATCCCAACACTTCCACT	NBD/PBC/RBK	porechop+dorado
+BC75	barcode	both	GACCATTGTGATGAACCCTGTTGT	NBD/PBC/RBK	porechop+dorado
+BC76	barcode	both	ATGCTTGTTACATCAACCCTGGAC	NBD/PBC/RBK	porechop+dorado
+BC77	barcode	both	CGACCTGTTTCTCAGGGATACAAC	NBD/PBC/RBK	porechop+dorado
+BC78	barcode	both	AACAACCGAACCTTTGAATCAGAA	NBD/PBC/RBK	porechop+dorado
+BC79	barcode	both	TCTCGGAGATAGTTCTCACTGCTG	NBD/PBC/RBK	porechop+dorado
+BC80	barcode	both	CGGATGAACATAGGATAGCGATTC	NBD/PBC/RBK	porechop+dorado
+BC81	barcode	both	CCTCATCTTGTGAAGTTGTTTCGG	NBD/PBC/RBK	porechop+dorado
+BC82	barcode	both	ACGGTATGTCGAGTTCCAGGACTA	NBD/PBC/RBK	porechop+dorado
+BC83	barcode	both	TGGCTTGATCTAGGTAAGGTCGAA	NBD/PBC/RBK	porechop+dorado
+BC84	barcode	both	GTAGTGGACCTAGAACCTGTGCCA	NBD/PBC/RBK	porechop+dorado
+BC85	barcode	both	AACGGAGGAGTTAGTTGGATGATC	NBD/PBC/RBK	porechop+dorado
+BC86	barcode	both	AGGTGATCCCAACAAGCGTAAGTA	NBD/PBC/RBK	porechop+dorado
+BC87	barcode	both	TACATGCTCCTGTTGTTAGGGAGG	NBD/PBC/RBK	porechop+dorado
+BC88	barcode	both	TCTTCTACTACCGATCCGAAGCAG	NBD/PBC/RBK	porechop+dorado
+BC89	barcode	both	ACAGCATCAATGTTTGGCTAGTTG	NBD/PBC/RBK	porechop+dorado
+BC90	barcode	both	GATGTAGAGGGTACGGTTTGAGGC	NBD/PBC/RBK	porechop+dorado
+BC91	barcode	both	GGCTCCATAGGAACTCACGCTACT	NBD/PBC/RBK	porechop+dorado
+BC92	barcode	both	TTGTGAGTGGAAAGATACAGGACC	NBD/PBC/RBK	porechop+dorado
+BC93	barcode	both	AGTTTCCATCACTTCAGACTTGGG	NBD/PBC/RBK	porechop+dorado
+BC94	barcode	both	GATTGTCCTCAAACTGCCACCTAC	NBD/PBC/RBK	porechop+dorado
+BC95	barcode	both	CCTGTCTGGAAGAAGAATGGACTT	NBD/PBC/RBK	porechop+dorado
+BC96	barcode	both	CTGAACGGTCATAGAGTCCACCAT	NBD/PBC/RBK	porechop+dorado
