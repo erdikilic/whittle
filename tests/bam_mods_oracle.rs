@@ -79,7 +79,7 @@ fn trimmed_output_mods_match_oracle() {
 
     // Trim the first 3 bases (head-crop 3) via the library run().
     let cfg = whittle::cli::config_for_test(&input, &output, 3, 0);
-    whittle::run(cfg).unwrap();
+    whittle::run(cfg, &whittle::obs::ProgressHandle::disabled()).unwrap();
 
     let original = hts_mods(&input);
     let start = 3usize;
@@ -139,7 +139,7 @@ fn trimmed_output_multimod_mods_match_oracle() {
 
     // head-crop 2, tail-crop 2 -> surviving window [2, 8) on the length-10 read.
     let cfg = whittle::cli::config_for_test(&input, &output, 2, 2);
-    whittle::run(cfg).unwrap();
+    whittle::run(cfg, &whittle::obs::ProgressHandle::disabled()).unwrap();
 
     let (head, tail, len) = (2usize, 2usize, 10usize);
     let tail_start = len - tail;
@@ -185,7 +185,7 @@ fn trimmed_output_multimod_mods_match_oracle_t8() {
     write_fixture_multimod(&input);
 
     let cfg = whittle::cli::config_for_test_threads(&input, &output, 2, 2, 8);
-    whittle::run(cfg).unwrap();
+    whittle::run(cfg, &whittle::obs::ProgressHandle::disabled()).unwrap();
 
     let (head, tail, len) = (2usize, 2usize, 10usize);
     let tail_start = len - tail;
@@ -261,7 +261,7 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
     w.try_finish().unwrap();
 
     let cfg = whittle::cli::config_for_test_threads(&input, &output, 2, 2, 8);
-    whittle::run(cfg).unwrap();
+    whittle::run(cfg, &whittle::obs::ProgressHandle::disabled()).unwrap();
 
     let (head, orig_len) = (2usize, 10usize);
     let orig = hts_mods_by_read(&input);
@@ -361,7 +361,7 @@ fn real_ubam_oracle_sweep() {
     let output = dir.path().join("out.ubam");
 
     let cfg = whittle::cli::config_for_test(&input, &output, 10, 10);
-    whittle::run(cfg).unwrap();
+    whittle::run(cfg, &whittle::obs::ProgressHandle::disabled()).unwrap();
 
     let orig = hts_mods_by_read(&input);
     let out = hts_mods_by_read(&output);
@@ -402,7 +402,7 @@ fn real_ubam_oracle_sweep_t8() {
     let output = dir.path().join("out.ubam");
 
     let cfg = whittle::cli::config_for_test_threads(&input, &output, 10, 10, 8);
-    whittle::run(cfg).unwrap();
+    whittle::run(cfg, &whittle::obs::ProgressHandle::disabled()).unwrap();
 
     let orig = hts_mods_by_read(&input);
     let out = hts_mods_by_read(&output);

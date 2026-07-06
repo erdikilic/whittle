@@ -1,4 +1,5 @@
 fn main() -> anyhow::Result<()> {
     let cfg = whittle::cli::parse()?;
-    whittle::run(cfg)
+    let obs = whittle::obs::init(cfg.verbosity, cfg.quiet);
+    whittle::run(cfg, &obs)
 }

@@ -19,11 +19,15 @@ use gzp::{Compression, ZWriter};
 /// Top-level entry point. Dispatches on the input: a directory triggers
 /// folder-merge (all read files in it merged into one output); otherwise a
 /// single file / stdin is trimmed. FASTQ and unaligned BAM are supported.
-pub fn run(cfg: Config) -> anyhow::Result<()> {
+pub fn run(cfg: Config, obs: &obs::ProgressHandle) -> anyhow::Result<()> {
     use config::EncodeKind;
     use io::Format;
 
     let mut cfg = cfg;
+
+    if let Some((requested, ncpu)) = cfg.threads_clamped {
+        tracing::warn!("requested -t {requested} exceeds {ncpu} available CPUs; using {ncpu}");
+    }
 
     // Scoped so the borrow of `cfg.io.input` ends before `run_folder` needs
     // `&mut cfg` — the directory path itself is cloned out first.
@@ -34,7 +38,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
         .filter(|p| p.is_dir())
         .map(|p| p.to_path_buf())
     {
-        return run_folder(&dir, &mut cfg);
+        return run_folder(&dir, &mut cfg, obs);
     }
 
     // Refuse to read and write the same file: `whittle` streams the input, so
@@ -117,7 +121,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
             // truncated BAM with a success exit code.
             sink.finish()?;
-            eprint_run_summary(&stats);
+            obs.finish(&stats);
             return Ok(());
         },
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
@@ -133,7 +137,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
             cfg.render_workers = b.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg)?;
             writer.finish()?;
-            eprint_run_summary(&stats);
+            obs.finish(&stats);
             return Ok(());
         },
         (Format::Fastq | Format::FastqGz, Format::Bam) => {
@@ -156,7 +160,7 @@ pub fn run(cfg: Config) -> anyhow::Result<()> {
     let records = io::fastq::reader_from(source, gz_in);
     let stats = pipeline::run_fastq(records, &mut writer, &cfg)?;
     writer.finish()?;
-    eprint_run_summary(&stats);
+    obs.finish(&stats);
     Ok(())
 }
 
@@ -237,7 +241,11 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
 /// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
 /// then merge all its read files into a single trimmed output using the same
 /// pipelines as the single-file path.
-fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
+fn run_folder(
+    dir: &std::path::Path,
+    cfg: &mut Config,
+    obs: &obs::ProgressHandle,
+) -> anyhow::Result<()> {
     use config::EncodeKind;
     use io::Format;
 
@@ -246,7 +254,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
     // overwriting either while merging the rest is silent data loss. The merged
     // output must live outside the input directory.
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
-    eprintln!(
+    tracing::info!(
         "Merging {} {:?} file(s) from {}",
         paths.len(),
         family,
@@ -280,7 +288,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
             let records = io::dir::fastq_records(&paths);
             let stats = pipeline::run_fastq(records, &mut writer, cfg)?;
             writer.finish()?;
-            eprint_run_summary(&stats);
+            obs.finish(&stats);
             Ok(())
         },
         io::dir::Family::Bam => match out_fmt {
@@ -301,7 +309,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg)?;
                 sink.finish()?;
-                eprint_run_summary(&stats);
+                obs.finish(&stats);
                 Ok(())
             },
             Format::Fastq | Format::FastqGz => {
@@ -316,7 +324,7 @@ fn run_folder(dir: &std::path::Path, cfg: &mut Config) -> anyhow::Result<()> {
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg)?;
                 writer.finish()?;
-                eprint_run_summary(&stats);
+                obs.finish(&stats);
                 Ok(())
             },
         },
@@ -358,29 +366,13 @@ pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
-/// Print the end-of-run summary: the kept/total count, plus a one-line advisory
-/// if any read carried a malformed per-base tag (see `has_malformed_perbase_tag`).
-fn eprint_run_summary(stats: &pipeline::Stats) {
-    eprintln!(
-        "Kept {} reads out of {}",
-        stats.output_reads, stats.input_reads
-    );
-    if stats.malformed_tag_reads > 0 {
-        eprintln!(
-            "note: {} read(s) carried a per-base kinetics tag (ip/pw/fi/fp/ri/rp) whose \
-             length did not match the sequence; left unchanged",
-            stats.malformed_tag_reads
-        );
-    }
-}
-
 /// `--fastq-tags` only affects BAM→FASTQ output. When the user set a non-default
 /// value (`none`/an explicit list) on any other path, emit a one-line stderr note
 /// rather than silently ignoring it. (An explicit `all` is the default and stays
 /// silent.)
 fn note_tags_ignored(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) {
     if !matches!(cfg.fastq_tags, config::FastqTags::All) {
-        eprintln!(
+        tracing::warn!(
             "note: --fastq-tags applies only to BAM->FASTQ output; ignored for {in_fmt:?}->{out_fmt:?}"
         );
     }
