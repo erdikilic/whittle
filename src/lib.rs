@@ -29,7 +29,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let setup_start = std::time::Instant::now();
 
     if let Some((requested, ncpu)) = cfg.threads_clamped {
-        tracing::warn!("requested -t {requested} exceeds {ncpu} available CPUs; using {ncpu}");
+        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
     }
 
     // Scoped so the borrow of `cfg.io.input` ends before `run_folder` needs
@@ -115,9 +115,21 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
     tracing::debug!(
-        "input opened, format {in_fmt:?} -> {out_fmt:?} detected in {:?}",
-        setup_start.elapsed()
+        "Detected {} input in {}",
+        in_fmt.label(),
+        obs::human_dur(setup_start.elapsed())
     );
+
+    // Line mode only: bar mode stays clean of everything but the bar itself,
+    // warnings/errors, and the final summary.
+    if obs.shows_lines() {
+        tracing::info!(
+            "Reading {}, writing {} ({} threads)",
+            in_fmt.label(),
+            out_fmt.label(),
+            cfg.threads
+        );
+    }
 
     obs.start(total, counters.clone());
 
@@ -126,10 +138,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // Stages run concurrently internally (read/trim/write overlap across
     // threads), so this is a phase boundary, not a CPU-time split.
     let t0 = std::time::Instant::now();
-    tracing::debug!(
-        "processing {in_fmt:?} -> {out_fmt:?} with {} threads",
-        cfg.threads
-    );
+    tracing::debug!("Processing {}, {} threads", in_fmt.label(), cfg.threads);
 
     // BAM dispatch happens before creating/truncating the output file, and so
     // do the FASTQ->BAM rejection and the BAM->FASTQ conversion, so a rejected
@@ -159,7 +168,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
             // truncated BAM with a success exit code.
             sink.finish()?;
-            tracing::debug!("processing finished in {:?}", t0.elapsed());
+            tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
             obs.finish(&stats);
             return Ok(());
         },
@@ -176,7 +185,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             cfg.render_workers = b.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
             writer.finish()?;
-            tracing::debug!("processing finished in {:?}", t0.elapsed());
+            tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
             obs.finish(&stats);
             return Ok(());
         },
@@ -200,7 +209,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let records = io::fastq::reader_from(source, gz_in);
     let stats = pipeline::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
-    tracing::debug!("processing finished in {:?}", t0.elapsed());
+    tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
     obs.finish(&stats);
     Ok(())
 }
@@ -295,12 +304,6 @@ fn run_folder(
     // overwriting either while merging the rest is silent data loss. The merged
     // output must live outside the input directory.
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
-    tracing::info!(
-        "Merging {} {:?} file(s) from {}",
-        paths.len(),
-        family,
-        dir.display()
-    );
     let family_fmt = match family {
         io::dir::Family::Fastq => Format::Fastq,
         io::dir::Family::Bam => Format::Bam,
@@ -310,12 +313,26 @@ fn run_folder(
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
 
+    // Line mode only (this doubles as the folder-mode start line): bar mode stays
+    // clean of everything but the bar itself, warnings/errors, and the summary.
+    if obs.shows_lines() {
+        tracing::info!(
+            "Merging {} {} file(s) from {}, writing {} ({} threads)",
+            paths.len(),
+            family_fmt.label(),
+            dir.display(),
+            out_fmt.label(),
+            cfg.threads
+        );
+    }
+
     let counters = std::sync::Arc::new(pipeline::Counters::default());
     obs.start(None, counters.clone());
 
     let t0 = std::time::Instant::now();
     tracing::debug!(
-        "processing folder {family:?} -> {out_fmt:?} with {} threads",
+        "Processing folder ({}), {} threads",
+        family_fmt.label(),
         cfg.threads
     );
 
@@ -338,7 +355,7 @@ fn run_folder(
             let records = io::dir::fastq_records(&paths);
             let stats = pipeline::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
-            tracing::debug!("processing finished in {:?}", t0.elapsed());
+            tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
             obs.finish(&stats);
             Ok(())
         },
@@ -360,7 +377,7 @@ fn run_folder(
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
-                tracing::debug!("processing finished in {:?}", t0.elapsed());
+                tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
                 obs.finish(&stats);
                 Ok(())
             },
@@ -376,7 +393,7 @@ fn run_folder(
                 cfg.render_workers = b.render;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
                 writer.finish()?;
-                tracing::debug!("processing finished in {:?}", t0.elapsed());
+                tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
                 obs.finish(&stats);
                 Ok(())
             },
@@ -426,7 +443,9 @@ pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
 fn note_tags_ignored(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) {
     if !matches!(cfg.fastq_tags, config::FastqTags::All) {
         tracing::warn!(
-            "note: --fastq-tags applies only to BAM->FASTQ output; ignored for {in_fmt:?}->{out_fmt:?}"
+            "Note: --fastq-tags applies only to BAM-to-FASTQ output; ignored for {} to {}",
+            in_fmt.label(),
+            out_fmt.label()
         );
     }
 }

@@ -12,6 +12,17 @@ pub enum Format {
     Bam,
 }
 
+impl Format {
+    /// Human-facing label used in log/summary output: `FASTQ`, `FASTQ.gz`, `BAM`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Format::Fastq => "FASTQ",
+            Format::FastqGz => "FASTQ.gz",
+            Format::Bam => "BAM",
+        }
+    }
+}
+
 /// Extension-based detection. Recognises `.fastq`/`.fq`, the `.gz` variants, and `.bam`.
 pub fn from_extension(path: &Path) -> Option<Format> {
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
@@ -89,6 +100,13 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn format_labels() {
+        assert_eq!(Format::Fastq.label(), "FASTQ");
+        assert_eq!(Format::FastqGz.label(), "FASTQ.gz");
+        assert_eq!(Format::Bam.label(), "BAM");
+    }
 
     #[test]
     fn extensions() {

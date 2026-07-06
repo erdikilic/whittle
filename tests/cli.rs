@@ -167,7 +167,7 @@ fn default_run_prints_summary_to_stderr() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Kept 1 reads out of 1"));
+        .stderr(predicate::str::contains("Kept 1 of 1 reads"));
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn verbose_shows_phase_timing() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("processing")); // phase timing line appears at DEBUG
+        .stderr(predicate::str::contains("Processing")); // phase timing line appears at DEBUG
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn default_hides_debug() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("processing").not());
+        .stderr(predicate::str::contains("Processing").not());
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn whittle_log_overrides_verbosity_when_not_quiet() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("processing"));
+        .stderr(predicate::str::contains("Processing"));
 }
 
 #[test]

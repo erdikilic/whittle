@@ -258,6 +258,6 @@ fn fastq_tags_on_fastq_input_prints_ignored_note() {
         .assert()
         .success()
         .stderr(predicates::str::contains(
-            "--fastq-tags applies only to BAM->FASTQ",
+            "--fastq-tags applies only to BAM-to-FASTQ",
         ));
 }
