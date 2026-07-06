@@ -149,7 +149,7 @@ fn hard_linked_input_output_is_rejected_and_preserves_input() {
 
 #[test]
 fn quiet_suppresses_summary_but_keeps_stdout() {
-    // A minimal FASTQ over stdin; default run prints the "Kept" summary to stderr.
+    // A minimal FASTQ over stdin; default run prints the "Summary:" line to stderr.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .arg("--quiet")
@@ -157,17 +157,17 @@ fn quiet_suppresses_summary_but_keeps_stdout() {
         .assert()
         .success()
         .stdout(predicate::str::contains("@r1"))
-        .stderr(predicate::str::contains("Kept").not());
+        .stderr(predicate::str::contains("Summary:").not());
 }
 
 #[test]
 fn default_run_prints_summary_to_stderr() {
     let input = "@r1\nACGT\n+\nIIII\n";
-    whittle()
-        .write_stdin(input)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Kept 1 of 1 reads"));
+    whittle().write_stdin(input).assert().success().stderr(
+        predicate::str::contains("Summary:")
+            .and(predicate::str::contains("input reads"))
+            .and(predicate::str::contains("output reads")),
+    );
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn quiet_beats_whittle_log() {
         .assert()
         .success()
         .stdout(predicate::str::contains("@r1"))
-        .stderr(predicate::str::contains("Kept").not());
+        .stderr(predicate::str::contains("Summary:").not());
 }
 
 #[test]

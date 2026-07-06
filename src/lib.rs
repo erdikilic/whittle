@@ -9,7 +9,7 @@ pub mod qual;
 pub mod record;
 pub mod trim;
 
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 
 pub use config::Config;
 use gzp::deflate::Gzip;
@@ -109,10 +109,46 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             },
         },
     };
+
+    // Advisory only: an explicit --in-format always wins for actual detection
+    // (this never changes behavior), but it usually signals a mistake when it
+    // disagrees with the file's own extension — e.g. `--in-format bam` on a
+    // `.fastq` file. Extension-only check: skipped for stdin / no-extension.
+    if let Some(forced) = cfg.io.in_format
+        && let Some(detected) = in_path.and_then(io::from_extension)
+        && detected != forced
+    {
+        tracing::warn!(
+            "--in-format {} but the file extension looks like {}",
+            forced.label(),
+            detected.label()
+        );
+    }
+
     let out_fmt = cfg
         .io
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
+
+    // Hard-error before any writer/output file is created: dumping BAM or
+    // gzipped bytes into an interactive terminal is never useful and almost
+    // always means the user forgot `-o`/a redirect.
+    guard_stdout_binary(&cfg, out_fmt)?;
+
+    // Advisory only: no trimming, a pass-through filter, and no format
+    // conversion means the run just re-emits (almost) the same reads it read —
+    // usually not what was intended. Skipped for a conversion-only run
+    // (in_fmt != out_fmt), which is legitimate on its own.
+    let no_trim = cfg.trim.head == 0 && cfg.trim.tail == 0 && cfg.trim.quality.is_none();
+    let pass_through_filter = cfg.filter.min_length <= 1
+        && cfg.filter.max_length == usize::MAX
+        && cfg.filter.min_qual <= 0.0
+        && cfg.filter.max_qual >= 1000.0
+        && cfg.filter.min_gc.is_none()
+        && cfg.filter.max_gc.is_none();
+    if no_trim && pass_through_filter && in_fmt == out_fmt {
+        tracing::warn!("No trimming or filtering options set; output will mostly mirror the input");
+    }
 
     tracing::debug!(
         "Detected {} input in {}",
@@ -288,6 +324,34 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
     }
 }
 
+/// True iff writing `fmt`'s bytes to stdout would dump binary (BAM) or gzip
+/// (FASTQ.gz) data into an interactive terminal — never useful output, and
+/// almost always a forgotten `-o`/redirect. Plain FASTQ text is always fine.
+/// Pure (no I/O) so it's trivial to unit-test without a real TTY.
+fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bool) -> bool {
+    output_is_stdout && stdout_is_tty && matches!(fmt, io::Format::Bam | io::Format::FastqGz)
+}
+
+/// Hard-error before any writer/output file is created if `out_fmt` would land
+/// binary/gzip bytes on an interactive stdout (see `binary_to_terminal`).
+/// Shared by `run`'s single-file path and `run_folder`.
+fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> {
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    if binary_to_terminal(cfg.io.output.is_none(), out_fmt, stdout_is_tty) {
+        let ext = match out_fmt {
+            io::Format::Bam => "bam",
+            io::Format::FastqGz => "fastq.gz",
+            io::Format::Fastq => "fastq", // unreachable via binary_to_terminal, kept exhaustive
+        };
+        anyhow::bail!(
+            "refusing to write {} to a terminal — redirect to a file/pipe (e.g. `> out.{ext}`) \
+             or pass -o",
+            out_fmt.label()
+        );
+    }
+    Ok(())
+}
+
 /// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
 /// then merge all its read files into a single trimmed output using the same
 /// pipelines as the single-file path.
@@ -312,6 +376,10 @@ fn run_folder(
         .io
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
+
+    // Hard-error before any writer/output file is created (see `run`'s
+    // matching guard for the single-file path).
+    guard_stdout_binary(cfg, out_fmt)?;
 
     // Line mode only (this doubles as the folder-mode start line): bar mode stays
     // clean of everything but the bar itself, warnings/errors, and the summary.
@@ -506,6 +574,35 @@ mod tests {
     use noodles_sam::header::record::value::map::program::tag;
 
     use super::*;
+
+    #[test]
+    fn binary_to_terminal_flags_bam_on_a_tty_stdout() {
+        assert!(binary_to_terminal(true, io::Format::Bam, true));
+    }
+
+    #[test]
+    fn binary_to_terminal_flags_fastq_gz_on_a_tty_stdout() {
+        assert!(binary_to_terminal(true, io::Format::FastqGz, true));
+    }
+
+    #[test]
+    fn binary_to_terminal_allows_plain_fastq() {
+        // Plain text FASTQ on a terminal is normal/expected output.
+        assert!(!binary_to_terminal(true, io::Format::Fastq, true));
+    }
+
+    #[test]
+    fn binary_to_terminal_allows_when_output_file_given() {
+        // -o was given, so `output_is_stdout` is false regardless of format.
+        assert!(!binary_to_terminal(false, io::Format::Bam, true));
+    }
+
+    #[test]
+    fn binary_to_terminal_allows_when_not_a_tty() {
+        // Redirected to a file/pipe: not a terminal, so it's fine.
+        assert!(!binary_to_terminal(true, io::Format::Bam, false));
+        assert!(!binary_to_terminal(true, io::Format::FastqGz, false));
+    }
 
     /// Regression test for `d481c48`: a header with a dangling `@PG PP:` chain
     /// (a `PP` value that names a program ID not present in the header) used

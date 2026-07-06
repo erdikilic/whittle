@@ -245,26 +245,8 @@ impl ProgressHandle {
     pub fn finish(&mut self, stats: &Stats) {
         self.stop_ticker();
 
-        let pct = if stats.input_reads > 0 {
-            100.0 * stats.output_reads as f64 / stats.input_reads as f64
-        } else {
-            0.0
-        };
-        let mut msg = format!(
-            "Kept {} of {} reads ({pct:.1}%)",
-            commas(stats.output_reads),
-            commas(stats.input_reads),
-        );
-        if let Some(start) = self.start.take() {
-            let elapsed = start.elapsed();
-            let rate = stats.input_reads as f64 / elapsed.as_secs_f64().max(1e-9);
-            msg.push_str(&format!(
-                " in {} ({} reads/s)",
-                human_dur(elapsed),
-                human_count(rate.round() as u64)
-            ));
-        }
-        tracing::info!("{msg}");
+        let elapsed = self.start.take().map(|start| start.elapsed());
+        tracing::info!("{}", summary_line(stats, elapsed));
 
         if stats.malformed_tag_reads > 0 {
             tracing::warn!(
@@ -358,6 +340,25 @@ fn commas(n: u64) -> String {
         out.push(b as char);
     }
     out
+}
+
+/// The end-of-run summary line: `Summary: 1 input reads, 3 output reads in 2.00s`.
+/// Deliberately split-safe — no "kept X%" figure — because `--split-qual` can
+/// turn one input read into several output segments, so `output_reads` can
+/// legitimately exceed `input_reads` (a naive percentage would then read
+/// "300%"). `elapsed` is `None` when the caller never started a timer (e.g. a
+/// library caller using `ProgressHandle::disabled()`), in which case the
+/// trailing "in <dur>" clause is omitted.
+fn summary_line(stats: &Stats, elapsed: Option<Duration>) -> String {
+    let mut msg = format!(
+        "Summary: {} input reads, {} output reads",
+        commas(stats.input_reads),
+        commas(stats.output_reads),
+    );
+    if let Some(d) = elapsed {
+        msg.push_str(&format!(" in {}", human_dur(d)));
+    }
+    msg
 }
 
 /// Human-readable duration for the summary/debug lines: `420ms`, `1.42s`, `1m08s`, `1h02m`.
@@ -500,6 +501,35 @@ mod tests {
         assert_eq!(human_dur(Duration::from_millis(1_420)), "1.42s");
         assert_eq!(human_dur(Duration::from_secs(68)), "1m08s");
         assert_eq!(human_dur(Duration::from_secs(3_720)), "1h02m");
+    }
+
+    #[test]
+    fn summary_line_is_split_safe_with_no_percentage() {
+        // Regression: --split-qual can turn one input read into several output
+        // segments, so output_reads > input_reads is legitimate. The summary
+        // must not compute a "kept X%" figure off these counts.
+        let stats = Stats {
+            input_reads: 1,
+            output_reads: 3,
+            malformed_tag_reads: 0,
+        };
+        let s = summary_line(&stats, Some(Duration::from_secs(2)));
+        assert_eq!(s, "Summary: 1 input reads, 3 output reads in 2.00s");
+        assert!(!s.contains('%'));
+        assert!(!s.contains("Kept"));
+    }
+
+    #[test]
+    fn summary_line_omits_duration_when_elapsed_unknown() {
+        let stats = Stats {
+            input_reads: 5,
+            output_reads: 5,
+            malformed_tag_reads: 0,
+        };
+        assert_eq!(
+            summary_line(&stats, None),
+            "Summary: 5 input reads, 5 output reads"
+        );
     }
 
     #[test]
