@@ -262,14 +262,16 @@ pub fn format_progress(
         0.0
     };
     let mut s = format!(
-        "[{}] {} in → {} kept ({:.0}%) · {:.0}k reads/s · {:.0} MB/s",
+        "[{}] {} in → {} kept ({:.0}%) · {:.0}k reads/s",
         fmt_hms(elapsed),
         human_count(input_reads),
         human_count(output_reads),
         kept_pct,
         rps / 1000.0,
-        mbps,
     );
+    if bytes > 0 {
+        s.push_str(&format!(" · {mbps:.0} MB/s"));
+    }
     if let Some(t) = total.filter(|&t| t > 0) {
         let pct = (100.0 * bytes as f64 / t as f64).min(100.0);
         s.push_str(&format!(" · {pct:.0}%"));
@@ -324,6 +326,10 @@ mod tests {
         assert!(s.contains("1.0M kept") || s.contains("1.1M kept"));
         assert!(s.contains("reads/s"));
         assert!(!s.contains('%') || s.contains("88%") || s.contains("87%")); // kept% present, no ETA%
+        assert!(
+            !s.contains("MB/s"),
+            "bytes=0 (untracked, e.g. folder-merge mode) must not render a misleading MB/s field: {s}"
+        );
     }
 
     #[test]
