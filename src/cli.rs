@@ -74,7 +74,8 @@ struct Cli {
     #[arg(long, help_heading = "Trimming")]
     update_moves: bool,
 
-    /// Adapter FASTA (each sequence >= 6 bp). Enables adapter trimming.
+    /// Adapter FASTA (each sequence >= the 11-bp minimum match length).
+    /// Enables adapter trimming.
     #[arg(short = 'a', long, help_heading = "Adapter trimming")]
     adapter_fasta: Option<PathBuf>,
     /// Built-in ONT adapter catalog. Enables adapter trimming.
@@ -278,7 +279,12 @@ pub fn parse() -> anyhow::Result<Config> {
     })
 }
 
-/// Read adapter sequences from a FASTA. Skips entries < 6 bp with a warning.
+/// Read adapter sequences from a FASTA. Lowercase acgt is uppercased and
+/// accepted; entries with any other non-ACGT byte (e.g. IUPAC ambiguity
+/// codes) are skipped with a warning, matching `preset::parse_catalog`'s
+/// ACGT-only rule. Entries shorter than `adapter::MIN_PATTERN_LEN` (the
+/// matcher's minimum pattern length) are also skipped with a warning, since a
+/// shorter pattern would never be matched anyway.
 fn read_adapter_fasta(path: &std::path::Path) -> anyhow::Result<Vec<crate::adapter::Adapter>> {
     use seq_io::fasta::{Reader, Record};
     let mut reader = Reader::from_path(path)
@@ -290,11 +296,19 @@ fn read_adapter_fasta(path: &std::path::Path) -> anyhow::Result<Vec<crate::adapt
             .seq()
             .iter()
             .filter(|b| !b.is_ascii_whitespace())
-            .copied()
+            .map(u8::to_ascii_uppercase)
             .collect();
         let name = String::from_utf8_lossy(rec.head()).into_owned();
-        if seq.len() < 6 {
-            eprintln!("[WARN] adapter {name:?} is < 6 bp; skipped");
+        if !seq.iter().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
+            eprintln!("[WARN] adapter {name:?} has non-ACGT bases; skipped");
+            continue;
+        }
+        if seq.len() < crate::adapter::MIN_PATTERN_LEN {
+            eprintln!(
+                "[WARN] adapter {name:?} is {} bp; shorter than the {}-bp minimum match length, skipped",
+                seq.len(),
+                crate::adapter::MIN_PATTERN_LEN
+            );
             continue;
         }
         out.push(crate::adapter::Adapter {
@@ -357,5 +371,52 @@ pub fn config_for_test_threads(
         verbosity: 0,
         quiet: true,
         threads_clamped: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // A 6-10bp entry used to pass this reader's old ">= 6bp" gate but could
+    // never actually match in `adapter::adapter_segments` (which silently
+    // ignores anything shorter than `MIN_PATTERN_LEN` = 11bp) — silently
+    // never trimming. The gate here must match that 11bp floor exactly.
+    #[test]
+    fn read_adapter_fasta_skips_entries_below_min_pattern_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapters.fasta");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, ">kept_20bp").unwrap();
+        writeln!(f, "ACGTACGTACGTACGTACGT").unwrap(); // 20 bp
+        writeln!(f, ">skipped_8bp").unwrap();
+        writeln!(f, "ACGTACGT").unwrap(); // 8 bp, below the 11bp MIN_PATTERN_LEN
+        drop(f);
+
+        let adapters = read_adapter_fasta(&path).unwrap();
+
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters[0].seq, b"ACGTACGTACGTACGTACGT".to_vec());
+    }
+
+    // Parity with `preset::parse_catalog`: entries with non-ACGT bases (IUPAC
+    // ambiguity codes like N) are rejected, not silently searched as-is.
+    #[test]
+    fn read_adapter_fasta_skips_non_acgt_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapters.fasta");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, ">kept_valid_20bp").unwrap();
+        writeln!(f, "ACGTACGTACGTACGTACGT").unwrap(); // 20 bp, valid ACGT
+        writeln!(f, ">skipped_n_20bp").unwrap();
+        writeln!(f, "ACGTACGTACGTACGTACGN").unwrap(); // 20 bp, but has an N
+        drop(f);
+
+        let adapters = read_adapter_fasta(&path).unwrap();
+
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters[0].name, "kept_valid_20bp");
+        assert_eq!(adapters[0].seq, b"ACGTACGTACGTACGTACGT".to_vec());
     }
 }

@@ -186,7 +186,7 @@ See **The MM/ML/ML guarantee** below.
 | `--qual-split <Q>` | Split the read at low-quality (< Q) runs, keeping each surviving segment as its own record |
 | `--qual-split-window <N>` | Smoothing window for `--qual-split` (default 1): a low-quality run shorter than this is tolerated rather than causing a split |
 | `--update-moves` | Keep ONT signal tags (`mv`/`ts`/`ns`/`sp`/`pi`) consistent through trimming for signal-aware tools (Remora, Clair3 v2) instead of dropping them. BAM→BAM only |
-| `-a`, `--adapter-fasta <FILE>` | Custom adapter/primer FASTA (sequences < 6 bp are skipped with a warning). Enables adapter trimming. See **Adapter trimming** below |
+| `-a`, `--adapter-fasta <FILE>` | Custom adapter/primer FASTA (sequences shorter than the 11 bp minimum match length are skipped with a warning). Enables adapter trimming. See **Adapter trimming** below |
 | `--adapter-preset {ont}` | Use the built-in ONT catalog instead of (or alongside) `--adapter-fasta`. Enables adapter trimming |
 | `--adapter-error-rate <F>` | End-match error tolerance as a fraction of adapter length (default 0.2); interior/chimera-split hits use half this budget |
 | `--adapter-end-size <N>` | Bases at each read end searched for a terminal adapter (default 150) |
@@ -257,9 +257,9 @@ surviving window:
 Adapter trimming is **opt-in and off by default** — every existing invocation
 of `whittle` behaves exactly as before. Turn it on with `-a`/`--adapter-fasta
 <FILE>` (your own adapter/primer sequences, one per FASTA record — each must
-be >= 6 bp; shorter entries are skipped with a warning) and/or
-`--adapter-preset ont` (the built-in ONT catalog, below); the two can be
-combined, and either one alone is enough to enable the feature.
+be >= the 11 bp minimum match length; shorter entries are skipped with a
+warning) and/or `--adapter-preset ont` (the built-in ONT catalog, below); the
+two can be combined, and either one alone is enough to enable the feature.
 
 Once enabled, every adapter is searched for on **both strands** (each
 sequence is also matched reverse-complemented, so it's found regardless of
@@ -271,7 +271,9 @@ read orientation), and `whittle` does two things per read:
 - **Chimera splitting** — an adapter matching in the read's interior (away
   from both ends) is treated as a chimera junction: the read is split there,
   the adapter excised, and each surviving side kept as its own segment. Pass
-  `--adapter-ends-only` to disable this and only trim ends.
+  `--adapter-ends-only` to disable this and only trim ends — this also skips
+  searching the interior entirely, so each adapter lookup only scans the two
+  end-zones (cheaper than the full-window scan chimera splitting requires).
 
 Catalog entries tagged 5'/3'/both only gate which end is checked for a
 *terminal* trim — any adapter can still trigger an interior split, since a
