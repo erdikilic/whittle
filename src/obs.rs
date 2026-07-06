@@ -2,8 +2,9 @@
 
 use tracing::level_filters::LevelFilter;
 
-/// Map the CLI verbosity/quiet flags to a tracing level. `WHITTLE_LOG`, when set,
-/// is applied separately (in `init`) and takes precedence over this.
+/// Map the CLI verbosity/quiet flags to a tracing level. `WHITTLE_LOG`, when set, is
+/// applied separately (in `init`) and overrides this — unless `quiet` is set, in which
+/// case `quiet` always wins (WARN) regardless of `WHITTLE_LOG`.
 pub fn level_from(verbosity: u8, quiet: bool) -> LevelFilter {
     if quiet {
         LevelFilter::WARN
@@ -200,10 +201,18 @@ impl Drop for ProgressHandle {
 }
 
 /// Install the global subscriber and return the progress handle. Call once, in the binary.
+///
+/// Precedence: `--quiet` always wins (WARN, regardless of `WHITTLE_LOG`); otherwise a
+/// non-empty `WHITTLE_LOG` overrides `-v`/`-vv`; otherwise the level is derived from
+/// `verbosity`.
 pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
-    let filter = match std::env::var("WHITTLE_LOG") {
-        Ok(s) if !s.is_empty() => EnvFilter::new(s),
-        _ => EnvFilter::new(level_from(verbosity, quiet).to_string()),
+    let filter = if quiet {
+        EnvFilter::new(level_from(verbosity, true).to_string())
+    } else {
+        match std::env::var("WHITTLE_LOG") {
+            Ok(s) if !s.is_empty() => EnvFilter::new(s),
+            _ => EnvFilter::new(level_from(verbosity, false).to_string()),
+        }
     };
     let multi = MultiProgress::new();
     let tty = io::stderr().is_terminal();

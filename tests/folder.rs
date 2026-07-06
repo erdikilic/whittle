@@ -9,7 +9,9 @@ use noodles_sam::alignment::record::Flags;
 use predicates::prelude::*;
 
 fn whittle() -> Command {
-    Command::cargo_bin("whittle").unwrap()
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd
 }
 
 #[test]

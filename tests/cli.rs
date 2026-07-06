@@ -2,7 +2,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn whittle() -> Command {
-    Command::cargo_bin("whittle").unwrap()
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd
 }
 
 #[test]
@@ -198,6 +200,32 @@ fn default_hides_debug() {
         .assert()
         .success()
         .stderr(predicate::str::contains("processing").not());
+}
+
+#[test]
+fn quiet_beats_whittle_log() {
+    // --quiet must win even when WHITTLE_LOG asks for verbose output.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .env("WHITTLE_LOG", "debug")
+        .arg("--quiet")
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("@r1"))
+        .stderr(predicate::str::contains("Kept").not());
+}
+
+#[test]
+fn whittle_log_overrides_verbosity_when_not_quiet() {
+    // Without --quiet, WHITTLE_LOG still raises the level above the CLI's default.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle()
+        .env("WHITTLE_LOG", "debug")
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("processing"));
 }
 
 #[test]
