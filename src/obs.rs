@@ -39,10 +39,34 @@ const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// Steady-tick interval for the indicatif spinner shown when `total` is
 /// unknown (no byte count to drive a determinate bar).
 const SPINNER_TICK: Duration = Duration::from_millis(120);
-/// Cadence of the periodic progress log line in `Mode::Line`. The ticker thread
-/// sleeps in much shorter `TICK_INTERVAL` steps so `stop_ticker`'s join stays
-/// prompt; it only actually logs once this much time has elapsed.
-const LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Resolve the periodic-log cadence for `Mode::Line`: 30s by default, 10s at
+/// `-v`/`-vv` (a verbose run wants more frequent feedback), overridable either
+/// way via `WHITTLE_PROGRESS_INTERVAL` (integer seconds). Pure — takes the env
+/// var's value as a parameter — so it's unit-testable without mutating real
+/// process env (which would race across parallel test threads); the real
+/// entry point, `resolve_log_interval`, is a thin wrapper reading the actual var.
+fn log_interval_from(verbosity: u8, env_override: Option<&str>) -> Duration {
+    if let Some(secs) = env_override.and_then(|s| s.parse::<u64>().ok()) {
+        return Duration::from_secs(secs);
+    }
+    if verbosity >= 1 {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(30)
+    }
+}
+
+/// The ticker thread sleeps in much shorter `TICK_INTERVAL` steps so
+/// `stop_ticker`'s join stays prompt; it only actually logs once
+/// `log_interval_from`'s duration has elapsed. Malformed
+/// `WHITTLE_PROGRESS_INTERVAL` values (unset, empty, non-numeric) are ignored.
+fn resolve_log_interval(verbosity: u8) -> Duration {
+    log_interval_from(
+        verbosity,
+        std::env::var("WHITTLE_PROGRESS_INTERVAL").ok().as_deref(),
+    )
+}
 
 /// Custom event formatter: `[YYYY-MM-DD HH:MM:SS] [LEVEL] Message`, with a
 /// bracketed local wall-clock timestamp (via `jiff`) AND a bracketed level.
@@ -106,12 +130,13 @@ impl<'a> MakeWriter<'a> for MpWriter {
 pub(crate) enum Mode {
     /// `--quiet`: warnings/errors only. No bar, no progress line, no summary.
     Off,
-    /// Default level on a real terminal: an animated bar/spinner, warnings/errors
-    /// (suspended above it), and the final summary. No periodic log lines, no debug.
+    /// Default level on a real terminal: a one-line start banner, an animated
+    /// bar/spinner, warnings/errors (suspended above it), and the final summary.
+    /// No periodic log lines, no debug.
     Bar,
-    /// `-v`/`-vv` on a TTY, or any non-TTY run: the start line, a periodic progress
-    /// line every `LOG_INTERVAL`, debug/trace output (per level), and the summary.
-    /// No bar.
+    /// `-v`/`-vv` on a TTY, or any non-TTY run: the full multi-line start banner, a
+    /// periodic progress line every `log_interval` (see `resolve_log_interval`),
+    /// debug/trace output (per level), and the summary. No bar.
     Line,
 }
 
@@ -126,6 +151,10 @@ pub struct ProgressHandle {
     /// summary's "in <dur> (<rate>)" tail. `None` if `start()` was never called
     /// (or after `finish()` has already consumed it).
     start: Option<Instant>,
+    /// `Mode::Line` periodic-log cadence, resolved once in `init()` from
+    /// verbosity/`WHITTLE_PROGRESS_INTERVAL` (see `resolve_log_interval`). Unused
+    /// outside `Mode::Line`.
+    log_interval: Duration,
 }
 
 impl ProgressHandle {
@@ -137,22 +166,32 @@ impl ProgressHandle {
             ticker: None,
             bar: None,
             start: None,
+            log_interval: Duration::from_secs(30),
         }
     }
 
     /// True iff this run is in line mode (the periodic-log, no-bar mode) — either
     /// `-v`/`-vv` on a TTY, or any non-TTY run. Used to gate output that must not
-    /// appear over a live bar (e.g. the one-time start line in `lib.rs`): bar mode
-    /// stays clean of everything but the bar itself, warnings/errors, and the final
-    /// summary. False in both `Mode::Bar` and `Mode::Off`.
+    /// appear over a live bar (e.g. the startup banner in `lib.rs`): bar mode
+    /// stays clean of everything but its own one-line start, the bar itself,
+    /// warnings/errors, and the final summary. False in both `Mode::Bar` and
+    /// `Mode::Off`.
     pub fn shows_lines(&self) -> bool {
         matches!(self.mode, Mode::Line)
+    }
+
+    /// True iff this run is in bar mode (the animated bar/spinner, default level on
+    /// a real terminal). Used to gate the one-line bar-mode start banner in
+    /// `lib.rs` — unlike line mode's full multi-line banner, bar mode gets exactly
+    /// one line so the bar stays clean. False in both `Mode::Line` and `Mode::Off`.
+    pub fn is_bar(&self) -> bool {
+        matches!(self.mode, Mode::Bar)
     }
 
     /// Begin live progress once the input is open. `Mode::Bar` → animated bar/spinner
     /// driven by a ticker thread that polls the shared counters every `TICK_INTERVAL`;
     /// `Mode::Line` → no bar, the ticker instead emits a periodic INFO line every
-    /// `LOG_INTERVAL`. `total` (input byte count) is `None` until byte counting lands;
+    /// `log_interval`. `total` (input byte count) is `None` until byte counting lands;
     /// a `None` total renders a spinner rather than a bar. No-op in `Mode::Off`.
     pub fn start(&mut self, total: Option<u64>, counters: Arc<Counters>) {
         if matches!(self.mode, Mode::Off) {
@@ -193,6 +232,7 @@ impl ProgressHandle {
         let stop_t = stop.clone();
         let bar_t = bar.clone();
         let mode = self.mode;
+        let log_interval = self.log_interval;
         let start = Instant::now();
         self.start = Some(start);
         let handle = std::thread::spawn(move || {
@@ -211,7 +251,7 @@ impl ProgressHandle {
                         }
                     },
                     Mode::Line => {
-                        if last_log.elapsed() >= LOG_INTERVAL {
+                        if last_log.elapsed() >= log_interval {
                             tracing::info!("{}", periodic_line(ir, by, total, start.elapsed()));
                             last_log = Instant::now();
                         }
@@ -242,7 +282,13 @@ impl ProgressHandle {
     /// Stop the ticker and clear the bar, then print the end-of-run summary through
     /// tracing (subject to the level filter). The ticker is joined and the bar cleared
     /// *before* logging so no stale bar/spinner frame is left behind the summary line.
-    pub fn finish(&mut self, stats: &Stats) {
+    /// `output` is the output path (or `<stdout>`) shown in the closing `Completed`
+    /// line — the end-of-run counterpart to the startup banner's `Output:` line.
+    /// `Completed` is always the last thing logged (after the malformed-tag note, if
+    /// any) so it closes out the run symmetrically with the banner that opened it.
+    /// Omitted when `elapsed` is unknown (a library caller using
+    /// `ProgressHandle::disabled()`, which never calls `start()`).
+    pub fn finish(&mut self, stats: &Stats, output: &str) {
         self.stop_ticker();
 
         let elapsed = self.start.take().map(|start| start.elapsed());
@@ -254,6 +300,10 @@ impl ProgressHandle {
                  length did not match the sequence; left unchanged",
                 stats.malformed_tag_reads
             );
+        }
+
+        if let Some(d) = elapsed {
+            tracing::info!("{}", completed_line(d, output));
         }
     }
 }
@@ -314,6 +364,7 @@ pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
         ticker: None,
         bar: None,
         start: None,
+        log_interval: resolve_log_interval(verbosity),
     }
 }
 
@@ -325,6 +376,29 @@ fn human_count(n: u64) -> String {
         format!("{:.0}k", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+/// Human-readable byte count for the startup banner's `Input:`/`Output:` fields:
+/// `5.4 GB`, `183 MB`, `512 B`. Decimal (SI, 1000-based) units — consistent with
+/// the MB/s figures already computed elsewhere in this module off `1_000_000.0`.
+/// Bytes render as a bare integer (no fractional byte makes sense); above that,
+/// values under 10 in their unit get one decimal place (`5.4 GB`), 10 and over
+/// round to a whole number (`183 MB`).
+pub(crate) fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut val = n as f64;
+    let mut unit = 0usize;
+    while val >= 1000.0 && unit + 1 < UNITS.len() {
+        val /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} {}", UNITS[0])
+    } else if val < 10.0 {
+        format!("{val:.1} {}", UNITS[unit])
+    } else {
+        format!("{val:.0} {}", UNITS[unit])
     }
 }
 
@@ -361,8 +435,10 @@ fn summary_line(stats: &Stats, elapsed: Option<Duration>) -> String {
     msg
 }
 
-/// Human-readable duration for the summary/debug lines: `420ms`, `1.42s`, `1m08s`, `1h02m`.
-pub(crate) fn human_dur(d: Duration) -> String {
+/// Human-readable duration for the summary/debug/closer lines: `420ms`, `1.42s`,
+/// `1m08s`, `1h02m`. `pub`: `main.rs`'s failure path calls this directly to render
+/// the "Failed after ..." elapsed time before any run-scoped state exists.
+pub fn human_dur(d: Duration) -> String {
     let secs = d.as_secs_f64();
     if secs < 1.0 {
         format!("{}ms", d.as_millis())
@@ -375,6 +451,14 @@ pub(crate) fn human_dur(d: Duration) -> String {
         let total = d.as_secs();
         format!("{}h{:02}m", total / 3600, (total % 3600) / 60)
     }
+}
+
+/// The end-of-run closer, emitted after the summary (and after the malformed-tag
+/// note, if any) so it's always the true last line of a run — the end-of-run
+/// counterpart to the startup banner's `Output:` line: `Completed in 2.00s,
+/// output /path/to/out.fastq.gz`.
+fn completed_line(elapsed: Duration, output: &str) -> String {
+    format!("Completed in {}, output {output}", human_dur(elapsed))
 }
 
 /// `HH:MM:SS`-style duration, for the periodic line's ETA field (indicatif draws its
@@ -401,15 +485,17 @@ fn bar_message(input_reads: u64, bytes: u64, elapsed: Duration) -> String {
     s
 }
 
-/// Line-mode periodic progress log, emitted at INFO every `LOG_INTERVAL`:
-/// `1,200,000 reads, 42%, 45k reads/s, 380 MB/s, ETA 00:00:40`. Fields, in order:
-/// full-precision read count, `%` complete (if `total` bytes known), reads/s, MB/s
-/// (if any bytes have been read), ETA (if `total` known).
+/// Line-mode periodic progress log, emitted at INFO every `log_interval` (see
+/// `resolve_log_interval`): `Processed 1,200,000 input reads, 42%, 45k reads/s,
+/// 380 MB/s, ETA 00:00:40`. Fields, in order: full-precision *input* read count
+/// (explicit — this is reads consumed, not reads emitted, which can legitimately
+/// differ under `--split-qual`), `%` complete (if `total` bytes known), reads/s,
+/// MB/s (if any bytes have been read), ETA (if `total` known).
 fn periodic_line(input_reads: u64, bytes: u64, total: Option<u64>, elapsed: Duration) -> String {
     let secs = elapsed.as_secs_f64().max(1e-3);
     let rps = input_reads as f64 / secs;
 
-    let mut s = format!("{} reads", commas(input_reads));
+    let mut s = format!("Processed {} input reads", commas(input_reads));
     if let Some(t) = total.filter(|&t| t > 0) {
         let pct = (100.0 * bytes as f64 / t as f64).min(100.0);
         s.push_str(&format!(", {pct:.0}%"));
@@ -444,6 +530,7 @@ mod tests {
             ticker: None,
             bar: None,
             start: None,
+            log_interval: Duration::from_secs(30),
         };
         h.start(None, Arc::new(Counters::default()));
         assert!(h.ticker.is_some(), "start() should have spawned a ticker");
@@ -461,6 +548,7 @@ mod tests {
             ticker: None,
             bar: None,
             start: None,
+            log_interval: Duration::from_secs(30),
         };
         h.start(Some(1_000), Arc::new(Counters::default()));
         assert!(h.ticker.is_some(), "start() should have spawned a ticker");
@@ -504,6 +592,51 @@ mod tests {
     }
 
     #[test]
+    fn human_bytes_formats_magnitudes() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(183_000_000), "183 MB");
+        assert_eq!(human_bytes(5_400_000_000), "5.4 GB");
+        // 1000 bytes rolls over to the next unit rather than staying "1000 B".
+        assert_eq!(human_bytes(1_000), "1.0 KB");
+    }
+
+    #[test]
+    fn log_interval_defaults_to_30s_and_10s_when_verbose() {
+        assert_eq!(log_interval_from(0, None), Duration::from_secs(30));
+        assert_eq!(log_interval_from(1, None), Duration::from_secs(10));
+        assert_eq!(log_interval_from(2, None), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn log_interval_env_override_wins_either_way() {
+        assert_eq!(log_interval_from(0, Some("5")), Duration::from_secs(5));
+        assert_eq!(log_interval_from(1, Some("60")), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn log_interval_ignores_unparseable_env_override() {
+        assert_eq!(
+            log_interval_from(0, Some("not-a-number")),
+            Duration::from_secs(30)
+        );
+        assert_eq!(log_interval_from(0, Some("")), Duration::from_secs(30));
+        assert_eq!(log_interval_from(1, Some("")), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn completed_line_formats_elapsed_and_output() {
+        assert_eq!(
+            completed_line(Duration::from_secs(2), "/tmp/out.fastq.gz"),
+            "Completed in 2.00s, output /tmp/out.fastq.gz"
+        );
+        assert_eq!(
+            completed_line(Duration::from_millis(420), "<stdout>"),
+            "Completed in 420ms, output <stdout>"
+        );
+    }
+
+    #[test]
     fn summary_line_is_split_safe_with_no_percentage() {
         // Regression: --split-qual can turn one input read into several output
         // segments, so output_reads > input_reads is legitimate. The summary
@@ -535,7 +668,7 @@ mod tests {
     #[test]
     fn periodic_line_without_total_has_no_percent_or_eta() {
         let s = periodic_line(1_200_000, 0, None, Duration::from_secs(10));
-        assert!(s.contains("1,200,000 reads"));
+        assert!(s.contains("Processed 1,200,000 input reads"));
         assert!(s.contains("reads/s"));
         assert!(!s.contains('%'));
         assert!(!s.contains("ETA"));

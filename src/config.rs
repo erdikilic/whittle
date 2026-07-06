@@ -109,6 +109,16 @@ pub struct ThreadBudget {
     pub encode: usize,
 }
 
+impl ThreadBudget {
+    /// Sum across all three stages — the resolved total worker count shown in
+    /// the startup banner's `Threads: {total} total (...)` line. May exceed the
+    /// requested `-t` value at very low counts, since `thread_budget` floors
+    /// `render`/`encode` at >= 1 each even when the overall total is 1.
+    pub fn total(&self) -> usize {
+        self.decode + self.render + self.encode
+    }
+}
+
 /// The output compression stage's weight, for thread budgeting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodeKind {
@@ -258,6 +268,19 @@ mod tests {
                 for e in [None, Bgzf, Gzip] {
                     let b = thread_budget(t, rh, e);
                     assert!(b.decode >= 1 && b.render >= 1 && b.encode >= 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn thread_budget_total_sums_all_three_stages() {
+        use EncodeKind::*;
+        for t in [1usize, 2, 8, 16] {
+            for rh in [true, false] {
+                for e in [None, Bgzf, Gzip] {
+                    let b = thread_budget(t, rh, e);
+                    assert_eq!(b.total(), b.decode + b.render + b.encode);
                 }
             }
         }

@@ -229,6 +229,46 @@ fn whittle_log_overrides_verbosity_when_not_quiet() {
 }
 
 #[test]
+fn line_mode_banner_and_closer_appear_in_order() {
+    // assert_cmd captures stderr to a pipe (non-tty), so this always runs in
+    // line mode regardless of verbosity — the full startup banner plus the
+    // Completed closer should appear, in order.
+    let input = "@r1\nACGT\n+\nIIII\n";
+    whittle().write_stdin(input).assert().success().stderr(
+        predicate::str::contains("whittle ")
+            .and(predicate::str::contains("Command:"))
+            .and(predicate::str::contains("Trimming"))
+            .and(predicate::str::contains("Input: <stdin>"))
+            .and(predicate::str::contains("Output: <stdout>"))
+            .and(predicate::str::contains("Threads:"))
+            .and(predicate::str::contains("Filters:"))
+            .and(predicate::str::contains("Summary:"))
+            .and(predicate::str::contains("Completed in")),
+    );
+}
+
+#[test]
+fn failure_path_prints_a_single_failed_after_line() {
+    // The reworked `main.rs` failure path must print one clean "Failed after
+    // ...: <message>" line via tracing (not a second, differently-formatted
+    // anyhow dump from the default `fn main() -> anyhow::Result<()>` pattern).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reads.fastq");
+    std::fs::write(&path, "@r1\nACGT\n+\nIIII\n").unwrap();
+
+    whittle()
+        .arg("-i")
+        .arg(&path)
+        .arg("-o")
+        .arg(&path)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("Failed after").and(predicate::str::contains("same file")),
+        );
+}
+
+#[test]
 fn gz_output_roundtrips() {
     use std::io::Read;
     let dir = tempfile::tempdir().unwrap();
