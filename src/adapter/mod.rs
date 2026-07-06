@@ -44,6 +44,10 @@ pub const MIN_PATTERN_LEN: usize = 11;
 ///   - terminal hits within `end_size` of an end trim that end inward;
 ///   - interior hits (stricter `k_mid`) excise and split.
 ///
+/// When `cfg.split` is false (`--adapter-ends-only`), only the two end-zones
+/// are searched at all — the interior is never scanned, since no hit found
+/// there could ever be actioned.
+///
 /// Returns `[start,end)` spans in `window` coordinates.
 pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
     let n = window.len();
@@ -67,16 +71,40 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
         }
         let k_end = (cfg.error_rate * len as f64).floor() as usize;
         let k_mid = (0.5 * cfg.error_rate * len as f64).floor() as usize;
-        for h in hits(&mut searcher, &ad.seq, window, k_end) {
-            let near5 = h.start <= end_size && matches!(ad.end, End::Five | End::Both);
-            let near3 =
-                h.end >= n.saturating_sub(end_size) && matches!(ad.end, End::Three | End::Both);
-            if near5 {
-                lo = lo.max(h.end);
-            } else if near3 {
-                hi = hi.min(h.start);
-            } else if cfg.split && h.cost <= k_mid {
-                interior.push((h.start, h.end));
+        if cfg.split {
+            // Whole-window search: terminal hits trim, interior hits (within
+            // k_mid) collect for splitting.
+            for h in hits(&mut searcher, &ad.seq, window, k_end) {
+                let near5 = h.start <= end_size && matches!(ad.end, End::Five | End::Both);
+                let near3 =
+                    h.end >= n.saturating_sub(end_size) && matches!(ad.end, End::Three | End::Both);
+                if near5 {
+                    lo = lo.max(h.end);
+                } else if near3 {
+                    hi = hi.min(h.start);
+                } else if h.cost <= k_mid {
+                    interior.push((h.start, h.end));
+                }
+            }
+        } else {
+            // Ends-only: search only the two end-zones, never the interior.
+            // A terminal 5' hit has `h.start <= end_size` but its `h.end` can
+            // extend up to `end_size + len`, so the head zone must be that
+            // wide (not just `end_size`) or a straddling terminal adapter
+            // would be missed entirely. Symmetric for the tail zone.
+            let head_end = (end_size + len).min(n);
+            for h in hits(&mut searcher, &ad.seq, &window[..head_end], k_end) {
+                // Zone starts at 0, so h's coords are already window coords.
+                if h.start <= end_size && matches!(ad.end, End::Five | End::Both) {
+                    lo = lo.max(h.end);
+                }
+            }
+            let tail_start = n.saturating_sub(end_size + len);
+            for h in hits(&mut searcher, &ad.seq, &window[tail_start..], k_end) {
+                let (s, e) = (tail_start + h.start, tail_start + h.end);
+                if e >= n.saturating_sub(end_size) && matches!(ad.end, End::Three | End::Both) {
+                    hi = hi.min(s);
+                }
             }
         }
     }
@@ -177,6 +205,51 @@ mod segment_tests {
         w.extend_from_slice(b"CCCCCCCCCCCCCCCCCCCCCCCC");
         let c = cfg(vec![ad("mid", adapter, End::Both)], false); // ends-only
         assert_eq!(adapter_segments(&w, &c), vec![(0, w.len())]);
+    }
+
+    #[test]
+    fn ends_only_trims_both_terminal_adapters() {
+        // [5' adapter][insert][3' adapter], ends-only mode: both ends must
+        // still trim to the insert even though only the two end-zones (not
+        // the whole window) are searched.
+        let adapter5 = b"ACGTACGTACGT"; // 12 bp
+        let adapter3 = b"TTTTGGGGCCCC"; // 12 bp, distinct from adapter5
+        let insert = b"AAAAAAAAAAAA"; // 12 bp
+        let mut w = adapter5.to_vec();
+        w.extend_from_slice(insert);
+        w.extend_from_slice(adapter3);
+        let c = cfg(
+            vec![
+                ad("five", adapter5, End::Five),
+                ad("three", adapter3, End::Three),
+            ],
+            false, // ends-only
+        );
+        assert_eq!(adapter_segments(&w, &c), vec![(12, 24)]);
+    }
+
+    #[test]
+    fn ends_only_trims_adapter_straddling_end_size() {
+        // A terminal 5' adapter whose match STARTS within end_size but ENDS
+        // beyond it: end_size=4, a 12bp adapter starting at position 2, so
+        // it spans [2,14) crossing the end_size=4 boundary. If the ends-only
+        // head zone were naively sized as `window[..end_size]` (4 bytes),
+        // this adapter (needing ~12 bytes of text) could never be found, and
+        // the read would come back untrimmed. With the correct
+        // `end_size + len` zone sizing, the head zone is `window[..16]`,
+        // which fully contains the match.
+        let adapter = b"ACGTACGTACGT"; // 12 bp
+        let mut w = b"AA".to_vec(); // 2 bp prefix -> adapter starts at position 2
+        w.extend_from_slice(adapter); // adapter occupies [2, 14)
+        w.extend_from_slice(b"CCCCCCCCCCCCCCCCCCCC"); // 20 bp tail
+        let c = AdapterConfig {
+            adapters: vec![ad("five", adapter, End::Five)],
+            error_rate: 0.2,
+            end_size: 4,
+            split: false, // ends-only
+        };
+        let segs = adapter_segments(&w, &c);
+        assert_eq!(segs, vec![(14, w.len())]);
     }
 
     #[test]

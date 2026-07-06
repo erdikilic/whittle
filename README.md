@@ -271,7 +271,9 @@ read orientation), and `whittle` does two things per read:
 - **Chimera splitting** — an adapter matching in the read's interior (away
   from both ends) is treated as a chimera junction: the read is split there,
   the adapter excised, and each surviving side kept as its own segment. Pass
-  `--adapter-ends-only` to disable this and only trim ends.
+  `--adapter-ends-only` to disable this and only trim ends — this also skips
+  searching the interior entirely, so each adapter lookup only scans the two
+  end-zones (cheaper than the full-window scan chimera splitting requires).
 
 Catalog entries tagged 5'/3'/both only gate which end is checked for a
 *terminal* trim — any adapter can still trigger an interior split, since a
