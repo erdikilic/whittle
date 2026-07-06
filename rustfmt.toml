@@ -1,4 +1,4 @@
-# Formatting configuration for `chopping`.
+# Formatting configuration for `whittle`.
 #
 # The unstable options in the "nightly" sections require the nightly toolchain:
 # `cargo +nightly fmt`. Stable `cargo fmt` still runs and passes `--check` — it

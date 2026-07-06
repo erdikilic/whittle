@@ -8,8 +8,8 @@ use noodles_sam::alignment::io::Write as _;
 use noodles_sam::alignment::record::Flags;
 use predicates::prelude::*;
 
-fn chopping() -> Command {
-    Command::cargo_bin("chopping").unwrap()
+fn whittle() -> Command {
+    Command::cargo_bin("whittle").unwrap()
 }
 
 #[test]
@@ -20,7 +20,7 @@ fn folder_merge_fastq_sorted_and_ignores_non_read_files() {
     std::fs::write(dir.path().join("sequencing_summary.txt"), "junk\n").unwrap(); // ignored
     let out = dir.path().join("merged.fastq");
 
-    chopping()
+    whittle()
         .arg("-i")
         .arg(dir.path())
         .arg("-o")
@@ -54,7 +54,7 @@ fn folder_merge_bam_two_files() {
     write_ubam(&dir.path().join("b.bam"), b"r2", b"TTTTGGGG", vec![40; 8]);
     let out = dir.path().join("merged.bam");
 
-    chopping()
+    whittle()
         .arg("-i")
         .arg(dir.path())
         .arg("-o")
@@ -63,14 +63,14 @@ fn folder_merge_bam_two_files() {
         .assert()
         .success();
 
-    // Read the merged BAM back: 2 records, @PG chopping present.
+    // Read the merged BAM back: 2 records, @PG whittle present.
     let mut r = bam::io::Reader::new(File::open(&out).unwrap());
     let hdr = r.read_header().unwrap();
     assert!(
         hdr.programs()
             .roots()
-            .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"chopping"),
-        "expected @PG chopping in merged header"
+            .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"whittle"),
+        "expected @PG whittle in merged header"
     );
     let mut count = 0usize;
     let mut buf = RecordBuf::default();
@@ -84,7 +84,7 @@ fn folder_merge_bam_two_files() {
 fn empty_folder_errors() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
-    chopping()
+    whittle()
         .arg("-i")
         .arg(dir.path())
         .assert()
@@ -94,7 +94,7 @@ fn empty_folder_errors() {
 
 #[test]
 fn folder_output_matching_a_real_input_is_rejected_and_preserves_it() {
-    // `chopping -i dir -o dir/a.fastq` where a.fastq is a real input must
+    // `whittle -i dir -o dir/a.fastq` where a.fastq is a real input must
     // hard-error, not merge the rest over a.fastq (the reported data-loss bug).
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.fastq"), "@a\nACGT\n+\nIIII\n").unwrap();
@@ -102,7 +102,7 @@ fn folder_output_matching_a_real_input_is_rejected_and_preserves_it() {
     let a = dir.path().join("a.fastq");
     let before = std::fs::read(&a).unwrap();
 
-    chopping()
+    whittle()
         .arg("-i")
         .arg(dir.path())
         .arg("-o")
@@ -127,7 +127,7 @@ fn folder_rerun_with_output_inside_dir_hard_errors() {
     let out = dir.path().join("merged.fastq");
 
     // First run: merged.fastq doesn't exist yet -> succeeds, creates it.
-    chopping()
+    whittle()
         .arg("-i")
         .arg(dir.path())
         .arg("-o")
@@ -138,7 +138,7 @@ fn folder_rerun_with_output_inside_dir_hard_errors() {
     let first = std::fs::read_to_string(&out).unwrap();
 
     // Rerun: merged.fastq now exists in the dir -> hard error, prior output kept.
-    chopping()
+    whittle()
         .arg("-i")
         .arg(dir.path())
         .arg("-o")
@@ -162,7 +162,7 @@ fn folder_bam_to_fastq_rerun_with_output_inside_dir_hard_errors() {
     write_ubam(&dir.path().join("a.bam"), b"r1", b"ACGTACGT", vec![40; 8]);
     let out = dir.path().join("merged.fastq");
 
-    chopping()
+    whittle()
         .arg("-i")
         .arg(dir.path())
         .arg("-o")
@@ -172,7 +172,7 @@ fn folder_bam_to_fastq_rerun_with_output_inside_dir_hard_errors() {
         .success();
     let first = std::fs::read_to_string(&out).unwrap();
 
-    chopping()
+    whittle()
         .arg("-i")
         .arg(dir.path())
         .arg("-o")
@@ -214,7 +214,7 @@ fn folder_merge_bam_warns_on_differing_read_groups() {
     write_ubam_with_rg(&dir.path().join("b.bam"), b"r2", "rg_b");
     let out = dir.path().join("merged.bam");
 
-    chopping()
+    whittle()
         .arg("-i")
         .arg(dir.path())
         .arg("-o")

@@ -52,7 +52,7 @@ fn write_fixture(path: &Path) {
 }
 
 fn run(args: &[&str], input: &Path, output: &Path) {
-    Command::cargo_bin("chopping")
+    Command::cargo_bin("whittle")
         .unwrap()
         .args(args)
         .arg("-i")
@@ -247,7 +247,7 @@ fn fastq_tags_on_fastq_input_prints_ignored_note() {
     let out = dir.path().join("out.fastq");
     std::fs::write(&inp, b"@r\nACGT\n+\nIIII\n").unwrap();
 
-    Command::cargo_bin("chopping")
+    Command::cargo_bin("whittle")
         .unwrap()
         .args(["--fastq-tags", "none", "-i"])
         .arg(&inp)

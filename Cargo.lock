@@ -208,28 +208,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "chopping"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "bstr",
- "clap",
- "crossbeam-channel",
- "flate2",
- "gzp",
- "noodles-bam",
- "noodles-bgzf",
- "noodles-sam",
- "predicates",
- "rayon",
- "rust-htslib",
- "seq_io",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "clang-sys"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1584,6 +1562,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "whittle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "bstr",
+ "clap",
+ "crossbeam-channel",
+ "flate2",
+ "gzp",
+ "noodles-bam",
+ "noodles-bgzf",
+ "noodles-sam",
+ "predicates",
+ "rayon",
+ "rust-htslib",
+ "seq_io",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
