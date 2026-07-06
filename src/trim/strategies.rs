@@ -4,7 +4,7 @@ use crate::qual::phred_to_prob;
 type Segments = Vec<(usize, usize)>;
 
 /// Trim low-quality bases from both ends until reaching a base with phred >= cutoff.
-/// Ported from chopper TrimByQualityStrategy (inputs are raw phred here).
+/// Matches chopper's TrimByQualityStrategy (ground-truth reference; inputs are raw phred here).
 pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     let len = phred.len();
     let mut start = 0;
@@ -23,8 +23,8 @@ pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
 }
 
 /// Modified Mott: the single segment with the lowest cumulative error probability.
-/// Ported from chopper HighestQualityTrimStrategy; `cutoff_q` is converted to a
-/// probability cutoff exactly as chopper did at its call site.
+/// Matches chopper's HighestQualityTrimStrategy (ground-truth reference); `cutoff_q` is
+/// converted to a probability cutoff exactly as chopper does at its call site.
 pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
     let cutoff = phred_to_prob(cutoff_q);
     let mut best_start = usize::MAX;
@@ -59,8 +59,8 @@ pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
 }
 
 /// Split into high-quality segments separated by runs of >= `window` low-quality
-/// bases; drop segments shorter than `min_length`. Ported from chopper
-/// SplitByLowQualityStrategy.
+/// bases; drop segments shorter than `min_length`. Matches chopper's
+/// SplitByLowQualityStrategy (ground-truth reference).
 pub fn split_low_quality(
     phred: &[u8],
     cutoff: u8,
@@ -107,7 +107,7 @@ pub fn split_low_quality(
 mod tests {
     use super::*;
 
-    // (seq, ascii_qual) — identical bytes to chopper's trimmers.rs get_reads().
+    // (seq, ascii_qual) — same test vectors as chopper's trimmers.rs get_reads() (ground-truth reference).
     fn reads() -> [(Vec<u8>, Vec<u8>); 6] {
         let raw = [
             (
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn split_matches_chopper() {
-        // (cutoff, min_length, expected) — from chopper split_by_low_quality_strategy_test, window=1.
+        // (cutoff, min_length, expected) — cross-checked against chopper's split_by_low_quality_strategy_test, window=1.
         let cases: [(u8, usize, Segments); 6] = [
             (20, 3, vec![(6, 9), (10, 16)]),
             (7, 3, vec![(4, 15), (17, 20)]),

@@ -264,4 +264,4 @@ surviving window:
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Erdi Kilic.
+Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Erdi Kılıç.

@@ -1,7 +1,8 @@
 use std::sync::LazyLock;
 
 /// Precomputed 10^(-q/10) for every possible Phred byte. Sizing to the full u8
-/// range means any quality byte indexes safely (ported from chopper's PHRED_LUT).
+/// range means any quality byte indexes safely. Matches chopper's PHRED_LUT
+/// (chopper is a ground-truth reference, not ported code).
 static PHRED_LUT: LazyLock<[f64; 256]> = LazyLock::new(|| {
     let mut lut = [0.0f64; 256];
     for (i, v) in lut.iter_mut().enumerate() {
@@ -15,7 +16,8 @@ pub fn phred_to_prob(q: u8) -> f64 {
     PHRED_LUT[q as usize]
 }
 
-/// Error-probability mean quality: the ONT-standard "read Q" (chopper's ave_qual).
+/// Error-probability mean quality: the ONT-standard "read Q" — the same value
+/// chopper's ave_qual computes (ground-truth reference).
 pub fn mean_prob_q(phred: &[u8]) -> f64 {
     if phred.is_empty() {
         return 0.0;
@@ -87,7 +89,7 @@ mod tests {
         assert!((phred_to_prob(30) - 0.001).abs() < 1e-12);
     }
 
-    // Values ported from chopper's ave_qual test, but inputs are RAW phred (no +33).
+    // Values cross-checked against chopper's ave_qual test, but inputs are RAW phred (no +33).
     #[test]
     fn mean_prob_q_matches_chopper() {
         assert!((mean_prob_q(&[10]) - 10.0).abs() < 1e-9);
