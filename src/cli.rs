@@ -282,9 +282,7 @@ pub fn parse() -> anyhow::Result<Config> {
 /// Read adapter sequences from a FASTA. Skips entries shorter than
 /// `adapter::MIN_PATTERN_LEN` (the matcher's minimum pattern length) with a
 /// warning, since a shorter pattern would never be matched anyway.
-pub(crate) fn read_adapter_fasta(
-    path: &std::path::Path,
-) -> anyhow::Result<Vec<crate::adapter::Adapter>> {
+fn read_adapter_fasta(path: &std::path::Path) -> anyhow::Result<Vec<crate::adapter::Adapter>> {
     use seq_io::fasta::{Reader, Record};
     let mut reader = Reader::from_path(path)
         .map_err(|e| anyhow::anyhow!("--adapter-fasta {}: {e}", path.display()))?;
