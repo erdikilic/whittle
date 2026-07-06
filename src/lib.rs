@@ -232,6 +232,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             // re-opening stdin would drop the BGZF header. For a file, `source` is
             // the same handle positioned at the start.
             let (header, records) = io::bam::reader_from(source, budget.decode)?;
+            let records = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))?;
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
             let mut sink = io::bam::writer(
@@ -254,6 +255,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
             // See the note in the (Bam, Bam) arm: read from the chained `source`.
             let (_header, records) = io::bam::reader_from(source, budget.decode)?;
+            let records = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))?;
             let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
@@ -274,11 +276,94 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
 
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
+    let records = maybe_reduce_adapters(records, &mut cfg, |r| r.seq.as_slice())?;
     let stats = pipeline::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
     tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
     obs.finish(&stats, &out_desc);
     Ok(())
+}
+
+/// The noodles `RecordBuf` SEQ accessor: the base bytes (A/C/G/T/...), the same
+/// ones `pipeline/bam.rs` slices via `rec.sequence().as_ref()`. Kept as a named
+/// `fn` (rather than an inline closure per call site) so it can be passed as
+/// `seq_of` to `maybe_reduce_adapters` from both BAM dispatch arms.
+fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
+    rec.sequence().as_ref()
+}
+
+/// If adapter trimming is active and `cfg.adapter_sample > 0`, buffer up to
+/// `adapter_sample` records, detect which adapters are actually present in the
+/// sample, and reduce `cfg.adapters` to that set. Returns `buffered ++ rest`
+/// (the buffered prefix is empty when detection is off, so the returned
+/// iterator is a no-op wrapper in that case). `seq_of` extracts a record's SEQ.
+fn maybe_reduce_adapters<R, I, F>(
+    mut records: I,
+    cfg: &mut Config,
+    // Explicit HRTB so the returned SEQ borrows the record arg (elision may not
+    // link them on its own).
+    seq_of: F,
+) -> anyhow::Result<impl Iterator<Item = anyhow::Result<R>> + Send + use<R, I, F>>
+where
+    // `+ Send` / `R: Send`: the FASTQ and BAM pipelines' parallel paths require a
+    // `Send` record iterator. `seq_of` is only used inside this fn (not captured
+    // by the returned iterator), so it needs no `Send` bound.
+    I: Iterator<Item = anyhow::Result<R>> + Send,
+    R: Send,
+    F: for<'a> Fn(&'a R) -> &'a [u8],
+{
+    let mut sample: Vec<R> = Vec::new();
+    if let Some(ac) = cfg.adapters.clone()
+        && cfg.adapter_sample > 0
+    {
+        for _ in 0..cfg.adapter_sample {
+            match records.next() {
+                Some(Ok(r)) => sample.push(r),
+                Some(Err(e)) => return Err(e),
+                None => break,
+            }
+        }
+        let s = sample.len();
+        let full = ac.adapters.len();
+        let kept = if s < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION {
+            tracing::info!(
+                "Adapter presence: only {s} reads (< {}); using all {full} adapters",
+                crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+            );
+            ac.adapters.clone()
+        } else {
+            let seqs: Vec<&[u8]> = sample.iter().map(&seq_of).collect();
+            let kept = crate::adapter::detect::present(
+                &seqs,
+                &ac.adapters,
+                ac.error_rate,
+                ac.end_size,
+                ac.split,
+                crate::adapter::detect::presence_min(s),
+            );
+            let names: Vec<&str> = kept.iter().take(12).map(|a| a.name.as_str()).collect();
+            let more = kept.len().saturating_sub(names.len());
+            tracing::info!(
+                "Adapter presence: sampled {s} reads, kept {} of {full} adapters{}{}",
+                kept.len(),
+                if names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", names.join(", "))
+                },
+                if more > 0 {
+                    format!(" +{more} more")
+                } else {
+                    String::new()
+                },
+            );
+            kept
+        };
+        let mut reduced = ac.clone();
+        reduced.adapters = kept;
+        cfg.adapters = Some(reduced);
+    }
+    Ok(sample.into_iter().map(anyhow::Ok).chain(records))
 }
 
 /// FASTQ output writer: either a plain buffered writer, or a `gzp` parallel

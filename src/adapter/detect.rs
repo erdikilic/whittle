@@ -76,7 +76,11 @@ mod tests {
     use crate::adapter::End;
 
     fn ad(name: &str, seq: &[u8], end: End) -> Adapter {
-        Adapter { name: name.into(), seq: seq.to_vec(), end }
+        Adapter {
+            name: name.into(),
+            seq: seq.to_vec(),
+            end,
+        }
     }
 
     #[test]
@@ -95,7 +99,7 @@ mod tests {
         let mut reads: Vec<Vec<u8>> = Vec::new();
         for _ in 0..200 {
             let mut r = p.to_vec();
-            r.extend_from_slice(&vec![b'A'; 60]); // insert with no P/Q content
+            r.extend_from_slice(&[b'A'; 60]); // insert with no P/Q content
             reads.push(r);
         }
         let seqs: Vec<&[u8]> = reads.iter().map(|r| r.as_slice()).collect();
@@ -111,14 +115,20 @@ mod tests {
         let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", End::Both);
         // terminal: adapter at read start.
         let mut term = a.seq.clone();
-        term.extend_from_slice(&vec![b'A'; 60]);
+        term.extend_from_slice(&[b'A'; 60]);
         assert!(adapter_present_in(&mut s, &term, &a, 0.2, 150, false));
         // absent: pure-A read.
-        assert!(!adapter_present_in(&mut s, &vec![b'A'; 80], &a, 0.2, 150, true));
+        assert!(!adapter_present_in(&mut s, &[b'A'; 80], &a, 0.2, 150, true));
         // interior (deep, split on): adapter in the middle of a long read.
         let mut inter = vec![b'A'; 300];
         inter.splice(150..150, a.seq.iter().copied());
-        assert!(adapter_present_in(&mut s, &inter, &a, 0.2, 20, true), "interior found when split");
-        assert!(!adapter_present_in(&mut s, &inter, &a, 0.2, 20, false), "interior ignored when ends-only");
+        assert!(
+            adapter_present_in(&mut s, &inter, &a, 0.2, 20, true),
+            "interior found when split"
+        );
+        assert!(
+            !adapter_present_in(&mut s, &inter, &a, 0.2, 20, false),
+            "interior ignored when ends-only"
+        );
     }
 }

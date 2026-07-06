@@ -104,6 +104,100 @@ fn adapter_fasta_with_no_usable_entries_errors() {
         .stderr(predicates::str::contains("no usable adapters"));
 }
 
+// Build a FASTQ where every read starts with adapter A (present) and none
+// contains catalog barcode-ish B; with a custom 2-adapter FASTA, detection
+// should keep only A. We assert the log line AND that trimming still works.
+#[test]
+fn detection_keeps_present_drops_absent_and_still_trims() {
+    let present = "GGGGTTTTGGGGTTTTGGGG"; // 20bp present adapter
+    let absent = "ACGACGACGACGACGACGAC"; // 20bp never in the reads
+    let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40bp
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fa, ">present\n{present}\n>absent\n{absent}").unwrap();
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    for i in 0..200 {
+        writeln!(fq, "@r{i}\n{present}{insert}\n+\n{}", "I".repeat(60)).unwrap();
+    }
+    let out = Command::cargo_bin("whittle")
+        .unwrap()
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+            "-v",
+        ]) // -v so the info detection line reaches stderr
+        .assert()
+        .success();
+    let res = out.get_output();
+    let stderr = String::from_utf8_lossy(&res.stderr);
+    assert!(stderr.contains("kept 1 of 2 adapters"), "stderr: {stderr}");
+    let stdout = String::from_utf8_lossy(&res.stdout);
+    assert!(stdout.contains(insert), "insert kept");
+    assert!(
+        !stdout.contains(&format!("{present}{insert}")),
+        "present adapter trimmed"
+    );
+}
+
+#[test]
+fn adapter_sample_zero_disables_detection() {
+    let present = "GGGGTTTTGGGGTTTTGGGG";
+    let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fa, ">present\n{present}").unwrap();
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    for i in 0..200 {
+        writeln!(fq, "@r{i}\n{present}{insert}\n+\n{}", "I".repeat(60)).unwrap();
+    }
+    let res = Command::cargo_bin("whittle")
+        .unwrap()
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+            "--adapter-sample",
+            "0",
+            "-v",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&res.get_output().stderr);
+    assert!(
+        !stderr.contains("Adapter presence"),
+        "detection must be off: {stderr}"
+    );
+}
+
+#[test]
+fn tiny_input_skips_detection() {
+    let present = "GGGGTTTTGGGGTTTTGGGG";
+    let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fa, ">present\n{present}").unwrap();
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    for i in 0..10 {
+        writeln!(fq, "@r{i}\n{present}{insert}\n+\n{}", "I".repeat(60)).unwrap();
+    }
+    let res = Command::cargo_bin("whittle")
+        .unwrap()
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+            "-v",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&res.get_output().stderr);
+    assert!(
+        stderr.contains("using all"),
+        "tiny input must skip detection: {stderr}"
+    );
+}
+
 #[test]
 fn no_adapter_flag_is_byte_identical() {
     let mut fq = tempfile::NamedTempFile::new().unwrap();
