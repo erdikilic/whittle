@@ -4,7 +4,7 @@ use crate::qual::phred_to_prob;
 type Segments = Vec<(usize, usize)>;
 
 /// Trim low-quality bases from both ends until reaching a base with phred >= cutoff.
-/// Matches chopper's TrimByQualityStrategy (ground-truth reference; inputs are raw phred here).
+/// Inputs are raw phred here.
 pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     let len = phred.len();
     let mut start = 0;
@@ -23,8 +23,7 @@ pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
 }
 
 /// Modified Mott: the single segment with the lowest cumulative error probability.
-/// Matches chopper's HighestQualityTrimStrategy (ground-truth reference); `cutoff_q` is
-/// converted to a probability cutoff exactly as chopper does at its call site.
+/// `cutoff_q` is converted to a probability cutoff before scanning.
 pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
     let cutoff = phred_to_prob(cutoff_q);
     let mut best_start = usize::MAX;
@@ -59,8 +58,7 @@ pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
 }
 
 /// Split into high-quality segments separated by runs of >= `window` low-quality
-/// bases; drop segments shorter than `min_length`. Matches chopper's
-/// SplitByLowQualityStrategy (ground-truth reference).
+/// bases; drop segments shorter than `min_length`.
 pub fn split_low_quality(
     phred: &[u8],
     cutoff: u8,
@@ -107,7 +105,7 @@ pub fn split_low_quality(
 mod tests {
     use super::*;
 
-    // (seq, ascii_qual) — same test vectors as chopper's trimmers.rs get_reads() (ground-truth reference).
+    // (seq, ascii_qual) — shared test vectors for the trim-strategy tests below.
     fn reads() -> [(Vec<u8>, Vec<u8>); 6] {
         let raw = [
             (
@@ -139,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn trim_by_quality_matches_chopper() {
+    fn trim_by_quality_expected_ranges() {
         let expected: [(u8, Vec<(usize, usize)>); 6] = [
             (20, vec![(4, 20)]),
             (7, vec![(0, 20)]),
@@ -154,8 +152,8 @@ mod tests {
     }
 
     #[test]
-    fn best_segment_matches_chopper() {
-        // chopper cutoffs were probabilities; the equivalent Q scores are:
+    fn best_segment_expected_ranges() {
+        // These Q-score cutoffs are the equivalents of probability thresholds:
         // 0.01=Q20, 0.199..=Q7, 0.0316..=Q15, 0.0001=Q40.
         let expected: [(u8, Vec<(usize, usize)>); 6] = [
             (20, vec![(10, 16)]),
@@ -171,8 +169,8 @@ mod tests {
     }
 
     #[test]
-    fn split_matches_chopper() {
-        // (cutoff, min_length, expected) — cross-checked against chopper's split_by_low_quality_strategy_test, window=1.
+    fn split_expected_segments() {
+        // (cutoff, min_length, expected) with window=1.
         let cases: [(u8, usize, Segments); 6] = [
             (20, 3, vec![(6, 9), (10, 16)]),
             (7, 3, vec![(4, 15), (17, 20)]),
@@ -188,7 +186,7 @@ mod tests {
 
     #[test]
     fn split_window_tolerates_short_dips() {
-        // chopper window_test: III#IIII###III with Q40=I, Q2=#
+        // III#IIII###III with Q40=I, Q2=#
         let phred: Vec<u8> = b"III#IIII###III".iter().map(|&b| b - 33).collect();
         assert_eq!(
             split_low_quality(&phred, 10, 1, 1),
