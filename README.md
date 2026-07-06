@@ -1,5 +1,9 @@
 # whittle
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+![Rust](https://img.shields.io/badge/rust-2024%20edition-000000?logo=rust&logoColor=white)
+![Long reads](https://img.shields.io/badge/long--reads-ONT%20%7C%20PacBio-1f6feb)
+
 A tag-aware long-read (ONT/PacBio) trimmer. `whittle` filters and trims
 FASTQ and unaligned BAM (uBAM) reads the same way tools like `chopper` do —
 but when the input is uBAM, it also **recomputes the `MM`/`ML`/`MN`

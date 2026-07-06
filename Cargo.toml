@@ -3,7 +3,7 @@ name = "whittle"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Tag-aware long-read trimmer (ONT/PacBio): FASTQ/uBAM trimming + splitting with MM/ML reconstruction"
+description = "Tag-aware long-read (ONT/PacBio) trimmer for FASTQ/uBAM that reconstructs MM/ML base-modification tags on every trim and split"
 
 [[bin]]
 name = "whittle"
