@@ -2200,4 +2200,56 @@ mod tests {
             "t1 and t8 FASTQ must match as a multiset"
         );
     }
+
+    #[test]
+    fn interior_adapter_split_reconstructs_mods_per_segment() {
+        use crate::adapter::{Adapter, AdapterConfig, End};
+        // seq (64 bp): [flank1: C + 23 A][adapter GGGGTTTTGGGGTTTT (no C/A)][flank2: C + 23 A]
+        // Only two C's, at abs 0 and abs 40. MM "C+m,0,0;" marks both. ML [100,200].
+        let mut seq = b"CAAAAAAAAAAAAAAAAAAAAAAA".to_vec(); // C at 0
+        seq.extend_from_slice(b"GGGGTTTTGGGGTTTT"); // interior adapter, 16 bp
+        seq.extend_from_slice(b"CAAAAAAAAAAAAAAAAAAAAAAA"); // C at 40
+        let quals = vec![40u8; seq.len()];
+        let mut rec = ubam_with_mods(&seq, quals, b"C+m,0,0;", vec![100, 200]);
+        rec.data_mut().insert(
+            Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
+            Value::Int32(seq.len() as i32),
+        );
+
+        // BAM->FASTQ path (renders MM/ML/MN as header text), adapters active, split on.
+        let mut cfg = cfg_bam2fq(None, 0, FastqTags::All);
+        cfg.adapters = Some(AdapterConfig {
+            adapters: vec![Adapter {
+                name: "mid".into(),
+                seq: b"GGGGTTTTGGGGTTTT".to_vec(),
+                end: End::Both,
+            }],
+            error_rate: 0.2,
+            end_size: 8, // adapter at [24,40) is interior (> 8 from both ends of 64 bp)
+            split: true,
+        });
+
+        let mut out = Vec::new();
+        let stats = run_bam_to_fastq(
+            [Ok(rec)].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            stats.output_reads, 2,
+            "interior adapter splits into two subreads"
+        );
+        let s = String::from_utf8(out).unwrap();
+        // Each segment keeps exactly its own C mod, renumbered to occurrence 0.
+        assert!(
+            s.contains("@r1_segment_1\tMM:Z:C+m,0;\tML:B:C,100\tMN:i:24"),
+            "seg1 mods wrong: {s}"
+        );
+        assert!(
+            s.contains("@r1_segment_2\tMM:Z:C+m,0;\tML:B:C,200\tMN:i:24"),
+            "seg2 mods wrong: {s}"
+        );
+    }
 }

@@ -61,18 +61,34 @@ struct Cli {
     #[arg(short = 'T', long, default_value_t = 0, help_heading = "Trimming")]
     tail_crop: usize,
     #[arg(long, help_heading = "Trimming")]
-    trim_qual: Option<u8>,
+    qual_trim: Option<u8>,
     #[arg(long, help_heading = "Trimming")]
-    best_segment: Option<u8>,
+    qual_best_segment: Option<u8>,
     #[arg(long, help_heading = "Trimming")]
-    split_qual: Option<u8>,
+    qual_split: Option<u8>,
     #[arg(long, default_value_t = 1, help_heading = "Trimming")]
-    split_window: usize,
+    qual_split_window: usize,
     /// Keep ONT signal tags consistent through trimming (slice `mv`, update
     /// `ts`/`ns`/`sp`/`pi`) for signal-aware tools (Remora, Clair3 v2), instead
     /// of dropping them. BAM→BAM only.
     #[arg(long, help_heading = "Trimming")]
     update_moves: bool,
+
+    /// Adapter FASTA (each sequence >= 6 bp). Enables adapter trimming.
+    #[arg(short = 'a', long, help_heading = "Adapter trimming")]
+    adapter_fasta: Option<PathBuf>,
+    /// Built-in ONT adapter catalog. Enables adapter trimming.
+    #[arg(long, value_enum, default_value_t = AdapterPresetArg::None, help_heading = "Adapter trimming")]
+    adapter_preset: AdapterPresetArg,
+    /// End-match tolerance (fraction of adapter length). Interior splits use half.
+    #[arg(long, default_value_t = 0.2, help_heading = "Adapter trimming")]
+    adapter_error_rate: f64,
+    /// Bases at each read end searched for a terminal adapter.
+    #[arg(long, default_value_t = 150, help_heading = "Adapter trimming")]
+    adapter_end_size: usize,
+    /// Trim adapters at read ends only; never split on interior adapters.
+    #[arg(long, help_heading = "Adapter trimming")]
+    adapter_ends_only: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -109,20 +125,26 @@ impl From<QualModeArg> for QualMode {
     }
 }
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum AdapterPresetArg {
+    None,
+    Ont,
+}
+
 pub fn parse() -> anyhow::Result<Config> {
     let c = Cli::parse();
 
     // Mutual exclusion of the three quality trim ops.
     let n_quality = [
-        c.trim_qual.is_some(),
-        c.best_segment.is_some(),
-        c.split_qual.is_some(),
+        c.qual_trim.is_some(),
+        c.qual_best_segment.is_some(),
+        c.qual_split.is_some(),
     ]
     .iter()
     .filter(|&&b| b)
     .count();
     if n_quality > 1 {
-        anyhow::bail!("--trim-qual, --best-segment and --split-qual are mutually exclusive");
+        anyhow::bail!("--qual-trim, --qual-best-segment and --qual-split are mutually exclusive");
     }
     // bgzf (libdeflate) accepts up to 12 and gzip up to 9; cap at the common 0-9
     // so a single flag is valid for both compressed output formats.
@@ -168,19 +190,51 @@ pub fn parse() -> anyhow::Result<Config> {
         anyhow::bail!("--min-gc ({a}) must not exceed --max-gc ({b})");
     }
 
-    let quality = if let Some(q) = c.trim_qual {
+    let quality = if let Some(q) = c.qual_trim {
         Some(QualityOp::TrimQual(q))
-    } else if let Some(q) = c.best_segment {
+    } else if let Some(q) = c.qual_best_segment {
         Some(QualityOp::BestSegment(q))
-    } else if let Some(q) = c.split_qual {
+    } else if let Some(q) = c.qual_split {
         Some(QualityOp::Split {
             cutoff: q,
-            window: c.split_window,
+            window: c.qual_split_window,
         })
     } else {
         None
     };
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
+
+    let mut adapter_seqs: Vec<crate::adapter::Adapter> = Vec::new();
+    if c.adapter_preset == AdapterPresetArg::Ont {
+        adapter_seqs.extend(crate::adapter::preset::preset_ont());
+    }
+    if let Some(path) = &c.adapter_fasta {
+        adapter_seqs.extend(read_adapter_fasta(path)?);
+    }
+    let adapters = if adapter_seqs.is_empty() {
+        if c.adapter_ends_only {
+            eprintln!(
+                "[WARN] --adapter-ends-only has no effect without --adapter-fasta or --adapter-preset"
+            );
+        }
+        None
+    } else {
+        if !(0.0..=1.0).contains(&c.adapter_error_rate) {
+            anyhow::bail!(
+                "--adapter-error-rate ({}) must be between 0 and 1",
+                c.adapter_error_rate
+            );
+        }
+        if c.adapter_end_size == 0 {
+            anyhow::bail!("--adapter-end-size must be >= 1");
+        }
+        Some(crate::adapter::AdapterConfig {
+            adapters: adapter_seqs,
+            error_rate: c.adapter_error_rate,
+            end_size: c.adapter_end_size,
+            split: !c.adapter_ends_only,
+        })
+    };
 
     let ncpu = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -212,7 +266,7 @@ pub fn parse() -> anyhow::Result<Config> {
             tail: c.tail_crop,
             quality,
         },
-        adapters: None,
+        adapters,
         threads,
         fastq_tags,
         render_workers: 0,
@@ -222,6 +276,34 @@ pub fn parse() -> anyhow::Result<Config> {
         quiet: c.quiet,
         threads_clamped,
     })
+}
+
+/// Read adapter sequences from a FASTA. Skips entries < 6 bp with a warning.
+fn read_adapter_fasta(path: &std::path::Path) -> anyhow::Result<Vec<crate::adapter::Adapter>> {
+    use seq_io::fasta::{Reader, Record};
+    let mut reader = Reader::from_path(path)
+        .map_err(|e| anyhow::anyhow!("--adapter-fasta {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    while let Some(rec) = reader.next() {
+        let rec = rec.map_err(|e| anyhow::anyhow!("--adapter-fasta {}: {e}", path.display()))?;
+        let seq: Vec<u8> = rec
+            .seq()
+            .iter()
+            .filter(|b| !b.is_ascii_whitespace())
+            .copied()
+            .collect();
+        let name = String::from_utf8_lossy(rec.head()).into_owned();
+        if seq.len() < 6 {
+            eprintln!("[WARN] adapter {name:?} is < 6 bp; skipped");
+            continue;
+        }
+        out.push(crate::adapter::Adapter {
+            name,
+            seq,
+            end: crate::adapter::End::Both,
+        });
+    }
+    Ok(out)
 }
 
 /// Build a Config directly (used by integration tests). head/tail are fixed crops.

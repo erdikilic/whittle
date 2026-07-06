@@ -480,7 +480,7 @@ fn commas(n: u64) -> String {
 }
 
 /// The end-of-run summary line: `Summary: 1 input reads, 3 output reads in 2.00s`.
-/// Deliberately split-safe — no "kept X%" figure — because `--split-qual` can
+/// Deliberately split-safe — no "kept X%" figure — because `--qual-split` can
 /// turn one input read into several output segments, so `output_reads` can
 /// legitimately exceed `input_reads` (a naive percentage would then read
 /// "300%"). `elapsed` is `None` when the caller never started a timer (e.g. a
@@ -628,7 +628,7 @@ fn bar_message(input_reads: u64, bytes: u64, elapsed: Duration) -> String {
 /// `resolve_log_interval`): `Processed 1,200,000 input reads, 42%, 45k reads/s,
 /// 380 MB/s, ETA 00:00:40`. Fields, in order: full-precision *input* read count
 /// (explicit — this is reads consumed, not reads emitted, which can legitimately
-/// differ under `--split-qual`), `%` complete (if `total` bytes known), reads/s,
+/// differ under `--qual-split`), `%` complete (if `total` bytes known), reads/s,
 /// MB/s (if any bytes have been read), ETA (if `total` known).
 fn periodic_line(input_reads: u64, bytes: u64, total: Option<u64>, elapsed: Duration) -> String {
     let secs = elapsed.as_secs_f64().max(1e-3);
@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn summary_line_is_split_safe_with_no_percentage() {
-        // Regression: --split-qual can turn one input read into several output
+        // Regression: --qual-split can turn one input read into several output
         // segments, so output_reads > input_reads is legitimate. The summary
         // must not compute a "kept X%" figure off these counts.
         let stats = Stats {
