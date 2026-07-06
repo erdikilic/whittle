@@ -963,6 +963,9 @@ mod tests {
             render_workers: 0,
             compression_level: 6,
             update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
         };
 
         let result = run_bam(&header, [Ok(rec)].into_iter(), &mut sink, &cfg);
@@ -1065,6 +1068,9 @@ mod tests {
             render_workers: 0,
             compression_level: 6,
             update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
         }
     }
 
@@ -1770,6 +1776,9 @@ mod tests {
             render_workers: 0,
             compression_level: 6,
             update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
         };
         // 300 reads with mods so reconstruction runs on every one.
         let recs: Vec<RecordBuf> = (0..300)
@@ -1875,6 +1884,9 @@ mod tests {
             render_workers: 0,
             compression_level: 6,
             update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
         };
         let recs: Vec<anyhow::Result<RecordBuf>> = (0..3000)
             .map(|_| anyhow::Ok(RecordBuf::default()))
@@ -1943,6 +1955,9 @@ mod tests {
             render_workers: 0,
             compression_level: 6,
             update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
             (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -1997,6 +2012,9 @@ mod tests {
             render_workers: 0,
             compression_level: 6,
             update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
         };
         let recs: Vec<RecordBuf> = (0..300)
             .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))

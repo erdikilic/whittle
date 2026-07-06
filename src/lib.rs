@@ -3,6 +3,7 @@ pub mod config;
 pub mod filter;
 pub mod io;
 pub mod mods;
+pub mod obs;
 pub mod pipeline;
 pub mod qual;
 pub mod record;

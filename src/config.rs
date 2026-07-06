@@ -90,6 +90,10 @@ pub struct Config {
     /// (BAM→BAM only — see `pipeline::bam`). Default false drops `mv`/`ts`/`ns`/
     /// `sp`/`pi` on any trimmed read.
     pub update_moves: bool,
+    pub verbosity: u8,
+    pub quiet: bool,
+    /// `Some((requested, ncpu))` when `-t` was clamped down; drives a warning in `run`.
+    pub threads_clamped: Option<(usize, usize)>,
 }
 
 /// How a `-t` total worker budget splits across the pipeline stages. The split
@@ -141,6 +145,38 @@ pub fn thread_budget(total: usize, render_heavy: bool, encode: EncodeKind) -> Th
         decode: 1,
         render: render.max(1),
         encode: encode_n.max(1),
+    }
+}
+
+/// Resolve the worker-thread count. `None` (flag omitted) → all available CPUs;
+/// `Some(n)` → clamp into `[1, ncpu]`. The caller warns when it clamped down.
+pub fn resolve_threads(requested: Option<usize>, ncpu: usize) -> usize {
+    let ncpu = ncpu.max(1);
+    match requested {
+        None => ncpu,
+        Some(n) => n.clamp(1, ncpu),
+    }
+}
+
+#[cfg(test)]
+mod resolve_threads_tests {
+    use super::resolve_threads;
+
+    #[test]
+    fn auto_uses_all_cpus() {
+        assert_eq!(resolve_threads(None, 8), 8);
+    }
+    #[test]
+    fn in_range_is_unchanged() {
+        assert_eq!(resolve_threads(Some(4), 8), 4);
+    }
+    #[test]
+    fn over_spec_clamps_to_ncpu() {
+        assert_eq!(resolve_threads(Some(32), 8), 8);
+    }
+    #[test]
+    fn zero_floors_to_one() {
+        assert_eq!(resolve_threads(Some(0), 8), 1);
     }
 }
 
