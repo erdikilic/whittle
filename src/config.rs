@@ -73,6 +73,9 @@ pub struct Config {
     pub io: IoConfig,
     pub filter: FilterConfig,
     pub trim: TrimPlan,
+    /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
+    /// `--adapter-preset ont` was given (adapter trimming off — no per-read cost).
+    pub adapters: Option<crate::adapter::AdapterConfig>,
     pub threads: usize,
     pub fastq_tags: FastqTags,
     /// Resolved render-pool size for this dispatch; `0` means "fall back to

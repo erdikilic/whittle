@@ -27,7 +27,13 @@ pub fn run_fastq_seq<W: Write>(
             counters.record_filter_drop(reason);
             continue;
         }
-        let intervals = trim::apply(rec.seq.len(), &rec.qual, &cfg.trim, cfg.filter.min_length);
+        let intervals = trim::apply(
+            &rec.seq,
+            &rec.qual,
+            &cfg.trim,
+            cfg.adapters.as_ref(),
+            cfg.filter.min_length,
+        );
         if intervals.is_empty() {
             counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
             continue;
@@ -63,7 +69,13 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> (u64, u
         counters.record_filter_drop(reason);
         return (0, 0, Vec::new());
     }
-    let intervals = trim::apply(rec.seq.len(), &rec.qual, &cfg.trim, cfg.filter.min_length);
+    let intervals = trim::apply(
+        &rec.seq,
+        &rec.qual,
+        &cfg.trim,
+        cfg.adapters.as_ref(),
+        cfg.filter.min_length,
+    );
     if intervals.is_empty() {
         counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
         return (0, 0, Vec::new());
@@ -233,6 +245,7 @@ mod tests {
                 tail: 1,
                 quality: None,
             },
+            adapters: None,
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -276,6 +289,7 @@ mod tests {
                 tail: 1,
                 quality: None,
             },
+            adapters: None,
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -316,6 +330,7 @@ mod tests {
                     window: 1,
                 }),
             },
+            adapters: None,
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -360,6 +375,7 @@ mod tests {
                 tail: 0,
                 quality: None,
             },
+            adapters: None,
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -399,6 +415,7 @@ mod tests {
                 tail: 0,
                 quality: None,
             },
+            adapters: None,
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -439,6 +456,7 @@ mod tests {
                 tail: 0,
                 quality: None,
             },
+            adapters: None,
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -478,6 +496,7 @@ mod tests {
                 tail: 0,
                 quality: Some(QualityOp::TrimQual(20)),
             },
+            adapters: None,
             threads,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -560,6 +579,7 @@ mod tests {
                 tail: 0,
                 quality: None,
             },
+            adapters: None,
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -607,6 +627,7 @@ mod tests {
                 tail: 0,
                 quality: None,
             },
+            adapters: None,
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,

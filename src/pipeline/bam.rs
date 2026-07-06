@@ -515,7 +515,13 @@ fn run_bam_seq(
             counters.record_filter_drop(reason);
             continue;
         }
-        let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+        let intervals = trim::apply(
+            &seq,
+            &qual,
+            &cfg.trim,
+            cfg.adapters.as_ref(),
+            cfg.filter.min_length,
+        );
         if intervals.is_empty() {
             counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
             continue;
@@ -687,7 +693,13 @@ pub fn run_bam(
                 counters.record_filter_drop(reason);
                 return Ok((Vec::new(), 0));
             }
-            let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+            let intervals = trim::apply(
+                &seq,
+                &qual,
+                &cfg.trim,
+                cfg.adapters.as_ref(),
+                cfg.filter.min_length,
+            );
             if intervals.is_empty() {
                 counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
                 return Ok((Vec::new(), 0));
@@ -812,7 +824,13 @@ where
             continue;
         }
         let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
-        let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+        let intervals = trim::apply(
+            &seq,
+            &qual,
+            &cfg.trim,
+            cfg.adapters.as_ref(),
+            cfg.filter.min_length,
+        );
         if intervals.is_empty() {
             counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
             continue;
@@ -880,7 +898,13 @@ pub fn run_bam_to_fastq<W: Write + Send>(
                 return Ok((Vec::new(), 0));
             }
             let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
-            let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+            let intervals = trim::apply(
+                &seq,
+                &qual,
+                &cfg.trim,
+                cfg.adapters.as_ref(),
+                cfg.filter.min_length,
+            );
             if intervals.is_empty() {
                 counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
                 return Ok((Vec::new(), 0));
@@ -1016,6 +1040,7 @@ mod tests {
                 tail: 0,
                 quality: None,
             },
+            adapters: None,
             threads: 1,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -1127,6 +1152,7 @@ mod tests {
                 tail: 0,
                 quality,
             },
+            adapters: None,
             threads: 1,
             fastq_tags: tags,
             render_workers: 0,
@@ -1876,6 +1902,7 @@ mod tests {
                 tail: 2,
                 quality: None,
             },
+            adapters: None,
             threads,
             fastq_tags: FastqTags::All,
             render_workers: 0,
@@ -1986,6 +2013,7 @@ mod tests {
                 tail: 0,
                 quality: None,
             },
+            adapters: None,
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -2058,6 +2086,7 @@ mod tests {
                 tail: 0,
                 quality: None,
             },
+            adapters: None,
             threads: 4,
             fastq_tags: crate::config::FastqTags::All,
             render_workers: 0,
@@ -2116,6 +2145,7 @@ mod tests {
                 tail: 2,
                 quality: None,
             },
+            adapters: None,
             threads,
             fastq_tags: FastqTags::All,
             render_workers: 0,
