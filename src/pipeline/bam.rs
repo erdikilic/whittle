@@ -511,10 +511,15 @@ fn run_bam_seq(
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
-        if !filter::passes(&seq, &qual, &cfg.filter) {
+        if let Some(reason) = filter::check(&seq, &qual, &cfg.filter) {
+            counters.record_filter_drop(reason);
             continue;
         }
         let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+        if intervals.is_empty() {
+            counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
         let total = intervals.len();
         let mut out_bases = 0u64;
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
@@ -527,13 +532,7 @@ fn run_bam_seq(
             .output_bases
             .fetch_add(out_bases, Ordering::Relaxed);
     }
-    Ok(Stats {
-        input_reads: counters.input_reads.load(Ordering::Relaxed),
-        output_reads: counters.output_reads.load(Ordering::Relaxed),
-        input_bases: counters.input_bases.load(Ordering::Relaxed),
-        output_bases: counters.output_bases.load(Ordering::Relaxed),
-        malformed_tag_reads,
-    })
+    Ok(counters.snapshot(malformed_tag_reads))
 }
 
 /// Shared parallel driver: reader iterator -> rayon pool (render) -> bounded
@@ -643,13 +642,7 @@ where
     if let Some(e) = write_err.lock().unwrap().take() {
         return Err(e.into());
     }
-    Ok(Stats {
-        input_reads: counters.input_reads.load(Ordering::Relaxed),
-        output_reads: counters.output_reads.load(Ordering::Relaxed),
-        input_bases: counters.input_bases.load(Ordering::Relaxed),
-        output_bases: counters.output_bases.load(Ordering::Relaxed),
-        malformed_tag_reads: malformed.load(Ordering::Relaxed),
-    })
+    Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
 }
 
 /// Threads-aware uBAM pipeline entry point: refuse aligned reads, filter, trim,
@@ -689,10 +682,15 @@ pub fn run_bam(
                     qual.len()
                 );
             }
-            if !filter::passes(&seq, &qual, &cfg.filter) {
+            if let Some(reason) = filter::check(&seq, &qual, &cfg.filter) {
+                counters.record_filter_drop(reason);
                 return Ok((Vec::new(), 0));
             }
             let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+            if intervals.is_empty() {
+                counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
+                return Ok((Vec::new(), 0));
+            }
             let total = intervals.len();
             let out_bases: u64 = intervals.iter().map(|&(s, e)| (e - s) as u64).sum();
             let items = intervals
@@ -807,11 +805,16 @@ where
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
-        if !filter::passes(&seq, &qual, &cfg.filter) {
+        if let Some(reason) = filter::check(&seq, &qual, &cfg.filter) {
+            counters.record_filter_drop(reason);
             continue;
         }
         let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
         let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+        if intervals.is_empty() {
+            counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
         let total = intervals.len();
         let mut out_bases = 0u64;
         for (idx, (s, e)) in intervals.into_iter().enumerate() {
@@ -828,13 +831,7 @@ where
             .output_bases
             .fetch_add(out_bases, Ordering::Relaxed);
     }
-    Ok(Stats {
-        input_reads: counters.input_reads.load(Ordering::Relaxed),
-        output_reads: counters.output_reads.load(Ordering::Relaxed),
-        input_bases: counters.input_bases.load(Ordering::Relaxed),
-        output_bases: counters.output_bases.load(Ordering::Relaxed),
-        malformed_tag_reads,
-    })
+    Ok(counters.snapshot(malformed_tag_reads))
 }
 
 /// Threads-aware uBAM→FASTQ pipeline entry point: refuse aligned reads, filter,
@@ -875,11 +872,16 @@ pub fn run_bam_to_fastq<W: Write + Send>(
                     qual.len()
                 );
             }
-            if !filter::passes(&seq, &qual, &cfg.filter) {
+            if let Some(reason) = filter::check(&seq, &qual, &cfg.filter) {
+                counters.record_filter_drop(reason);
                 return Ok((Vec::new(), 0));
             }
             let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
             let intervals = trim::apply(seq.len(), &qual, &cfg.trim, cfg.filter.min_length);
+            if intervals.is_empty() {
+                counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
+                return Ok((Vec::new(), 0));
+            }
             let total = intervals.len();
             let mut out = Vec::with_capacity(total);
             let mut out_bases = 0u64;

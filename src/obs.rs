@@ -298,6 +298,10 @@ impl ProgressHandle {
             tracing::info!("{}", line);
         }
 
+        if let Some(line) = dropped_line(stats) {
+            tracing::info!("{}", line);
+        }
+
         if stats.malformed_tag_reads > 0 {
             tracing::warn!(
                 "Note: {} read(s) carried a per-base kinetics tag (ip/pw/fi/fp/ri/rp) whose \
@@ -470,6 +474,48 @@ fn bases_line(stats: &Stats) -> Option<String> {
         "Bases: {} in, {} out ({pct:.1}% kept)",
         human_bases(stats.input_bases),
         human_bases(stats.output_bases),
+    ))
+}
+
+/// The end-of-run "why reads were dropped" line, shown right after `Bases:`:
+/// `Dropped: 3,200 input reads (2,100 too short, 1,100 low quality)`. Only the
+/// non-zero reasons appear, in this fixed order: too short, too long, low
+/// quality, high quality, GC out of range, trimmed away (passed the filter but
+/// every trimmed segment was empty/sub-`min_length`). `None` when nothing was
+/// dropped, so a clean run gets no extra line.
+fn dropped_line(stats: &Stats) -> Option<String> {
+    let total = stats.dropped_short
+        + stats.dropped_long
+        + stats.dropped_low_qual
+        + stats.dropped_high_qual
+        + stats.dropped_gc
+        + stats.dropped_trimmed;
+    if total == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if stats.dropped_short > 0 {
+        parts.push(format!("{} too short", commas(stats.dropped_short)));
+    }
+    if stats.dropped_long > 0 {
+        parts.push(format!("{} too long", commas(stats.dropped_long)));
+    }
+    if stats.dropped_low_qual > 0 {
+        parts.push(format!("{} low quality", commas(stats.dropped_low_qual)));
+    }
+    if stats.dropped_high_qual > 0 {
+        parts.push(format!("{} high quality", commas(stats.dropped_high_qual)));
+    }
+    if stats.dropped_gc > 0 {
+        parts.push(format!("{} GC out of range", commas(stats.dropped_gc)));
+    }
+    if stats.dropped_trimmed > 0 {
+        parts.push(format!("{} trimmed away", commas(stats.dropped_trimmed)));
+    }
+    Some(format!(
+        "Dropped: {} input reads ({})",
+        commas(total),
+        parts.join(", ")
     ))
 }
 
@@ -682,9 +728,7 @@ mod tests {
         let stats = Stats {
             input_reads: 1,
             output_reads: 3,
-            input_bases: 0,
-            output_bases: 0,
-            malformed_tag_reads: 0,
+            ..Default::default()
         };
         let s = summary_line(&stats, Some(Duration::from_secs(2)));
         assert_eq!(s, "Summary: 1 input reads, 3 output reads in 2.00s");
@@ -697,9 +741,7 @@ mod tests {
         let stats = Stats {
             input_reads: 5,
             output_reads: 5,
-            input_bases: 0,
-            output_bases: 0,
-            malformed_tag_reads: 0,
+            ..Default::default()
         };
         assert_eq!(
             summary_line(&stats, None),
@@ -722,7 +764,7 @@ mod tests {
             output_reads: 1,
             input_bases: 12_400_000_000,
             output_bases: 11_900_000_000,
-            malformed_tag_reads: 0,
+            ..Default::default()
         };
         assert_eq!(
             bases_line(&stats).unwrap(),
@@ -735,11 +777,45 @@ mod tests {
         let stats = Stats {
             input_reads: 0,
             output_reads: 0,
-            input_bases: 0,
-            output_bases: 0,
-            malformed_tag_reads: 0,
+            ..Default::default()
         };
         assert_eq!(bases_line(&stats), None);
+    }
+
+    #[test]
+    fn dropped_line_lists_only_nonzero_reasons_in_fixed_order() {
+        let stats = Stats {
+            dropped_short: 2_100,
+            dropped_low_qual: 1_100,
+            ..Default::default()
+        };
+        assert_eq!(
+            dropped_line(&stats).unwrap(),
+            "Dropped: 3,200 input reads (2,100 too short, 1,100 low quality)"
+        );
+    }
+
+    #[test]
+    fn dropped_line_covers_every_reason_in_order() {
+        let stats = Stats {
+            dropped_short: 1,
+            dropped_long: 2,
+            dropped_low_qual: 3,
+            dropped_high_qual: 4,
+            dropped_gc: 5,
+            dropped_trimmed: 6,
+            ..Default::default()
+        };
+        assert_eq!(
+            dropped_line(&stats).unwrap(),
+            "Dropped: 21 input reads (1 too short, 2 too long, 3 low quality, \
+             4 high quality, 5 GC out of range, 6 trimmed away)"
+        );
+    }
+
+    #[test]
+    fn dropped_line_omitted_when_total_zero() {
+        assert_eq!(dropped_line(&Stats::default()), None);
     }
 
     #[test]
