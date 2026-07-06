@@ -24,7 +24,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use tracing::{Event, Subscriber};
+use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter};
 use tracing_subscriber::layer::SubscriberExt;
@@ -70,10 +70,31 @@ fn resolve_log_interval(verbosity: u8) -> Duration {
 
 /// Custom event formatter: `[YYYY-MM-DD HH:MM:SS] [LEVEL] Message`, with a
 /// bracketed local wall-clock timestamp (via `jiff`) AND a bracketed level.
-/// Plain (no ANSI) — the stock formatter's ` INFO`-padded, unbracketed level is
-/// what this replaces. `Level`'s `Display` yields `INFO`/`WARN`/`DEBUG`/`TRACE`/
-/// `ERROR`, so the level renders as `[INFO]` etc.
-struct WhittleFormat;
+/// The stock formatter's ` INFO`-padded, unbracketed level is what this
+/// replaces. `Level`'s `Display` yields `INFO`/`WARN`/`DEBUG`/`TRACE`/`ERROR`,
+/// so the level renders as `[INFO]` etc. `color` (set once in `init` from
+/// whether stderr is a TTY) gates ANSI coloring of the `[LEVEL]` token only —
+/// the timestamp and message always stay plain; when `false`, output carries
+/// zero escape bytes, which matters for redirected/non-TTY runs.
+struct WhittleFormat {
+    color: bool,
+}
+
+/// ANSI color codes for the bracketed `[LEVEL]` token, raw (no new dependency):
+/// ERROR bold red, WARN yellow, INFO green, DEBUG/TRACE dim. `color == false`
+/// (non-TTY) yields the plain `[LEVEL]` token with no escape bytes at all.
+fn format_level(level: &Level, color: bool) -> String {
+    if !color {
+        return format!("[{level}]");
+    }
+    let code = match *level {
+        Level::ERROR => "\x1b[1;31m",
+        Level::WARN => "\x1b[33m",
+        Level::INFO => "\x1b[32m",
+        Level::DEBUG | Level::TRACE => "\x1b[2m",
+    };
+    format!("{code}[{level}]\x1b[0m")
+}
 
 impl<S, N> FormatEvent<S, N> for WhittleFormat
 where
@@ -88,9 +109,9 @@ where
     ) -> std::fmt::Result {
         write!(
             w,
-            "[{}] [{}] ",
+            "[{}] {} ",
             jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S"),
-            event.metadata().level()
+            format_level(event.metadata().level(), self.color)
         )?;
         ctx.field_format().format_fields(w.by_ref(), event)?;
         writeln!(w)
@@ -289,9 +310,17 @@ impl ProgressHandle {
     /// Omitted when `elapsed` is unknown (a library caller using
     /// `ProgressHandle::disabled()`, which never calls `start()`).
     pub fn finish(&mut self, stats: &Stats, output: &str) {
+        // Snapshot elapsed *before* `stop_ticker()`, not after: `stop_ticker` blocks
+        // on `handle.join()`, and the ticker thread only wakes from its
+        // `TICK_INTERVAL` (250ms) sleep to notice the stop flag — so measuring
+        // afterward could add up to a full tick's worth of pure join-wait onto a
+        // genuinely fast run, reporting e.g. "250ms" for a run that actually took
+        // single-digit milliseconds. Capturing here first makes the reported
+        // duration true wall-clock processing time, not processing time plus
+        // ticker-shutdown latency.
+        let elapsed = self.start.take().map(|start| start.elapsed());
         self.stop_ticker();
 
-        let elapsed = self.start.take().map(|start| start.elapsed());
         tracing::info!("{}", summary_line(stats, elapsed));
 
         if let Some(line) = bases_line(stats) {
@@ -360,7 +389,7 @@ pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
         .with(filter)
         .with(
             fmt::layer()
-                .event_format(WhittleFormat)
+                .event_format(WhittleFormat { color: tty })
                 .with_writer(MpWriter {
                     multi: multi.clone(),
                 }),
@@ -638,6 +667,48 @@ mod tests {
         assert!(h.ticker.is_some(), "start() should have spawned a ticker");
         assert!(h.bar.is_some(), "Mode::Bar should create a live bar");
         drop(h); // must join the ticker thread and clear the bar, not hang
+    }
+
+    #[test]
+    fn format_level_plain_has_no_escape_bytes() {
+        for level in [
+            Level::ERROR,
+            Level::WARN,
+            Level::INFO,
+            Level::DEBUG,
+            Level::TRACE,
+        ] {
+            let s = format_level(&level, false);
+            assert!(
+                !s.contains('\x1b'),
+                "non-color output must carry zero escape bytes: {s:?}"
+            );
+        }
+        assert_eq!(format_level(&Level::INFO, false), "[INFO]");
+        assert_eq!(format_level(&Level::ERROR, false), "[ERROR]");
+    }
+
+    #[test]
+    fn format_level_color_wraps_each_level_with_its_own_code_and_a_reset() {
+        assert_eq!(
+            format_level(&Level::ERROR, true),
+            "\x1b[1;31m[ERROR]\x1b[0m"
+        );
+        assert_eq!(format_level(&Level::WARN, true), "\x1b[33m[WARN]\x1b[0m");
+        assert_eq!(format_level(&Level::INFO, true), "\x1b[32m[INFO]\x1b[0m");
+        assert_eq!(format_level(&Level::DEBUG, true), "\x1b[2m[DEBUG]\x1b[0m");
+        assert_eq!(format_level(&Level::TRACE, true), "\x1b[2m[TRACE]\x1b[0m");
+        for level in [
+            Level::ERROR,
+            Level::WARN,
+            Level::INFO,
+            Level::DEBUG,
+            Level::TRACE,
+        ] {
+            let s = format_level(&level, true);
+            assert!(s.contains('\x1b'), "color output must escape: {s:?}");
+            assert!(s.ends_with("\x1b[0m"), "must always reset: {s:?}");
+        }
     }
 
     #[test]

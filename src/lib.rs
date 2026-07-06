@@ -185,14 +185,14 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
                 budget.encode
             )
         );
-        tracing::info!("{}", threads_banner_line(budget));
+        tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
     } else if obs.is_bar() {
         tracing::info!(
             "Trimming {} to {} ({} threads)",
             in_fmt.label(),
             out_fmt.label(),
-            budget.total()
+            cfg.threads
         );
     }
 
@@ -429,14 +429,14 @@ fn run_folder(
                 budget.encode
             )
         );
-        tracing::info!("{}", threads_banner_line(budget));
+        tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
     } else if obs.is_bar() {
         tracing::info!(
             "Trimming {} to {} ({} threads)",
             family_fmt.label(),
             out_fmt.label(),
-            budget.total()
+            cfg.threads
         );
     }
 
@@ -554,17 +554,19 @@ fn output_banner_line(
     line
 }
 
-/// The startup banner's `Threads: ...` line, mapping the resolved
-/// `ThreadBudget`'s internal stage names (decode/render/encode) onto the
-/// pipeline-stage vocabulary shown to the user (read/trim/write):
-/// `Threads: 8 total (read 1, trim 4, write 3)`.
-fn threads_banner_line(b: config::ThreadBudget) -> String {
+/// The startup banner's `Threads: ...` line: the resolved `-t`/auto worker
+/// count (`threads`) as the header, with the per-stage split (mapping the
+/// `ThreadBudget`'s internal stage names — decode/render/encode — onto the
+/// pipeline-stage vocabulary shown to the user: read/trim/write) in
+/// parentheses: `Threads: 8 (read 1, trim 4, write 3)`. Deliberately *not*
+/// `b.total()`: that per-stage sum can exceed `threads` (each stage is floored
+/// at >= 1 even when the overall total is 1 — see `ThreadBudget::total`'s
+/// doc), which read as a confusing second, larger "total" next to the `-t`
+/// value the user actually asked for.
+fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> String {
     format!(
-        "Threads: {} total (read {}, trim {}, write {})",
-        b.total(),
-        b.decode,
-        b.render,
-        b.encode
+        "Threads: {threads} (read {}, trim {}, write {})",
+        b.decode, b.render, b.encode
     )
 }
 
@@ -580,28 +582,48 @@ fn qual_mode_label(mode: qual::QualMode) -> &'static str {
 
 /// The startup banner's `Filters: ...; trim: ...` line, built from the resolved
 /// `FilterConfig` + `TrimPlan`. Pure (no I/O), so it's unit-testable directly.
+/// Shows only *active* (non-default) clauses/ops — a fresh-defaults run (no
+/// filters, no trim) reads as `Filters: none; trim: none` rather than
+/// spelling out every no-op threshold (e.g. `mean quality >=0`).
 ///
-/// Filters clause, always present: `length >={min}` (plus ` <={max}` if bounded),
-/// `{qual_mode} quality >={min_qual}` (plus ` <={max_qual}` if bounded below the
-/// default 1000), and `GC {min}-{max}` only if either GC bound was set.
+/// Filters clause: `length >={min}` only if `min_length > 1`, plus ` <={max}`
+/// only if `max_length != usize::MAX`; `{qual_mode} quality >={min}` only if
+/// `min_qual > 0.0`, plus ` <={max}` only if `max_qual < 1000.0`; `GC
+/// {min}-{max}` only if either GC bound was set. `none` if nothing above fired.
 ///
 /// Trim clause: `head {N}, tail {N}` only if either crop is non-zero, plus the
 /// configured quality op's own wording, joined with a comma; `none` if neither
 /// a crop nor a quality op is set.
 fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -> String {
-    let mut length = format!(">={}", filter.min_length);
-    if filter.max_length != usize::MAX {
-        length.push_str(&format!(" <={}", filter.max_length));
+    let mut filters = Vec::new();
+
+    let length_active = filter.min_length > 1 || filter.max_length != usize::MAX;
+    if length_active {
+        let mut length = String::new();
+        if filter.min_length > 1 {
+            length.push_str(&format!(">={}", filter.min_length));
+        }
+        if filter.max_length != usize::MAX {
+            if !length.is_empty() {
+                length.push(' ');
+            }
+            length.push_str(&format!("<={}", filter.max_length));
+        }
+        filters.push(format!("length {length}"));
     }
-    let mut quality = format!(
-        "{} quality >={}",
-        qual_mode_label(filter.qual_mode),
-        filter.min_qual
-    );
-    if filter.max_qual < 1000.0 {
-        quality.push_str(&format!(" <={}", filter.max_qual));
+
+    let qual_active = filter.min_qual > 0.0 || filter.max_qual < 1000.0;
+    if qual_active {
+        let mut quality = format!("{} quality", qual_mode_label(filter.qual_mode));
+        if filter.min_qual > 0.0 {
+            quality.push_str(&format!(" >={}", filter.min_qual));
+        }
+        if filter.max_qual < 1000.0 {
+            quality.push_str(&format!(" <={}", filter.max_qual));
+        }
+        filters.push(quality);
     }
-    let mut filters = vec![format!("length {length}"), quality];
+
     if filter.min_gc.is_some() || filter.max_gc.is_some() {
         filters.push(format!(
             "GC {}-{}",
@@ -609,6 +631,12 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
             filter.max_gc.unwrap_or(1.0)
         ));
     }
+
+    let filters_str = if filters.is_empty() {
+        "none".to_string()
+    } else {
+        filters.join("; ")
+    };
 
     let mut trim_parts = Vec::new();
     if trim.head > 0 || trim.tail > 0 {
@@ -627,7 +655,7 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
         trim_parts.join(", ")
     };
 
-    format!("Filters: {}; trim: {}", filters.join("; "), trim_str)
+    format!("Filters: {filters_str}; trim: {trim_str}")
 }
 
 /// The startup banner's `Command: ...` line: `std::env::args()`, space-joined,
@@ -923,22 +951,33 @@ mod tests {
     }
 
     #[test]
-    fn threads_banner_line_maps_decode_render_encode_to_read_trim_write() {
+    fn threads_banner_line_shows_requested_threads_not_the_stage_sum() {
         let b = config::thread_budget(8, true, config::EncodeKind::Bgzf);
         assert_eq!(
-            threads_banner_line(b),
+            threads_banner_line(8, b),
             format!(
-                "Threads: {} total (read {}, trim {}, write {})",
-                b.total(),
-                b.decode,
-                b.render,
-                b.encode
+                "Threads: 8 (read {}, trim {}, write {})",
+                b.decode, b.render, b.encode
             )
         );
         // Concrete figure too, so a change in `thread_budget`'s split is noticed here.
         assert_eq!(
-            threads_banner_line(b),
-            "Threads: 8 total (read 1, trim 4, write 3)"
+            threads_banner_line(8, b),
+            "Threads: 8 (read 1, trim 4, write 3)"
+        );
+    }
+
+    #[test]
+    fn threads_banner_line_header_is_requested_even_when_stage_sum_differs() {
+        // Regression for the confusing pre-fix wording: `render_heavy=true` with
+        // `EncodeKind::None` sums to 9 (1 decode + 7 render + 1 encode) for a
+        // requested `-t 8` — the header must still read the requested 8, not
+        // that 9-thread stage sum.
+        let b = config::thread_budget(8, true, config::EncodeKind::None);
+        assert_eq!(b.total(), 9);
+        assert_eq!(
+            threads_banner_line(8, b),
+            "Threads: 8 (read 1, trim 7, write 1)"
         );
     }
 
@@ -964,9 +1003,71 @@ mod tests {
 
     #[test]
     fn filters_and_trim_line_defaults() {
+        // All-default filter/trim: no active clause, so it reads "none" rather
+        // than spelling out no-op thresholds like "mean quality >=0".
         assert_eq!(
             filters_and_trim_line(&base_filter(), &base_trim()),
-            "Filters: length >=1; mean quality >=0; trim: none"
+            "Filters: none; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_min_length_active() {
+        let mut f = base_filter();
+        f.min_length = 500;
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: length >=500; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_max_length_active() {
+        let mut f = base_filter();
+        f.max_length = 10_000;
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: length <=10000; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_min_qual_active() {
+        let mut f = base_filter();
+        f.min_qual = 10.0;
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: mean quality >=10; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_max_qual_active() {
+        let mut f = base_filter();
+        f.max_qual = 40.0;
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: mean quality <=40; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_gc_active() {
+        let mut f = base_filter();
+        f.min_gc = Some(0.3);
+        assert_eq!(
+            filters_and_trim_line(&f, &base_trim()),
+            "Filters: GC 0.3-1; trim: none"
+        );
+    }
+
+    #[test]
+    fn filters_and_trim_line_only_trim_active() {
+        let mut t = base_trim();
+        t.head = 5;
+        assert_eq!(
+            filters_and_trim_line(&base_filter(), &t),
+            "Filters: none; trim: head 5, tail 0"
         );
     }
 
