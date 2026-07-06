@@ -30,6 +30,15 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::pipeline::{Counters, Stats};
 
+/// How often the ticker thread polls the shared counters and refreshes the
+/// bar's message/position (or, off-TTY, checks whether it's time to log).
+const TICK_INTERVAL: Duration = Duration::from_millis(250);
+/// Steady-tick interval for the indicatif spinner shown when `total` is
+/// unknown (no byte count to drive a determinate bar).
+const SPINNER_TICK: Duration = Duration::from_millis(120);
+/// Minimum gap between off-TTY throttled progress log lines.
+const LOG_THROTTLE: Duration = Duration::from_secs(30);
+
 /// A `MakeWriter` that routes each fmt write through `MultiProgress::suspend`, so log
 /// lines are printed cleanly above the live progress bar (and plainly when no bar exists).
 #[derive(Clone)]
@@ -88,6 +97,10 @@ impl ProgressHandle {
         if !self.enabled {
             return;
         }
+        debug_assert!(
+            self.ticker.is_none(),
+            "start() called twice without finish()"
+        );
         let bar = if self.tty {
             let pb = match total {
                 Some(t) => {
@@ -101,7 +114,7 @@ impl ProgressHandle {
                 },
                 None => {
                     let pb = self.multi.add(ProgressBar::new_spinner());
-                    pb.enable_steady_tick(Duration::from_millis(120));
+                    pb.enable_steady_tick(SPINNER_TICK);
                     pb
                 },
             };
@@ -118,7 +131,7 @@ impl ProgressHandle {
         let handle = std::thread::spawn(move || {
             let mut last_log = Instant::now();
             while !stop_t.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(TICK_INTERVAL);
                 let ir = counters.input_reads.load(Ordering::Relaxed);
                 let or = counters.output_reads.load(Ordering::Relaxed);
                 let by = counters.bytes_read.load(Ordering::Relaxed);
@@ -128,7 +141,7 @@ impl ProgressHandle {
                         pb.set_position(by);
                     }
                     pb.set_message(msg);
-                } else if !tty && last_log.elapsed() >= Duration::from_secs(30) {
+                } else if !tty && last_log.elapsed() >= LOG_THROTTLE {
                     tracing::info!("{msg}");
                     last_log = Instant::now();
                 }
@@ -138,10 +151,12 @@ impl ProgressHandle {
         self.bar = bar;
     }
 
-    /// Stop the ticker and clear the bar, then print the end-of-run summary through
-    /// tracing (subject to the level filter). The ticker is joined and the bar cleared
-    /// *before* logging so no stale bar/spinner frame is left behind the summary line.
-    pub fn finish(&mut self, stats: &Stats) {
+    /// Stop the ticker (signal + join) and clear the bar, if either is live. Idempotent:
+    /// both fields are `.take()`n, so a second call — including the one implicit in
+    /// `Drop` after an explicit `finish()` — is a no-op. Shared by `finish()` (which
+    /// follows it with the end-of-run summary) and `Drop` (which must clean up silently
+    /// on an early `?`/`bail!` return, before the summary would otherwise ever print).
+    fn stop_ticker(&mut self) {
         if let Some((stop, handle)) = self.ticker.take() {
             stop.store(true, Ordering::Relaxed);
             let _ = handle.join();
@@ -149,6 +164,13 @@ impl ProgressHandle {
         if let Some(pb) = self.bar.take() {
             pb.finish_and_clear();
         }
+    }
+
+    /// Stop the ticker and clear the bar, then print the end-of-run summary through
+    /// tracing (subject to the level filter). The ticker is joined and the bar cleared
+    /// *before* logging so no stale bar/spinner frame is left behind the summary line.
+    pub fn finish(&mut self, stats: &Stats) {
+        self.stop_ticker();
         tracing::info!(
             "Kept {} reads out of {}",
             stats.output_reads,
@@ -161,6 +183,19 @@ impl ProgressHandle {
                 stats.malformed_tag_reads
             );
         }
+    }
+}
+
+/// RAII backstop for early `?`/`bail!` returns from `run`/`run_folder` after
+/// `start()` but before `finish()`: without this, the ticker thread and (on a
+/// TTY) the steady-tick spinner keep running after an error propagates, and
+/// the spinner can overwrite the fatal error message `main` prints. Stops and
+/// joins the ticker and clears the bar — no summary logging, since an error
+/// path has no `Stats` to summarize. A no-op after an explicit `finish()`
+/// (both fields are already `None`).
+impl Drop for ProgressHandle {
+    fn drop(&mut self) {
+        self.stop_ticker();
     }
 }
 
@@ -245,6 +280,25 @@ pub fn format_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for the RAII `Drop` cleanup: dropping a handle whose ticker
+    /// thread is still running (e.g. via an early `?`/`bail!` return in `run` that
+    /// never calls `finish()`) must stop and join that thread rather than leaking
+    /// it or hanging the process. Built non-TTY so no real spinner/terminal is
+    /// needed; `enabled: true` so `start()` actually spawns the ticker.
+    #[test]
+    fn dropping_started_handle_stops_ticker_without_hanging() {
+        let mut h = ProgressHandle {
+            multi: MultiProgress::new(),
+            enabled: true,
+            tty: false,
+            ticker: None,
+            bar: None,
+        };
+        h.start(None, Arc::new(Counters::default()));
+        assert!(h.ticker.is_some(), "start() should have spawned a ticker");
+        drop(h); // must join the ticker thread and return, not hang
+    }
 
     #[test]
     fn level_mapping() {
