@@ -101,7 +101,8 @@ struct Cli {
     adapter_infer: bool,
     /// Discover adapters and print them (sequences + support + catalog names),
     /// then exit without trimming. Implies --adapter-infer. May be combined with
-    /// --adapter-fasta (naming is catalog-only for now -- see the printed note).
+    /// --adapter-fasta (naming covers the built-in catalog plus your FASTA's
+    /// adapters -- see the printed note).
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_infer_only: bool,
 }
