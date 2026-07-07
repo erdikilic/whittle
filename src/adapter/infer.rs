@@ -4,8 +4,8 @@
 //! peeling, boundary drop-trim, and presence-fraction confidence. Implemented
 //! from the paper (not translated from GPL source). Pure and format-neutral.
 
-use crate::adapter::Adapter;
-use crate::adapter::search::{DnaSearcher, hits};
+use crate::adapter::search::{DnaSearcher, hits, new_searcher};
+use crate::adapter::{Adapter, End, MIN_PATTERN_LEN};
 
 /// Cap on the number of windows scanned per k-mer during the 2-error recount
 /// (Task 9's confidence pass), bounding its cost on large samples.
@@ -393,6 +393,87 @@ fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize) -> Vec<(Vec<u8>, Vec<u32>)> 
     out
 }
 
+/// True if `a` and `b` are the "same" adapter within `error_rate`: an
+/// approximate occurrence of the shorter in the longer on either strand
+/// (the both-strand searcher covers the RC case).
+fn same_adapter(a: &[u8], b: &[u8], error_rate: f64) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    if short.len() < MIN_PATTERN_LEN {
+        return short == long;
+    }
+    let k = (error_rate * short.len() as f64).floor() as usize;
+    let mut s = new_searcher();
+    !hits(&mut s, short, long, k).is_empty()
+}
+
+/// Folds a sequence discovered at BOTH the 5' and 3' ends (per `same_adapter`)
+/// into a single `End::Both` entry, so the matcher's nearest-end arbitration
+/// (see `classify_terminal`) handles it rather than two independent
+/// single-end entries. The rest keep their originating end tag.
+// Not yet called from production code (only from the tests below); Task 9
+// (discover) wires this in and this allow comes off then.
+#[allow(dead_code)]
+fn merge_both_ends(
+    five: Vec<Vec<u8>>,
+    three: Vec<Vec<u8>>,
+    error_rate: f64,
+) -> Vec<(Vec<u8>, End)> {
+    let mut out: Vec<(Vec<u8>, End)> = Vec::new();
+    let mut three_used = vec![false; three.len()];
+    for f in &five {
+        if let Some(j) = three
+            .iter()
+            .enumerate()
+            .position(|(j, t)| !three_used[j] && same_adapter(f, t, error_rate))
+        {
+            three_used[j] = true;
+            out.push((f.clone(), End::Both));
+        } else {
+            out.push((f.clone(), End::Five));
+        }
+    }
+    for (j, t) in three.into_iter().enumerate() {
+        if !three_used[j] {
+            out.push((t, End::Three));
+        }
+    }
+    out
+}
+
+/// Best catalog matches for `seq` as `(name, percent_identity)`, sorted desc,
+/// top 3, only >= 60%. Used to give an inferred adapter a human-readable name
+/// when it corresponds to a known catalog entry.
+// Not yet called from production code (only from the tests below); Task 9
+// (discover) wires this in and this allow comes off then.
+#[allow(dead_code)]
+fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f32)> {
+    let mut s = new_searcher();
+    let mut named: Vec<(String, f32)> = Vec::new();
+    for r in refs {
+        let (short, long) = if seq.len() <= r.seq.len() {
+            (seq, r.seq.as_slice())
+        } else {
+            (r.seq.as_slice(), seq)
+        };
+        if short.len() < MIN_PATTERN_LEN {
+            continue;
+        }
+        let k = (error_rate * short.len() as f64).ceil() as usize;
+        if let Some(h) = hits(&mut s, short, long, k)
+            .into_iter()
+            .min_by_key(|h| h.cost)
+        {
+            let pct = 100.0 * (1.0 - h.cost as f32 / short.len() as f32);
+            if pct >= 60.0 {
+                named.push((r.name.clone(), pct));
+            }
+        }
+    }
+    named.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
+    named.truncate(3);
+    named
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,5 +614,33 @@ mod tests {
     fn support_is_median_over_windows() {
         let profile = vec![40u32, 50, 60];
         assert!((support_from_profile(&profile, 100) - 0.50).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merge_folds_shared_sequence_to_both() {
+        let a = b"ACGTACGTACGTACGT".to_vec();
+        let five = vec![a.clone(), b"TTTTGGGGTTTTGGGG".to_vec()];
+        let three = vec![a.clone()]; // same adapter seen at 3' too
+        let merged = merge_both_ends(five, three, 0.2);
+        // a -> Both; the 5'-only one stays Five; no 3'-only left.
+        assert!(merged.iter().any(|(s, e)| s == &a && *e == End::Both));
+        assert!(
+            merged
+                .iter()
+                .any(|(s, e)| s == b"TTTTGGGGTTTTGGGG" && *e == End::Five)
+        );
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn name_against_matches_catalog_entry() {
+        let refs = vec![Adapter {
+            name: "SQK-TEST".into(),
+            seq: b"ACGTACGTACGTACGT".to_vec(),
+            end: End::Both,
+        }];
+        let hits = name_against(b"ACGTACGTACGTACGT", &refs, 0.2);
+        assert_eq!(hits[0].0, "SQK-TEST");
+        assert!((hits[0].1 - 100.0).abs() < 1e-3);
     }
 }
