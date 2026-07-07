@@ -979,7 +979,12 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
 /// `0` (discovery hasn't run yet — it replaces `cfg.adapters` only once the
 /// buffer-then-decide seam runs, after this banner prints), so a `· infer` /
 /// `· infer-only` suffix is appended to make clear the set is about to be
-/// discovered, not that trimming is configured with zero adapters.
+/// discovered, not that trimming is configured with zero adapters. This is
+/// forced to `0` explicitly (rather than read off `a.adapters.len()`) because
+/// under `ReportOnly` with a `--adapter-fasta`, `a.adapters` may itself hold
+/// the user's FASTA entries (see `cli::parse`'s `trim_adapters`) -- carried
+/// through purely as extra naming refs for `infer::discover`, never as a
+/// trimming set, so they must not be counted here as if they were one.
 fn adapter_banner_line(
     adapters: Option<&crate::adapter::AdapterConfig>,
     adapter_sample: usize,
@@ -997,11 +1002,14 @@ fn adapter_banner_line(
         AdapterInfer::Trim => " \u{b7} infer",
         AdapterInfer::ReportOnly => " \u{b7} infer-only",
     };
+    let n_adapters = if adapter_infer == AdapterInfer::Off {
+        a.adapters.len()
+    } else {
+        0
+    };
     Some(format!(
         "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp · {sample}{infer_suffix}",
-        a.adapters.len(),
-        a.error_rate,
-        a.end_size
+        n_adapters, a.error_rate, a.end_size
     ))
 }
 

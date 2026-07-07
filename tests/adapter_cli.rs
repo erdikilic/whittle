@@ -578,12 +578,14 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
 }
 
 // --adapter-infer-only + --adapter-fasta is allowed (unlike --adapter-infer,
-// which rejects a FASTA outright), but v1 descopes cross-naming discovered
-// sequences against the user's FASTA -- naming stays catalog-only. This just
-// checks the one informational line fires so a user combining the two flags
-// isn't left assuming the FASTA did something.
+// which rejects a FASTA outright): naming now covers the built-in catalog
+// PLUS the user's FASTA (FU3 -- see `infer::discover`'s `name_refs`). This
+// just checks the informational line reflects that (not the old "catalog
+// only" wording), so a user combining the two flags isn't left assuming the
+// FASTA did nothing. The actual cross-naming is proven end-to-end by
+// `infer_only_cross_names_against_user_fasta` below.
 #[test]
-fn infer_only_with_fasta_notes_naming_is_catalog_only() {
+fn infer_only_with_fasta_notes_naming_includes_fasta() {
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     writeln!(fa, ">present\nACGTACGTACGTACGTACGT").unwrap();
     let mut fq = tempfile::NamedTempFile::new().unwrap();
@@ -602,7 +604,7 @@ fn infer_only_with_fasta_notes_naming_is_catalog_only() {
         ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("catalog only"));
+        .stderr(predicates::str::contains("plus your FASTA's adapters"));
 }
 
 // --- ab-initio inference wiring (Task 11) -------------------------------
@@ -703,6 +705,57 @@ fn infer_only_prints_and_does_not_trim() {
     assert!(
         !stdout.contains('@'),
         "report-only must not write any trimmed FASTQ to stdout: {stdout}"
+    );
+}
+
+// FU3: report-only cross-names discovered adapters against the ONT catalog
+// UNION the user's --adapter-fasta, not the catalog alone.
+//
+// `PLANTED_ADAPTER` is byte-identical to the catalog's own `LSK109_front`
+// entry (see `src/adapter/ont_catalog.tsv`), so a discovered consensus that
+// reconstructs it scores identically (same bytes compared, same edit-distance
+// search) against BOTH the catalog entry and our own FASTA-supplied copy --
+// an exact tie in `name_against`'s percent-identity, broken by its
+// alphabetical (name asc) tie-break. The FASTA header is prefixed `AAA_` so
+// it sorts before `LSK109_front` and therefore deterministically wins that
+// tie, becoming `name_hits[0]` -- the only hit `log_discovered` prints -- no
+// matter how `discover` actually reconstructs the consensus. That makes this
+// a genuine proof that naming consulted the user's FASTA (not merely that it
+// also happened to match the catalog): if `discover` still only checked the
+// built-in catalog (pre-fix), the log would show `LSK109_front` instead and
+// this assertion would fail.
+#[test]
+fn infer_only_cross_names_against_user_fasta() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq(dir.path(), 500);
+    // Filename deliberately has no "MY_CUSTOM_ADAPTER" substring, so a stray
+    // path/filename echo elsewhere in the log could never produce a false
+    // pass -- the assertion below can only be satisfied by the discovered
+    // adapter's own cross-name.
+    let fa_path = dir.path().join("cross_name_refs.fa");
+    std::fs::write(
+        &fa_path,
+        format!(">AAA_MY_CUSTOM_ADAPTER\n{PLANTED_ADAPTER}\n"),
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "--adapter-infer-only",
+        "--adapter-fasta",
+        fa_path.to_str().unwrap(),
+        "-t",
+        "1",
+    ]);
+    let assert = cmd.assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("MY_CUSTOM_ADAPTER"),
+        "discovered adapter must be cross-named against the user's --adapter-fasta, \
+         not just the built-in catalog: {stderr}"
     );
 }
 

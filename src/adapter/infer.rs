@@ -502,7 +502,11 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
 /// Full ab-initio discovery pipeline: per-end `assemble`, fold shared 5'/3'
 /// discoveries into `End::Both` via `merge_both_ends`, drop anything too
 /// short or too weakly supported, then name each survivor against the
-/// built-in ONT catalog. Deterministic order: support desc, then sequence asc.
+/// built-in ONT catalog UNION `base.adapters` -- extra naming refs, e.g. the
+/// user's `--adapter-fasta` entries under `AdapterInfer::ReportOnly` (see
+/// `cli::parse`'s `trim_adapters`; empty under `Trim`, which rejects a FASTA
+/// outright, and under a `ReportOnly` run with no FASTA). Deterministic
+/// order: support desc, then sequence asc.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
     let (five_w, three_w) = end_windows(sample, WINDOW_LEN);
     let five = assemble(&five_w, base);
@@ -533,9 +537,23 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         base.error_rate,
     );
 
+    // Naming refs: the built-in ONT catalog, plus any extra refs carried in
+    // `base.adapters` (never trimmed against here -- see the doc comment
+    // above). Chaining is skipped entirely when there are none, so a
+    // catalog-only run (the common case) doesn't pay for an extra Vec/clone.
     let refs = crate::adapter::preset::preset_ont();
-    let mut result: Vec<InferredAdapter> = Vec::new();
-    for (i, (seq, end)) in merged.into_iter().enumerate() {
+    let name_refs: Vec<Adapter> = if base.adapters.is_empty() {
+        refs
+    } else {
+        refs.into_iter()
+            .chain(base.adapters.iter().cloned())
+            .collect()
+    };
+
+    // (seq, end, support, name_hits) survivors, pre-final-sort.
+    type Candidate = (Vec<u8>, End, f64, Vec<(String, f32)>);
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for (seq, end) in merged.into_iter() {
         if seq.len() < MIN_PATTERN_LEN {
             continue;
         }
@@ -543,25 +561,31 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         if support < KEEP_SUPPORT {
             continue;
         }
-        let name_hits = name_against(&seq, &refs, base.error_rate);
-        let name = name_hits
-            .first()
-            .map(|(n, _)| n.clone())
-            .unwrap_or_else(|| format!("inferred_{}", i + 1));
-        result.push(InferredAdapter {
-            adapter: Adapter { name, seq, end },
-            support,
-            name_hits,
-        });
+        let name_hits = name_against(&seq, &name_refs, base.error_rate);
+        candidates.push((seq, end, support, name_hits));
     }
     // deterministic order: support desc, then sequence asc.
-    result.sort_by(|a, b| {
-        b.support
-            .partial_cmp(&a.support)
-            .unwrap()
-            .then(a.adapter.seq.cmp(&b.adapter.seq))
-    });
-    result
+    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap().then(a.0.cmp(&b.0)));
+    // `inferred_N` fallback numbering is assigned AFTER the sort above (M4
+    // fix) so it agrees with the position `log_discovered` prints each entry
+    // at; assigning it during the first pass (pre-sort `merged` index) could
+    // disagree with the post-sort log order whenever sorting reordered
+    // entries.
+    candidates
+        .into_iter()
+        .enumerate()
+        .map(|(i, (seq, end, support, name_hits))| {
+            let name = name_hits
+                .first()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_else(|| format!("inferred_{}", i + 1));
+            InferredAdapter {
+                adapter: Adapter { name, seq, end },
+                support,
+                name_hits,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
