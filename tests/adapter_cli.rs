@@ -924,13 +924,30 @@ fn infer_is_deterministic() {
 
 // --- marginal-support warning ------------------------------------------
 
-/// Same fixture shape as `write_adapted_fastq`, but with the deterministic
-/// ~10% substitution error that `discover_recovers_planted_adapter_under_error`
-/// (src/adapter/infer.rs) plants into its own copy of this same adapter: a
-/// substitution every 10th position, shifted by the read index so no single
-/// end-window k-mer is corrupted in every read. That test's `discover()`
-/// support lands at ~0.144 -- above `KEEP_SUPPORT` (0.10, so the adapter is
-/// still kept) but inside `MARGINAL_SUPPORT` (0.20), so it should be flagged.
+/// Fraction of reads that carry `PLANTED_ADAPTER` at all; the rest are pure
+/// background (no adapter anywhere in the read), modelling a low-prevalence
+/// / barcode-specific adapter rather than a per-read match-quality problem.
+/// Support is now a whole-consensus PRESENCE fraction (see
+/// `infer::assemble`'s doc comment), so a per-read *error rate* no longer
+/// drags a genuine adapter's support down (a real, closely-matching
+/// reconstruction now recovers at support ~1.0, see
+/// `discover_recovers_planted_adapter_under_error`) -- what still lands an
+/// adapter in the marginal band is being present in only a *minority* of
+/// reads. 0.38 * 500 = 190 planted reads out of 500 puts support at ~0.38,
+/// inside `[KEEP_SUPPORT, MARGINAL_SUPPORT)` = `[0.30, 0.45)` with headroom
+/// on both sides.
+const PLANTED_ADAPTER_PREVALENCE: f64 = 0.38;
+
+/// Fixture for the marginal-support warning: `PLANTED_ADAPTER_PREVALENCE` of
+/// `n` reads get an EXACT copy of `PLANTED_ADAPTER` (no injected
+/// substitution error -- error-tolerant recovery is already covered by
+/// `discover_recovers_planted_adapter_under_error`, this fixture targets
+/// marginal *prevalence* instead) followed by a splitmix64 tail; the
+/// remaining reads are pure splitmix64 background of the same total length,
+/// carrying no adapter at all (same non-periodic bit-mix pattern used
+/// throughout this file and in `src/adapter/infer.rs`'s own `discover_*`
+/// unit tests, so it can't itself register as a spurious low-complexity
+/// signal).
 fn write_adapted_fastq_marginal(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
     // NOTE: deliberately not named "*marginal*" -- the path is itself echoed
     // into the `[INFO] Input: ...` / `Command: ...` log lines, which would
@@ -938,13 +955,17 @@ fn write_adapted_fastq_marginal(dir: &std::path::Path, n: usize) -> std::path::P
     // actual warning message under test.
     let path = dir.join("weak_adapter.fastq");
     let mut f = std::fs::File::create(&path).unwrap();
+    let planted_n = (n as f64 * PLANTED_ADAPTER_PREVALENCE).round() as usize;
     for i in 0..n {
-        let mut seq = PLANTED_ADAPTER.as_bytes().to_vec();
-        for p in (0..seq.len()).step_by(10) {
-            let q = (p + i) % seq.len();
-            seq[q] = b"ACGT"[(seq[q] as usize + 1) % 4];
-        }
-        seq.extend(splitmix_tail(i, TAIL_LEN));
+        let seq: Vec<u8> = if i < planted_n {
+            let mut s = PLANTED_ADAPTER.as_bytes().to_vec();
+            s.extend(splitmix_tail(i, TAIL_LEN));
+            s
+        } else {
+            // pure background, no adapter -- same total read length as the
+            // planted branch so both groups look alike apart from content.
+            splitmix_tail(i, TAIL_LEN + PLANTED_ADAPTER.len())
+        };
         let qual = "I".repeat(seq.len());
         writeln!(
             f,
@@ -957,7 +978,7 @@ fn write_adapted_fastq_marginal(dir: &std::path::Path, n: usize) -> std::path::P
 }
 
 /// A kept adapter whose support sits in `[KEEP_SUPPORT, MARGINAL_SUPPORT)`
-/// (here ~0.144, see `write_adapted_fastq_marginal`) must get an explicit
+/// (here ~0.38, see `write_adapted_fastq_marginal`) must get an explicit
 /// `warn!` in addition to the plain per-adapter info line, so a marginal
 /// discovery doesn't read the same as a confident one.
 #[test]

@@ -20,16 +20,21 @@ const WINDOW_LEN: usize = 100;
 const RECOUNT_EDITS: usize = 2;
 
 /// Minimum presence-fraction support required to keep a discovered adapter.
-/// 0.30 was too strict: `drop_trim`'s boundary-only trimming can leave an
-/// internal low-weight noise pocket inside an otherwise-correct consensus
-/// (see `discover_recovers_planted_adapter_under_error`), which drags the
-/// profile's median (support is `median(profile) / n_windows`) well below
-/// the true peak weight even for a genuine, closely-matching reconstruction.
-/// Empirically (that test, 10% substitution planted adapter): the real
-/// signal lands at support ~0.144 across all peeled variants, while clean
-/// (no-adapter) data's noise floor tops out at ~0.007 -- a >20x margin, so
-/// 0.10 safely separates real recoveries from noise on both sides.
-const KEEP_SUPPORT: f64 = 0.10;
+/// Support is now the whole-consensus presence fraction (see `assemble`):
+/// the share of sampled end-window reads that actually contain the trimmed
+/// consensus within an edit budget scaled to its own length -- not a
+/// per-position profile statistic, so an internal error-induced dip inside
+/// an otherwise-correct consensus can no longer drag it down. Empirically: a
+/// genuine, closely-matching planted adapter under ~10% substitution error
+/// (`discover_recovers_planted_adapter_under_error`) recovers at support
+/// ~1.0, while clean (no-adapter) data's noise floor tops out at ~0.008,
+/// both comfortably separated from 0.30 (roughly 3x headroom below the real
+/// signal, roughly 35x above the noise floor). 0.30 also matches the
+/// trimming use case: a constant/ligation adapter present in ~all reads
+/// scores high, while a low-presence/rare/barcode-specific consensus
+/// (present in only a small fraction of reads) is correctly dropped --
+/// trimming the constant flank removes barcodes anyway.
+const KEEP_SUPPORT: f64 = 0.30;
 
 /// Cap on the number of windows scanned per k-mer during the 2-error recount
 /// (Task 9's confidence pass), bounding its cost on large samples.
@@ -287,30 +292,6 @@ fn bounded_heaviest_path(
     Some((cons, profile, weight))
 }
 
-fn median_u32(xs: &[u32]) -> f64 {
-    if xs.is_empty() {
-        return 0.0;
-    }
-    let mut v = xs.to_vec();
-    v.sort_unstable();
-    let m = v.len() / 2;
-    if v.len() % 2 == 1 {
-        v[m] as f64
-    } else {
-        (v[m - 1] as f64 + v[m] as f64) / 2.0
-    }
-}
-
-/// Presence-fraction confidence for one consensus: `median(profile) /
-/// n_windows`, i.e. what share of the sampled end-windows actually
-/// contained a k-mer from this path, clamped to `[0,1]`.
-fn support_from_profile(profile: &[u32], n_windows: usize) -> f64 {
-    if n_windows == 0 {
-        return 0.0;
-    }
-    (median_u32(profile) / n_windows as f64).clamp(0.0, 1.0)
-}
-
 fn median_f64(xs: &[f64]) -> f64 {
     if xs.is_empty() {
         return 0.0;
@@ -499,13 +480,22 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
         .collect();
     let mut out = Vec::new();
     for (cons, profile) in peel_paths(weighted, KMER_K) {
-        let (trimmed, tprof) = drop_trim(&cons, &profile);
+        let (trimmed, _tprof) = drop_trim(&cons, &profile);
         if trimmed.len() < MIN_PATTERN_LEN {
             continue;
         }
-        out.push((trimmed, support_from_profile(&tprof, n_recount)));
+        // Whole-consensus presence: what fraction of sampled end-windows
+        // actually contain this trimmed consensus (within an error budget
+        // scaled to its own length), reusing the same forward searcher and
+        // the same per-window presence counter (`two_error_freq`) already
+        // used to reweight individual k-mers above. Unlike a per-position
+        // profile statistic, this can't be dragged down by an internal
+        // low-weight pocket inside an otherwise-correct reconstruction.
+        let k_cons = (base.error_rate * trimmed.len() as f64).floor() as usize;
+        let present = two_error_freq(&mut fwd, &trimmed, windows, k_cons);
+        let support = present as f64 / n_recount as f64;
+        out.push((trimmed, support));
     }
-    let _ = base; // error_rate/end_size not needed for assembly itself
     out
 }
 
@@ -711,12 +701,6 @@ mod tests {
     }
 
     #[test]
-    fn support_is_median_over_windows() {
-        let profile = vec![40u32, 50, 60];
-        assert!((support_from_profile(&profile, 100) - 0.50).abs() < 1e-9);
-    }
-
-    #[test]
     fn merge_folds_shared_sequence_to_both() {
         let a = b"ACGTACGTACGTACGT".to_vec();
         let five = vec![a.clone(), b"TTTTGGGGTTTTGGGG".to_vec()];
@@ -801,23 +785,30 @@ mod tests {
 
     #[test]
     fn discover_dual_end_adapter_gets_max_support() {
-        // Plant `adapter` at the 5' end (with a few substitutions -- weak
+        // Plant `adapter` at the 5' end (with heavier substitutions -- weak
         // recovery) and its exact reverse complement at the 3' end (strong
         // recovery) of every read, so `merge_both_ends` folds the two
         // per-end discoveries into a single `End::Both` entry (per
         // `same_adapter`, fuzzy/RC-aware). The two ends are assembled
         // completely independently (`assemble` only ever sees one end's
-        // windows), so the 3' end's own support here is deterministically
-        // ~1.0 (an exact copy, like `discover_finds_nothing_in_clean_reads`'s
-        // sibling exact-recovery cases) regardless of the 5' noise level.
-        // Pre-fix, `support_of` matched candidates by exact byte equality
-        // against the `Both` entry's (5') sequence, so it could only ever
-        // surface the 5' end's OWN weak support (~0.18, see the unmerged
-        // `Five` siblings this also produces) -- silently discarding the
-        // much stronger 3' recovery `merge_both_ends` had already matched.
-        // A reported support close to 1.0 (rather than ~0.18) proves the fix
-        // takes the max across `same_adapter`-equal entries, not just the
-        // exact ones.
+        // windows), so the 3' end's own whole-consensus presence support here
+        // is deterministically ~1.0 (an exact copy, like
+        // `discover_finds_nothing_in_clean_reads`'s sibling exact-recovery
+        // cases) regardless of the 5' noise level. The 5' copy's every-6th-
+        // position substitutions (~5 of 28 bases per read, positions varying
+        // by read index) keep the majority-vote consensus close enough to
+        // `adapter` for `same_adapter` to still fold it into `Both`, but each
+        // individual read then differs from that consensus by more edits
+        // than the 3' exact copies do, so its own presence support is
+        // measurably lower (~0.18, see the unmerged `Five` siblings this
+        // fixture also produces, below `KEEP_SUPPORT` on their own and
+        // correctly dropped independently). Pre-fix, `support_of` matched
+        // candidates by exact byte equality against the `Both` entry's (5')
+        // sequence, so it could only ever surface the 5' end's OWN weak
+        // support -- silently discarding the much stronger 3' recovery
+        // `merge_both_ends` had already matched. A reported support close to
+        // 1.0 (rather than ~0.18) proves the fix takes the max across
+        // `same_adapter`-equal entries, not just the exact ones.
         let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT"; // 28bp
         let rc: Vec<u8> = adapter
             .iter()
@@ -832,10 +823,10 @@ mod tests {
             .collect();
         let mut owned: Vec<Vec<u8>> = Vec::new();
         for i in 0..200usize {
-            // 5' copy: deterministic substitutions at every 8th (shifted)
+            // 5' copy: deterministic substitutions at every 6th (shifted)
             // position -- weak but still independently recoverable.
             let mut read = adapter.to_vec();
-            for p in (0..adapter.len()).step_by(8) {
+            for p in (0..adapter.len()).step_by(6) {
                 let q = (p + i) % adapter.len();
                 read[q] = b"ACGT"[(read[q] as usize + 1) % 4];
             }
@@ -881,9 +872,10 @@ mod tests {
 
         // the reported support must reflect the stronger (3') end, not the
         // weaker 5' end alone (~0.18 -- see the sibling unmerged `Five`
-        // entries this fixture also produces, at that same value).
+        // entries this fixture also produces, at that same value, and
+        // dropped independently since 0.18 < KEEP_SUPPORT).
         assert!(
-            both.support > 0.5,
+            both.support > 0.7,
             "Both adapter's support ({}) must reflect the max across ends \
              (3' end recovers at ~1.0 here), not just the weaker 5' end alone (~0.18)",
             both.support

@@ -308,12 +308,15 @@ fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
 }
 
 /// A kept adapter's support below this is close enough to `infer::KEEP_SUPPORT`
-/// (0.10) that it's worth an explicit warning rather than trusting the plain
-/// info line: the recovered support for a genuine adapter can land just above
-/// the keep floor (see `infer::KEEP_SUPPORT`'s doc comment — a real, closely-
-/// matching planted adapter recovers at ~0.144 in that test), so a kept
-/// adapter this weak deserves scrutiny before trusting it, not silent trust.
-const MARGINAL_SUPPORT: f64 = 0.20;
+/// (0.30, a whole-consensus presence fraction — see its doc comment) that
+/// it's worth an explicit warning rather than trusting the plain info line:
+/// a genuinely marginal discovery (e.g. an adapter only present in a fraction
+/// of reads, such as a barcode-specific sequence) can still clear the keep
+/// floor while remaining far from a confident, near-all-reads presence, so a
+/// kept adapter this weak deserves scrutiny before trusting it, not silent
+/// trust. ~1.5x `KEEP_SUPPORT` gives headroom above the floor while staying
+/// well below a genuine, high-prevalence adapter's typical near-1.0 presence.
+const MARGINAL_SUPPORT: f64 = 0.45;
 
 /// Log each ab-initio discovery (Task 9's `infer::discover` output) at
 /// `info!`: `inferred_N ≈ NAME (pct%) · support X.XX` when the discovered
