@@ -18,9 +18,6 @@ pub struct InferredAdapter {
 /// 2-bit-encode a k-mer (A=0,C=1,G=2,T=3). `None` if it contains any non-ACGT
 /// base (e.g. `N`) or is longer than 32. Deterministic, case-sensitive to
 /// uppercase (reads are uppercased upstream; lowercase/other -> None).
-// Not yet called from production code (only from the tests below); the
-// k-mer counting task wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn encode_kmer(bytes: &[u8]) -> Option<u64> {
     if bytes.len() > 32 {
         return None;
@@ -78,6 +75,49 @@ fn end_windows<'a>(sample: &[&'a [u8]], w: usize) -> (Vec<&'a [u8]>, Vec<&'a [u8
     (five, three)
 }
 
+/// True if a k-mer is too low-complexity to be a useful adapter seed:
+/// only 1 distinct base, or a period-1/period-2 repeat (homopolymer or
+/// dinucleotide run). Deterministic, no allocation beyond the small set.
+fn is_low_complexity(kmer: &[u8]) -> bool {
+    if kmer.windows(2).all(|w| w[0] == w[1]) {
+        return true; // homopolymer
+    }
+    // period-2 (e.g. ACACAC...)
+    if kmer.len() >= 4 && kmer.iter().enumerate().all(|(i, &b)| b == kmer[i % 2]) {
+        return true;
+    }
+    false
+}
+
+/// Exact k-mer counts across all windows, low-complexity k-mers dropped,
+/// sorted by `(count desc, code asc)` and truncated to `top`.
+// Not yet called from production code (only from the tests below); the
+// Task 9 (discover) wires this in and this allow comes off then.
+#[allow(dead_code)]
+fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<u64, u32> = HashMap::new();
+    for &wnd in windows {
+        if wnd.len() < k {
+            continue;
+        }
+        for i in 0..=wnd.len() - k {
+            let sub = &wnd[i..i + k];
+            if is_low_complexity(sub) {
+                continue;
+            }
+            if let Some(code) = encode_kmer(sub) {
+                *counts.entry(code).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut ranked: Vec<(u64, u32)> = counts.into_iter().collect();
+    // count desc, then code asc for a deterministic tie-break.
+    ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    ranked.truncate(top);
+    ranked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +133,7 @@ mod tests {
     fn encode_rejects_non_acgt() {
         assert_eq!(encode_kmer(b"ACGTN"), None);
         assert_eq!(encode_kmer(b"acgt"), None); // lowercase not accepted
+        assert_eq!(encode_kmer(&[b'A'; 33]), None); // > 32 bases rejected
     }
 
     #[test]
@@ -103,5 +144,34 @@ mod tests {
         let (five, three) = end_windows(&sample, 8);
         assert_eq!(five, vec![&r1[..8], r2]); // first 8 / whole short read
         assert_eq!(three, vec![&r1[16..], r2]); // last 8 / whole short read
+    }
+
+    #[test]
+    fn top_kmers_ranks_planted_over_background() {
+        // A planted 16-mer appears in every window; each window also has unique
+        // filler. The planted k-mer must rank first.
+        let planted = b"ACGTACGTACGTACGT"; // 16bp, not low-complexity
+        let mut owned: Vec<Vec<u8>> = Vec::new();
+        for i in 0..50u8 {
+            let mut wnd = planted.to_vec();
+            // Varied filler; first byte cycles B..E (never 'A') so a window's
+            // filler can never spell "ACGT" and accidentally reconstruct the
+            // planted (period-4) k-mer at the trailing slide offset.
+            wnd.extend_from_slice(&[b'B' + (i % 4), b'C', b'G', b'T']);
+            owned.push(wnd);
+        }
+        let windows: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let ranked = top_kmers(&windows, 16, 500);
+        assert_eq!(decode_kmer(ranked[0].0, 16), planted);
+        assert_eq!(ranked[0].1, 50);
+    }
+
+    #[test]
+    fn top_kmers_drops_homopolymer() {
+        let windows: Vec<&[u8]> = vec![b"AAAAAAAAAAAAAAAA"]; // pure homopolymer, 16bp
+        assert!(
+            top_kmers(&windows, 16, 500).is_empty(),
+            "low-complexity dropped"
+        );
     }
 }
