@@ -32,7 +32,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::pipeline::{Counters, Stats};
+use crate::workflow::{Counters, Stats};
 
 /// How often the ticker thread refreshes the bar's position/message in `Mode::Bar`.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);

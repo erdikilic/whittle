@@ -10,7 +10,7 @@ use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
 use crate::{filter, trim};
 
-/// Single-threaded FASTQ pipeline: filter -> trim -> write each surviving segment.
+/// Single-threaded FASTQ workflow: filter -> trim -> write each surviving segment.
 pub fn run_fastq_seq<W: Write>(
     records: impl Iterator<Item = anyhow::Result<ReadRecord>>,
     writer: &mut W,
@@ -101,7 +101,7 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> (u64, u
     (out, out_bases, buf)
 }
 
-/// Threads-aware FASTQ pipeline entry point. Sequential (and output-order
+/// Threads-aware FASTQ workflow entry point. Sequential (and output-order
 /// deterministic) when `cfg.threads <= 1`; otherwise renders each record on a
 /// rayon work pool and drains rendered buffers through a bounded channel on a
 /// dedicated writer task. Output order is unordered for `threads > 1` since
@@ -231,7 +231,7 @@ mod tests {
     fn shared_counters_reflect_totals() {
         use std::sync::Arc;
 
-        use crate::pipeline::Counters;
+        use crate::workflow::Counters;
         let cfg = Config {
             io: crate::config::IoConfig {
                 input: None,

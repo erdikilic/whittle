@@ -68,7 +68,7 @@ impl Counters {
         // Every input read is either dropped (counted under exactly one of the
         // reasons above) or produced at least one output segment (counted once
         // in `reads_with_output`, regardless of how many segments it split
-        // into) — never both, never neither. A future pipeline path that adds
+        // into) — never both, never neither. A future workflow path that adds
         // a `continue`/early return without bumping one of these counters
         // would silently under/over-count the summary; this catches that in
         // debug builds instead of shipping a quietly-wrong report.

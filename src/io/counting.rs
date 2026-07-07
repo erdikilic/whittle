@@ -6,7 +6,7 @@ use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::pipeline::Counters;
+use crate::workflow::Counters;
 
 /// Wraps any `Read` and increments `counters.bytes_read` by the number of
 /// bytes actually pulled through on each `read()` call.

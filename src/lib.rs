@@ -5,10 +5,10 @@ pub mod filter;
 pub mod io;
 pub mod mods;
 pub mod obs;
-pub mod pipeline;
 pub mod qual;
 pub mod record;
 pub mod trim;
+pub mod workflow;
 
 use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 
@@ -64,9 +64,9 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         .map(|m| m.len());
 
     // Created here (before the reader) so the same `Arc` can be shared into
-    // `CountingReader` below, then cloned again for the pipeline call and
+    // `CountingReader` below, then cloned again for the workflow call and
     // `obs.start`.
-    let counters = std::sync::Arc::new(pipeline::Counters::default());
+    let counters = std::sync::Arc::new(workflow::Counters::default());
 
     // Open the input (file or stdin) up front so format detection can sniff
     // its first bytes without losing them: any bytes consumed while sniffing
@@ -158,7 +158,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
 
     // Resolved once, here, so the banner's Threads line and the actual dispatch
     // arm below agree on the same split — recomputing per arm risked the banner
-    // showing one number and the pipeline running another.
+    // showing one number and the workflow running another.
     let budget = config::thread_budget(
         cfg.threads,
         matches!(in_fmt, Format::Bam),
@@ -247,7 +247,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
                 cfg.compression_level,
             )?;
             cfg.render_workers = budget.render;
-            let stats = pipeline::run_bam(&out_header, records, &mut sink, &cfg, &counters)?;
+            let stats = workflow::run_bam(&out_header, records, &mut sink, &cfg, &counters)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded — an I/O
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
@@ -265,7 +265,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             };
             let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
-            let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
+            let stats = workflow::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
             writer.finish()?;
             tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
             obs.finish(&stats, &out_desc);
@@ -292,7 +292,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     };
     let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
     cfg.render_workers = budget.render;
-    let stats = pipeline::run_fastq(records, &mut writer, &cfg, &counters)?;
+    let stats = workflow::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
     tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
     obs.finish(&stats, &out_desc);
@@ -300,7 +300,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
 }
 
 /// The noodles `RecordBuf` SEQ accessor: the base bytes (A/C/G/T/...), the same
-/// ones `pipeline/bam.rs` slices via `rec.sequence().as_ref()`. Kept as a named
+/// ones `workflow/bam.rs` slices via `rec.sequence().as_ref()`. Kept as a named
 /// `fn` (rather than an inline closure per call site) so it can be passed as
 /// `seq_of` to `maybe_reduce_adapters` from both BAM dispatch arms.
 fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
@@ -412,7 +412,7 @@ fn buffer_prefix<R>(
 ///   what it found and likewise returns `Ok(None)`.
 ///
 /// Returns `Ok(None)` when the caller must stop immediately — no writer, no
-/// pipeline dispatch, no output file (currently only `ReportOnly`, whether or
+/// workflow dispatch, no output file (currently only `ReportOnly`, whether or
 /// not discovery ran). Otherwise `Ok(Some(buffered ++ rest))`, boxed (rather
 /// than `impl Iterator`, as before ab-initio inference existed) because the
 /// two policies above buffer/reduce differently but must still hand the same
@@ -426,7 +426,7 @@ fn maybe_reduce_adapters<R, I, F>(
     seq_of: F,
 ) -> anyhow::Result<Option<Box<dyn Iterator<Item = anyhow::Result<R>> + Send>>>
 where
-    // `+ Send` / `R: Send`: the FASTQ and BAM pipelines' parallel paths require a
+    // `+ Send` / `R: Send`: the FASTQ and BAM workflows' parallel paths require a
     // `Send` record iterator. `+ 'static`: needed to box the returned iterator
     // (every real caller already hands in an already-boxed, owning iterator).
     // `seq_of` is only used inside this fn (not captured by the returned
@@ -669,7 +669,7 @@ fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> 
 
 /// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
 /// then merge all its read files into a single trimmed output using the same
-/// pipelines as the single-file path.
+/// workflows as the single-file path.
 fn run_folder(
     dir: &std::path::Path,
     cfg: &mut Config,
@@ -747,7 +747,7 @@ fn run_folder(
         tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
     }
 
-    let counters = std::sync::Arc::new(pipeline::Counters::default());
+    let counters = std::sync::Arc::new(workflow::Counters::default());
     obs.start(None, counters.clone());
 
     let t0 = std::time::Instant::now();
@@ -774,7 +774,7 @@ fn run_folder(
             };
             let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
-            let stats = pipeline::run_fastq(records, &mut writer, cfg, &counters)?;
+            let stats = workflow::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
             tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
             obs.finish(&stats, &out_desc);
@@ -798,7 +798,7 @@ fn run_folder(
                     cfg.compression_level,
                 )?;
                 cfg.render_workers = budget.render;
-                let stats = pipeline::run_bam(&out_header, records, &mut sink, cfg, &counters)?;
+                let stats = workflow::run_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
                 tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
                 obs.finish(&stats, &out_desc);
@@ -811,7 +811,7 @@ fn run_folder(
                 };
                 let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
                 cfg.render_workers = budget.render;
-                let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
+                let stats = workflow::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
                 writer.finish()?;
                 tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
                 obs.finish(&stats, &out_desc);
@@ -826,7 +826,7 @@ fn run_folder(
 /// Paired with `render_heavy` (`in_fmt == Format::Bam`, or the folder-mode
 /// equivalent), this is everything `config::thread_budget` needs; both call sites
 /// (`run`, `run_folder`) resolve their budget from this exactly once, before the
-/// startup banner, and reuse it for the actual pipeline dispatch below.
+/// startup banner, and reuse it for the actual workflow dispatch below.
 fn encode_kind_for(out_fmt: io::Format) -> config::EncodeKind {
     match out_fmt {
         io::Format::Bam => config::EncodeKind::Bgzf,
@@ -878,7 +878,7 @@ fn output_banner_line(
 /// The startup banner's `Threads: ...` line: the resolved `-t`/auto worker
 /// count (`threads`) as the header, with the per-stage split (mapping the
 /// `ThreadBudget`'s internal stage names — decode/render/encode — onto the
-/// pipeline-stage vocabulary shown to the user: read/trim/write) in
+/// workflow-stage vocabulary shown to the user: read/trim/write) in
 /// parentheses: `Threads: 8 (read 1, trim 4, write 3)`. Deliberately *not*
 /// `b.total()`: that per-stage sum can exceed `threads` (each stage is floored
 /// at >= 1 even when the overall total is 1 — see `ThreadBudget::total`'s

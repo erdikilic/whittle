@@ -328,7 +328,7 @@ fn detection_output_equals_full_set_for_present_adapter() {
     let run = |extra_args: &[&str]| {
         // `-t 1`: pin single-threaded so output order is deterministic (the
         // parallel writer path lands records in arrival order, not input
-        // order, for `threads > 1` -- see `pipeline::fastq::run`). That
+        // order, for `threads > 1` -- see `workflow::fastq::run`). That
         // nondeterminism is orthogonal to what this test checks, so it must
         // be controlled for to get a meaningful byte comparison.
         let mut args = vec![

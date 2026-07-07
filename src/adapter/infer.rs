@@ -453,7 +453,7 @@ fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f
     named
 }
 
-/// One end's pipeline: count -> reweight by 2-error freq -> peel -> drop-trim.
+/// One end's workflow: count -> reweight by 2-error freq -> peel -> drop-trim.
 /// Returns (trimmed consensus, support) candidates for this end.
 fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
     if windows.len() < 3 {
@@ -497,7 +497,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
     out
 }
 
-/// Full ab-initio discovery pipeline: per-end `assemble`, fold shared 5'/3'
+/// Full ab-initio discovery workflow: per-end `assemble`, fold shared 5'/3'
 /// discoveries into `End::Both` via `merge_both_ends`, drop anything too
 /// short or too weakly supported, then name each survivor against the
 /// built-in ONT catalog UNION `base.adapters` -- extra naming refs, e.g. the
