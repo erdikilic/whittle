@@ -19,6 +19,13 @@ pub fn new_searcher() -> DnaSearcher {
     Searcher::<Dna>::new_rc()
 }
 
+/// A fresh searcher that matches the FORWARD strand only (no reverse-complement).
+/// Used by inference's k-mer recount, where each read-end window is already
+/// strand-oriented and RC hits would inflate the per-window presence count.
+pub fn new_searcher_fwd() -> DnaSearcher {
+    Searcher::<Dna>::new_fwd()
+}
+
 /// All matches of `pattern` in `text` with edit distance <= `k` (both strands),
 /// as text spans. Reuses `searcher`'s internal buffers across calls.
 pub fn hits(searcher: &mut DnaSearcher, pattern: &[u8], text: &[u8], k: usize) -> Vec<Hit> {
@@ -60,6 +67,15 @@ mod tests {
         let h = hits(&mut s, b"AAAACCCC", b"TTGGGGTTTTAA", 0);
         assert_eq!(h.len(), 1);
         assert_eq!((h[0].start, h[0].end), (2, 10));
+    }
+
+    #[test]
+    fn forward_searcher_ignores_reverse_complement() {
+        let mut s = new_searcher_fwd();
+        // revcomp(AAAACCCC) = GGGGTTTT is in the text, but forward-only must skip it.
+        assert_eq!(hits(&mut s, b"AAAACCCC", b"TTGGGGTTTTAA", 0).len(), 0);
+        // the forward pattern present -> found.
+        assert_eq!(hits(&mut s, b"AAAACCCC", b"TTAAAACCCCTT", 0).len(), 1);
     }
 
     #[test]
