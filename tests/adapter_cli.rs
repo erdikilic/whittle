@@ -802,3 +802,88 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
         );
     }
 }
+
+// --- Task 11 review-fix regressions: `--adapter-infer-only` must NEVER
+// write or touch output -------------------------------------------------
+
+/// HIGH bug: the too-few-reads branch of the infer path used to return
+/// `Ok(Some(chain(sample, records)))` unconditionally, so `--adapter-infer-only`
+/// on an undersized input warned, then still dispatched and wrote the full
+/// (untrimmed) input back out through `-o`. `ReportOnly` must never write
+/// output, no matter whether discovery itself ran or was skipped for too few
+/// reads.
+#[test]
+fn infer_only_tiny_input_writes_no_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = 10; // < MIN_SAMPLE_FOR_DETECTION (100)
+    let fq = write_adapted_fastq(dir.path(), n);
+    let out_path = dir.path().join("out.fastq");
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "-o",
+        out_path.to_str().unwrap(),
+        "--adapter-infer-only",
+        "-t",
+        "1",
+    ]);
+    let assert = cmd.assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("too few"),
+        "must warn about the undersized sample: {stderr}"
+    );
+
+    // Report-only must write no records: either the `-o` file was never
+    // created, or it exists but is empty / has no FASTQ record header.
+    match std::fs::read(&out_path) {
+        Ok(bytes) => assert!(
+            bytes.is_empty() || !bytes.contains(&b'@'),
+            "report-only must not write any output records to -o: {:?}",
+            String::from_utf8_lossy(&bytes)
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::NotFound,
+            "unexpected error reading -o file: {e}"
+        ),
+    }
+}
+
+/// LOW bug: the FASTQ dispatch arm used to construct the output writer (a
+/// truncating `File::create`) BEFORE the buffer-and-decide seam
+/// (`maybe_reduce_adapters`), so `--adapter-infer-only -o existing.txt`
+/// truncated `existing.txt` to zero bytes even though report-only writes no
+/// records at all. The writer must only be created after the seam has had
+/// its chance to return the "stop now, no dispatch" signal.
+#[test]
+fn infer_only_does_not_clobber_output_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // Adequate (>= MIN_SAMPLE_FOR_DETECTION) planted-adapter input, so
+    // discovery actually runs (not the too-few-reads path exercised above).
+    let fq = write_adapted_fastq(dir.path(), 500);
+    let out_path = dir.path().join("existing.txt");
+    let sentinel = "SENTINEL: pre-existing file contents, must survive\n";
+    std::fs::write(&out_path, sentinel).unwrap();
+
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "-o",
+        out_path.to_str().unwrap(),
+        "--adapter-infer-only",
+        "-t",
+        "1",
+    ]);
+    cmd.assert().success();
+
+    let contents = std::fs::read_to_string(&out_path).unwrap();
+    assert_eq!(
+        contents, sentinel,
+        "report-only must not touch a pre-existing -o file at all"
+    );
+}

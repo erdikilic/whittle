@@ -278,14 +278,20 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     }
 
     note_tags_ignored(&cfg, in_fmt, out_fmt);
-    let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
-    cfg.render_workers = budget.render;
 
+    // Writer construction (a `File::create`, which eagerly truncates any
+    // existing `-o` target) happens AFTER `maybe_reduce_adapters`, not before
+    // — matching the BAM arms above. A `ReportOnly` early-exit (`Ok(None)`)
+    // must return before any output file is touched; building the writer
+    // first would truncate a pre-existing `-o` file even though report-only
+    // writes no records at all.
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
     let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| r.seq.as_slice())? else {
         return Ok(());
     };
+    let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
+    cfg.render_workers = budget.render;
     let stats = pipeline::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
     tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
@@ -355,18 +361,22 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
 ///   `cli::parse`) and run `infer::discover` on them to build the working
 ///   adapter set from scratch, ignoring whatever `cfg.adapters` held before
 ///   (it's always an empty list under infer; see `cli::parse`). Too small a
-///   sample (< `detect::MIN_SAMPLE_FOR_DETECTION`) skips discovery entirely
-///   and trims nothing (there is no "full set" to fall back to here, unlike
-///   Off's presence detection). A `ReportOnly` run logs what it found and
-///   returns `Ok(None)`.
+///   sample (< `detect::MIN_SAMPLE_FOR_DETECTION`) skips discovery entirely:
+///   under `Trim` there is no "full set" to fall back to here (unlike Off's
+///   presence detection), so it trims nothing and dispatch still runs; under
+///   `ReportOnly` there is nothing to report, so it warns and returns
+///   `Ok(None)` just like the post-discovery `ReportOnly` case below — its
+///   "never write or touch output" contract does not depend on discovery
+///   itself having run. A `ReportOnly` run that does complete discovery logs
+///   what it found and likewise returns `Ok(None)`.
 ///
 /// Returns `Ok(None)` when the caller must stop immediately — no writer, no
-/// pipeline dispatch, no output file (currently only `ReportOnly`, once it
-/// has logged its findings). Otherwise `Ok(Some(buffered ++ rest))`, boxed
-/// (rather than `impl Iterator`, as before ab-initio inference existed)
-/// because the two policies above buffer/reduce differently but must still
-/// hand the same iterator type back to each of the six call sites. `seq_of`
-/// extracts a record's SEQ.
+/// pipeline dispatch, no output file (currently only `ReportOnly`, whether or
+/// not discovery ran). Otherwise `Ok(Some(buffered ++ rest))`, boxed (rather
+/// than `impl Iterator`, as before ab-initio inference existed) because the
+/// two policies above buffer/reduce differently but must still hand the same
+/// iterator type back to each of the six call sites. `seq_of` extracts a
+/// record's SEQ.
 fn maybe_reduce_adapters<R, I, F>(
     mut records: I,
     cfg: &mut Config,
@@ -407,16 +417,20 @@ where
                 Box::new(sample.into_iter().map(anyhow::Ok).chain(records))
             };
         if s < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION {
-            // Deliberately not gated on `ReportOnly` here: discovery never ran,
-            // so there is no discovered set to print either way -- both modes
-            // just get their reads back untouched (dispatch runs; a
-            // `ReportOnly` run on a too-small input therefore still emits its
-            // input as-is rather than silently exiting with no output).
+            // Discovery never ran, so there is no discovered set to print --
+            // but `ReportOnly`'s contract ("never write or touch output") still
+            // applies even when discovery itself was skipped. Gate on it here,
+            // the same way the post-discovery `ReportOnly` check below does:
+            // warn, then hand back the "stop now, no dispatch" signal instead
+            // of falling through to `chain(sample, records)`.
             tracing::warn!(
                 "adapter inference: too few reads ({s}, need >= {}) to infer reliably; \
                  keeping reads untrimmed",
                 crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
             );
+            if cfg.adapter_infer == AdapterInfer::ReportOnly {
+                return Ok(None);
+            }
             let mut reduced = base;
             reduced.adapters = Vec::new();
             cfg.adapters = Some(reduced);
@@ -709,12 +723,15 @@ fn run_folder(
                 );
             }
             note_tags_ignored(cfg, family_fmt, out_fmt);
-            let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
-            cfg.render_workers = budget.render;
+            // Same ordering fix as `run`'s FASTQ arm: build the writer (a
+            // truncating `File::create`) only after `maybe_reduce_adapters`
+            // has had its chance to return `Ok(None)` for `ReportOnly`.
             let records = io::dir::fastq_records(&paths);
             let Some(records) = maybe_reduce_adapters(records, cfg, |r| r.seq.as_slice())? else {
                 return Ok(());
             };
+            let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
+            cfg.render_workers = budget.render;
             let stats = pipeline::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
             tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
