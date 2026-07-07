@@ -57,6 +57,27 @@ fn decode_kmer(mut code: u64, k: usize) -> Vec<u8> {
     out
 }
 
+/// Slices the first/last `w` bytes of each read into 5' and 3' window lists.
+/// Returns `.0` = 5' windows (`&read[..min(w,len)]`), `.1` = 3' windows
+/// (`&read[len-min(w,len)..]`). Empty reads are skipped.
+// Not yet called from production code (only from the tests below); the
+// Task 9 (discover) wires this in and this allow comes off then.
+#[allow(dead_code)]
+fn end_windows<'a>(sample: &[&'a [u8]], w: usize) -> (Vec<&'a [u8]>, Vec<&'a [u8]>) {
+    let mut five = Vec::new();
+    let mut three = Vec::new();
+    for &read in sample {
+        let n = read.len();
+        if n == 0 {
+            continue;
+        }
+        let take = w.min(n);
+        five.push(&read[..take]);
+        three.push(&read[n - take..]);
+    }
+    (five, three)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +93,15 @@ mod tests {
     fn encode_rejects_non_acgt() {
         assert_eq!(encode_kmer(b"ACGTN"), None);
         assert_eq!(encode_kmer(b"acgt"), None); // lowercase not accepted
+    }
+
+    #[test]
+    fn end_windows_slices_both_ends() {
+        let r1: &[u8] = b"AAAACCCCGGGGTTTTACGTACGT"; // 24bp
+        let r2: &[u8] = b"TTTT"; // 4bp (< w) -> whole read both ends
+        let sample: Vec<&[u8]> = vec![r1, r2, b""]; // empty skipped
+        let (five, three) = end_windows(&sample, 8);
+        assert_eq!(five, vec![&r1[..8], r2]); // first 8 / whole short read
+        assert_eq!(three, vec![&r1[16..], r2]); // last 8 / whole short read
     }
 }
