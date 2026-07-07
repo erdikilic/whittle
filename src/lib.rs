@@ -294,9 +294,12 @@ fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
 
 /// If adapter trimming is active and `cfg.adapter_sample > 0`, buffer up to
 /// `adapter_sample` records, detect which adapters are actually present in the
-/// sample, and reduce `cfg.adapters` to that set. Returns `buffered ++ rest`
-/// (the buffered prefix is empty when detection is off, so the returned
-/// iterator is a no-op wrapper in that case). `seq_of` extracts a record's SEQ.
+/// sample, and reduce `cfg.adapters` to that set — unless detection keeps zero
+/// adapters, in which case it falls back to the full set (an empty prefix
+/// result more likely means an unrepresentative sample than a truly
+/// adapter-free run). Returns `buffered ++ rest` (the buffered prefix is empty
+/// when detection is off, so the returned iterator is a no-op wrapper in that
+/// case). `seq_of` extracts a record's SEQ.
 fn maybe_reduce_adapters<R, I, F>(
     mut records: I,
     cfg: &mut Config,
@@ -333,7 +336,7 @@ where
             ac.adapters.clone()
         } else {
             let seqs: Vec<&[u8]> = sample.iter().map(&seq_of).collect();
-            let kept = crate::adapter::detect::present(
+            let detected = crate::adapter::detect::present(
                 &seqs,
                 &ac.adapters,
                 ac.error_rate,
@@ -341,23 +344,31 @@ where
                 ac.split,
                 crate::adapter::detect::presence_min(s),
             );
-            let names: Vec<&str> = kept.iter().take(12).map(|a| a.name.as_str()).collect();
-            let more = kept.len().saturating_sub(names.len());
-            tracing::info!(
-                "Adapter presence: sampled {s} reads, kept {} of {full} adapters{}{}",
-                kept.len(),
-                if names.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", names.join(", "))
-                },
-                if more > 0 {
-                    format!(" +{more} more")
-                } else {
-                    String::new()
-                },
-            );
-            kept
+            if detected.is_empty() {
+                tracing::warn!(
+                    "Adapter presence: no adapters detected in the first {s} sampled reads; using all {full} \
+                     (the sampled prefix may be unrepresentative — pass --adapter-sample 0 to always use the full set)"
+                );
+                ac.adapters.clone()
+            } else {
+                let names: Vec<&str> = detected.iter().take(12).map(|a| a.name.as_str()).collect();
+                let more = detected.len().saturating_sub(names.len());
+                tracing::info!(
+                    "Adapter presence: sampled {s} reads, kept {} of {full} adapters{}{}",
+                    detected.len(),
+                    if names.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", names.join(", "))
+                    },
+                    if more > 0 {
+                        format!(" +{more} more")
+                    } else {
+                        String::new()
+                    },
+                );
+                detected
+            }
         };
         let mut reduced = ac;
         reduced.adapters = kept;

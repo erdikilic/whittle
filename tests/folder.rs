@@ -207,12 +207,15 @@ fn write_ubam_with_rg(path: &Path, name: &[u8], rg: &str) {
     w.try_finish().unwrap();
 }
 
-// Folder-merge mirror of `adapter_cli::detection_keeps_present_drops_absent_and_still_trims`:
+// Folder-merge mirror of `adapter_cli::custom_fasta_never_reduces_even_with_an_absent_adapter`:
 // two FASTQ files (100 reads each) all carrying adapter `present`, merged by
-// `-i <dir>`. Detection samples the MERGED stream, so it must still see all
-// 200 reads and keep only `present` out of the 2-adapter FASTA.
+// `-i <dir>`. A custom --adapter-fasta now disables presence detection
+// outright (a curated FASTA should always be searched in full), so no
+// "Adapter presence" reduction is ever logged here -- but the merge, and
+// trimming of the present adapter, must still work correctly on the merged
+// stream.
 #[test]
-fn folder_merge_adapter_detection_keeps_present_and_trims() {
+fn folder_merge_custom_fasta_never_reduces_still_trims() {
     let present = "GGGGTTTTGGGGTTTTGGGG"; // 20bp present adapter
     let absent = "ACGACGACGACGACGACGAC"; // 20bp never in the reads
     let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40bp
@@ -258,7 +261,10 @@ fn folder_merge_adapter_detection_keeps_present_and_trims() {
         .success();
 
     let stderr = String::from_utf8_lossy(&res.get_output().stderr).into_owned();
-    assert!(stderr.contains("kept 1 of 2 adapters"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("Adapter presence"),
+        "custom --adapter-fasta must disable detection outright in folder-merge too: {stderr}"
+    );
 
     let got = std::fs::read_to_string(&out).unwrap();
     assert!(got.contains(insert), "insert kept");

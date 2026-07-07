@@ -259,6 +259,15 @@ pub fn parse() -> anyhow::Result<Config> {
         _ => None,
     };
 
+    // Presence detection is preset-only: a user-supplied --adapter-fasta is a
+    // curated set that should all be searched, and sampling could wrongly drop a
+    // rare custom adapter. So detection is disabled whenever a FASTA is provided.
+    let adapter_sample = if c.adapter_fasta.is_some() {
+        0
+    } else {
+        c.adapter_sample
+    };
+
     Ok(Config {
         io: IoConfig {
             input: c.input,
@@ -284,7 +293,7 @@ pub fn parse() -> anyhow::Result<Config> {
         threads,
         fastq_tags,
         render_workers: 0,
-        adapter_sample: c.adapter_sample,
+        adapter_sample,
         compression_level: c.compression_level,
         update_moves: c.update_moves,
         verbosity: c.verbose,
