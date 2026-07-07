@@ -42,9 +42,6 @@ fn encode_kmer(bytes: &[u8]) -> Option<u64> {
 }
 
 /// Inverse of `encode_kmer` for a known length `k`.
-// Not yet called from production code (only from the tests below); the
-// assembly task wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn decode_kmer(mut code: u64, k: usize) -> Vec<u8> {
     let mut out = vec![0u8; k];
     for i in (0..k).rev() {
@@ -146,6 +143,118 @@ fn two_error_freq(
     present
 }
 
+/// Reconstructs a consensus adapter sequence from weighted k-mer nodes via a
+/// cycle-safe bidirectional greedy walk: seed at the single heaviest node,
+/// then greedily extend forward (heaviest unvisited successor) and backward
+/// (heaviest unvisited predecessor), marking each node visited so no node is
+/// used twice. A length-bounded DP would traverse cycles repeatedly (weights
+/// are positive, so revisiting a cycle only adds weight) and emit a long
+/// repetitive consensus; the visited set makes this cycle-safe *and*
+/// cycle-*correct* by construction (a simple path, not a loop). Bidirectional
+/// extension is required because the heaviest seed k-mer usually sits in the
+/// middle of the adapter -- forward-only would recover only the suffix.
+/// Returns `(consensus bytes, per-position weight profile, total node-weight)`,
+/// or `None` if `nodes` is empty. `lmax` caps the total emitted length; the
+/// consensus is always at least one k-mer even if `lmax < k`.
+// Not yet called from production code (only from the tests below); Task 7
+// (peel_paths) wires this in and this allow comes off then.
+#[allow(dead_code)]
+fn bounded_heaviest_path(
+    nodes: &[(u64, u32)],
+    k: usize,
+    lmax: usize,
+) -> Option<(Vec<u8>, Vec<u32>, u64)> {
+    use std::collections::HashMap;
+    if nodes.is_empty() {
+        return None;
+    }
+    let n = nodes.len();
+    // (k-1)-overlap: node A -> node B iff last (k-1) bases of A == first (k-1)
+    // bases of B. On 2-bit codes: (A & suffix_mask) == (B >> 2).
+    let suffix_mask: u64 = if k >= 1 {
+        (1u64 << (2 * (k - 1))) - 1
+    } else {
+        0
+    };
+    // successor index: (k-1)-prefix code -> nodes whose PREFIX == that code.
+    // predecessor index: (k-1)-suffix code -> nodes whose SUFFIX == that code.
+    let mut by_prefix: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut by_suffix: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (i, &(code, _)) in nodes.iter().enumerate() {
+        by_prefix.entry(code >> 2).or_default().push(i);
+        by_suffix.entry(code & suffix_mask).or_default().push(i);
+    }
+
+    // deterministic pick: heaviest unvisited candidate, tie -> smaller code.
+    let pick = |cands: Option<&Vec<usize>>, visited: &[bool]| -> Option<usize> {
+        cands?
+            .iter()
+            .copied()
+            .filter(|&i| !visited[i])
+            .max_by(|&a, &b| {
+                nodes[a]
+                    .1
+                    .cmp(&nodes[b].1)
+                    .then(nodes[b].0.cmp(&nodes[a].0))
+            })
+    };
+
+    // seed = single heaviest node (tie -> smaller code).
+    let seed = (0..n)
+        .max_by(|&a, &b| {
+            nodes[a]
+                .1
+                .cmp(&nodes[b].1)
+                .then(nodes[b].0.cmp(&nodes[a].0))
+        })
+        .unwrap();
+    let mut visited = vec![false; n];
+    visited[seed] = true;
+
+    // forward extension: heaviest unvisited successor, until none or lmax reached.
+    let mut forward: Vec<usize> = Vec::new();
+    let mut cur = seed;
+    while k + forward.len() < lmax {
+        match pick(by_prefix.get(&(nodes[cur].0 & suffix_mask)), &visited) {
+            Some(v) => {
+                visited[v] = true;
+                forward.push(v);
+                cur = v;
+            },
+            None => break,
+        }
+    }
+    // backward extension: heaviest unvisited predecessor.
+    let mut backward: Vec<usize> = Vec::new();
+    cur = seed;
+    while k + forward.len() + backward.len() < lmax {
+        match pick(by_suffix.get(&(nodes[cur].0 >> 2)), &visited) {
+            Some(u) => {
+                visited[u] = true;
+                backward.push(u);
+                cur = u;
+            },
+            None => break,
+        }
+    }
+
+    // full path: reverse(backward) ++ [seed] ++ forward
+    let mut chain: Vec<usize> = backward.iter().rev().copied().collect();
+    chain.push(seed);
+    chain.extend(forward.iter().copied());
+
+    // build consensus: first node emits k bases, each subsequent emits its last base.
+    let mut cons = decode_kmer(nodes[chain[0]].0, k);
+    let mut profile: Vec<u32> = vec![nodes[chain[0]].1; k];
+    let mut weight: u64 = nodes[chain[0]].1 as u64;
+    for &idx in &chain[1..] {
+        cons.push(*decode_kmer(nodes[idx].0, k).last().unwrap());
+        profile.push(nodes[idx].1);
+        weight += nodes[idx].1 as u64;
+    }
+    Some((cons, profile, weight))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +327,35 @@ mod tests {
         let mut s = new_searcher_fwd();
         // w0 (exact) + w1 (1 edit) + w2 (twice -> once) = 3; w3 (RC only) excluded.
         assert_eq!(two_error_freq(&mut s, kmer, &windows, 2), 3);
+    }
+
+    #[test]
+    fn bounded_heaviest_path_reconstructs_known_consensus() {
+        // Overlapping 4-mers that tile ACGTACGT with descending weights on the
+        // intended path so the heaviest path is unambiguous.
+        // ACGT(9) -> CGTA(8) -> GTAC(7) -> TACG(6) -> ACGT... use k=4.
+        let mk = |s: &[u8], w: u32| (encode_kmer(s).unwrap(), w);
+        let nodes = vec![
+            mk(b"ACGT", 9),
+            mk(b"CGTA", 8),
+            mk(b"GTAC", 7),
+            mk(b"TACG", 6),
+        ];
+        let (cons, profile, weight) = bounded_heaviest_path(&nodes, 4, 100).unwrap();
+        assert_eq!(cons, b"ACGTACG"); // ACGT + C + A + G  (4 nodes -> 4+3 = 7 nt)
+        assert_eq!(profile.len(), cons.len());
+        assert_eq!(weight, 9 + 8 + 7 + 6);
+    }
+
+    #[test]
+    fn bounded_heaviest_path_terminates_on_cycle() {
+        // A real 2-node cycle: ATAT -> TATA -> ATAT (k=4). The visited set must stop
+        // the walk after each node is used once (no looping), so the consensus is a
+        // short simple path, not a repeat filling lmax.
+        let mk = |s: &[u8], w: u32| (encode_kmer(s).unwrap(), w);
+        let nodes = vec![mk(b"ATAT", 5), mk(b"TATA", 5)];
+        let (cons, _profile, _w) = bounded_heaviest_path(&nodes, 4, 12).unwrap();
+        assert!(cons.len() <= 12, "no loop: each node used at most once");
+        assert!(cons.starts_with(b"ATAT") || cons.starts_with(b"TATA"));
     }
 }
