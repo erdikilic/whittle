@@ -323,8 +323,8 @@ const MARGINAL_SUPPORT: f64 = 0.45;
 /// sequence cross-names against the built-in ONT catalog, else `inferred_N
 /// (no catalog match) · support X.XX`. `N` is the 1-based position in
 /// `discovered`'s own order (support desc, then sequence asc — see
-/// `infer::discover`), independent of `InferredAdapter::adapter.name` (which
-/// may itself already read `inferred_{k}` from a different, pre-sort index).
+/// `infer::discover`), which now agrees with any `inferred_{N}` fallback in
+/// `InferredAdapter::adapter.name` (both derive from the same post-sort order).
 /// The raw sequence is logged separately at `debug!` — too noisy for the
 /// default INFO level, but useful with `-v` when checking a discovery by eye.
 /// Support below `MARGINAL_SUPPORT` additionally gets a `warn!`, since it's
