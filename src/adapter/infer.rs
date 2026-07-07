@@ -519,10 +519,20 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     let three = assemble(&three_w, base);
 
     // support lookup by sequence (max across ends) before merge collapses tags.
+    // Fuzzy (`same_adapter`), not exact-equality: `merge_both_ends` folds a
+    // dual-end adapter into a single `End::Both` entry carrying the 5'
+    // sequence, paired with a 3' entry that's only `same_adapter`-equal to it
+    // (typically its reverse complement, the common ONT ligation topology),
+    // never byte-identical. Exact equality would only ever match the 5' entry
+    // itself, silently discarding a stronger 3' recovery -- a real dual-end
+    // adapter with a weak 5' but strong 3' assembly could then be dropped by
+    // `KEEP_SUPPORT` *because* it was recognized as dual-end. Distinct
+    // adapters won't `same_adapter`-match, so this can't pull in unrelated
+    // support.
     let support_of = |seq: &[u8]| -> f64 {
         five.iter()
             .chain(three.iter())
-            .filter(|(s, _)| s.as_slice() == seq)
+            .filter(|(s, _)| same_adapter(s, seq, base.error_rate))
             .map(|(_, sup)| *sup)
             .fold(0.0_f64, f64::max)
     };
@@ -786,6 +796,97 @@ mod tests {
             !hits(&mut s, &top.adapter.seq, adapter, k).is_empty()
                 || !hits(&mut s, adapter, &top.adapter.seq, k).is_empty(),
             "recovered adapter is within ~25% edit distance of the planted one"
+        );
+    }
+
+    #[test]
+    fn discover_dual_end_adapter_gets_max_support() {
+        // Plant `adapter` at the 5' end (with a few substitutions -- weak
+        // recovery) and its exact reverse complement at the 3' end (strong
+        // recovery) of every read, so `merge_both_ends` folds the two
+        // per-end discoveries into a single `End::Both` entry (per
+        // `same_adapter`, fuzzy/RC-aware). The two ends are assembled
+        // completely independently (`assemble` only ever sees one end's
+        // windows), so the 3' end's own support here is deterministically
+        // ~1.0 (an exact copy, like `discover_finds_nothing_in_clean_reads`'s
+        // sibling exact-recovery cases) regardless of the 5' noise level.
+        // Pre-fix, `support_of` matched candidates by exact byte equality
+        // against the `Both` entry's (5') sequence, so it could only ever
+        // surface the 5' end's OWN weak support (~0.18, see the unmerged
+        // `Five` siblings this also produces) -- silently discarding the
+        // much stronger 3' recovery `merge_both_ends` had already matched.
+        // A reported support close to 1.0 (rather than ~0.18) proves the fix
+        // takes the max across `same_adapter`-equal entries, not just the
+        // exact ones.
+        let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT"; // 28bp
+        let rc: Vec<u8> = adapter
+            .iter()
+            .rev()
+            .map(|&b| match b {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                b'T' => b'A',
+                _ => unreachable!("adapter is pure ACGT"),
+            })
+            .collect();
+        let mut owned: Vec<Vec<u8>> = Vec::new();
+        for i in 0..200usize {
+            // 5' copy: deterministic substitutions at every 8th (shifted)
+            // position -- weak but still independently recoverable.
+            let mut read = adapter.to_vec();
+            for p in (0..adapter.len()).step_by(8) {
+                let q = (p + i) % adapter.len();
+                read[q] = b"ACGT"[(read[q] as usize + 1) % 4];
+            }
+            // deterministic non-periodic genomic middle (same splitmix64
+            // mix used by the other `discover_*` fixtures in this file).
+            let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+            for _ in 0..150usize {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+            }
+            // 3' copy: EXACT reverse complement, no error -- strong recovery.
+            read.extend_from_slice(&rc);
+            owned.push(read);
+        }
+        let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let base = AdapterConfig {
+            adapters: vec![],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let found = discover(&sample, &base);
+
+        let both = found
+            .iter()
+            .find(|d| d.adapter.end == End::Both)
+            .expect("the shared 5'/3' adapter must be discovered as a single End::Both entry");
+
+        // near-matches the planted adapter (fuzzy, since recovery is
+        // approximate).
+        let mut s = new_searcher();
+        let k = (0.25 * adapter.len() as f64).ceil() as usize;
+        assert!(
+            !hits(&mut s, &both.adapter.seq, adapter, k).is_empty()
+                || !hits(&mut s, adapter, &both.adapter.seq, k).is_empty(),
+            "Both adapter (seq {:?}) must be within ~25% edit distance of the planted adapter",
+            String::from_utf8_lossy(&both.adapter.seq)
+        );
+
+        // the reported support must reflect the stronger (3') end, not the
+        // weaker 5' end alone (~0.18 -- see the sibling unmerged `Five`
+        // entries this fixture also produces, at that same value).
+        assert!(
+            both.support > 0.5,
+            "Both adapter's support ({}) must reflect the max across ends \
+             (3' end recovers at ~1.0 here), not just the weaker 5' end alone (~0.18)",
+            both.support
         );
     }
 
