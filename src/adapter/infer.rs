@@ -415,7 +415,17 @@ fn merge_both_ends(
             .position(|(j, t)| !three_used[j] && same_adapter(f, t, error_rate))
         {
             three_used[j] = true;
-            out.push((f.clone(), End::Both));
+            // Keep the LONGER of the two matched reconstructions (Bug 5): a
+            // shorter/truncated recovery at one end shouldn't win just
+            // because it's the 5' one -- the matcher searches both strands,
+            // so orientation is fine either way. Tie -> keep 5' (arbitrary
+            // but deterministic).
+            let kept = if three[j].len() > f.len() {
+                three[j].clone()
+            } else {
+                f.clone()
+            };
+            out.push((kept, End::Both));
         } else {
             out.push((f.clone(), End::Five));
         }
@@ -769,6 +779,30 @@ mod tests {
                 .any(|(s, e)| s == b"TTTTGGGGTTTTGGGG" && *e == End::Five)
         );
         assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn merge_keeps_longer_of_matched_both_end_pair() {
+        // Bug 5 regression: `merge_both_ends` used to always keep the 5'
+        // sequence for a folded `End::Both` pair, even when the 3'
+        // reconstruction was longer/cleaner (more specific -- e.g. the 5'
+        // recovery only assembled a truncated core of the adapter while the
+        // 3' end recovered the full-length sequence). The matcher searches
+        // both strands, so orientation is fine either way; the LONGER of the
+        // two matched reconstructions must be kept, not whichever end
+        // happened to be scanned first.
+        let core = b"ACGTACGTACGTACGT".to_vec(); // 16bp truncated core (>= MIN_PATTERN_LEN)
+        let mut longer = b"TT".to_vec();
+        longer.extend_from_slice(&core);
+        longer.extend_from_slice(b"TT"); // 20bp: `core` is an exact substring, so same_adapter-equal
+        let five = vec![core.clone()];
+        let three = vec![longer.clone()];
+        let merged = merge_both_ends(five, three, 0.2);
+        assert_eq!(
+            merged,
+            vec![(longer, End::Both)],
+            "the longer (3') reconstruction must be kept, not the shorter 5' core"
+        );
     }
 
     #[test]
