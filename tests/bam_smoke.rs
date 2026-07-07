@@ -1,7 +1,7 @@
-// End-to-end regression test for the uBAM pipeline: drives the compiled `whittle`
+// End-to-end regression test for the uBAM workflow: drives the compiled `whittle`
 // binary over a real on-disk BAM file (reader -> provenance_header -> run_bam ->
 // writer), rather than exercising `reconstruct_record` directly against synthetic
-// `RecordBuf`s the way `pipeline::bam_tests` does. Catches wiring bugs that unit
+// `RecordBuf`s the way `workflow::bam_tests` does. Catches wiring bugs that unit
 // tests can't (header handling, writer generics, CLI flag plumbing).
 use assert_cmd::Command;
 use noodles_bam as bam;
@@ -100,7 +100,7 @@ fn bam_to_bam_end_to_end() {
         "both reads should survive --head-crop 2 (len 10, 8 > min-length)"
     );
 
-    // Default threads (4) run the BAM pipeline unordered, so look records up by
+    // Default threads (4) run the BAM workflow unordered, so look records up by
     // name instead of assuming input order is preserved on output.
     let by_name: std::collections::HashMap<Vec<u8>, RecordBuf> = out_records
         .iter()

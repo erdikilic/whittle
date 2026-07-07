@@ -442,7 +442,7 @@ fn real_ubam_oracle_sweep_t8() {
 // Task 11 wired `--adapter-infer` through the shared buffer-then-decide seam
 // (`maybe_reduce_adapters` in src/lib.rs), which reads each record's SEQ via a
 // generic `seq_of` closure -- for BAM that's the same `rec.sequence().as_ref()`
-// accessor `pipeline::bam` already used before inference existed. So running
+// accessor `workflow::bam` already used before inference existed. So running
 // `--adapter-infer` on a uBAM should "just work" with no BAM-specific code,
 // and MM/ML reconstruction through the resulting trim is the same
 // `reconstruct_record` path already proven correct by every oracle test above

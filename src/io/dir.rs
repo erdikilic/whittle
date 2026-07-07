@@ -92,7 +92,7 @@ pub fn fastq_records(
 
 /// A boxed, owning iterator over decoded `RecordBuf`s (or per-record errors).
 /// Named to satisfy `clippy::type_complexity` on the `bam_reader` signature below.
-/// `Send` so it can feed `pipeline::run_bam`'s parallel path.
+/// `Send` so it can feed `workflow::run_bam`'s parallel path.
 type BamRecordIter = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
 
 /// The first file's header plus one chained record stream over all BAM files

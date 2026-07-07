@@ -477,7 +477,7 @@ pub fn reconstruct_mods(
     }
 }
 
-/// Single-threaded uBAM pipeline: refuse aligned reads, filter, trim, reconstruct.
+/// Single-threaded uBAM workflow: refuse aligned reads, filter, trim, reconstruct.
 fn run_bam_seq(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
@@ -544,7 +544,7 @@ fn run_bam_seq(
 
 /// Shared parallel driver: reader iterator -> rayon pool (render) -> bounded
 /// channel -> dedicated writer thread (write_one). Unordered. Mirrors
-/// `run_fastq`'s error seam (see `pipeline/fastq.rs`): the first parse/render
+/// `run_fastq`'s error seam (see `workflow/fastq.rs`): the first parse/render
 /// error and the first write error are each captured in a `Mutex<Option<_>>`
 /// slot; the writer task keeps draining `rx` after an error (never `break`) so
 /// producer threads blocked on the bounded channel's `tx.send` can never
@@ -652,7 +652,7 @@ where
     Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
 }
 
-/// Threads-aware uBAM pipeline entry point: refuse aligned reads, filter, trim,
+/// Threads-aware uBAM workflow entry point: refuse aligned reads, filter, trim,
 /// reconstruct. Sequential for `cfg.threads <= 1`; otherwise renders each
 /// record on a rayon work pool and drains the resulting `RecordBuf`s through
 /// `run_bam_parallel`'s bounded channel onto a dedicated writer task. Output
@@ -780,7 +780,7 @@ fn build_fastq_tags(
     tags
 }
 
-/// Single-threaded uBAM→FASTQ pipeline: refuse aligned reads, filter, trim, then
+/// Single-threaded uBAM→FASTQ workflow: refuse aligned reads, filter, trim, then
 /// write each surviving segment as FASTQ with the selected aux tags in the header
 /// (MM/ML/MN reconstructed; others verbatim). gz compression, when requested, is
 /// handled by the parallel `gzp` writer this drains into.
@@ -855,7 +855,7 @@ where
     Ok(counters.snapshot(malformed_tag_reads))
 }
 
-/// Threads-aware uBAM→FASTQ pipeline entry point: refuse aligned reads, filter,
+/// Threads-aware uBAM→FASTQ workflow entry point: refuse aligned reads, filter,
 /// trim, then write each surviving segment as FASTQ with the selected aux tags
 /// in the header (MM/ML/MN reconstructed; others verbatim). Sequential for
 /// `cfg.threads <= 1`; otherwise renders each record's FASTQ segments on a
@@ -1978,7 +1978,7 @@ mod tests {
         );
     }
 
-    /// Mirrors `pipeline::fastq`'s `parallel_surfaces_write_error_without_deadlock`,
+    /// Mirrors `workflow::fastq`'s `parallel_surfaces_write_error_without_deadlock`,
     /// but drives `run_bam_parallel` directly with a stub sink whose `write_one`
     /// starts erroring after `limit` writes. Record count (3000) exceeds the
     /// bounded channel capacity (`threads * 4` = 16), so a pre-fix build that
@@ -2059,7 +2059,7 @@ mod tests {
         );
     }
 
-    /// Mirrors `pipeline::fastq`'s `parallel_surfaces_parse_error_instead_of_dropping_it`,
+    /// Mirrors `workflow::fastq`'s `parallel_surfaces_parse_error_instead_of_dropping_it`,
     /// driving `run_bam_parallel` directly so a malformed upstream record (an
     /// `Err` item from the input iterator) is not silently swallowed.
     #[test]

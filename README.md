@@ -171,7 +171,7 @@ See **The MM/ML/ML guarantee** below.
 | `--in-format`, `--out-format {fastq,fastq-gz,bam}` | Force format instead of detecting it |
 | `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`; MM/ML/MN reconstructed, per-base kinetics sliced, `mv` dropped on trim, rest verbatim) |
 | `-c`, `--compression-level <0–9>` | DEFLATE level for compressed output — bgzf for BAM, gzip for FASTQ.gz (default 6). Lower is faster/larger; ignored for plain FASTQ |
-| `-t`, `--threads <N>` | Total worker threads (default: all detected CPUs; values above the CPU count are clamped down to it), split workload-aware across the decode/render/encode stages; applies to both the FASTQ and uBAM pipelines |
+| `-t`, `--threads <N>` | Total worker threads (default: all detected CPUs; values above the CPU count are clamped down to it), split workload-aware across the decode/render/encode stages; applies to both the FASTQ and uBAM workflows |
 | `-l`, `--min-length <N>` | Minimum read length to keep (default 1) — also the minimum length for a *split segment* to be kept, see below |
 | `-L`, `--max-length <N>` | Maximum read length to keep |
 | `-q`, `--min-qual <F>` | Minimum read quality to keep (default 0) |
@@ -209,7 +209,7 @@ just whole reads) that end up too short after trimming.
 Logging level is `-v`/`-vv` (debug/trace) or `--quiet` (warnings/errors
 only), with the `WHITTLE_LOG` environment variable available as a
 `RUST_LOG`-style override (e.g. `WHITTLE_LOG=debug`, or a per-module
-filter like `WHITTLE_LOG=whittle::pipeline=trace`). Precedence: `WHITTLE_LOG`
+filter like `WHITTLE_LOG=whittle::workflow=trace`). Precedence: `WHITTLE_LOG`
 overrides `-v`/`-vv`, but `--quiet` always wins over `WHITTLE_LOG`. All of
 this is on stderr — stdout carries only the read data. Progress itself
 renders as a live bar/spinner when stderr is a terminal, or as periodic

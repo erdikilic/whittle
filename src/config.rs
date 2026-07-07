@@ -93,7 +93,7 @@ pub struct Config {
     /// Resolved render-pool size for this dispatch; `0` means "fall back to
     /// `threads`" (used by tests and any caller that hasn't computed a
     /// workload-aware budget). Set by `run`/`run_folder` from
-    /// `thread_budget(..).render` before the pipeline runs.
+    /// `thread_budget(..).render` before the workflow runs.
     pub render_workers: usize,
     /// Reads to sample for adapter-presence detection before trimming the full
     /// dataset. `0` disables detection (trim against the full active set).
@@ -106,7 +106,7 @@ pub struct Config {
     pub compression_level: u8,
     /// When true, keep ONT signal tags consistent through trimming instead of
     /// dropping them: slice the `mv` move table and update `ts`/`ns`/`sp`/`pi`
-    /// (BAM→BAM only — see `pipeline::bam`). Default false drops `mv`/`ts`/`ns`/
+    /// (BAM→BAM only — see `workflow::bam`). Default false drops `mv`/`ts`/`ns`/
     /// `sp`/`pi` on any trimmed read.
     pub update_moves: bool,
     pub verbosity: u8,
@@ -115,7 +115,7 @@ pub struct Config {
     pub threads_clamped: Option<(usize, usize)>,
 }
 
-/// How a `-t` total worker budget splits across the pipeline stages. The split
+/// How a `-t` total worker budget splits across the workflow stages. The split
 /// is workload-aware (see `thread_budget`): decode never benefits from more
 /// than 1 thread (serial inflate keeps up), while render (MM/ML
 /// reconstruction, or the trim-only pass for FASTQ) and encode (bgzf/gzip
