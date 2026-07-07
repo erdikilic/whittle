@@ -5,6 +5,11 @@
 //! from the paper (not translated from GPL source). Pure and format-neutral.
 
 use crate::adapter::Adapter;
+use crate::adapter::search::{DnaSearcher, hits};
+
+/// Cap on the number of windows scanned per k-mer during the 2-error recount
+/// (Task 9's confidence pass), bounding its cost on large samples.
+const RECOUNT_WINDOWS: usize = 4000;
 
 /// One discovered adapter with inference metadata. Convert to a bare `Adapter`
 /// (dropping `support`/`name_hits`) only when building the trim config.
@@ -118,6 +123,29 @@ fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
     ranked
 }
 
+/// Number of distinct `windows` (capped at `RECOUNT_WINDOWS`) with >=1 forward
+/// approximate occurrence of `kmer` (edit distance <= `max_edits`). Each window
+/// counts at most once, even if `kmer` occurs in it multiple times. `searcher`
+/// must be forward-only (see `new_searcher_fwd`) so a window's own reverse-
+/// complement can't inflate the count.
+// Not yet called from production code (only from the test below); the
+// Task 9 (discover) confidence pass wires this in and this allow comes off then.
+#[allow(dead_code)]
+fn two_error_freq(
+    searcher: &mut DnaSearcher,
+    kmer: &[u8],
+    windows: &[&[u8]],
+    max_edits: usize,
+) -> u32 {
+    let mut present = 0u32;
+    for &wnd in windows.iter().take(RECOUNT_WINDOWS) {
+        if !hits(searcher, kmer, wnd, max_edits).is_empty() {
+            present += 1; // per-window presence, counted once
+        }
+    }
+    present
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +201,22 @@ mod tests {
             top_kmers(&windows, 16, 500).is_empty(),
             "low-complexity dropped"
         );
+    }
+
+    #[test]
+    fn two_error_freq_counts_windows_once_and_ignores_rc() {
+        use crate::adapter::search::new_searcher_fwd;
+        // kmer chosen NOT self-reverse-complementary so the RC case is meaningful:
+        // revcomp(AAAACCCCGGGGTATG) = CATACCCCGGGGTTTT (distinct from the kmer).
+        let kmer = b"AAAACCCCGGGGTATG"; // 16bp
+        let w0v = b"TTAAAACCCCGGGGTATGTT".to_vec(); // exact occurrence
+        let w1v = b"TTAAAACACCGGGGTATGTT".to_vec(); // 1 substitution (C->A)
+        let mut w2v = b"AAAACCCCGGGGTATG".to_vec(); // kmer twice -> counts ONCE
+        w2v.extend_from_slice(b"GGGGAAAACCCCGGGGTATG");
+        let w3v = b"TTCATACCCCGGGGTTTTTT".to_vec(); // reverse-complement only
+        let windows: Vec<&[u8]> = vec![&w0v, &w1v, &w2v, &w3v];
+        let mut s = new_searcher_fwd();
+        // w0 (exact) + w1 (1 edit) + w2 (twice -> once) = 3; w3 (RC only) excluded.
+        assert_eq!(two_error_freq(&mut s, kmer, &windows, 2), 3);
     }
 }
