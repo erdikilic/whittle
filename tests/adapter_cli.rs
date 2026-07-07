@@ -1405,3 +1405,92 @@ fn accounting_summary_end_to_end() {
         "segments_dropped_short=1 (the chimera's short half): {stderr}"
     );
 }
+
+/// Owner-reported regression: `--qual-split` must emit *every* high-quality
+/// piece (even ones shorter than `-l`) and let the post-trim filter drop the
+/// short ones -- it must not suppress them inside the trim stage itself.
+/// `AAAATAAAAAA` / `IIII#IIIIII` with `--qual-split-window 1` splits on the
+/// single low-quality base at index 4 into two produced pieces: `AAAA` at
+/// [0,4) and `AAAAAA` at [5,11). With `-l 5` the first (len 4) is filtered
+/// TooShort and the second (len 6) survives -- as the *second* produced
+/// segment, so it must be named `_segment_2`, not `_segment_1` (which would
+/// happen if the short piece were dropped pre-filter, shrinking the produced
+/// count to 1).
+#[test]
+fn qual_split_emits_short_pieces_for_post_trim_filter_to_own() {
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fq, "@r1\nAAAATAAAAAA\n+\nIIII#IIIIII").unwrap();
+
+    let res = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--qual-split",
+            "10",
+            "--qual-split-window",
+            "1",
+            "-l",
+            "5",
+        ])
+        .assert()
+        .success();
+    let out = res.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stdout.contains("r1_segment_2"),
+        "the surviving AAAAAA piece [5,11) must be named _segment_2 (produced \
+         as the 2nd of 2 pieces, even though the 1st was filtered): {stdout}"
+    );
+    assert!(
+        !stdout.contains("@r1\n"),
+        "the read must not appear unsuffixed -- it was split into 2 produced \
+         pieces: {stdout}"
+    );
+    assert!(
+        !stdout.contains("r1_segment_1"),
+        "the short AAAA piece [0,4) is filtered TooShort by -l 5, not written: {stdout}"
+    );
+    assert!(
+        stderr.contains("Segments dropped: 1 (1 too short)"),
+        "the short high-quality piece must be a real produced-then-filtered \
+         segment, bumping segments_dropped_short by exactly 1: {stderr}"
+    );
+}
+
+/// Same read, `-l 4`: both produced pieces (len 4 and len 6) now clear the
+/// length filter, so both survive and are numbered 1/2.
+#[test]
+fn qual_split_both_pieces_survive_at_lower_length_floor() {
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fq, "@r1\nAAAATAAAAAA\n+\nIIII#IIIIII").unwrap();
+
+    let res = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--qual-split",
+            "10",
+            "--qual-split-window",
+            "1",
+            "-l",
+            "4",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&res.get_output().stdout);
+
+    assert!(
+        stdout.contains("r1_segment_1"),
+        "AAAA [0,4) now clears -l 4: {stdout}"
+    );
+    assert!(
+        stdout.contains("r1_segment_2"),
+        "AAAAAA [5,11) still survives: {stdout}"
+    );
+}

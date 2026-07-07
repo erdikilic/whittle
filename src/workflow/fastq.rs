@@ -24,13 +24,7 @@ pub fn run_fastq_seq<W: Write>(
         counters
             .input_bases
             .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
-        let produced = trim::apply(
-            &rec.seq,
-            &rec.qual,
-            &cfg.trim,
-            cfg.adapters.as_ref(),
-            cfg.filter.min_length,
-        );
+        let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
         let total = produced.len();
         let mut survived = 0usize;
         let mut out_bases = 0u64;
@@ -64,13 +58,7 @@ pub fn run_fastq_seq<W: Write>(
 /// `reads_no_output` (read level) once for the record, and
 /// `counters.record_filter_drop` (segment level) once per rejected segment.
 fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> (u64, u64, Vec<u8>) {
-    let produced = trim::apply(
-        &rec.seq,
-        &rec.qual,
-        &cfg.trim,
-        cfg.adapters.as_ref(),
-        cfg.filter.min_length,
-    );
+    let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
     let total = produced.len();
     let mut buf = Vec::new();
     let mut out = 0u64;

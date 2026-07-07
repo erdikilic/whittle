@@ -512,13 +512,7 @@ fn run_bam_seq(
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
-        let produced = trim::apply(
-            &seq,
-            &qual,
-            &cfg.trim,
-            cfg.adapters.as_ref(),
-            cfg.filter.min_length,
-        );
+        let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
         let total = produced.len();
         let mut survived = 0usize;
         let mut out_bases = 0u64;
@@ -703,13 +697,7 @@ pub fn run_bam(
                     qual.len()
                 );
             }
-            let produced = trim::apply(
-                &seq,
-                &qual,
-                &cfg.trim,
-                cfg.adapters.as_ref(),
-                cfg.filter.min_length,
-            );
+            let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
             let total = produced.len();
             let mut items = Vec::with_capacity(total);
             let mut out_bases = 0u64;
@@ -837,13 +825,7 @@ where
             malformed_tag_reads += 1;
         }
         let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
-        let produced = trim::apply(
-            &seq,
-            &qual,
-            &cfg.trim,
-            cfg.adapters.as_ref(),
-            cfg.filter.min_length,
-        );
+        let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
         let total = produced.len();
         let mut survived = 0usize;
         let mut out_bases = 0u64;
@@ -916,13 +898,7 @@ pub fn run_bam_to_fastq<W: Write + Send>(
                 );
             }
             let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
-            let produced = trim::apply(
-                &seq,
-                &qual,
-                &cfg.trim,
-                cfg.adapters.as_ref(),
-                cfg.filter.min_length,
-            );
+            let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
             let total = produced.len();
             let mut out = Vec::with_capacity(total);
             let mut out_bases = 0u64;
