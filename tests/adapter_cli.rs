@@ -550,3 +550,29 @@ fn no_adapter_flag_is_byte_identical() {
         "@r1\nACGTACGTACGT\n+\nIIIIIIIIIIII\n"
     );
 }
+
+#[test]
+fn infer_and_fasta_are_mutually_exclusive() {
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        "x.fastq",
+        "--adapter-infer",
+        "--adapter-fasta",
+        "a.fa",
+    ]);
+    cmd.assert()
+        .failure()
+        .stderr(predicates::str::contains("mutually exclusive"));
+}
+
+#[test]
+fn adapter_sample_below_min_still_rejected_under_infer() {
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args(["-i", "x.fastq", "--adapter-infer", "--adapter-sample", "50"]);
+    cmd.assert()
+        .failure()
+        .stderr(predicates::str::contains("must be 0"));
+}

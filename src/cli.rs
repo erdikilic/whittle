@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{Config, FastqTags, IoConfig};
+use crate::config::{AdapterInfer, Config, FastqTags, IoConfig};
 use crate::filter::FilterConfig;
 use crate::io::Format;
 use crate::qual::QualMode;
@@ -90,12 +90,20 @@ struct Cli {
     /// Trim adapters at read ends only; never split on interior adapters.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
-    /// Reads to sample to detect which adapters are present, reducing the set
-    /// trimmed against (opt-in speed optimization). 0 = off (default, trim against
-    /// the full set); a value >= 100 enables detection. Preset-only (ignored with
-    /// --adapter-fasta).
-    #[arg(long, default_value_t = 0, help_heading = "Adapter trimming")]
-    adapter_sample: usize,
+    /// Reads to sample. Detection (>=100) or, under --adapter-infer, the inference
+    /// buffer (default 40000). Omitted = mode default; explicit 0 = off (no infer).
+    #[arg(long, help_heading = "Adapter trimming")]
+    adapter_sample: Option<usize>,
+    /// Discover adapters de novo from a read sample, then trim with only the
+    /// discovered set (ignores --adapter-preset for trimming; conflicts with
+    /// --adapter-fasta). Off by default.
+    #[arg(long, help_heading = "Adapter trimming")]
+    adapter_infer: bool,
+    /// Discover adapters and print them (sequences + support + catalog names),
+    /// then exit without trimming. Implies --adapter-infer. May be combined with
+    /// --adapter-fasta to also cross-name discovered sequences against your FASTA.
+    #[arg(long, help_heading = "Adapter trimming")]
+    adapter_infer_only: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -211,6 +219,32 @@ pub fn parse() -> anyhow::Result<Config> {
     };
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
 
+    let adapter_infer = if c.adapter_infer_only {
+        AdapterInfer::ReportOnly
+    } else if c.adapter_infer {
+        AdapterInfer::Trim
+    } else {
+        AdapterInfer::Off
+    };
+
+    // Mutual exclusion with an explicit FASTA (trim mode only; report-only
+    // allows a FASTA so it can be cross-named against what inference finds).
+    if adapter_infer == AdapterInfer::Trim && c.adapter_fasta.is_some() {
+        anyhow::bail!(
+            "--adapter-infer and --adapter-fasta are mutually exclusive (one discovers \
+             the set, the other supplies it). To trim with your FASTA and also see what \
+             inference finds, run --adapter-infer-only --adapter-fasta <file> first."
+        );
+    }
+    // The preset is redundant for trimming under infer (inference builds its
+    // own set) -- kept only so its names can be cross-referenced.
+    if adapter_infer != AdapterInfer::Off && c.adapter_preset != AdapterPresetArg::None {
+        eprintln!(
+            "[WARN] --adapter-preset is ignored for trimming under --adapter-infer \
+             (used only for naming discovered adapters)"
+        );
+    }
+
     let mut adapter_seqs: Vec<crate::adapter::Adapter> = Vec::new();
     if c.adapter_preset == AdapterPresetArg::Ont {
         adapter_seqs.extend(crate::adapter::preset::preset_ont());
@@ -227,7 +261,7 @@ pub fn parse() -> anyhow::Result<Config> {
         }
         adapter_seqs.extend(from_fasta);
     }
-    let adapters = if adapter_seqs.is_empty() {
+    let adapters = if adapter_seqs.is_empty() && adapter_infer == AdapterInfer::Off {
         if c.adapter_ends_only {
             eprintln!(
                 "[WARN] --adapter-ends-only has no effect without --adapter-fasta or --adapter-preset"
@@ -244,27 +278,53 @@ pub fn parse() -> anyhow::Result<Config> {
         if c.adapter_end_size == 0 {
             anyhow::bail!("--adapter-end-size must be >= 1");
         }
-        if c.adapter_sample != 0
-            && c.adapter_sample < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
-        {
-            anyhow::bail!(
-                "--adapter-sample ({}) must be 0 (disable detection) or at least {} \
-                 (smaller samples are too few for reliable detection)",
-                c.adapter_sample,
-                crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
-            );
-        }
-        if c.adapter_fasta.is_some() && c.adapter_sample > 0 {
-            eprintln!(
-                "[WARN] --adapter-sample is ignored with --adapter-fasta (presence detection is preset-only)"
-            );
-        }
+        // Under infer, the trimming set is discovered later (Task 11 fills
+        // it in); any preset/FASTA sequences gathered above are ignored here
+        // (the preset WARN above already told the user; a report-only FASTA
+        // is used for cross-naming elsewhere, not for trimming).
+        let trim_adapters = if adapter_infer == AdapterInfer::Off {
+            adapter_seqs
+        } else {
+            Vec::new()
+        };
         Some(crate::adapter::AdapterConfig {
-            adapters: adapter_seqs,
+            adapters: trim_adapters,
             error_rate: c.adapter_error_rate,
             end_size: c.adapter_end_size,
             split: !c.adapter_ends_only,
         })
+    };
+
+    // Resolve the sample size (distinguish unset from explicit 0): omitted
+    // means "the mode default" (0 = off normally, 40000 under infer); an
+    // explicit value is validated against the existing detection-floor rule,
+    // plus a 0-under-infer rejection (0 would starve inference entirely).
+    let adapter_sample = match c.adapter_sample {
+        None => {
+            if adapter_infer != AdapterInfer::Off {
+                40_000
+            } else {
+                0
+            }
+        },
+        Some(n) => {
+            if n != 0 && n < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION {
+                anyhow::bail!(
+                    "--adapter-sample ({}) must be 0 (disable detection) or at least {} \
+                     (smaller samples are too few for reliable detection)",
+                    n,
+                    crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+                );
+            }
+            if n == 0 && adapter_infer != AdapterInfer::Off {
+                anyhow::bail!(
+                    "--adapter-sample 0 disables sampling, which --adapter-infer requires; \
+                     omit it or pass >= {}",
+                    crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+                );
+            }
+            n
+        },
     };
 
     let ncpu = std::thread::available_parallelism()
@@ -278,11 +338,18 @@ pub fn parse() -> anyhow::Result<Config> {
 
     // Presence detection is preset-only: a user-supplied --adapter-fasta is a
     // curated set that should all be searched, and sampling could wrongly drop a
-    // rare custom adapter. So detection is disabled whenever a FASTA is provided.
-    let adapter_sample = if c.adapter_fasta.is_some() {
+    // rare custom adapter. So detection is disabled whenever a FASTA is provided
+    // and we're not inferring (under infer, --adapter-sample means the
+    // inference buffer, not presence detection, so it's left alone).
+    let adapter_sample = if adapter_infer == AdapterInfer::Off && c.adapter_fasta.is_some() {
+        if adapter_sample > 0 {
+            eprintln!(
+                "[WARN] --adapter-sample is ignored with --adapter-fasta (presence detection is preset-only)"
+            );
+        }
         0
     } else {
-        c.adapter_sample
+        adapter_sample
     };
 
     Ok(Config {
@@ -307,6 +374,7 @@ pub fn parse() -> anyhow::Result<Config> {
             quality,
         },
         adapters,
+        adapter_infer,
         threads,
         fastq_tags,
         render_workers: 0,
@@ -403,6 +471,7 @@ pub fn config_for_test_threads(
             quality: None,
         },
         adapters: None,
+        adapter_infer: crate::config::AdapterInfer::Off,
         threads: threads.max(1),
         fastq_tags: FastqTags::All,
         render_workers: 0,

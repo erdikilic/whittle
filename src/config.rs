@@ -60,6 +60,15 @@ impl FastqTags {
     }
 }
 
+/// Whether ab-initio adapter inference runs, and whether it also trims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AdapterInfer {
+    #[default]
+    Off,
+    Trim,
+    ReportOnly,
+}
+
 #[derive(Debug, Clone)]
 pub struct IoConfig {
     pub input: Option<PathBuf>,
@@ -76,6 +85,9 @@ pub struct Config {
     /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
     /// `--adapter-preset ont` was given (adapter trimming off — no per-read cost).
     pub adapters: Option<crate::adapter::AdapterConfig>,
+    /// Whether ab-initio adapter inference runs, and whether it also trims
+    /// (`Off` by default — no behavior change from before this field existed).
+    pub adapter_infer: AdapterInfer,
     pub threads: usize,
     pub fastq_tags: FastqTags,
     /// Resolved render-pool size for this dispatch; `0` means "fall back to
