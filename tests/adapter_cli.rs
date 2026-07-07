@@ -1156,3 +1156,358 @@ fn infer_only_on_bam_input_with_piped_stdout_succeeds() {
         .assert()
         .success();
 }
+
+// --- Task 2: trim-then-filter reorder end-to-end regressions --------------
+//
+// Task 1 moved `filter::check` from pre-trim (whole raw read) to post-trim
+// (each produced segment), and split read-level accounting from segment-level
+// drop counts. These pin that behavior change through the compiled binary
+// end-to-end, on top of the internal `run_fastq_seq` unit tests already in
+// `src/workflow/fastq.rs`.
+
+/// The headline behavior change: quality is judged on the TRIMMED insert, not
+/// the raw read. `r1` is 4 low-quality bases (phred 2, `'#'`) then 6
+/// high-quality bases (phred 40, `'I'`); raw arithmetic mean = (2*4 + 40*6) /
+/// 10 = 24.8.
+///
+/// Run 1 (sanity): no head-crop, `-q 30 -m arithmetic` -> the filter runs on
+/// the whole raw read (its only produced segment, since there's no adapter/
+/// crop to carve it up) and 24.8 < 30 fails -> no output. This reproduces
+/// what the OLD pre-reorder (filter-before-trim) code measured, for real,
+/// through the binary.
+/// Run 2 (the fix): `-H 4` crops the bad flank away BEFORE filtering, SAME
+/// `-q 30` -> the surviving 6-base insert's own mean (40) passes -> written.
+/// Run 3 (guard): same crop, but `-q 45` (above the insert's own mean of 40)
+/// -> dropped again, proving the insert's own quality is still enforced, not
+/// that trimming silently disabled filtering.
+#[test]
+fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    write!(fq, "@r1\nAAAAAAAAAA\n+\n####IIIIII\n").unwrap();
+
+    let no_crop = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "-q",
+            "30",
+            "-m",
+            "arithmetic",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        no_crop.get_output().stdout,
+        b"",
+        "sanity: the raw whole-read mean (24.8) must fail -q 30 with no trim applied"
+    );
+
+    let cropped = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "-H",
+            "4",
+            "-q",
+            "30",
+            "-m",
+            "arithmetic",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        cropped.get_output().stdout,
+        b"@r1\nAAAAAA\n+\nIIIIII\n",
+        "trimmed insert (mean 40) must survive -q 30 once the bad flank is cropped away first"
+    );
+
+    let guard = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "-H",
+            "4",
+            "-q",
+            "45",
+            "-m",
+            "arithmetic",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success();
+    let guard_out = guard.get_output();
+    assert_eq!(
+        guard_out.stdout, b"",
+        "guard: the insert's own mean (40) must still fail -q 45"
+    );
+    let stderr = String::from_utf8_lossy(&guard_out.stderr);
+    assert!(
+        stderr.contains("No reads survived"),
+        "guard run must report the read as fully dropped: {stderr}"
+    );
+}
+
+/// Naming (produced-index, "option b"): a survivor keeps the index it was
+/// PRODUCED at, not renumbered by how many segments survived. Three reads in
+/// one run, exact output asserted: `one_seg` has no adapter match (produced
+/// == 1) -> name unchanged; `two_seg` splits into two 10bp flanks that both
+/// clear `-l 5` -> `_segment_1`/`_segment_2`; `gap_seg` splits into a 3bp
+/// flank (< `-l 5`, filtered `TooShort`) and a 10bp flank (survives) -> the
+/// survivor is a LONE `_segment_2`, signalling the split even though only the
+/// second piece made it to output.
+#[test]
+fn produced_index_naming_end_to_end() {
+    let adapter = "GGGGTTTTGGGGTTTT"; // 16bp, G/T only -> no accidental match in the A flanks
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fa, ">mid\n{adapter}").unwrap();
+
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fq, "@one_seg\n{}\n+\n{}", "A".repeat(20), "I".repeat(20)).unwrap();
+    writeln!(
+        fq,
+        "@two_seg\n{}{adapter}{}\n+\n{}",
+        "A".repeat(10),
+        "A".repeat(10),
+        "I".repeat(36)
+    )
+    .unwrap();
+    writeln!(
+        fq,
+        "@gap_seg\n{}{adapter}{}\n+\n{}",
+        "A".repeat(3),
+        "A".repeat(10),
+        "I".repeat(29)
+    )
+    .unwrap();
+
+    let out = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+            "--adapter-error-rate",
+            "0.1",
+            "--adapter-end-size",
+            "1",
+            "-l",
+            "5",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let expected = format!(
+        "@one_seg\n{}\n+\n{}\n@two_seg_segment_1\n{}\n+\n{}\n@two_seg_segment_2\n{}\n+\n{}\n@gap_seg_segment_2\n{}\n+\n{}\n",
+        "A".repeat(20),
+        "I".repeat(20),
+        "A".repeat(10),
+        "I".repeat(10),
+        "A".repeat(10),
+        "I".repeat(10),
+        "A".repeat(10),
+        "I".repeat(10),
+    );
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        expected,
+        "exact survivor names/order: unsplit unchanged, both-survive suffixed 1/2, \
+         first-filtered leaves a lone _segment_2"
+    );
+}
+
+/// Accounting/summary end-to-end: a mix of clean reads, a chimera with one
+/// sub-`-l` half, an all-adapter read (fully consumed by terminal trimming, so
+/// `trim::apply` produces zero segments), an empty read, and a read whose sole
+/// produced segment is itself too short. Exercises the three-way read-level
+/// counter split (Fix #2) through the real binary's rendered summary
+/// (`obs.rs`'s `Summary:`/`Trimmed to nothing:`/`All segments filtered:`/
+/// `Segments dropped:` lines), not just the `Counters`/`Stats` unit tests in
+/// `src/workflow/mod.rs`. In particular it distinguishes the all-adapter/empty
+/// reads (`reads_trimmed_to_nothing` — no segments produced at all) from the
+/// short-only read (`reads_all_filtered` — one segment produced, then
+/// filtered).
+#[test]
+fn accounting_summary_end_to_end() {
+    let adapter = "GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fa, ">mid\n{adapter}").unwrap();
+
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    // Two clean reads: no adapter present, comfortably above -l 5.
+    writeln!(fq, "@clean1\n{}\n+\n{}", "A".repeat(20), "I".repeat(20)).unwrap();
+    writeln!(fq, "@clean2\n{}\n+\n{}", "A".repeat(20), "I".repeat(20)).unwrap();
+    // Chimera: interior adapter splits into a 3bp flank (< -l 5, filtered
+    // TooShort) and a 15bp flank (survives) -> 1 read with output, 1 segment
+    // written, 1 segment dropped.
+    writeln!(
+        fq,
+        "@chimera\n{}{adapter}{}\n+\n{}",
+        "A".repeat(3),
+        "A".repeat(15),
+        "I".repeat(38)
+    )
+    .unwrap();
+    // All-adapter: the read IS the adapter -- terminal trimming consumes the
+    // whole thing, so `trim::apply` produces zero segments (no segment-level
+    // drop; the per-segment filter loop never runs) -> reads_trimmed_to_nothing.
+    writeln!(fq, "@alladapter\n{adapter}\n+\n{}", "I".repeat(20)).unwrap();
+    // Empty read: 0-length SEQ/QUAL, not silently skipped from accounting ->
+    // also reads_trimmed_to_nothing.
+    write!(fq, "@empty\n\n+\n\n").unwrap();
+    // Short-only: no adapter present, no split -- trim::apply returns the
+    // whole (untrimmed) 3bp read as its single produced segment, which the
+    // length filter then rejects -> reads_all_filtered (distinct from
+    // reads_trimmed_to_nothing: a segment WAS produced, just not one that
+    // survived).
+    writeln!(fq, "@shortonly\n{}\n+\n{}", "A".repeat(3), "I".repeat(3)).unwrap();
+
+    let res = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+            "--adapter-error-rate",
+            "0.1",
+            "--adapter-end-size",
+            "1",
+            "-l",
+            "5",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&res.get_output().stderr);
+
+    // Read level: 6 input reads; 3 produced output (2 clean + the chimera's
+    // surviving half); 2 trimmed to nothing (the fully-consumed adapter read,
+    // the empty read); 1 with every segment filtered (shortonly) -- the
+    // three-way invariant (`reads_with_output + reads_trimmed_to_nothing +
+    // reads_all_filtered == input_reads`) holds via `snapshot`'s debug assert.
+    assert!(
+        stderr.contains("Summary: 6 input reads, 3 output reads"),
+        "input_reads=6, segments written=3: {stderr}"
+    );
+    assert!(
+        stderr.contains("Trimmed to nothing: 2 input reads produced no segments at all"),
+        "reads_trimmed_to_nothing=2 (alladapter + empty): {stderr}"
+    );
+    assert!(
+        stderr.contains("All segments filtered: 1 input reads had every produced segment filtered"),
+        "reads_all_filtered=1 (shortonly): {stderr}"
+    );
+    assert!(
+        stderr.contains("Segments dropped: 2 (2 too short)"),
+        "segments_dropped_short=2 (the chimera's short half + shortonly's sole segment): {stderr}"
+    );
+}
+
+/// Owner-reported regression: `--qual-split` must emit *every* high-quality
+/// piece (even ones shorter than `-l`) and let the post-trim filter drop the
+/// short ones -- it must not suppress them inside the trim stage itself.
+/// `AAAATAAAAAA` / `IIII#IIIIII` with `--qual-split-window 1` splits on the
+/// single low-quality base at index 4 into two produced pieces: `AAAA` at
+/// [0,4) and `AAAAAA` at [5,11). With `-l 5` the first (len 4) is filtered
+/// TooShort and the second (len 6) survives -- as the *second* produced
+/// segment, so it must be named `_segment_2`, not `_segment_1` (which would
+/// happen if the short piece were dropped pre-filter, shrinking the produced
+/// count to 1).
+#[test]
+fn qual_split_emits_short_pieces_for_post_trim_filter_to_own() {
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fq, "@r1\nAAAATAAAAAA\n+\nIIII#IIIIII").unwrap();
+
+    let res = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--qual-split",
+            "10",
+            "--qual-split-window",
+            "1",
+            "-l",
+            "5",
+        ])
+        .assert()
+        .success();
+    let out = res.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stdout.contains("r1_segment_2"),
+        "the surviving AAAAAA piece [5,11) must be named _segment_2 (produced \
+         as the 2nd of 2 pieces, even though the 1st was filtered): {stdout}"
+    );
+    assert!(
+        !stdout.contains("@r1\n"),
+        "the read must not appear unsuffixed -- it was split into 2 produced \
+         pieces: {stdout}"
+    );
+    assert!(
+        !stdout.contains("r1_segment_1"),
+        "the short AAAA piece [0,4) is filtered TooShort by -l 5, not written: {stdout}"
+    );
+    assert!(
+        stderr.contains("Segments dropped: 1 (1 too short)"),
+        "the short high-quality piece must be a real produced-then-filtered \
+         segment, bumping segments_dropped_short by exactly 1: {stderr}"
+    );
+}
+
+/// Same read, `-l 4`: both produced pieces (len 4 and len 6) now clear the
+/// length filter, so both survive and are numbered 1/2.
+#[test]
+fn qual_split_both_pieces_survive_at_lower_length_floor() {
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fq, "@r1\nAAAATAAAAAA\n+\nIIII#IIIIII").unwrap();
+
+    let res = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--qual-split",
+            "10",
+            "--qual-split-window",
+            "1",
+            "-l",
+            "4",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&res.get_output().stdout);
+
+    assert!(
+        stdout.contains("r1_segment_1"),
+        "AAAA [0,4) now clears -l 4: {stdout}"
+    );
+    assert!(
+        stdout.contains("r1_segment_2"),
+        "AAAAAA [5,11) still survives: {stdout}"
+    );
+}

@@ -18,14 +18,14 @@ pub struct TrimPlan {
 
 /// Fixed crop first (positional), then the adapter stage on the cropped window
 /// (when configured), then the chosen quality op within each adapter segment,
-/// offsetting intervals back to original coordinates. Every returned segment
-/// is >= `min_length`.
+/// offsetting intervals back to original coordinates. Emits crop->adapter->quality
+/// segments only, including short ones; the caller filters (length/quality/GC)
+/// per segment — `apply` never applies a length filter itself.
 pub fn apply(
     seq: &[u8],
     phred: &[u8],
     plan: &TrimPlan,
     adapters: Option<&crate::adapter::AdapterConfig>,
-    min_length: usize,
 ) -> Vec<(usize, usize)> {
     debug_assert_eq!(
         seq.len(),
@@ -48,7 +48,8 @@ pub fn apply(
         None => vec![(start, end)],
     };
 
-    // Quality op within each adapter segment, offset back; then min_length filter.
+    // Quality op within each adapter segment, offset back. No length filter here
+    // — the caller filters each returned segment (length/quality/GC).
     let mut out = Vec::new();
     for (s, e) in adapter_segs {
         let window_phred = &phred[s..e];
@@ -57,15 +58,10 @@ pub fn apply(
             Some(QualityOp::TrimQual(q)) => trim_by_quality(window_phred, *q),
             Some(QualityOp::BestSegment(q)) => best_segment(window_phred, *q),
             Some(QualityOp::Split { cutoff, window }) => {
-                split_low_quality(window_phred, *cutoff, min_length, *window)
+                split_low_quality(window_phred, *cutoff, *window)
             },
         };
-        out.extend(
-            inner
-                .into_iter()
-                .map(|(is, ie)| (is + s, ie + s))
-                .filter(|&(a, b)| b - a >= min_length),
-        );
+        out.extend(inner.into_iter().map(|(is, ie)| (is + s, ie + s)));
     }
     out
 }
@@ -83,7 +79,7 @@ mod tests {
             tail: 3,
             quality: None,
         };
-        assert_eq!(apply(&seq, &phred, &plan, None, 1), vec![(5, 17)]);
+        assert_eq!(apply(&seq, &phred, &plan, None), vec![(5, 17)]);
     }
 
     #[test]
@@ -99,11 +95,13 @@ mod tests {
             tail: 0,
             quality: Some(QualityOp::TrimQual(30)),
         };
-        assert_eq!(apply(&seq, &phred, &plan, None, 1), vec![(2, 20)]);
+        assert_eq!(apply(&seq, &phred, &plan, None), vec![(2, 20)]);
     }
 
     #[test]
-    fn min_length_drops_short_segments() {
+    fn short_segments_are_emitted_not_filtered() {
+        // `apply` has no length filter at all: filtering moved entirely to the
+        // caller (per-segment, post-trim). A short segment is still RETURNED here.
         let phred = vec![40u8; 4];
         let seq = vec![b'A'; 4];
         let plan = TrimPlan {
@@ -111,10 +109,7 @@ mod tests {
             tail: 0,
             quality: None,
         };
-        assert_eq!(
-            apply(&seq, &phred, &plan, None, 5),
-            Vec::<(usize, usize)>::new()
-        );
+        assert_eq!(apply(&seq, &phred, &plan, None), vec![(0, 4)]);
     }
 
     #[test]
@@ -127,7 +122,7 @@ mod tests {
             quality: None,
         };
         assert_eq!(
-            apply(&seq, &phred, &plan, None, 1),
+            apply(&seq, &phred, &plan, None),
             Vec::<(usize, usize)>::new()
         );
     }
@@ -154,7 +149,7 @@ mod tests {
             end_size: 20,
             split: false,
         };
-        assert_eq!(apply(&seq, &phred, &plan, Some(&ac), 1), vec![(12, 24)]);
+        assert_eq!(apply(&seq, &phred, &plan, Some(&ac)), vec![(12, 24)]);
     }
 
     #[test]
@@ -166,6 +161,6 @@ mod tests {
             tail: 3,
             quality: None,
         };
-        assert_eq!(apply(&seq, &phred, &plan, None, 1), vec![(5, 17)]);
+        assert_eq!(apply(&seq, &phred, &plan, None), vec![(5, 17)]);
     }
 }

@@ -58,13 +58,9 @@ pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
 }
 
 /// Split into high-quality segments separated by runs of >= `window` low-quality
-/// bases; drop segments shorter than `min_length`.
-pub fn split_low_quality(
-    phred: &[u8],
-    cutoff: u8,
-    min_length: usize,
-    window: usize,
-) -> Vec<(usize, usize)> {
+/// bases. Emits every high-quality run, regardless of length — the caller's
+/// length filter (`-l`) owns dropping short pieces, post-trim.
+pub fn split_low_quality(phred: &[u8], cutoff: u8, window: usize) -> Vec<(usize, usize)> {
     let window = window.max(1);
     let mut segments = Vec::new();
     let mut segment_start: Option<usize> = None;
@@ -72,7 +68,7 @@ pub fn split_low_quality(
     let mut bad_run = 0usize;
 
     let push = |start: usize, end: usize, out: &mut Segments| {
-        if end - start >= min_length {
+        if end > start {
             out.push((start, end));
         }
     };
@@ -170,17 +166,18 @@ mod tests {
 
     #[test]
     fn split_expected_segments() {
-        // (cutoff, min_length, expected) with window=1.
-        let cases: [(u8, usize, Segments); 6] = [
-            (20, 3, vec![(6, 9), (10, 16)]),
-            (7, 3, vec![(4, 15), (17, 20)]),
-            (15, 3, vec![(4, 7), (14, 19)]),
-            (40, 3, vec![]),
-            (40, 1, vec![(19, 20)]),
-            (40, 1, vec![(0, 1)]),
+        // (cutoff, expected) with window=1. Every high-quality run is emitted,
+        // including short ones — length filtering is the caller's job now.
+        let cases: [(u8, Segments); 6] = [
+            (20, vec![(4, 5), (6, 9), (10, 16), (17, 18), (19, 20)]),
+            (7, vec![(0, 2), (4, 15), (17, 20)]),
+            (15, vec![(1, 2), (4, 7), (8, 10), (11, 13), (14, 19)]),
+            (40, vec![]),
+            (40, vec![(19, 20)]),
+            (40, vec![(0, 1)]),
         ];
-        for ((cutoff, min_length, want), (_, phred)) in cases.iter().zip(reads()) {
-            assert_eq!(split_low_quality(&phred, *cutoff, *min_length, 1), *want);
+        for ((cutoff, want), (_, phred)) in cases.iter().zip(reads()) {
+            assert_eq!(split_low_quality(&phred, *cutoff, 1), *want);
         }
     }
 
@@ -189,10 +186,10 @@ mod tests {
         // III#IIII###III with Q40=I, Q2=#
         let phred: Vec<u8> = b"III#IIII###III".iter().map(|&b| b - 33).collect();
         assert_eq!(
-            split_low_quality(&phred, 10, 1, 1),
+            split_low_quality(&phred, 10, 1),
             vec![(0, 3), (4, 8), (11, 14)]
         );
-        assert_eq!(split_low_quality(&phred, 10, 1, 3), vec![(0, 8), (11, 14)]);
-        assert_eq!(split_low_quality(&phred, 10, 1, 4), vec![(0, 14)]);
+        assert_eq!(split_low_quality(&phred, 10, 3), vec![(0, 8), (11, 14)]);
+        assert_eq!(split_low_quality(&phred, 10, 4), vec![(0, 14)]);
     }
 }
