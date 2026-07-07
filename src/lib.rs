@@ -366,6 +366,29 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
     }
 }
 
+/// `--adapter-infer-only`'s stdout contract: print each discovered adapter as
+/// a bare FASTA record -- header `>inferred_N support=X.XX [\u{2248} NAME
+/// (pct%)]` (the bracketed cross-name suffix omitted when there's no catalog/
+/// FASTA hit), then the sequence on its own line. CLI help promises
+/// "sequences + support + catalog names" for report-only, but pre-fix the
+/// sequence only ever appeared at `debug!` (see `log_discovered`), so plain
+/// `--adapter-infer-only` stdout was empty -- nothing to redirect into an
+/// adapter FASTA of your own. `N` matches `log_discovered`'s own 1-based
+/// numbering (both iterate `discovered` in the same post-sort order from
+/// `infer::discover`). Trim mode keeps the sequence at `debug!` only -- this
+/// is report-only's stdout output, not an additional log line.
+fn print_discovered_fasta(discovered: &[crate::adapter::infer::InferredAdapter]) {
+    for (i, d) in discovered.iter().enumerate() {
+        let n = i + 1;
+        let name_suffix = match d.name_hits.first() {
+            Some((name, pct)) => format!(" [\u{2248} {name} ({pct:.0}%)]"),
+            None => String::new(),
+        };
+        println!(">inferred_{n} support={:.2}{name_suffix}", d.support);
+        println!("{}", String::from_utf8_lossy(&d.adapter.seq));
+    }
+}
+
 /// Pull up to `n` records off the front of `records` into a `Vec`, stopping
 /// early if the iterator is exhausted first. Shared by both buffering points
 /// in `maybe_reduce_adapters` below (the ab-initio inference sample and the
@@ -476,6 +499,7 @@ where
         log_discovered(&discovered, s);
 
         if cfg.adapter_infer == AdapterInfer::ReportOnly {
+            print_discovered_fasta(&discovered);
             return Ok(None);
         }
 
@@ -650,7 +674,20 @@ fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bo
 /// Hard-error before any writer/output file is created if `out_fmt` would land
 /// binary/gzip bytes on an interactive stdout (see `binary_to_terminal`).
 /// Shared by `run`'s single-file path and `run_folder`.
+///
+/// `AdapterInfer::ReportOnly` is exempt (Bug 4): report-only never builds a
+/// writer for `out_fmt` at all -- it prints a small FASTA text summary to
+/// stdout (`print_discovered_fasta`) and returns before dispatch, from the
+/// `ReportOnly` early-exit in `maybe_reduce_adapters`, which runs AFTER this
+/// guard. Pre-fix, this guard ran first and could refuse e.g. `whittle -i
+/// reads.bam --adapter-infer-only` on a terminal ("would write BAM to
+/// terminal") even though that run writes no BAM at all. A non-report-only
+/// run reaching an actual binary write on a TTY is still refused exactly as
+/// before.
 fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> {
+    if cfg.adapter_infer == AdapterInfer::ReportOnly {
+        return Ok(());
+    }
     let stdout_is_tty = std::io::stdout().is_terminal();
     if binary_to_terminal(cfg.io.output.is_none(), out_fmt, stdout_is_tty) {
         let ext = match out_fmt {
