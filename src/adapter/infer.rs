@@ -11,6 +11,26 @@ use crate::adapter::search::{DnaSearcher, hits};
 /// (Task 9's confidence pass), bounding its cost on large samples.
 const RECOUNT_WINDOWS: usize = 4000;
 
+/// Max total emitted length of a single `bounded_heaviest_path` consensus,
+/// used by `peel_paths` so no single peel can run away in length.
+const LMAX: usize = 100;
+
+/// Max number of adapters `peel_paths` will extract from one end's k-mer graph.
+const MAX_ADAPTERS_PER_END: usize = 3;
+
+/// A peeled path is kept only if its total weight is at least this fraction
+/// of the first (heaviest) path's weight; below that it's noise, not a
+/// distinct adapter.
+const MIN_PATH_WEIGHT_FRAC: f64 = 0.25;
+
+/// Neighbourhood size (in profile positions) `drop_trim` scans inward from
+/// each end when looking for a sharp support drop.
+const DROP_WINDOW: usize = 7;
+
+/// Fraction of the profile's max weight added to the median-of-diffs baseline
+/// to form `drop_trim`'s cut threshold.
+const CUT_RATIO: f64 = 0.075;
+
 /// One discovered adapter with inference metadata. Convert to a bare `Adapter`
 /// (dropping `support`/`name_hits`) only when building the trim config.
 #[derive(Debug, Clone)]
@@ -156,9 +176,6 @@ fn two_error_freq(
 /// Returns `(consensus bytes, per-position weight profile, total node-weight)`,
 /// or `None` if `nodes` is empty. `lmax` caps the total emitted length; the
 /// consensus is always at least one k-mer even if `lmax < k`.
-// Not yet called from production code (only from the tests below); Task 7
-// (peel_paths) wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn bounded_heaviest_path(
     nodes: &[(u64, u32)],
     k: usize,
@@ -253,6 +270,127 @@ fn bounded_heaviest_path(
         weight += nodes[idx].1 as u64;
     }
     Some((cons, profile, weight))
+}
+
+fn median_u32(xs: &[u32]) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    let mut v = xs.to_vec();
+    v.sort_unstable();
+    let m = v.len() / 2;
+    if v.len() % 2 == 1 {
+        v[m] as f64
+    } else {
+        (v[m - 1] as f64 + v[m] as f64) / 2.0
+    }
+}
+
+/// Presence-fraction confidence for one consensus: `median(profile) /
+/// n_windows`, i.e. what share of the sampled end-windows actually
+/// contained a k-mer from this path, clamped to `[0,1]`.
+// Not yet called from production code (only from the tests below); Task 9
+// (discover) wires this in and this allow comes off then.
+#[allow(dead_code)]
+fn support_from_profile(profile: &[u32], n_windows: usize) -> f64 {
+    if n_windows == 0 {
+        return 0.0;
+    }
+    (median_u32(profile) / n_windows as f64).clamp(0.0, 1.0)
+}
+
+fn median_f64(xs: &[f64]) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    let mut v = xs.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let m = v.len() / 2;
+    if v.len() % 2 == 1 {
+        v[m]
+    } else {
+        (v[m - 1] + v[m]) / 2.0
+    }
+}
+
+/// Trim low-support flanks. Walk from each end inward; cut at the first position
+/// where the support jumps by more than the drop threshold relative to the
+/// interior plateau. Threshold = median of |successive differences| + CUT_RATIO
+/// * max(profile), evaluated over a DROP_WINDOW-sized neighbourhood.
+// Not yet called from production code (only from the tests below); Task 9
+// (discover) wires this in and this allow comes off then.
+#[allow(dead_code)]
+fn drop_trim(consensus: &[u8], profile: &[u32]) -> (Vec<u8>, Vec<u32>) {
+    let n = profile.len();
+    if n == 0 {
+        return (consensus.to_vec(), profile.to_vec());
+    }
+    let maxp = *profile.iter().max().unwrap() as f64;
+    let diffs: Vec<f64> = profile
+        .windows(2)
+        .map(|w| (w[0] as f64 - w[1] as f64).abs())
+        .collect();
+    let thresh = median_f64(&diffs) + CUT_RATIO * maxp;
+
+    // left boundary: advance while a sharp drop-in from the edge is seen within
+    // the first DROP_WINDOW positions.
+    let mut lo = 0usize;
+    while lo + 1 < n && lo < DROP_WINDOW {
+        if (profile[lo] as f64) < maxp - thresh && (profile[lo + 1] as f64) >= maxp - thresh {
+            lo += 1;
+            break;
+        }
+        if (profile[lo] as f64) < maxp - thresh {
+            lo += 1;
+        } else {
+            break;
+        }
+    }
+    // right boundary: symmetric from the tail.
+    let mut hi = n;
+    while hi > lo + 1 && n - hi < DROP_WINDOW {
+        if (profile[hi - 1] as f64) < maxp - thresh {
+            hi -= 1;
+        } else {
+            break;
+        }
+    }
+    if lo >= hi {
+        return (consensus.to_vec(), profile.to_vec()); // never trim to nothing
+    }
+    (consensus[lo..hi].to_vec(), profile[lo..hi].to_vec())
+}
+
+/// Iteratively peels up to `MAX_ADAPTERS_PER_END` distinct adapter
+/// consensuses out of a single end's weighted k-mer graph: each round runs
+/// `bounded_heaviest_path`, then removes that path's k-mers from `nodes` so
+/// the next round is forced onto a different (non-overlapping) path. Stops
+/// early once a path's weight falls below `MIN_PATH_WEIGHT_FRAC` of the
+/// first (heaviest) path's weight, or once no path / no nodes remain.
+// Not yet called from production code (only from the tests below); Task 9
+// (discover) wires this in and this allow comes off then.
+#[allow(dead_code)]
+fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize) -> Vec<(Vec<u8>, Vec<u32>)> {
+    let mut out = Vec::new();
+    let mut first_weight: Option<u64> = None;
+    while out.len() < MAX_ADAPTERS_PER_END {
+        let Some((cons, profile, weight)) = bounded_heaviest_path(&nodes, k, LMAX) else {
+            break;
+        };
+        let fw = *first_weight.get_or_insert(weight);
+        if (weight as f64) < MIN_PATH_WEIGHT_FRAC * fw as f64 {
+            break;
+        }
+        // remove the nodes used by this path so the next peel finds a different one.
+        let used: std::collections::HashSet<u64> =
+            cons.windows(k).filter_map(encode_kmer).collect();
+        nodes.retain(|(code, _)| !used.contains(code));
+        out.push((cons, profile));
+        if nodes.is_empty() {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -357,5 +495,43 @@ mod tests {
         let (cons, _profile, _w) = bounded_heaviest_path(&nodes, 4, 12).unwrap();
         assert!(cons.len() <= 12, "no loop: each node used at most once");
         assert!(cons.starts_with(b"ATAT") || cons.starts_with(b"TATA"));
+    }
+
+    #[test]
+    fn peel_extracts_two_distinct_adapters() {
+        // Two non-overlapping tilings, each internally chained, different bases.
+        let mk = |s: &[u8], w: u32| (encode_kmer(s).unwrap(), w);
+        let nodes = vec![
+            // adapter 1: ACGTACG... high weight
+            mk(b"ACGT", 100),
+            mk(b"CGTA", 99),
+            mk(b"GTAC", 98),
+            // adapter 2: TTGGTTG... lower but > 25% of 297
+            mk(b"TTGG", 90),
+            mk(b"TGGT", 89),
+            mk(b"GGTT", 88),
+        ];
+        let paths = peel_paths(nodes, 4);
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].0.starts_with(b"ACGT"));
+        assert!(paths[1].0.starts_with(b"TTGG"));
+    }
+
+    #[test]
+    fn drop_trim_cuts_low_support_flank() {
+        // high plateau then a sharp drop -> trailing low-support positions removed.
+        let consensus = b"ACGTACGTACGTAAAA".to_vec(); // last 4 are the flank
+        let profile = vec![
+            100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 3, 3, 3, 3,
+        ];
+        let (trimmed, tprof) = drop_trim(&consensus, &profile);
+        assert_eq!(trimmed, b"ACGTACGTACGT");
+        assert_eq!(tprof.len(), trimmed.len());
+    }
+
+    #[test]
+    fn support_is_median_over_windows() {
+        let profile = vec![40u32, 50, 60];
+        assert!((support_from_profile(&profile, 100) - 0.50).abs() < 1e-9);
     }
 }
