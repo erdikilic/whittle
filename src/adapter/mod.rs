@@ -1,4 +1,5 @@
 pub mod detect;
+pub mod infer;
 pub mod preset;
 pub mod search;
 
