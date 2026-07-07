@@ -469,6 +469,15 @@ fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f
     named
 }
 
+/// Deterministically sample <= `cap` windows spread across the WHOLE slice
+/// (stride, not the first `cap`) so the recount/support frame isn't order-
+/// biased (Bug 1: see `assemble`'s `recount` sample below). If `windows.len()
+/// <= cap`, returns every window, in order (step == 1).
+fn stride_sample<'a>(windows: &[&'a [u8]], cap: usize) -> Vec<&'a [u8]> {
+    let step = windows.len().div_ceil(cap.max(1)).max(1);
+    windows.iter().step_by(step).copied().collect()
+}
+
 /// One end's workflow: count -> reweight by 2-error freq -> peel -> drop-trim.
 /// Returns (trimmed consensus, support) candidates for this end.
 fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
@@ -502,8 +511,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
     // start to end, so no read range is structurally excluded. `top_kmers`
     // above still ranks over ALL windows -- only the recount/support sample
     // is capped, for cost.
-    let step = windows.len().div_ceil(RECOUNT_WINDOWS).max(1);
-    let recount: Vec<&[u8]> = windows.iter().step_by(step).copied().collect();
+    let recount = stride_sample(windows, RECOUNT_WINDOWS);
     let n_recount = recount.len();
 
     let mut fwd = crate::adapter::search::new_searcher_fwd();
@@ -1014,6 +1022,48 @@ mod tests {
     }
 
     #[test]
+    fn stride_sample_is_identity_when_within_cap() {
+        // len <= cap: every window is returned, in order (step == 1).
+        let a: &[u8] = b"A";
+        let b: &[u8] = b"C";
+        let c: &[u8] = b"G";
+        let windows: Vec<&[u8]> = vec![a, b, c];
+        assert_eq!(stride_sample(&windows, 4), windows);
+    }
+
+    #[test]
+    fn stride_sample_spans_the_whole_range_not_just_a_prefix() {
+        // 13 distinct one-byte windows, cap=4. A `.take(cap)` bug would only
+        // ever see indices 0..4 (the first third); the real stride
+        // (step = ceil(13/4) = 4) must reach into the last third instead.
+        let bytes: Vec<u8> = (0..13u8).map(|i| b'A' + i).collect();
+        let windows: Vec<&[u8]> = bytes.iter().map(std::slice::from_ref).collect();
+        let sampled = stride_sample(&windows, 4);
+        assert!(sampled.len() <= 4);
+        // Expected indices: 0, 4, 8, 12.
+        assert_eq!(
+            sampled,
+            vec![windows[0], windows[4], windows[8], windows[12]]
+        );
+        let last_idx = 12usize; // where the last sampled window actually lives
+        assert!(
+            last_idx >= (13usize * 2).div_ceil(3),
+            "last sampled window must fall in the last third of the range, not a prefix"
+        );
+        assert_eq!(*sampled.last().unwrap(), windows[last_idx]);
+    }
+
+    // Slow (~64-75s: builds an 8001-read fixture to exceed RECOUNT_WINDOWS),
+    // so it's gated out of the default suite the same way
+    // `bam_mods_oracle.rs`'s real-uBAM oracle sweeps are gated (#[ignore]),
+    // and run on demand instead:
+    //   cargo test --lib discover_is_not_order_biased_by_recount_window_cap -- --ignored
+    // The fast `stride_sample_*` unit tests above cover the striding logic
+    // itself (same helper, same cap semantics) on every default `cargo
+    // test`; this is the on-demand end-to-end regression check that the
+    // same behavior holds through the full `discover` pipeline.
+    #[test]
+    #[ignore]
     fn discover_is_not_order_biased_by_recount_window_cap() {
         // Bug 1 regression: pre-fix, `two_error_freq`'s reweight/support
         // recount only ever looked at `windows.iter().take(RECOUNT_WINDOWS)`
