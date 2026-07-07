@@ -327,7 +327,11 @@ impl ProgressHandle {
             tracing::info!("{}", line);
         }
 
-        if let Some(line) = dropped_line(stats) {
+        if let Some(line) = no_output_line(stats) {
+            tracing::info!("{}", line);
+        }
+
+        if let Some(line) = segments_dropped_line(stats) {
             tracing::info!("{}", line);
         }
 
@@ -532,43 +536,70 @@ fn bases_line(stats: &Stats) -> Option<String> {
     ))
 }
 
-/// The end-of-run "why reads were dropped" line, shown right after `Bases:`:
-/// `Dropped: 3,200 input reads (2,100 too short, 1,100 low quality)`. Only the
-/// non-zero reasons appear, in this fixed order: too short, too long, low
-/// quality, high quality, GC out of range, trimmed away (passed the filter but
-/// every trimmed segment was empty/sub-`min_length`). `None` when nothing was
-/// dropped, so a clean run gets no extra line.
-fn dropped_line(stats: &Stats) -> Option<String> {
-    let total = stats.dropped_short
-        + stats.dropped_long
-        + stats.dropped_low_qual
-        + stats.dropped_high_qual
-        + stats.dropped_gc
-        + stats.dropped_trimmed;
+/// The end-of-run read-level "no surviving output" line, shown right after
+/// `Bases:`: `No output: 1,234 input reads produced no surviving segment`.
+/// Replaces the old single "Dropped:" line's read-level half — this now
+/// covers every reason a read ends up with zero output (empty read, fully
+/// consumed by adapter trimming, or every produced segment filtered), since
+/// per-segment filtering means a read is never "the" dropped reason anymore.
+/// `None` when every input read produced at least one surviving segment.
+fn no_output_line(stats: &Stats) -> Option<String> {
+    if stats.reads_no_output == 0 {
+        return None;
+    }
+    Some(format!(
+        "No output: {} input reads produced no surviving segment",
+        commas(stats.reads_no_output)
+    ))
+}
+
+/// The end-of-run segment-level "why segments were dropped" line, shown right
+/// after `no_output_line`: `Segments dropped: 3,200 (2,100 too short, 1,100
+/// low quality)`. Only the non-zero reasons appear, in this fixed order: too
+/// short, too long, low quality, high quality, GC out of range. Counts
+/// *segments* (post-trim, per `filter::check`), not reads — a single split
+/// read can contribute to more than one of these while still surviving
+/// overall. `None` when nothing was dropped, so a clean run gets no extra
+/// line.
+fn segments_dropped_line(stats: &Stats) -> Option<String> {
+    let total = stats.segments_dropped_short
+        + stats.segments_dropped_long
+        + stats.segments_dropped_low_qual
+        + stats.segments_dropped_high_qual
+        + stats.segments_dropped_gc;
     if total == 0 {
         return None;
     }
     let mut parts = Vec::new();
-    if stats.dropped_short > 0 {
-        parts.push(format!("{} too short", commas(stats.dropped_short)));
+    if stats.segments_dropped_short > 0 {
+        parts.push(format!(
+            "{} too short",
+            commas(stats.segments_dropped_short)
+        ));
     }
-    if stats.dropped_long > 0 {
-        parts.push(format!("{} too long", commas(stats.dropped_long)));
+    if stats.segments_dropped_long > 0 {
+        parts.push(format!("{} too long", commas(stats.segments_dropped_long)));
     }
-    if stats.dropped_low_qual > 0 {
-        parts.push(format!("{} low quality", commas(stats.dropped_low_qual)));
+    if stats.segments_dropped_low_qual > 0 {
+        parts.push(format!(
+            "{} low quality",
+            commas(stats.segments_dropped_low_qual)
+        ));
     }
-    if stats.dropped_high_qual > 0 {
-        parts.push(format!("{} high quality", commas(stats.dropped_high_qual)));
+    if stats.segments_dropped_high_qual > 0 {
+        parts.push(format!(
+            "{} high quality",
+            commas(stats.segments_dropped_high_qual)
+        ));
     }
-    if stats.dropped_gc > 0 {
-        parts.push(format!("{} GC out of range", commas(stats.dropped_gc)));
-    }
-    if stats.dropped_trimmed > 0 {
-        parts.push(format!("{} trimmed away", commas(stats.dropped_trimmed)));
+    if stats.segments_dropped_gc > 0 {
+        parts.push(format!(
+            "{} GC out of range",
+            commas(stats.segments_dropped_gc)
+        ));
     }
     Some(format!(
-        "Dropped: {} input reads ({})",
+        "Segments dropped: {} ({})",
         commas(total),
         parts.join(", ")
     ))
@@ -911,39 +942,55 @@ mod tests {
     }
 
     #[test]
-    fn dropped_line_lists_only_nonzero_reasons_in_fixed_order() {
+    fn segments_dropped_line_lists_only_nonzero_reasons_in_fixed_order() {
         let stats = Stats {
-            dropped_short: 2_100,
-            dropped_low_qual: 1_100,
+            segments_dropped_short: 2_100,
+            segments_dropped_low_qual: 1_100,
             ..Default::default()
         };
         assert_eq!(
-            dropped_line(&stats).unwrap(),
-            "Dropped: 3,200 input reads (2,100 too short, 1,100 low quality)"
+            segments_dropped_line(&stats).unwrap(),
+            "Segments dropped: 3,200 (2,100 too short, 1,100 low quality)"
         );
     }
 
     #[test]
-    fn dropped_line_covers_every_reason_in_order() {
+    fn segments_dropped_line_covers_every_reason_in_order() {
         let stats = Stats {
-            dropped_short: 1,
-            dropped_long: 2,
-            dropped_low_qual: 3,
-            dropped_high_qual: 4,
-            dropped_gc: 5,
-            dropped_trimmed: 6,
+            segments_dropped_short: 1,
+            segments_dropped_long: 2,
+            segments_dropped_low_qual: 3,
+            segments_dropped_high_qual: 4,
+            segments_dropped_gc: 5,
             ..Default::default()
         };
         assert_eq!(
-            dropped_line(&stats).unwrap(),
-            "Dropped: 21 input reads (1 too short, 2 too long, 3 low quality, \
-             4 high quality, 5 GC out of range, 6 trimmed away)"
+            segments_dropped_line(&stats).unwrap(),
+            "Segments dropped: 15 (1 too short, 2 too long, 3 low quality, \
+             4 high quality, 5 GC out of range)"
         );
     }
 
     #[test]
-    fn dropped_line_omitted_when_total_zero() {
-        assert_eq!(dropped_line(&Stats::default()), None);
+    fn segments_dropped_line_omitted_when_total_zero() {
+        assert_eq!(segments_dropped_line(&Stats::default()), None);
+    }
+
+    #[test]
+    fn no_output_line_reports_read_level_count() {
+        let stats = Stats {
+            reads_no_output: 42,
+            ..Default::default()
+        };
+        assert_eq!(
+            no_output_line(&stats).unwrap(),
+            "No output: 42 input reads produced no surviving segment"
+        );
+    }
+
+    #[test]
+    fn no_output_line_omitted_when_zero() {
+        assert_eq!(no_output_line(&Stats::default()), None);
     }
 
     #[test]

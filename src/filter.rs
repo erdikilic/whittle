@@ -37,6 +37,12 @@ pub enum DropReason {
 /// (surfaced as `TooShort`, the same bucket a zero `min_length` would put them
 /// in). Same thresholds and check order as the old `passes` — this just names
 /// the reason instead of discarding it.
+///
+/// Called once per **trimmed segment**, post-trim (`workflow::fastq`/
+/// `workflow::bam` run this after `trim::apply`, not on the raw read before
+/// trimming) — so `seq`/`phred` here are a single segment's own bases, not
+/// necessarily the whole input read. Logic/thresholds are unchanged; only the
+/// call site (and what counts as "the read" being judged) moved.
 pub fn check(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> Option<DropReason> {
     let len = seq.len();
     if len == 0 || len < cfg.min_length {

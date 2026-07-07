@@ -18,8 +18,11 @@ pub struct TrimPlan {
 
 /// Fixed crop first (positional), then the adapter stage on the cropped window
 /// (when configured), then the chosen quality op within each adapter segment,
-/// offsetting intervals back to original coordinates. Every returned segment
-/// is >= `min_length`.
+/// offsetting intervals back to original coordinates. Emits crop->adapter->quality
+/// segments only; the caller filters (length/quality/GC) per segment. `min_length`
+/// is not applied here as a filter — it is only forwarded to `split_low_quality`,
+/// where it is the minimum quality-split piece size (a split-granularity control,
+/// not a biological length filter).
 pub fn apply(
     seq: &[u8],
     phred: &[u8],
@@ -48,7 +51,8 @@ pub fn apply(
         None => vec![(start, end)],
     };
 
-    // Quality op within each adapter segment, offset back; then min_length filter.
+    // Quality op within each adapter segment, offset back. No length filter here
+    // — the caller filters each returned segment (length/quality/GC).
     let mut out = Vec::new();
     for (s, e) in adapter_segs {
         let window_phred = &phred[s..e];
@@ -60,12 +64,7 @@ pub fn apply(
                 split_low_quality(window_phred, *cutoff, min_length, *window)
             },
         };
-        out.extend(
-            inner
-                .into_iter()
-                .map(|(is, ie)| (is + s, ie + s))
-                .filter(|&(a, b)| b - a >= min_length),
-        );
+        out.extend(inner.into_iter().map(|(is, ie)| (is + s, ie + s)));
     }
     out
 }
@@ -103,7 +102,10 @@ mod tests {
     }
 
     #[test]
-    fn min_length_drops_short_segments() {
+    fn short_segments_are_emitted_not_filtered() {
+        // `apply` no longer applies a `min_length` filter: filtering moved to the
+        // caller (per-segment, post-trim). A segment shorter than `min_length` is
+        // still RETURNED here.
         let phred = vec![40u8; 4];
         let seq = vec![b'A'; 4];
         let plan = TrimPlan {
@@ -111,10 +113,7 @@ mod tests {
             tail: 0,
             quality: None,
         };
-        assert_eq!(
-            apply(&seq, &phred, &plan, None, 5),
-            Vec::<(usize, usize)>::new()
-        );
+        assert_eq!(apply(&seq, &phred, &plan, None, 5), vec![(0, 4)]);
     }
 
     #[test]

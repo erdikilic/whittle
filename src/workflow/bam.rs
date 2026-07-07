@@ -477,7 +477,8 @@ pub fn reconstruct_mods(
     }
 }
 
-/// Single-threaded uBAM workflow: refuse aligned reads, filter, trim, reconstruct.
+/// Single-threaded uBAM workflow: refuse aligned reads, trim, filter each
+/// produced segment, reconstruct survivors.
 fn run_bam_seq(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
@@ -511,33 +512,37 @@ fn run_bam_seq(
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
-        if let Some(reason) = filter::check(&seq, &qual, &cfg.filter) {
-            counters.record_filter_drop(reason);
-            continue;
-        }
-        let intervals = trim::apply(
+        let produced = trim::apply(
             &seq,
             &qual,
             &cfg.trim,
             cfg.adapters.as_ref(),
             cfg.filter.min_length,
         );
-        if intervals.is_empty() {
-            counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-        let total = intervals.len();
-        counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+        let total = produced.len();
+        let mut survived = 0usize;
         let mut out_bases = 0u64;
-        for (idx, (s, e)) in intervals.into_iter().enumerate() {
+        for (idx, (s, e)) in produced.into_iter().enumerate() {
+            let seg_seq = &seq[s..e];
+            let seg_qual = &qual[s..e];
+            if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
+                counters.record_filter_drop(reason);
+                continue;
+            }
             let out = reconstruct_record(&rec, s, e, total, idx, cfg.update_moves);
             sink.write_record(header, &out)?;
             counters.output_reads.fetch_add(1, Ordering::Relaxed);
             out_bases += (e - s) as u64;
+            survived += 1;
         }
         counters
             .output_bases
             .fetch_add(out_bases, Ordering::Relaxed);
+        if survived == 0 {
+            counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
+        } else {
+            counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+        }
     }
     Ok(counters.snapshot(malformed_tag_reads))
 }
@@ -672,7 +677,8 @@ pub fn run_bam(
         records,
         cfg,
         sink,
-        // render: per-record guards + filter + trim + reconstruct -> (Vec<RecordBuf>, output bases)
+        // render: per-record guards + trim + per-segment filter + reconstruct
+        // survivors -> (Vec<RecordBuf>, output bases)
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
             let seq = rec.sequence().as_ref().to_vec();
@@ -689,29 +695,31 @@ pub fn run_bam(
                     qual.len()
                 );
             }
-            if let Some(reason) = filter::check(&seq, &qual, &cfg.filter) {
-                counters.record_filter_drop(reason);
-                return Ok((Vec::new(), 0));
-            }
-            let intervals = trim::apply(
+            let produced = trim::apply(
                 &seq,
                 &qual,
                 &cfg.trim,
                 cfg.adapters.as_ref(),
                 cfg.filter.min_length,
             );
-            if intervals.is_empty() {
-                counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
-                return Ok((Vec::new(), 0));
+            let total = produced.len();
+            let mut items = Vec::with_capacity(total);
+            let mut out_bases = 0u64;
+            for (idx, (s, e)) in produced.into_iter().enumerate() {
+                let seg_seq = &seq[s..e];
+                let seg_qual = &qual[s..e];
+                if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
+                    counters.record_filter_drop(reason);
+                    continue;
+                }
+                items.push(reconstruct_record(rec, s, e, total, idx, cfg.update_moves));
+                out_bases += (e - s) as u64;
             }
-            let total = intervals.len();
-            counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-            let out_bases: u64 = intervals.iter().map(|&(s, e)| (e - s) as u64).sum();
-            let items = intervals
-                .into_iter()
-                .enumerate()
-                .map(|(idx, (s, e))| reconstruct_record(rec, s, e, total, idx, cfg.update_moves))
-                .collect();
+            if items.is_empty() {
+                counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
+            } else {
+                counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+            }
             Ok((items, out_bases))
         },
         // write_one: encode+write on the writer thread (bgzf compress is MT).
@@ -780,10 +788,11 @@ fn build_fastq_tags(
     tags
 }
 
-/// Single-threaded uBAM→FASTQ workflow: refuse aligned reads, filter, trim, then
-/// write each surviving segment as FASTQ with the selected aux tags in the header
-/// (MM/ML/MN reconstructed; others verbatim). gz compression, when requested, is
-/// handled by the parallel `gzp` writer this drains into.
+/// Single-threaded uBAM→FASTQ workflow: refuse aligned reads, trim, filter each
+/// produced segment, then write each surviving segment as FASTQ with the
+/// selected aux tags in the header (MM/ML/MN reconstructed; others verbatim).
+/// gz compression, when requested, is handled by the parallel `gzp` writer this
+/// drains into.
 fn run_bam_to_fastq_seq<W>(
     records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
     writer: &mut W,
@@ -819,38 +828,42 @@ where
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
-        if let Some(reason) = filter::check(&seq, &qual, &cfg.filter) {
-            counters.record_filter_drop(reason);
-            continue;
-        }
         let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
-        let intervals = trim::apply(
+        let produced = trim::apply(
             &seq,
             &qual,
             &cfg.trim,
             cfg.adapters.as_ref(),
             cfg.filter.min_length,
         );
-        if intervals.is_empty() {
-            counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-        let total = intervals.len();
-        counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+        let total = produced.len();
+        let mut survived = 0usize;
         let mut out_bases = 0u64;
-        for (idx, (s, e)) in intervals.into_iter().enumerate() {
+        for (idx, (s, e)) in produced.into_iter().enumerate() {
+            let seg_seq = &seq[s..e];
+            let seg_qual = &qual[s..e];
+            if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
+                counters.record_filter_drop(reason);
+                continue;
+            }
             let tags = build_fastq_tags(&rec, &seq, s, e, total, &cfg.fastq_tags);
             if tags.is_empty() {
-                write_segment(writer, &name, &seq[s..e], &qual[s..e], total, idx)?;
+                write_segment(writer, &name, seg_seq, seg_qual, total, idx)?;
             } else {
-                write_segment_tagged(writer, &name, &seq[s..e], &qual[s..e], total, idx, &tags)?;
+                write_segment_tagged(writer, &name, seg_seq, seg_qual, total, idx, &tags)?;
             }
             counters.output_reads.fetch_add(1, Ordering::Relaxed);
             out_bases += (e - s) as u64;
+            survived += 1;
         }
         counters
             .output_bases
             .fetch_add(out_bases, Ordering::Relaxed);
+        if survived == 0 {
+            counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
+        } else {
+            counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+        }
     }
     Ok(counters.snapshot(malformed_tag_reads))
 }
@@ -876,7 +889,8 @@ pub fn run_bam_to_fastq<W: Write + Send>(
         records,
         cfg,
         writer,
-        // render: guards + filter + trim -> (Vec<Vec<u8>>, output bases) (rendered FASTQ segments)
+        // render: guards + trim + per-segment filter -> (Vec<Vec<u8>>, output
+        // bases) (rendered FASTQ segments, survivors only)
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
             let seq = rec.sequence().as_ref().to_vec();
@@ -893,44 +907,38 @@ pub fn run_bam_to_fastq<W: Write + Send>(
                     qual.len()
                 );
             }
-            if let Some(reason) = filter::check(&seq, &qual, &cfg.filter) {
-                counters.record_filter_drop(reason);
-                return Ok((Vec::new(), 0));
-            }
             let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
-            let intervals = trim::apply(
+            let produced = trim::apply(
                 &seq,
                 &qual,
                 &cfg.trim,
                 cfg.adapters.as_ref(),
                 cfg.filter.min_length,
             );
-            if intervals.is_empty() {
-                counters.dropped_trimmed.fetch_add(1, Ordering::Relaxed);
-                return Ok((Vec::new(), 0));
-            }
-            let total = intervals.len();
-            counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+            let total = produced.len();
             let mut out = Vec::with_capacity(total);
             let mut out_bases = 0u64;
-            for (idx, (s, e)) in intervals.into_iter().enumerate() {
+            for (idx, (s, e)) in produced.into_iter().enumerate() {
+                let seg_seq = &seq[s..e];
+                let seg_qual = &qual[s..e];
+                if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
+                    counters.record_filter_drop(reason);
+                    continue;
+                }
                 let tags = build_fastq_tags(rec, &seq, s, e, total, &cfg.fastq_tags);
                 let mut buf = Vec::new();
                 if tags.is_empty() {
-                    write_segment(&mut buf, &name, &seq[s..e], &qual[s..e], total, idx)?;
+                    write_segment(&mut buf, &name, seg_seq, seg_qual, total, idx)?;
                 } else {
-                    write_segment_tagged(
-                        &mut buf,
-                        &name,
-                        &seq[s..e],
-                        &qual[s..e],
-                        total,
-                        idx,
-                        &tags,
-                    )?;
+                    write_segment_tagged(&mut buf, &name, seg_seq, seg_qual, total, idx, &tags)?;
                 }
                 out.push(buf);
                 out_bases += (e - s) as u64;
+            }
+            if out.is_empty() {
+                counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
+            } else {
+                counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
             }
             Ok((out, out_bases))
         },
