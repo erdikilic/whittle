@@ -307,6 +307,14 @@ fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
     rec.sequence().as_ref()
 }
 
+/// A kept adapter's support below this is close enough to `infer::KEEP_SUPPORT`
+/// (0.10) that it's worth an explicit warning rather than trusting the plain
+/// info line: the recovered support for a genuine adapter can land just above
+/// the keep floor (see `infer::KEEP_SUPPORT`'s doc comment — a real, closely-
+/// matching planted adapter recovers at ~0.144 in that test), so a kept
+/// adapter this weak deserves scrutiny before trusting it, not silent trust.
+const MARGINAL_SUPPORT: f64 = 0.20;
+
 /// Log each ab-initio discovery (Task 9's `infer::discover` output) at
 /// `info!`: `inferred_N ≈ NAME (pct%) · support X.XX` when the discovered
 /// sequence cross-names against the built-in ONT catalog, else `inferred_N
@@ -316,6 +324,8 @@ fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
 /// may itself already read `inferred_{k}` from a different, pre-sort index).
 /// The raw sequence is logged separately at `debug!` — too noisy for the
 /// default INFO level, but useful with `-v` when checking a discovery by eye.
+/// Support below `MARGINAL_SUPPORT` additionally gets a `warn!`, since it's
+/// close enough to the `KEEP_SUPPORT` floor to warrant double-checking.
 fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampled: usize) {
     tracing::info!(
         "Adapter inference: sampled {n_sampled} reads, discovered {} adapter{}",
@@ -337,6 +347,14 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
                     d.support
                 );
             },
+        }
+        if d.support < MARGINAL_SUPPORT {
+            tracing::warn!(
+                "adapter '{}' support {:.2} is marginal (near the KEEP_SUPPORT floor); \
+                 verify with --adapter-infer-only",
+                d.adapter.name,
+                d.support
+            );
         }
         tracing::debug!(
             "inferred_{n} sequence: {}",

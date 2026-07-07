@@ -921,3 +921,62 @@ fn infer_is_deterministic() {
         "same input -> byte-identical output"
     );
 }
+
+// --- marginal-support warning ------------------------------------------
+
+/// Same fixture shape as `write_adapted_fastq`, but with the deterministic
+/// ~10% substitution error that `discover_recovers_planted_adapter_under_error`
+/// (src/adapter/infer.rs) plants into its own copy of this same adapter: a
+/// substitution every 10th position, shifted by the read index so no single
+/// end-window k-mer is corrupted in every read. That test's `discover()`
+/// support lands at ~0.144 -- above `KEEP_SUPPORT` (0.10, so the adapter is
+/// still kept) but inside `MARGINAL_SUPPORT` (0.20), so it should be flagged.
+fn write_adapted_fastq_marginal(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
+    // NOTE: deliberately not named "*marginal*" -- the path is itself echoed
+    // into the `[INFO] Input: ...` / `Command: ...` log lines, which would
+    // make `stderr.contains("marginal")` a false positive unrelated to the
+    // actual warning message under test.
+    let path = dir.join("weak_adapter.fastq");
+    let mut f = std::fs::File::create(&path).unwrap();
+    for i in 0..n {
+        let mut seq = PLANTED_ADAPTER.as_bytes().to_vec();
+        for p in (0..seq.len()).step_by(10) {
+            let q = (p + i) % seq.len();
+            seq[q] = b"ACGT"[(seq[q] as usize + 1) % 4];
+        }
+        seq.extend(splitmix_tail(i, TAIL_LEN));
+        let qual = "I".repeat(seq.len());
+        writeln!(
+            f,
+            "@r{i}\n{}\n+\n{qual}",
+            std::str::from_utf8(&seq).unwrap()
+        )
+        .unwrap();
+    }
+    path
+}
+
+/// A kept adapter whose support sits in `[KEEP_SUPPORT, MARGINAL_SUPPORT)`
+/// (here ~0.144, see `write_adapted_fastq_marginal`) must get an explicit
+/// `warn!` in addition to the plain per-adapter info line, so a marginal
+/// discovery doesn't read the same as a confident one.
+#[test]
+fn infer_warns_on_marginal_support() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq_marginal(dir.path(), 500);
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "--adapter-infer-only",
+        "-t",
+        "1",
+    ]);
+    let assert = cmd.assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("marginal"),
+        "a support just above KEEP_SUPPORT must be flagged marginal: {stderr}"
+    );
+}
