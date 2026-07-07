@@ -6,6 +6,7 @@ use assert_cmd::Command;
 fn old_qual_flag_is_gone_new_one_listed() {
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args(["--help"])
         .assert()
         .success()
@@ -18,6 +19,7 @@ fn old_qual_flag_is_gone_new_one_listed() {
 fn adapter_help_lists_flags() {
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args(["--help"])
         .assert()
         .success()
@@ -31,6 +33,7 @@ fn adapter_help_lists_flags() {
 fn adapter_sample_flag_listed() {
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args(["--help"])
         .assert()
         .success()
@@ -42,6 +45,7 @@ fn rejects_out_of_range_error_rate() {
     // error-rate is only validated when an adapter source is active.
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "--adapter-preset",
             "ont",
@@ -55,6 +59,24 @@ fn rejects_out_of_range_error_rate() {
 }
 
 #[test]
+fn adapter_sample_below_min_is_rejected() {
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "--adapter-preset",
+            "ont",
+            "--adapter-sample",
+            "50",
+            "-i",
+            "/dev/null",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("must be 0"));
+}
+
+#[test]
 fn fastq_end_adapter_is_trimmed() {
     let adapter = "ACGTACGTACGTACGTACGT"; // 20 bp
     let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40 bp
@@ -65,6 +87,7 @@ fn fastq_end_adapter_is_trimmed() {
 
     let out = Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "-i",
             fq.path().to_str().unwrap(),
@@ -93,6 +116,7 @@ fn adapter_fasta_with_no_usable_entries_errors() {
     writeln!(fq, "@r1\nACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIII").unwrap();
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "-i",
             fq.path().to_str().unwrap(),
@@ -123,6 +147,7 @@ fn custom_fasta_never_reduces_even_with_an_absent_adapter() {
     }
     let out = Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "-i",
             fq.path().to_str().unwrap(),
@@ -158,6 +183,7 @@ fn adapter_sample_zero_disables_detection() {
     }
     let res = Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "-i",
             fq.path().to_str().unwrap(),
@@ -194,6 +220,7 @@ fn tiny_input_skips_detection() {
     }
     let res = Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "-i",
             fq.path().to_str().unwrap(),
@@ -261,6 +288,7 @@ fn detection_output_equals_full_set_for_present_adapter() {
         args.extend_from_slice(extra_args);
         let out = Command::cargo_bin("whittle")
             .unwrap()
+            .env_remove("WHITTLE_LOG")
             .args(args)
             .assert()
             .success();
@@ -340,6 +368,7 @@ fn custom_fasta_trims_adapters_after_a_clean_prefix() {
 
     let out = Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "-i",
             fq.path().to_str().unwrap(),
@@ -413,6 +442,7 @@ fn preset_detection_falls_back_when_prefix_has_no_adapters() {
 
     let res = Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args([
             "-i",
             fq.path().to_str().unwrap(),
@@ -446,6 +476,7 @@ fn no_adapter_flag_is_byte_identical() {
     write!(fq, "@r1\nACGTACGTACGT\n+\nIIIIIIIIIIII\n").unwrap();
     let out = Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args(["-i", fq.path().to_str().unwrap()])
         .assert()
         .success()

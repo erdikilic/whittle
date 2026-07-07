@@ -242,6 +242,16 @@ pub fn parse() -> anyhow::Result<Config> {
         if c.adapter_end_size == 0 {
             anyhow::bail!("--adapter-end-size must be >= 1");
         }
+        if c.adapter_sample != 0
+            && c.adapter_sample < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+        {
+            anyhow::bail!(
+                "--adapter-sample ({}) must be 0 (disable detection) or at least {} \
+                 (smaller samples are too few for reliable detection)",
+                c.adapter_sample,
+                crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+            );
+        }
         Some(crate::adapter::AdapterConfig {
             adapters: adapter_seqs,
             error_rate: c.adapter_error_rate,

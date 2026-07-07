@@ -191,7 +191,7 @@ See **The MM/ML/ML guarantee** below.
 | `--adapter-error-rate <F>` | End-match error tolerance as a fraction of adapter length (default 0.2); interior/chimera-split hits use half this budget |
 | `--adapter-end-size <N>` | Bases at each read end searched for a terminal adapter (default 150) |
 | `--adapter-ends-only` | Trim adapters at read ends only; never split on an interior adapter |
-| `--adapter-sample <N>` | Reads to sample (the first N, not random) for adapter presence detection with `--adapter-preset` (default 10000); trimming then runs only against adapters actually found in the sample (faster, fewer spurious trims), falling back to the full set if detection finds none. Always disabled (`0`) when `--adapter-fasta` is given — a custom FASTA is searched in full. `0` disables detection outright. Inputs under 100 reads always skip detection, regardless of this setting |
+| `--adapter-sample <N>` | Reads to sample (the first N, not random) for adapter presence detection with `--adapter-preset` (default 10000); trimming then runs only against adapters actually found in the sample (faster, fewer spurious trims), falling back to the full set if detection finds none. `0` disables detection outright (trim against the full set); any other value must be >= 100 (rejected at startup otherwise — smaller samples are too few for reliable detection). Always disabled (`0`) when `--adapter-fasta` is given — a custom FASTA is searched in full. Separately, an input that supplies fewer than 100 reads to sample skips detection and uses the full set, regardless of this setting |
 | `-v`, `-vv` | Increase logging detail: `-v` = debug, `-vv` = trace (default: info). See **Logging & progress** below |
 | `--quiet` | Silence progress and the info-level summary; warnings and errors still print |
 
@@ -311,14 +311,21 @@ sampling could otherwise drop a rare custom adapter. Pass `--adapter-sample 0`
 yourself to disable detection for a preset too and trim against the full
 configured set, unconditionally.
 
+`--adapter-sample` only accepts `0` (disable detection) or a value >= 100;
+anything from 1-99 is rejected at startup, since a sample that small is too
+few reads for reliable detection — silently falling back to the full set
+would be surprising, so `whittle` refuses the flag instead. This is a
+separate concern from the input itself being small: even with a valid
+`--adapter-sample` (the default 10000, say), if the input supplies **fewer
+than 100 reads** to sample, detection is skipped for that run and the full
+configured set is used, regardless of the flag's value.
+
 Because the sample is a prefix rather than a random draw, ordered data (e.g. a
 run of clean reads before any adapted ones) can look adapter-free during
 detection even though adapters are present later in the file. To guard
 against this, if detection keeps **zero** adapters, `whittle` falls back to
 the full configured set (logged as a warning) instead of silently disabling
-trimming for the rest of the run. Inputs under 100 reads always skip
-detection (too few reads to sample reliably) and use the full set regardless
-of `--adapter-sample`.
+trimming for the rest of the run.
 
 ### The built-in ONT catalog
 
