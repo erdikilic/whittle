@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use assert_cmd::Command;
 use noodles_bam as bam;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
@@ -434,4 +435,264 @@ fn real_ubam_oracle_sweep_t8() {
             "t8 mod mismatch for read {name}"
         );
     }
+}
+
+// --- Task 12: ab-initio inference on uBAM must not disturb MM/ML -----------
+//
+// Task 11 wired `--adapter-infer` through the shared buffer-then-decide seam
+// (`maybe_reduce_adapters` in src/lib.rs), which reads each record's SEQ via a
+// generic `seq_of` closure -- for BAM that's the same `rec.sequence().as_ref()`
+// accessor `pipeline::bam` already used before inference existed. So running
+// `--adapter-infer` on a uBAM should "just work" with no BAM-specific code,
+// and MM/ML reconstruction through the resulting trim is the same
+// `reconstruct_record` path already proven correct by every oracle test above
+// -- this is a wiring check, not new logic. This plants the SAME 28bp adapter
+// used by `tests/adapter_cli.rs`'s FASTQ inference fixtures at the 5' end of
+// >=100 uBAM records, each carrying a real MM/ML (`C+m`) tag anchored deep
+// enough into the per-read genomic tail that no plausible adapter-fuzzy-match
+// cut could ever reach it, runs `--adapter-infer` BAM->BAM through the CLI
+// binary, and checks: (a) the output BAM parses, (b) every surviving read's
+// SEQ is a genuine adapter-shaped suffix of its original (same suffix +
+// cut-length sanity check `infer_trims_planted_adapter` uses on FASTQ), and
+// (c) MM/ML decodes -- via the same htslib oracle used by every test above --
+// to exactly the original's mod calls filtered to the surviving window and
+// offset by that read's own actual (per-read, since the fuzzy match cut
+// length varies) cut length.
+
+/// The 28bp adapter planted at the 5' end of every fixture read below -- the
+/// same SQK-NSK007/LSK109-neighborhood sequence `tests/adapter_cli.rs` plants
+/// (`PLANTED_ADAPTER` there), duplicated here since each integration-test file
+/// compiles as its own standalone binary and can't share helpers across files.
+const INFER_MM_ML_ADAPTER: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT";
+
+/// Length of the per-read genomic tail appended after `INFER_MM_ML_ADAPTER`.
+const INFER_MM_ML_TAIL_LEN: usize = 150;
+
+/// A chosen mod position's absolute read offset must be >= this, comfortably
+/// past `infer_trims_planted_adapter`'s empirical 20..=50bp fuzzy-match cut
+/// window (see the `(15..=60)` sanity check below), so a real modified base
+/// can never land inside the part adapter trimming removes.
+const INFER_MM_ML_MOD_MIN_ABS: usize = 70;
+
+/// Same splitmix64 bit-mixer as `tests/adapter_cli.rs`'s `splitmix_tail`:
+/// deterministic, per-read, non-periodic ACGT background so the discoverer
+/// never mistakes the (otherwise-identical-looking) tail region itself for a
+/// second conserved "adapter" — see that file's comment for why a naive
+/// periodic generator breaks discovery tests like this one.
+fn splitmix_tail_infer(i: usize, len: usize) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        out.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+    }
+    out
+}
+
+/// 0-based occurrence indices (in read order, i.e. "the Nth `canonical` base
+/// in this read") of `canonical` bases whose absolute position is >=
+/// `min_abs`, up to `want` of them. MM encodes modified bases by occurrence
+/// count of the canonical base across the WHOLE read (SAM spec: deltas count
+/// skipped occurrences from the read start), so this is what a real MM string
+/// needs -- not raw absolute positions.
+fn occurrence_indices_after(seq: &[u8], canonical: u8, min_abs: usize, want: usize) -> Vec<usize> {
+    let mut occ = 0usize;
+    let mut out = Vec::new();
+    for (pos, &b) in seq.iter().enumerate() {
+        if b == canonical {
+            if pos >= min_abs && out.len() < want {
+                out.push(occ);
+            }
+            occ += 1;
+        }
+    }
+    out
+}
+
+/// Build a delta-encoded MM segment (`"{canonical}+{code},{d0,d1,...};"`) and
+/// matching ML bytes for the given 0-based occurrence indices.
+fn mm_segment(canonical: u8, code: char, occ_indices: &[usize], ml_seed: u8) -> (String, Vec<u8>) {
+    let mut deltas = Vec::with_capacity(occ_indices.len());
+    let mut prev: Option<usize> = None;
+    for &occ in occ_indices {
+        deltas.push(match prev {
+            None => occ,
+            Some(p) => occ - p - 1,
+        });
+        prev = Some(occ);
+    }
+    let mm = format!(
+        "{}+{},{};",
+        canonical as char,
+        code,
+        deltas
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    // Per-read-distinct ML bytes (mirrors the `wrapping_add(i as u8)` trick in
+    // `trimmed_output_multimod_mods_match_oracle_t8_many_reads` above), so a
+    // name<->payload mispairing bug would show up as a qual mismatch.
+    let ml: Vec<u8> = (0..occ_indices.len())
+        .map(|k| 100u8.wrapping_add(ml_seed).wrapping_add(k as u8 * 7))
+        .collect();
+    (mm, ml)
+}
+
+/// Write `n` uBAM records named `r0..r{n-1}`: each `INFER_MM_ML_ADAPTER`
+/// followed by a per-read splitmix64 tail, carrying a real `C+m` MM/ML tag
+/// anchored at occurrence positions >= `INFER_MM_ML_MOD_MIN_ABS`.
+fn write_infer_mm_ml_fixture(path: &Path, n: usize) {
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
+    w.write_header(&header).unwrap();
+    for i in 0..n {
+        let mut seq = INFER_MM_ML_ADAPTER.to_vec();
+        seq.extend(splitmix_tail_infer(i, INFER_MM_ML_TAIL_LEN));
+
+        let occ = occurrence_indices_after(&seq, b'C', INFER_MM_ML_MOD_MIN_ABS, 3);
+        assert!(
+            !occ.is_empty(),
+            "read {i}: fixture must have >=1 C past position {INFER_MM_ML_MOD_MIN_ABS} \
+             for a meaningful mod tag"
+        );
+        let (mm, ml) = mm_segment(b'C', 'm', &occ, i as u8);
+
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        *rec.name_mut() = Some(format!("r{i}").into_bytes().into());
+        let seq_len = seq.len();
+        *rec.sequence_mut() = seq.into();
+        *rec.quality_scores_mut() = vec![40u8; seq_len].into();
+        let data = rec.data_mut();
+        data.insert(
+            Tag::BASE_MODIFICATIONS,
+            Value::String(mm.into_bytes().into()),
+        );
+        data.insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(ml)),
+        );
+        data.insert(
+            Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
+            Value::Int32(seq_len as i32),
+        );
+        w.write_alignment_record(&header, &rec).unwrap();
+    }
+    w.try_finish().unwrap();
+}
+
+/// Decode every record's (name, SEQ) from a BAM/uBAM via noodles -- independent
+/// of the htslib oracle used for mods, this just needs the raw bases to check
+/// the suffix/cut-length trimming property.
+fn read_bam_seqs(path: &Path) -> HashMap<String, Vec<u8>> {
+    let mut r = bam::io::Reader::new(std::fs::File::open(path).unwrap());
+    let hdr = r.read_header().unwrap();
+    let mut out = HashMap::new();
+    let mut buf = RecordBuf::default();
+    while r.read_record_buf(&hdr, &mut buf).unwrap() != 0 {
+        let name = String::from_utf8(buf.name().unwrap().to_vec()).unwrap();
+        out.insert(name, buf.sequence().as_ref().to_vec());
+    }
+    out
+}
+
+#[test]
+fn infer_on_ubam_preserves_mm_ml() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.ubam");
+    let output = dir.path().join("out.ubam");
+    let n = 150; // >= MIN_SAMPLE_FOR_DETECTION (100)
+    write_infer_mm_ml_fixture(&input, n);
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "--in-format",
+            "bam",
+            "--out-format",
+            "bam",
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--adapter-infer",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    // (a) Output BAM parses.
+    let in_seqs = read_bam_seqs(&input);
+    let out_seqs = read_bam_seqs(&output);
+    assert_eq!(
+        out_seqs.len(),
+        n,
+        "all {n} reads must survive (long inserts, default min-length 1)"
+    );
+
+    // (b) Every output SEQ is a genuine adapter-shaped suffix of its original
+    // -- proves real per-read trimming happened, not a no-op or a whole-read
+    // wipe (same check `infer_trims_planted_adapter` in adapter_cli.rs makes
+    // on the FASTQ path).
+    for (name, out_seq) in &out_seqs {
+        let orig_seq = in_seqs.get(name).expect("matching input read");
+        assert!(
+            orig_seq.ends_with(out_seq.as_slice()),
+            "output read {name:?} must be an exact suffix of its original"
+        );
+        let cut = orig_seq.len() - out_seq.len();
+        assert!(
+            (15..=60).contains(&cut),
+            "read {name:?}: cut length {cut} is not adapter-shaped (planted adapter is 28bp)"
+        );
+    }
+
+    // (c) MM/ML present and in register: decode both files with the htslib
+    // oracle (independent MM/ML implementation, same one every other test in
+    // this file uses) and check, per read, that the output's mod calls equal
+    // the original's filtered to [cut, len) and offset by that read's own
+    // actual cut length (not a fixed head/tail crop like the tests above --
+    // the fuzzy adapter match cuts a slightly different amount per read).
+    let orig_mods = hts_mods_by_read(&input);
+    let out_mods = hts_mods_by_read(&output);
+    assert_eq!(
+        out_mods.len(),
+        n,
+        "all reads must decode from the output BAM"
+    );
+
+    let mut any_nonempty = false;
+    for (name, (_out_len, got)) in &out_mods {
+        let (orig_len, orig) = orig_mods
+            .get(name)
+            .unwrap_or_else(|| panic!("output read {name} has no matching original"));
+        let out_seq_len = out_seqs[name].len();
+        let cut = orig_len - out_seq_len;
+        let expected: Vec<_> = orig
+            .iter()
+            .filter(|(pos, ..)| *pos >= cut)
+            .map(|&(pos, cb, mb, st, q)| (pos - cut, cb, mb, st, q))
+            .collect();
+        assert_eq!(
+            sorted(&expected),
+            sorted(got),
+            "read {name}: MM/ML must survive adapter-infer trimming in register"
+        );
+        if !got.is_empty() {
+            any_nonempty = true;
+        }
+    }
+    assert!(
+        any_nonempty,
+        "sanity check: at least one read must retain a non-empty mod call post-trim \
+         (else the comparison above could trivially pass empty-vs-empty)"
+    );
 }

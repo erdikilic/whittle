@@ -887,3 +887,37 @@ fn infer_only_does_not_clobber_output_file() {
         "report-only must not touch a pre-existing -o file at all"
     );
 }
+
+// --- Task 12: determinism ------------------------------------------------
+
+/// Same input, run twice through `--adapter-infer` at `-t 1`, must produce
+/// byte-identical output. Discovery itself (`infer::discover`) is pure over
+/// its sampled slice with no RNG or hashmap-iteration-order dependence, and
+/// `-t 1` pins the FASTQ dispatch to its sequential (order-preserving) path,
+/// so this is a black-box seal on that guarantee rather than new logic.
+#[test]
+fn infer_is_deterministic() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq(dir.path(), 500);
+    let run = |name: &str| {
+        let out = dir.path().join(name);
+        let mut cmd = Command::cargo_bin("whittle").unwrap();
+        cmd.env_remove("WHITTLE_LOG");
+        cmd.args([
+            "-i",
+            fq.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--adapter-infer",
+            "-t",
+            "1",
+        ]);
+        cmd.assert().success();
+        std::fs::read(&out).unwrap()
+    };
+    assert_eq!(
+        run("a.fastq"),
+        run("b.fastq"),
+        "same input -> byte-identical output"
+    );
+}
