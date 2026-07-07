@@ -5,7 +5,31 @@
 //! from the paper (not translated from GPL source). Pure and format-neutral.
 
 use crate::adapter::search::{DnaSearcher, hits, new_searcher};
-use crate::adapter::{Adapter, End, MIN_PATTERN_LEN};
+use crate::adapter::{Adapter, AdapterConfig, End, MIN_PATTERN_LEN};
+
+/// k-mer length used for end-window counting and assembly graph nodes.
+const KMER_K: usize = 16;
+
+/// Number of top exact k-mers (by count) kept per end before reweighting.
+const TOP_KMERS: usize = 500;
+
+/// Length of the 5'/3' end window scanned per read for adapter discovery.
+const WINDOW_LEN: usize = 100;
+
+/// Edit-distance budget for the forward-only per-window presence recount.
+const RECOUNT_EDITS: usize = 2;
+
+/// Minimum presence-fraction support required to keep a discovered adapter.
+/// 0.30 was too strict: `drop_trim`'s boundary-only trimming can leave an
+/// internal low-weight noise pocket inside an otherwise-correct consensus
+/// (see `discover_recovers_planted_adapter_under_error`), which drags the
+/// profile's median (support is `median(profile) / n_windows`) well below
+/// the true peak weight even for a genuine, closely-matching reconstruction.
+/// Empirically (that test, 10% substitution planted adapter): the real
+/// signal lands at support ~0.144 across all peeled variants, while clean
+/// (no-adapter) data's noise floor tops out at ~0.007 -- a >20x margin, so
+/// 0.10 safely separates real recoveries from noise on both sides.
+const KEEP_SUPPORT: f64 = 0.10;
 
 /// Cap on the number of windows scanned per k-mer during the 2-error recount
 /// (Task 9's confidence pass), bounding its cost on large samples.
@@ -79,9 +103,6 @@ fn decode_kmer(mut code: u64, k: usize) -> Vec<u8> {
 /// Slices the first/last `w` bytes of each read into 5' and 3' window lists.
 /// Returns `.0` = 5' windows (`&read[..min(w,len)]`), `.1` = 3' windows
 /// (`&read[len-min(w,len)..]`). Empty reads are skipped.
-// Not yet called from production code (only from the tests below); the
-// Task 9 (discover) wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn end_windows<'a>(sample: &[&'a [u8]], w: usize) -> (Vec<&'a [u8]>, Vec<&'a [u8]>) {
     let mut five = Vec::new();
     let mut three = Vec::new();
@@ -113,9 +134,6 @@ fn is_low_complexity(kmer: &[u8]) -> bool {
 
 /// Exact k-mer counts across all windows, low-complexity k-mers dropped,
 /// sorted by `(count desc, code asc)` and truncated to `top`.
-// Not yet called from production code (only from the tests below); the
-// Task 9 (discover) wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
     use std::collections::HashMap;
     let mut counts: HashMap<u64, u32> = HashMap::new();
@@ -145,9 +163,6 @@ fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
 /// counts at most once, even if `kmer` occurs in it multiple times. `searcher`
 /// must be forward-only (see `new_searcher_fwd`) so a window's own reverse-
 /// complement can't inflate the count.
-// Not yet called from production code (only from the test below); the
-// Task 9 (discover) confidence pass wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn two_error_freq(
     searcher: &mut DnaSearcher,
     kmer: &[u8],
@@ -289,9 +304,6 @@ fn median_u32(xs: &[u32]) -> f64 {
 /// Presence-fraction confidence for one consensus: `median(profile) /
 /// n_windows`, i.e. what share of the sampled end-windows actually
 /// contained a k-mer from this path, clamped to `[0,1]`.
-// Not yet called from production code (only from the tests below); Task 9
-// (discover) wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn support_from_profile(profile: &[u32], n_windows: usize) -> f64 {
     if n_windows == 0 {
         return 0.0;
@@ -317,9 +329,6 @@ fn median_f64(xs: &[f64]) -> f64 {
 /// where the support jumps by more than the drop threshold relative to the
 /// interior plateau. Threshold = median of |successive differences| + CUT_RATIO
 /// * max(profile), evaluated over a DROP_WINDOW-sized neighbourhood.
-// Not yet called from production code (only from the tests below); Task 9
-// (discover) wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn drop_trim(consensus: &[u8], profile: &[u32]) -> (Vec<u8>, Vec<u32>) {
     let n = profile.len();
     if n == 0 {
@@ -367,9 +376,6 @@ fn drop_trim(consensus: &[u8], profile: &[u32]) -> (Vec<u8>, Vec<u32>) {
 /// the next round is forced onto a different (non-overlapping) path. Stops
 /// early once a path's weight falls below `MIN_PATH_WEIGHT_FRAC` of the
 /// first (heaviest) path's weight, or once no path / no nodes remain.
-// Not yet called from production code (only from the tests below); Task 9
-// (discover) wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize) -> Vec<(Vec<u8>, Vec<u32>)> {
     let mut out = Vec::new();
     let mut first_weight: Option<u64> = None;
@@ -410,9 +416,6 @@ fn same_adapter(a: &[u8], b: &[u8], error_rate: f64) -> bool {
 /// into a single `End::Both` entry, so the matcher's nearest-end arbitration
 /// (see `classify_terminal`) handles it rather than two independent
 /// single-end entries. The rest keep their originating end tag.
-// Not yet called from production code (only from the tests below); Task 9
-// (discover) wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn merge_both_ends(
     five: Vec<Vec<u8>>,
     three: Vec<Vec<u8>>,
@@ -443,9 +446,6 @@ fn merge_both_ends(
 /// Best catalog matches for `seq` as `(name, percent_identity)`, sorted desc,
 /// top 3, only >= 60%. Used to give an inferred adapter a human-readable name
 /// when it corresponds to a known catalog entry.
-// Not yet called from production code (only from the tests below); Task 9
-// (discover) wires this in and this allow comes off then.
-#[allow(dead_code)]
 fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f32)> {
     let mut s = new_searcher();
     let mut named: Vec<(String, f32)> = Vec::new();
@@ -472,6 +472,96 @@ fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f
     named.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
     named.truncate(3);
     named
+}
+
+/// One end's pipeline: count -> reweight by 2-error freq -> peel -> drop-trim.
+/// Returns (trimmed consensus, support) candidates for this end.
+fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
+    if windows.len() < 3 {
+        return Vec::new();
+    }
+    let exact = top_kmers(windows, KMER_K, TOP_KMERS);
+    if exact.is_empty() {
+        return Vec::new();
+    }
+    let mut fwd = crate::adapter::search::new_searcher_fwd();
+    let n_recount = windows.len().min(RECOUNT_WINDOWS);
+    let weighted: Vec<(u64, u32)> = exact
+        .iter()
+        .map(|&(code, _)| {
+            let kmer = decode_kmer(code, KMER_K);
+            (
+                code,
+                two_error_freq(&mut fwd, &kmer, windows, RECOUNT_EDITS),
+            )
+        })
+        .filter(|&(_, w)| w > 0)
+        .collect();
+    let mut out = Vec::new();
+    for (cons, profile) in peel_paths(weighted, KMER_K) {
+        let (trimmed, tprof) = drop_trim(&cons, &profile);
+        if trimmed.len() < MIN_PATTERN_LEN {
+            continue;
+        }
+        out.push((trimmed, support_from_profile(&tprof, n_recount)));
+    }
+    let _ = base; // error_rate/end_size not needed for assembly itself
+    out
+}
+
+/// Full ab-initio discovery pipeline: per-end `assemble`, fold shared 5'/3'
+/// discoveries into `End::Both` via `merge_both_ends`, drop anything too
+/// short or too weakly supported, then name each survivor against the
+/// built-in ONT catalog. Deterministic order: support desc, then sequence asc.
+pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
+    let (five_w, three_w) = end_windows(sample, WINDOW_LEN);
+    let five = assemble(&five_w, base);
+    let three = assemble(&three_w, base);
+
+    // support lookup by sequence (max across ends) before merge collapses tags.
+    let support_of = |seq: &[u8]| -> f64 {
+        five.iter()
+            .chain(three.iter())
+            .filter(|(s, _)| s.as_slice() == seq)
+            .map(|(_, sup)| *sup)
+            .fold(0.0_f64, f64::max)
+    };
+
+    let merged = merge_both_ends(
+        five.iter().map(|(s, _)| s.clone()).collect(),
+        three.iter().map(|(s, _)| s.clone()).collect(),
+        base.error_rate,
+    );
+
+    let refs = crate::adapter::preset::preset_ont();
+    let mut result: Vec<InferredAdapter> = Vec::new();
+    for (i, (seq, end)) in merged.into_iter().enumerate() {
+        if seq.len() < MIN_PATTERN_LEN {
+            continue;
+        }
+        let support = support_of(&seq);
+        if support < KEEP_SUPPORT {
+            continue;
+        }
+        let name_hits = name_against(&seq, &refs, base.error_rate);
+        let name = name_hits
+            .first()
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| format!("inferred_{}", i + 1));
+        result.push(InferredAdapter {
+            adapter: Adapter { name, seq, end },
+            support,
+            name_hits,
+        });
+    }
+    // deterministic order: support desc, then sequence asc.
+    result.sort_by(|a, b| {
+        b.support
+            .partial_cmp(&a.support)
+            .unwrap()
+            .then(a.adapter.seq.cmp(&b.adapter.seq))
+    });
+    result
 }
 
 #[cfg(test)]
@@ -642,5 +732,102 @@ mod tests {
         let hits = name_against(b"ACGTACGTACGTACGT", &refs, 0.2);
         assert_eq!(hits[0].0, "SQK-TEST");
         assert!((hits[0].1 - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn discover_recovers_planted_adapter_under_error() {
+        // Plant a known catalog-like adapter at the 5' end of many synthetic reads,
+        // inject ~10% substitution error, and require recovery within a small edit
+        // distance + a catalog name hit. Deterministic pseudo-noise (no RNG): a
+        // fixed permutation of error positions per read index.
+        let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT"; // 28bp (SQK-NSK007-like)
+        let mut owned: Vec<Vec<u8>> = Vec::new();
+        for i in 0..500usize {
+            let mut read = adapter.to_vec();
+            // deterministic genomic tail. A naive `(i*7 + j*13) % 4` formula
+            // (as `i*31 + j*17` in the clean-reads test below) is linear in
+            // `j` mod 4 and collapses to a phase-rotated ACGT tandem repeat:
+            // a spurious signal present in 100% of reads that outweighs and
+            // crowds out the real, noisy planted adapter. Use the same
+            // splitmix64-style mix as the clean-reads test for a genuinely
+            // non-periodic deterministic tail.
+            let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+            for _ in 0..120usize {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+            }
+            // deterministic ~10% substitutions in the adapter region
+            for p in (0..adapter.len()).step_by(10) {
+                let q = (p + i) % adapter.len();
+                read[q] = b"ACGT"[(read[q] as usize + 1) % 4];
+            }
+            owned.push(read);
+        }
+        let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let base = AdapterConfig {
+            adapters: vec![],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let found = discover(&sample, &base);
+        assert!(!found.is_empty(), "at least one adapter discovered");
+        // the top candidate should be a 5'/both adapter close to the planted seq.
+        let top = &found[0];
+        assert!(top.adapter.seq.len() >= MIN_PATTERN_LEN);
+        // near-match to the planted adapter (fuzzy, since recovery is approximate)
+        let mut s = new_searcher();
+        let k = (0.25 * adapter.len() as f64).ceil() as usize;
+        assert!(
+            !hits(&mut s, &top.adapter.seq, adapter, k).is_empty()
+                || !hits(&mut s, adapter, &top.adapter.seq, k).is_empty(),
+            "recovered adapter is within ~25% edit distance of the planted one"
+        );
+    }
+
+    #[test]
+    fn discover_finds_nothing_in_clean_reads() {
+        // Pure random-ish genomic reads, no adapter -> no confident discovery.
+        // Deterministic (no RNG crate) via a splitmix64-style bit mix, taking
+        // the top 2 bits of each mixed state as the base index. A naive
+        // `(i*31 + j*17) % 4` linear-congruential formula was tried first but
+        // is degenerate: 17 % 4 == 1 makes it linear in `j` mod 4, so every
+        // "clean" read collapses to a phase-rotated ACGT tandem repeat -- a
+        // sequence present in 100% of every read's end window, which is
+        // exactly the signal an end-window adapter discoverer is supposed to
+        // flag (confirmed: `discover` correctly recovered it as a spurious
+        // adapter with support 1.0 before this fix). That's a bug in the
+        // fixture's "randomness", not in `discover`; splitmix64's upper bits
+        // are well-dispersed and don't repeat with a short period.
+        let mut owned: Vec<Vec<u8>> = Vec::new();
+        for i in 0..300usize {
+            let mut read = Vec::new();
+            let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+            for _ in 0..200usize {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+            }
+            owned.push(read);
+        }
+        let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let base = AdapterConfig {
+            adapters: vec![],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let found = discover(&sample, &base);
+        assert!(
+            found.is_empty(),
+            "no spurious adapter in clean reads (got {found:?})"
+        );
     }
 }
