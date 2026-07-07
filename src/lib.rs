@@ -12,6 +12,7 @@ pub mod trim;
 
 use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 
+use config::AdapterInfer;
 pub use config::Config;
 use gzp::deflate::Gzip;
 use gzp::par::compress::{ParCompress, ParCompressBuilder};
@@ -185,7 +186,9 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         );
         tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
-        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref(), cfg.adapter_sample) {
+        if let Some(line) =
+            adapter_banner_line(cfg.adapters.as_ref(), cfg.adapter_sample, cfg.adapter_infer)
+        {
             tracing::info!("{line}");
         }
     } else if obs.is_bar() {
@@ -232,7 +235,9 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             // re-opening stdin would drop the BGZF header. For a file, `source` is
             // the same handle positioned at the start.
             let (header, records) = io::bam::reader_from(source, budget.decode)?;
-            let records = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))?;
+            let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))? else {
+                return Ok(());
+            };
             // Provenance: append our @PG line to a cloned header before writing.
             let out_header = provenance_header(header);
             let mut sink = io::bam::writer(
@@ -255,7 +260,9 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
             // See the note in the (Bam, Bam) arm: read from the chained `source`.
             let (_header, records) = io::bam::reader_from(source, budget.decode)?;
-            let records = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))?;
+            let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))? else {
+                return Ok(());
+            };
             let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
             let stats = pipeline::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
@@ -276,7 +283,9 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
 
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
-    let records = maybe_reduce_adapters(records, &mut cfg, |r| r.seq.as_slice())?;
+    let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| r.seq.as_slice())? else {
+        return Ok(());
+    };
     let stats = pipeline::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
     tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
@@ -292,29 +301,150 @@ fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
     rec.sequence().as_ref()
 }
 
-/// If adapter trimming is active and `cfg.adapter_sample > 0`, buffer up to
-/// `adapter_sample` records, detect which adapters are actually present in the
-/// sample, and reduce `cfg.adapters` to that set — unless detection keeps zero
-/// adapters, in which case it falls back to the full set (an empty prefix
-/// result more likely means an unrepresentative sample than a truly
-/// adapter-free run). Returns `buffered ++ rest` (the buffered prefix is empty
-/// when detection is off, so the returned iterator is a no-op wrapper in that
-/// case). `seq_of` extracts a record's SEQ.
+/// Log each ab-initio discovery (Task 9's `infer::discover` output) at
+/// `info!`: `inferred_N ≈ NAME (pct%) · support X.XX` when the discovered
+/// sequence cross-names against the built-in ONT catalog, else `inferred_N
+/// (no catalog match) · support X.XX`. `N` is the 1-based position in
+/// `discovered`'s own order (support desc, then sequence asc — see
+/// `infer::discover`), independent of `InferredAdapter::adapter.name` (which
+/// may itself already read `inferred_{k}` from a different, pre-sort index).
+/// The raw sequence is logged separately at `debug!` — too noisy for the
+/// default INFO level, but useful with `-v` when checking a discovery by eye.
+fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampled: usize) {
+    tracing::info!(
+        "Adapter inference: sampled {n_sampled} reads, discovered {} adapter{}",
+        discovered.len(),
+        if discovered.len() == 1 { "" } else { "s" }
+    );
+    for (i, d) in discovered.iter().enumerate() {
+        let n = i + 1;
+        match d.name_hits.first() {
+            Some((name, pct)) => {
+                tracing::info!(
+                    "inferred_{n} \u{2248} {name} ({pct:.0}%) \u{b7} support {:.2}",
+                    d.support
+                );
+            },
+            None => {
+                tracing::info!(
+                    "inferred_{n} (no catalog match) \u{b7} support {:.2}",
+                    d.support
+                );
+            },
+        }
+        tracing::debug!(
+            "inferred_{n} sequence: {}",
+            String::from_utf8_lossy(&d.adapter.seq)
+        );
+    }
+}
+
+/// The buffer-then-decide seam shared by every FASTQ/BAM dispatch arm in
+/// `run`/`run_folder`. Two independent policies live here, selected by
+/// `cfg.adapter_infer`:
+///
+/// - `AdapterInfer::Off` (unchanged from before ab-initio inference existed):
+///   Phase 1.5 presence detection. When `cfg.adapter_sample > 0`, buffer up
+///   to that many records, detect which of the *configured* adapters are
+///   actually present, and reduce `cfg.adapters` to that set — falling back
+///   to the full configured set (with a WARN) if detection keeps zero (an
+///   empty result more likely means an unrepresentative sample than a truly
+///   adapter-free run).
+/// - `AdapterInfer::Trim` / `AdapterInfer::ReportOnly` (Phase 2, ab-initio):
+///   buffer up to `cfg.adapter_sample` records (always > 0 here — see
+///   `cli::parse`) and run `infer::discover` on them to build the working
+///   adapter set from scratch, ignoring whatever `cfg.adapters` held before
+///   (it's always an empty list under infer; see `cli::parse`). Too small a
+///   sample (< `detect::MIN_SAMPLE_FOR_DETECTION`) skips discovery entirely
+///   and trims nothing (there is no "full set" to fall back to here, unlike
+///   Off's presence detection). A `ReportOnly` run logs what it found and
+///   returns `Ok(None)`.
+///
+/// Returns `Ok(None)` when the caller must stop immediately — no writer, no
+/// pipeline dispatch, no output file (currently only `ReportOnly`, once it
+/// has logged its findings). Otherwise `Ok(Some(buffered ++ rest))`, boxed
+/// (rather than `impl Iterator`, as before ab-initio inference existed)
+/// because the two policies above buffer/reduce differently but must still
+/// hand the same iterator type back to each of the six call sites. `seq_of`
+/// extracts a record's SEQ.
 fn maybe_reduce_adapters<R, I, F>(
     mut records: I,
     cfg: &mut Config,
     // Explicit HRTB so the returned SEQ borrows the record arg (elision may not
     // link them on its own).
     seq_of: F,
-) -> anyhow::Result<impl Iterator<Item = anyhow::Result<R>> + Send + use<R, I, F>>
+) -> anyhow::Result<Option<Box<dyn Iterator<Item = anyhow::Result<R>> + Send>>>
 where
     // `+ Send` / `R: Send`: the FASTQ and BAM pipelines' parallel paths require a
-    // `Send` record iterator. `seq_of` is only used inside this fn (not captured
-    // by the returned iterator), so it needs no `Send` bound.
-    I: Iterator<Item = anyhow::Result<R>> + Send,
-    R: Send,
+    // `Send` record iterator. `+ 'static`: needed to box the returned iterator
+    // (every real caller already hands in an already-boxed, owning iterator).
+    // `seq_of` is only used inside this fn (not captured by the returned
+    // iterator), so it needs no `Send`/`'static` bound.
+    I: Iterator<Item = anyhow::Result<R>> + Send + 'static,
+    R: Send + 'static,
     F: for<'a> Fn(&'a R) -> &'a [u8],
 {
+    if cfg.adapter_infer != AdapterInfer::Off {
+        // Always `Some` here: `cli::parse` never resolves `adapters` to `None`
+        // while `adapter_infer != Off` (an empty adapter list, not `None`, is
+        // how it represents "the trimming set is discovered later").
+        let base = cfg
+            .adapters
+            .clone()
+            .expect("adapter_infer != Off implies cfg.adapters is Some (see cli::parse)");
+
+        let mut sample: Vec<R> = Vec::new();
+        for _ in 0..cfg.adapter_sample {
+            match records.next() {
+                Some(Ok(r)) => sample.push(r),
+                Some(Err(e)) => return Err(e),
+                None => break,
+            }
+        }
+        let s = sample.len();
+        let chain =
+            |sample: Vec<R>, records: I| -> Box<dyn Iterator<Item = anyhow::Result<R>> + Send> {
+                Box::new(sample.into_iter().map(anyhow::Ok).chain(records))
+            };
+        if s < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION {
+            // Deliberately not gated on `ReportOnly` here: discovery never ran,
+            // so there is no discovered set to print either way -- both modes
+            // just get their reads back untouched (dispatch runs; a
+            // `ReportOnly` run on a too-small input therefore still emits its
+            // input as-is rather than silently exiting with no output).
+            tracing::warn!(
+                "adapter inference: too few reads ({s}, need >= {}) to infer reliably; \
+                 keeping reads untrimmed",
+                crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+            );
+            let mut reduced = base;
+            reduced.adapters = Vec::new();
+            cfg.adapters = Some(reduced);
+            return Ok(Some(chain(sample, records)));
+        }
+
+        let seqs: Vec<&[u8]> = sample.iter().map(&seq_of).collect();
+        let discovered = crate::adapter::infer::discover(&seqs, &base);
+        log_discovered(&discovered, s);
+
+        if cfg.adapter_infer == AdapterInfer::ReportOnly {
+            return Ok(None);
+        }
+
+        if discovered.is_empty() {
+            tracing::warn!(
+                "adapter inference: no adapters inferred from the first {s} reads; keeping \
+                 reads untrimmed"
+            );
+        }
+        let mut reduced = base;
+        reduced.adapters = discovered.into_iter().map(|d| d.adapter).collect();
+        cfg.adapters = Some(reduced);
+        return Ok(Some(chain(sample, records)));
+    }
+
+    // Phase 1.5 presence detection (unchanged from before ab-initio inference
+    // existed).
     let mut sample: Vec<R> = Vec::new();
     if let Some(ac) = cfg.adapters.clone()
         && cfg.adapter_sample > 0
@@ -374,7 +504,9 @@ where
         reduced.adapters = kept;
         cfg.adapters = Some(reduced);
     }
-    Ok(sample.into_iter().map(anyhow::Ok).chain(records))
+    Ok(Some(Box::new(
+        sample.into_iter().map(anyhow::Ok).chain(records),
+    )))
 }
 
 /// FASTQ output writer: either a plain buffered writer, or a `gzp` parallel
@@ -540,7 +672,9 @@ fn run_folder(
         );
         tracing::info!("{}", threads_banner_line(cfg.threads, budget));
         tracing::info!("{}", filters_and_trim_line(&cfg.filter, &cfg.trim));
-        if let Some(line) = adapter_banner_line(cfg.adapters.as_ref(), cfg.adapter_sample) {
+        if let Some(line) =
+            adapter_banner_line(cfg.adapters.as_ref(), cfg.adapter_sample, cfg.adapter_infer)
+        {
             tracing::info!("{line}");
         }
     } else if obs.is_bar() {
@@ -578,7 +712,9 @@ fn run_folder(
             let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
             let records = io::dir::fastq_records(&paths);
-            let records = maybe_reduce_adapters(records, cfg, |r| r.seq.as_slice())?;
+            let Some(records) = maybe_reduce_adapters(records, cfg, |r| r.seq.as_slice())? else {
+                return Ok(());
+            };
             let stats = pipeline::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
             tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
@@ -592,7 +728,9 @@ fn run_folder(
                 // declare different read groups (relevant only for BAM output).
                 io::dir::warn_on_bam_header_mismatch(&paths);
                 let (header, records) = io::dir::bam_reader(&paths, budget.decode)?;
-                let records = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))?;
+                let Some(records) = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))? else {
+                    return Ok(());
+                };
                 let out_header = provenance_header(header);
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
@@ -609,7 +747,9 @@ fn run_folder(
             },
             Format::Fastq | Format::FastqGz => {
                 let (_header, records) = io::dir::bam_reader(&paths, budget.decode)?;
-                let records = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))?;
+                let Some(records) = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))? else {
+                    return Ok(());
+                };
                 let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
                 cfg.render_workers = budget.render;
                 let stats = pipeline::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
@@ -796,9 +936,16 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
 /// rate, the end-zone size in bp, and (via `adapter_sample`, i.e.
 /// `cfg.adapter_sample`) whether presence detection will sample the input —
 /// `sample {N}` when active, `sample off` when `N == 0` disables detection.
+///
+/// Under `AdapterInfer::Trim`/`ReportOnly`, the count printed here is always
+/// `0` (discovery hasn't run yet — it replaces `cfg.adapters` only once the
+/// buffer-then-decide seam runs, after this banner prints), so a `· infer` /
+/// `· infer-only` suffix is appended to make clear the set is about to be
+/// discovered, not that trimming is configured with zero adapters.
 fn adapter_banner_line(
     adapters: Option<&crate::adapter::AdapterConfig>,
     adapter_sample: usize,
+    adapter_infer: AdapterInfer,
 ) -> Option<String> {
     let a = adapters?;
     let mode = if a.split { "trim + split" } else { "ends-only" };
@@ -807,8 +954,13 @@ fn adapter_banner_line(
     } else {
         "sample off".to_string()
     };
+    let infer_suffix = match adapter_infer {
+        AdapterInfer::Off => "",
+        AdapterInfer::Trim => " \u{b7} infer",
+        AdapterInfer::ReportOnly => " \u{b7} infer-only",
+    };
     Some(format!(
-        "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp · {sample}",
+        "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp · {sample}{infer_suffix}",
         a.adapters.len(),
         a.error_rate,
         a.end_size
@@ -1307,7 +1459,7 @@ mod tests {
 
     #[test]
     fn adapter_banner_line_none_when_off_and_describes_when_on() {
-        assert!(adapter_banner_line(None, 10000).is_none());
+        assert!(adapter_banner_line(None, 10000, AdapterInfer::Off).is_none());
         let cfg = AdapterConfig {
             adapters: vec![Adapter {
                 name: "a".into(),
@@ -1318,14 +1470,15 @@ mod tests {
             end_size: 150,
             split: true,
         };
-        let line = adapter_banner_line(Some(&cfg), 10000).unwrap();
+        let line = adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off).unwrap();
         assert!(line.contains("1 sequences"));
         assert!(line.contains("trim + split"));
         assert!(line.contains("error 0.20"));
         assert!(line.contains("end-zone 150 bp"));
         assert!(line.contains("sample 10000"));
+        assert!(!line.contains("infer"), "no infer suffix when off: {line}");
 
-        let off_line = adapter_banner_line(Some(&cfg), 0).unwrap();
+        let off_line = adapter_banner_line(Some(&cfg), 0, AdapterInfer::Off).unwrap();
         assert!(off_line.contains("sample off"));
     }
 
@@ -1342,10 +1495,26 @@ mod tests {
             split: false,
         };
         assert!(
-            adapter_banner_line(Some(&cfg), 10000)
+            adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off)
                 .unwrap()
                 .contains("ends-only")
         );
+    }
+
+    #[test]
+    fn adapter_banner_line_notes_infer_mode() {
+        let cfg = AdapterConfig {
+            adapters: vec![],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let trim_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::Trim).unwrap();
+        assert!(trim_line.ends_with("infer"), "{trim_line}");
+        assert!(!trim_line.ends_with("infer-only"), "{trim_line}");
+
+        let report_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::ReportOnly).unwrap();
+        assert!(report_line.ends_with("infer-only"), "{report_line}");
     }
 
     #[test]

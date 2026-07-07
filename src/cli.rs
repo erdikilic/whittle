@@ -101,7 +101,7 @@ struct Cli {
     adapter_infer: bool,
     /// Discover adapters and print them (sequences + support + catalog names),
     /// then exit without trimming. Implies --adapter-infer. May be combined with
-    /// --adapter-fasta to also cross-name discovered sequences against your FASTA.
+    /// --adapter-fasta (naming is catalog-only for now -- see the printed note).
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_infer_only: bool,
 }
@@ -242,6 +242,20 @@ pub fn parse() -> anyhow::Result<Config> {
         eprintln!(
             "[WARN] --adapter-preset is ignored for trimming under --adapter-infer \
              (used only for naming discovered adapters)"
+        );
+    }
+    // --adapter-infer-only + --adapter-fasta is allowed (unlike --adapter-infer,
+    // which rejects a FASTA outright above), but cross-naming discovered
+    // sequences against the user's own FASTA is descoped for v1: naming only
+    // ever checks the built-in ONT catalog (see `infer::discover`). No Config
+    // field carries the FASTA path here -- this is purely an informational
+    // note so a user combining the two flags isn't left assuming the FASTA
+    // did something.
+    if adapter_infer == AdapterInfer::ReportOnly && c.adapter_fasta.is_some() {
+        eprintln!(
+            "[INFO] --adapter-infer-only with --adapter-fasta: discovered adapters are named \
+             against the built-in ONT catalog only; cross-naming against your FASTA isn't \
+             wired up yet"
         );
     }
 

@@ -576,3 +576,229 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
         .failure()
         .stderr(predicates::str::contains("must be 0"));
 }
+
+// --adapter-infer-only + --adapter-fasta is allowed (unlike --adapter-infer,
+// which rejects a FASTA outright), but v1 descopes cross-naming discovered
+// sequences against the user's FASTA -- naming stays catalog-only. This just
+// checks the one informational line fires so a user combining the two flags
+// isn't left assuming the FASTA did something.
+#[test]
+fn infer_only_with_fasta_notes_naming_is_catalog_only() {
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    writeln!(fa, ">present\nACGTACGTACGTACGTACGT").unwrap();
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    for i in 0..10 {
+        writeln!(fq, "@r{i}\nACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIII").unwrap();
+    }
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--adapter-infer-only",
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("catalog only"));
+}
+
+// --- ab-initio inference wiring (Task 11) -------------------------------
+//
+// Fixtures below plant an EXACT copy (no injected error -- error-tolerant
+// recovery is already covered by `discover_recovers_planted_adapter_under_error`
+// in src/adapter/infer.rs) of a real catalog-neighborhood adapter at the 5'
+// end of every read, followed by a deterministic splitmix64-mixed genomic
+// tail distinct per read index.
+//
+// IMPORTANT: a naive `(a*i + b*j) % 4` background generator is periodic
+// (linear in `j` mod 4) and collapses into a phase-rotated ACGT tandem
+// repeat -- a spurious, low-complexity-but-not-homopolymer signal that the
+// k-mer discoverer picks up as a fake "adapter" of its own, breaking these
+// tests. The splitmix64 bit-mix below is the same fixture pattern
+// `src/adapter/infer.rs`'s own `discover_*` unit tests use, and does not
+// have that defect.
+
+/// The 28bp adapter planted at the 5' end of every synthetic read below (an
+/// SQK-NSK007/LSK109-neighborhood front sequence -- same one used by
+/// `discover_recovers_planted_adapter_under_error` in src/adapter/infer.rs).
+const PLANTED_ADAPTER: &str = "AATGTACTTCGTTCAGTTACGTATTGCT";
+
+/// Length of the per-read genomic tail appended after `PLANTED_ADAPTER`.
+const TAIL_LEN: usize = 120;
+
+/// Deterministic, non-periodic genomic background for read `i`: a
+/// splitmix64-style bit-mix seeded from the read index, matching
+/// `src/adapter/infer.rs`'s `discover_*` unit-test fixtures exactly. Distinct
+/// per `i` (each read gets its own splitmix64 state), and not periodic (so it
+/// carries no spurious cross-read k-mer signal for the discoverer to flag).
+fn splitmix_tail(i: usize, len: usize) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        out.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+    }
+    out
+}
+
+/// The full (untrimmed) synthetic sequence for read `i`: the exact planted
+/// adapter followed by its splitmix64 tail. Used both to write the input
+/// fixture and, independently, to recompute what a genuinely-trimmed output
+/// record must be a suffix of.
+fn full_read_seq(i: usize) -> Vec<u8> {
+    let mut seq = PLANTED_ADAPTER.as_bytes().to_vec();
+    seq.extend(splitmix_tail(i, TAIL_LEN));
+    seq
+}
+
+/// Write `n` synthetic reads (see fixture notes above) to `<dir>/adapted.fastq`
+/// and return its path. Read `i`'s id is `@r{i}` (no description), so a test
+/// can parse the trailing digits back into the same index `full_read_seq`
+/// used to build it.
+fn write_adapted_fastq(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
+    let path = dir.join("adapted.fastq");
+    let mut f = std::fs::File::create(&path).unwrap();
+    for i in 0..n {
+        let seq = full_read_seq(i);
+        let qual = "I".repeat(seq.len());
+        writeln!(
+            f,
+            "@r{i}\n{}\n+\n{qual}",
+            std::str::from_utf8(&seq).unwrap()
+        )
+        .unwrap();
+    }
+    path
+}
+
+#[test]
+fn infer_only_prints_and_does_not_trim() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq(dir.path(), 500);
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "--adapter-infer-only",
+        "-t",
+        "1",
+    ]);
+    let assert = cmd.assert().success();
+    let out = assert.get_output();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("inferred") || stderr.contains("support"),
+        "report-only must log what it discovered: {stderr}"
+    );
+    // Report-only exits before dispatch: no FASTQ record header on stdout.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains('@'),
+        "report-only must not write any trimmed FASTQ to stdout: {stdout}"
+    );
+}
+
+#[test]
+fn infer_trims_planted_adapter() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = 500;
+    let fq = write_adapted_fastq(dir.path(), n);
+    let out_path = dir.path().join("out.fastq");
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "-o",
+        out_path.to_str().unwrap(),
+        "--adapter-infer",
+        "-t",
+        "1",
+    ]);
+    let assert = cmd.assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("inferred"),
+        "stderr must show an inferred-adapter log line: {stderr}"
+    );
+
+    let trimmed = std::fs::read_to_string(&out_path).unwrap();
+    assert!(
+        !trimmed.contains(PLANTED_ADAPTER),
+        "the planted adapter must not survive anywhere in the output: {trimmed}"
+    );
+
+    // Genuine trimming check (not just "the adapter substring is gone"):
+    // every surviving record's sequence must be an exact SUFFIX of the read
+    // whittle actually read in (reconstructed independently via
+    // `full_read_seq`, not re-derived from the output), and the amount cut
+    // off the front must land in a sane window around the 28bp planted
+    // adapter's length -- proving real per-read adapter-shaped trimming, not
+    // a no-op, a fixed head-crop, or a whole-read wipe.
+    let mut lines = trimmed.lines();
+    let mut n_records = 0;
+    while let Some(header) = lines.next() {
+        assert!(header.starts_with("@r"), "unexpected header: {header}");
+        let idx: usize = header[2..].parse().expect("header must be @r<index>");
+        let seq_line = lines.next().expect("sequence line");
+        let _plus = lines.next().expect("plus line");
+        let _qual = lines.next().expect("quality line");
+
+        let original = full_read_seq(idx);
+        let cut = original.len() - seq_line.len();
+        assert!(
+            original.ends_with(seq_line.as_bytes()),
+            "record {idx}'s output must be an exact suffix of its original read"
+        );
+        assert!(
+            (20..=50).contains(&cut),
+            "record {idx}: cut length {cut} is not adapter-shaped (planted adapter is 28bp)"
+        );
+        n_records += 1;
+    }
+    assert_eq!(n_records, n, "no reads were dropped by trimming");
+}
+
+#[test]
+fn infer_on_tiny_input_warns_and_keeps_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = 10; // < MIN_SAMPLE_FOR_DETECTION (100)
+    let fq = write_adapted_fastq(dir.path(), n);
+    let out_path = dir.path().join("out.fastq");
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "-o",
+        out_path.to_str().unwrap(),
+        "--adapter-infer",
+        "-t",
+        "1",
+    ]);
+    let assert = cmd.assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("too few") || stderr.contains("no adapters"),
+        "must warn about the undersized sample: {stderr}"
+    );
+
+    // Untrimmed: every output record equals its full original (unstripped)
+    // read exactly -- the planted adapter is still there, verbatim.
+    let trimmed = std::fs::read_to_string(&out_path).unwrap();
+    for i in 0..n {
+        let expected = String::from_utf8(full_read_seq(i)).unwrap();
+        assert!(
+            trimmed.contains(&expected),
+            "record {i} must be kept untrimmed: {trimmed}"
+        );
+    }
+}
