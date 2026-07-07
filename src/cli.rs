@@ -245,17 +245,14 @@ pub fn parse() -> anyhow::Result<Config> {
         );
     }
     // --adapter-infer-only + --adapter-fasta is allowed (unlike --adapter-infer,
-    // which rejects a FASTA outright above), but cross-naming discovered
-    // sequences against the user's own FASTA is descoped for v1: naming only
-    // ever checks the built-in ONT catalog (see `infer::discover`). No Config
-    // field carries the FASTA path here -- this is purely an informational
-    // note so a user combining the two flags isn't left assuming the FASTA
-    // did something.
+    // which rejects a FASTA outright above): report-only names discovered
+    // adapters against the built-in ONT catalog UNION the user's FASTA (see
+    // `infer::discover`), so a user combining the two flags gets their own
+    // adapter names surfaced too, not just catalog matches.
     if adapter_infer == AdapterInfer::ReportOnly && c.adapter_fasta.is_some() {
         eprintln!(
             "[INFO] --adapter-infer-only with --adapter-fasta: discovered adapters are named \
-             against the built-in ONT catalog only; cross-naming against your FASTA isn't \
-             wired up yet"
+             against the built-in ONT catalog plus your FASTA's adapters"
         );
     }
 
@@ -263,6 +260,11 @@ pub fn parse() -> anyhow::Result<Config> {
     if c.adapter_preset == AdapterPresetArg::Ont {
         adapter_seqs.extend(crate::adapter::preset::preset_ont());
     }
+    // Tracked separately from `adapter_seqs` (which also mixes in the preset
+    // above): only the user's own FASTA entries are carried onward as extra
+    // naming refs (see the `trim_adapters` comment below), not the preset
+    // (already covered by `infer::discover`'s own built-in catalog lookup).
+    let mut fasta_adapters: Vec<crate::adapter::Adapter> = Vec::new();
     if let Some(path) = &c.adapter_fasta {
         let from_fasta = read_adapter_fasta(path)?;
         if from_fasta.is_empty() {
@@ -273,6 +275,7 @@ pub fn parse() -> anyhow::Result<Config> {
                 crate::adapter::MIN_PATTERN_LEN
             );
         }
+        fasta_adapters = from_fasta.clone();
         adapter_seqs.extend(from_fasta);
     }
     let adapters = if adapter_seqs.is_empty() && adapter_infer == AdapterInfer::Off {
@@ -293,13 +296,19 @@ pub fn parse() -> anyhow::Result<Config> {
             anyhow::bail!("--adapter-end-size must be >= 1");
         }
         // Under infer, the trimming set is discovered later (Task 11 fills
-        // it in); any preset/FASTA sequences gathered above are ignored here
-        // (the preset WARN above already told the user; a report-only FASTA
-        // is used for cross-naming elsewhere, not for trimming).
+        // it in); any preset sequences gathered above are ignored here (the
+        // preset WARN above already told the user). A report-only FASTA is
+        // carried through as `fasta_adapters` instead of being dropped: it's
+        // never trimmed against under infer (discovery always replaces this
+        // field before any dispatch -- see `maybe_reduce_adapters`, and
+        // report-only exits before dispatch entirely), so reusing this field
+        // to ferry the FASTA refs to `infer::discover` for cross-naming is
+        // safe. Under `Trim`, a FASTA is rejected above, so this is always
+        // empty there.
         let trim_adapters = if adapter_infer == AdapterInfer::Off {
             adapter_seqs
         } else {
-            Vec::new()
+            fasta_adapters
         };
         Some(crate::adapter::AdapterConfig {
             adapters: trim_adapters,

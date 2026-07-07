@@ -307,15 +307,28 @@ fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
     rec.sequence().as_ref()
 }
 
+/// A kept adapter's support below this is close enough to `infer::KEEP_SUPPORT`
+/// (0.30, a whole-consensus presence fraction — see its doc comment) that
+/// it's worth an explicit warning rather than trusting the plain info line:
+/// a genuinely marginal discovery (e.g. an adapter only present in a fraction
+/// of reads, such as a barcode-specific sequence) can still clear the keep
+/// floor while remaining far from a confident, near-all-reads presence, so a
+/// kept adapter this weak deserves scrutiny before trusting it, not silent
+/// trust. ~1.5x `KEEP_SUPPORT` gives headroom above the floor while staying
+/// well below a genuine, high-prevalence adapter's typical near-1.0 presence.
+const MARGINAL_SUPPORT: f64 = 0.45;
+
 /// Log each ab-initio discovery (Task 9's `infer::discover` output) at
 /// `info!`: `inferred_N ≈ NAME (pct%) · support X.XX` when the discovered
 /// sequence cross-names against the built-in ONT catalog, else `inferred_N
 /// (no catalog match) · support X.XX`. `N` is the 1-based position in
 /// `discovered`'s own order (support desc, then sequence asc — see
-/// `infer::discover`), independent of `InferredAdapter::adapter.name` (which
-/// may itself already read `inferred_{k}` from a different, pre-sort index).
+/// `infer::discover`), which now agrees with any `inferred_{N}` fallback in
+/// `InferredAdapter::adapter.name` (both derive from the same post-sort order).
 /// The raw sequence is logged separately at `debug!` — too noisy for the
 /// default INFO level, but useful with `-v` when checking a discovery by eye.
+/// Support below `MARGINAL_SUPPORT` additionally gets a `warn!`, since it's
+/// close enough to the `KEEP_SUPPORT` floor to warrant double-checking.
 fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampled: usize) {
     tracing::info!(
         "Adapter inference: sampled {n_sampled} reads, discovered {} adapter{}",
@@ -338,11 +351,39 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
                 );
             },
         }
+        if d.support < MARGINAL_SUPPORT {
+            tracing::warn!(
+                "adapter '{}' support {:.2} is marginal (near the KEEP_SUPPORT floor); \
+                 verify with --adapter-infer-only",
+                d.adapter.name,
+                d.support
+            );
+        }
         tracing::debug!(
             "inferred_{n} sequence: {}",
             String::from_utf8_lossy(&d.adapter.seq)
         );
     }
+}
+
+/// Pull up to `n` records off the front of `records` into a `Vec`, stopping
+/// early if the iterator is exhausted first. Shared by both buffering points
+/// in `maybe_reduce_adapters` below (the ab-initio inference sample and the
+/// Phase 1.5 presence-detection sample), which otherwise duplicate this loop
+/// verbatim.
+fn buffer_prefix<R>(
+    records: &mut impl Iterator<Item = anyhow::Result<R>>,
+    n: usize,
+) -> anyhow::Result<Vec<R>> {
+    let mut sample = Vec::new();
+    for _ in 0..n {
+        match records.next() {
+            Some(Ok(r)) => sample.push(r),
+            Some(Err(e)) => return Err(e),
+            None => break,
+        }
+    }
+    Ok(sample)
 }
 
 /// The buffer-then-decide seam shared by every FASTQ/BAM dispatch arm in
@@ -403,14 +444,7 @@ where
             .clone()
             .expect("adapter_infer != Off implies cfg.adapters is Some (see cli::parse)");
 
-        let mut sample: Vec<R> = Vec::new();
-        for _ in 0..cfg.adapter_sample {
-            match records.next() {
-                Some(Ok(r)) => sample.push(r),
-                Some(Err(e)) => return Err(e),
-                None => break,
-            }
-        }
+        let sample: Vec<R> = buffer_prefix(&mut records, cfg.adapter_sample)?;
         let s = sample.len();
         let chain =
             |sample: Vec<R>, records: I| -> Box<dyn Iterator<Item = anyhow::Result<R>> + Send> {
@@ -457,19 +491,27 @@ where
         return Ok(Some(chain(sample, records)));
     }
 
+    // Pure no-op fast path (M7): no adapters configured at all, or detection
+    // sampling is off (`adapter_sample == 0`) -- nothing below would ever
+    // buffer or reduce anything, so hand `records` straight back rather than
+    // paying for an empty `Vec` plus a `Map<Chain<..>>` wrapper around it.
+    // `Box` is still required (every return path of this fn shares the same
+    // `Box<dyn Iterator>` return type across all six call sites -- see the
+    // fn's doc comment), so this doesn't remove that one layer of dynamic
+    // dispatch, only the unnecessary extra allocation/combinator on top of
+    // it; removing the `Box` itself would need a signature change touching
+    // every caller, which isn't a trivial win for this cost.
+    if cfg.adapters.is_none() || cfg.adapter_sample == 0 {
+        return Ok(Some(Box::new(records)));
+    }
+
     // Phase 1.5 presence detection (unchanged from before ab-initio inference
     // existed).
     let mut sample: Vec<R> = Vec::new();
     if let Some(ac) = cfg.adapters.clone()
         && cfg.adapter_sample > 0
     {
-        for _ in 0..cfg.adapter_sample {
-            match records.next() {
-                Some(Ok(r)) => sample.push(r),
-                Some(Err(e)) => return Err(e),
-                None => break,
-            }
-        }
+        sample = buffer_prefix(&mut records, cfg.adapter_sample)?;
         let s = sample.len();
         let full = ac.adapters.len();
         let kept = if s < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION {
@@ -958,7 +1000,12 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
 /// `0` (discovery hasn't run yet — it replaces `cfg.adapters` only once the
 /// buffer-then-decide seam runs, after this banner prints), so a `· infer` /
 /// `· infer-only` suffix is appended to make clear the set is about to be
-/// discovered, not that trimming is configured with zero adapters.
+/// discovered, not that trimming is configured with zero adapters. This is
+/// forced to `0` explicitly (rather than read off `a.adapters.len()`) because
+/// under `ReportOnly` with a `--adapter-fasta`, `a.adapters` may itself hold
+/// the user's FASTA entries (see `cli::parse`'s `trim_adapters`) -- carried
+/// through purely as extra naming refs for `infer::discover`, never as a
+/// trimming set, so they must not be counted here as if they were one.
 fn adapter_banner_line(
     adapters: Option<&crate::adapter::AdapterConfig>,
     adapter_sample: usize,
@@ -976,11 +1023,14 @@ fn adapter_banner_line(
         AdapterInfer::Trim => " \u{b7} infer",
         AdapterInfer::ReportOnly => " \u{b7} infer-only",
     };
+    let n_adapters = if adapter_infer == AdapterInfer::Off {
+        a.adapters.len()
+    } else {
+        0
+    };
     Some(format!(
         "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp · {sample}{infer_suffix}",
-        a.adapters.len(),
-        a.error_rate,
-        a.end_size
+        n_adapters, a.error_rate, a.end_size
     ))
 }
 

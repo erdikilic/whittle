@@ -20,16 +20,21 @@ const WINDOW_LEN: usize = 100;
 const RECOUNT_EDITS: usize = 2;
 
 /// Minimum presence-fraction support required to keep a discovered adapter.
-/// 0.30 was too strict: `drop_trim`'s boundary-only trimming can leave an
-/// internal low-weight noise pocket inside an otherwise-correct consensus
-/// (see `discover_recovers_planted_adapter_under_error`), which drags the
-/// profile's median (support is `median(profile) / n_windows`) well below
-/// the true peak weight even for a genuine, closely-matching reconstruction.
-/// Empirically (that test, 10% substitution planted adapter): the real
-/// signal lands at support ~0.144 across all peeled variants, while clean
-/// (no-adapter) data's noise floor tops out at ~0.007 -- a >20x margin, so
-/// 0.10 safely separates real recoveries from noise on both sides.
-const KEEP_SUPPORT: f64 = 0.10;
+/// Support is now the whole-consensus presence fraction (see `assemble`):
+/// the share of sampled end-window reads that actually contain the trimmed
+/// consensus within an edit budget scaled to its own length -- not a
+/// per-position profile statistic, so an internal error-induced dip inside
+/// an otherwise-correct consensus can no longer drag it down. Empirically: a
+/// genuine, closely-matching planted adapter under ~10% substitution error
+/// (`discover_recovers_planted_adapter_under_error`) recovers at support
+/// ~1.0, while clean (no-adapter) data's noise floor tops out at ~0.008,
+/// both comfortably separated from 0.30 (roughly 3x headroom below the real
+/// signal, roughly 35x above the noise floor). 0.30 also matches the
+/// trimming use case: a constant/ligation adapter present in ~all reads
+/// scores high, while a low-presence/rare/barcode-specific consensus
+/// (present in only a small fraction of reads) is correctly dropped --
+/// trimming the constant flank removes barcodes anyway.
+const KEEP_SUPPORT: f64 = 0.30;
 
 /// Cap on the number of windows scanned per k-mer during the 2-error recount
 /// (Task 9's confidence pass), bounding its cost on large samples.
@@ -217,29 +222,27 @@ fn bounded_heaviest_path(
         by_suffix.entry(code & suffix_mask).or_default().push(i);
     }
 
+    // deterministic comparator shared by `pick` and `seed`: heaviest wins,
+    // tie -> smaller code. Single source of truth for the tie-break rule (was
+    // previously duplicated between the two `max_by` calls below).
+    let weight_desc_code_asc = |&a: &usize, &b: &usize| {
+        nodes[a]
+            .1
+            .cmp(&nodes[b].1)
+            .then(nodes[b].0.cmp(&nodes[a].0))
+    };
+
     // deterministic pick: heaviest unvisited candidate, tie -> smaller code.
     let pick = |cands: Option<&Vec<usize>>, visited: &[bool]| -> Option<usize> {
         cands?
             .iter()
             .copied()
             .filter(|&i| !visited[i])
-            .max_by(|&a, &b| {
-                nodes[a]
-                    .1
-                    .cmp(&nodes[b].1)
-                    .then(nodes[b].0.cmp(&nodes[a].0))
-            })
+            .max_by(weight_desc_code_asc)
     };
 
     // seed = single heaviest node (tie -> smaller code).
-    let seed = (0..n)
-        .max_by(|&a, &b| {
-            nodes[a]
-                .1
-                .cmp(&nodes[b].1)
-                .then(nodes[b].0.cmp(&nodes[a].0))
-        })
-        .unwrap();
+    let seed = (0..n).max_by(weight_desc_code_asc).unwrap();
     let mut visited = vec![false; n];
     visited[seed] = true;
 
@@ -285,30 +288,6 @@ fn bounded_heaviest_path(
         weight += nodes[idx].1 as u64;
     }
     Some((cons, profile, weight))
-}
-
-fn median_u32(xs: &[u32]) -> f64 {
-    if xs.is_empty() {
-        return 0.0;
-    }
-    let mut v = xs.to_vec();
-    v.sort_unstable();
-    let m = v.len() / 2;
-    if v.len() % 2 == 1 {
-        v[m] as f64
-    } else {
-        (v[m - 1] as f64 + v[m] as f64) / 2.0
-    }
-}
-
-/// Presence-fraction confidence for one consensus: `median(profile) /
-/// n_windows`, i.e. what share of the sampled end-windows actually
-/// contained a k-mer from this path, clamped to `[0,1]`.
-fn support_from_profile(profile: &[u32], n_windows: usize) -> f64 {
-    if n_windows == 0 {
-        return 0.0;
-    }
-    (median_u32(profile) / n_windows as f64).clamp(0.0, 1.0)
 }
 
 fn median_f64(xs: &[f64]) -> f64 {
@@ -499,30 +478,53 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
         .collect();
     let mut out = Vec::new();
     for (cons, profile) in peel_paths(weighted, KMER_K) {
-        let (trimmed, tprof) = drop_trim(&cons, &profile);
+        let (trimmed, _tprof) = drop_trim(&cons, &profile);
         if trimmed.len() < MIN_PATTERN_LEN {
             continue;
         }
-        out.push((trimmed, support_from_profile(&tprof, n_recount)));
+        // Whole-consensus presence: what fraction of sampled end-windows
+        // actually contain this trimmed consensus (within an error budget
+        // scaled to its own length), reusing the same forward searcher and
+        // the same per-window presence counter (`two_error_freq`) already
+        // used to reweight individual k-mers above. Unlike a per-position
+        // profile statistic, this can't be dragged down by an internal
+        // low-weight pocket inside an otherwise-correct reconstruction.
+        let k_cons = (base.error_rate * trimmed.len() as f64).floor() as usize;
+        let present = two_error_freq(&mut fwd, &trimmed, windows, k_cons);
+        let support = present as f64 / n_recount as f64;
+        out.push((trimmed, support));
     }
-    let _ = base; // error_rate/end_size not needed for assembly itself
     out
 }
 
 /// Full ab-initio discovery pipeline: per-end `assemble`, fold shared 5'/3'
 /// discoveries into `End::Both` via `merge_both_ends`, drop anything too
 /// short or too weakly supported, then name each survivor against the
-/// built-in ONT catalog. Deterministic order: support desc, then sequence asc.
+/// built-in ONT catalog UNION `base.adapters` -- extra naming refs, e.g. the
+/// user's `--adapter-fasta` entries under `AdapterInfer::ReportOnly` (see
+/// `cli::parse`'s `trim_adapters`; empty under `Trim`, which rejects a FASTA
+/// outright, and under a `ReportOnly` run with no FASTA). Deterministic
+/// order: support desc, then sequence asc.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
     let (five_w, three_w) = end_windows(sample, WINDOW_LEN);
     let five = assemble(&five_w, base);
     let three = assemble(&three_w, base);
 
     // support lookup by sequence (max across ends) before merge collapses tags.
+    // Fuzzy (`same_adapter`), not exact-equality: `merge_both_ends` folds a
+    // dual-end adapter into a single `End::Both` entry carrying the 5'
+    // sequence, paired with a 3' entry that's only `same_adapter`-equal to it
+    // (typically its reverse complement, the common ONT ligation topology),
+    // never byte-identical. Exact equality would only ever match the 5' entry
+    // itself, silently discarding a stronger 3' recovery -- a real dual-end
+    // adapter with a weak 5' but strong 3' assembly could then be dropped by
+    // `KEEP_SUPPORT` *because* it was recognized as dual-end. Distinct
+    // adapters won't `same_adapter`-match, so this can't pull in unrelated
+    // support.
     let support_of = |seq: &[u8]| -> f64 {
         five.iter()
             .chain(three.iter())
-            .filter(|(s, _)| s.as_slice() == seq)
+            .filter(|(s, _)| same_adapter(s, seq, base.error_rate))
             .map(|(_, sup)| *sup)
             .fold(0.0_f64, f64::max)
     };
@@ -533,9 +535,23 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         base.error_rate,
     );
 
+    // Naming refs: the built-in ONT catalog, plus any extra refs carried in
+    // `base.adapters` (never trimmed against here -- see the doc comment
+    // above). Chaining is skipped entirely when there are none, so a
+    // catalog-only run (the common case) doesn't pay for an extra Vec/clone.
     let refs = crate::adapter::preset::preset_ont();
-    let mut result: Vec<InferredAdapter> = Vec::new();
-    for (i, (seq, end)) in merged.into_iter().enumerate() {
+    let name_refs: Vec<Adapter> = if base.adapters.is_empty() {
+        refs
+    } else {
+        refs.into_iter()
+            .chain(base.adapters.iter().cloned())
+            .collect()
+    };
+
+    // (seq, end, support, name_hits) survivors, pre-final-sort.
+    type Candidate = (Vec<u8>, End, f64, Vec<(String, f32)>);
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for (seq, end) in merged.into_iter() {
         if seq.len() < MIN_PATTERN_LEN {
             continue;
         }
@@ -543,25 +559,31 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         if support < KEEP_SUPPORT {
             continue;
         }
-        let name_hits = name_against(&seq, &refs, base.error_rate);
-        let name = name_hits
-            .first()
-            .map(|(n, _)| n.clone())
-            .unwrap_or_else(|| format!("inferred_{}", i + 1));
-        result.push(InferredAdapter {
-            adapter: Adapter { name, seq, end },
-            support,
-            name_hits,
-        });
+        let name_hits = name_against(&seq, &name_refs, base.error_rate);
+        candidates.push((seq, end, support, name_hits));
     }
     // deterministic order: support desc, then sequence asc.
-    result.sort_by(|a, b| {
-        b.support
-            .partial_cmp(&a.support)
-            .unwrap()
-            .then(a.adapter.seq.cmp(&b.adapter.seq))
-    });
-    result
+    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap().then(a.0.cmp(&b.0)));
+    // `inferred_N` fallback numbering is assigned AFTER the sort above (M4
+    // fix) so it agrees with the position `log_discovered` prints each entry
+    // at; assigning it during the first pass (pre-sort `merged` index) could
+    // disagree with the post-sort log order whenever sorting reordered
+    // entries.
+    candidates
+        .into_iter()
+        .enumerate()
+        .map(|(i, (seq, end, support, name_hits))| {
+            let name = name_hits
+                .first()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_else(|| format!("inferred_{}", i + 1));
+            InferredAdapter {
+                adapter: Adapter { name, seq, end },
+                support,
+                name_hits,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -701,12 +723,6 @@ mod tests {
     }
 
     #[test]
-    fn support_is_median_over_windows() {
-        let profile = vec![40u32, 50, 60];
-        assert!((support_from_profile(&profile, 100) - 0.50).abs() < 1e-9);
-    }
-
-    #[test]
     fn merge_folds_shared_sequence_to_both() {
         let a = b"ACGTACGTACGTACGT".to_vec();
         let five = vec![a.clone(), b"TTTTGGGGTTTTGGGG".to_vec()];
@@ -786,6 +802,105 @@ mod tests {
             !hits(&mut s, &top.adapter.seq, adapter, k).is_empty()
                 || !hits(&mut s, adapter, &top.adapter.seq, k).is_empty(),
             "recovered adapter is within ~25% edit distance of the planted one"
+        );
+    }
+
+    #[test]
+    fn discover_dual_end_adapter_gets_max_support() {
+        // Plant `adapter` at the 5' end (with heavier substitutions -- weak
+        // recovery) and its exact reverse complement at the 3' end (strong
+        // recovery) of every read, so `merge_both_ends` folds the two
+        // per-end discoveries into a single `End::Both` entry (per
+        // `same_adapter`, fuzzy/RC-aware). The two ends are assembled
+        // completely independently (`assemble` only ever sees one end's
+        // windows), so the 3' end's own whole-consensus presence support here
+        // is deterministically ~1.0 (an exact copy, like
+        // `discover_finds_nothing_in_clean_reads`'s sibling exact-recovery
+        // cases) regardless of the 5' noise level. The 5' copy's every-6th-
+        // position substitutions (~5 of 28 bases per read, positions varying
+        // by read index) keep the majority-vote consensus close enough to
+        // `adapter` for `same_adapter` to still fold it into `Both`, but each
+        // individual read then differs from that consensus by more edits
+        // than the 3' exact copies do, so its own presence support is
+        // measurably lower (~0.18, see the unmerged `Five` siblings this
+        // fixture also produces, below `KEEP_SUPPORT` on their own and
+        // correctly dropped independently). Pre-fix, `support_of` matched
+        // candidates by exact byte equality against the `Both` entry's (5')
+        // sequence, so it could only ever surface the 5' end's OWN weak
+        // support -- silently discarding the much stronger 3' recovery
+        // `merge_both_ends` had already matched. A reported support close to
+        // 1.0 (rather than ~0.18) proves the fix takes the max across
+        // `same_adapter`-equal entries, not just the exact ones.
+        let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT"; // 28bp
+        let rc: Vec<u8> = adapter
+            .iter()
+            .rev()
+            .map(|&b| match b {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                b'T' => b'A',
+                _ => unreachable!("adapter is pure ACGT"),
+            })
+            .collect();
+        let mut owned: Vec<Vec<u8>> = Vec::new();
+        for i in 0..200usize {
+            // 5' copy: deterministic substitutions at every 6th (shifted)
+            // position -- weak but still independently recoverable.
+            let mut read = adapter.to_vec();
+            for p in (0..adapter.len()).step_by(6) {
+                let q = (p + i) % adapter.len();
+                read[q] = b"ACGT"[(read[q] as usize + 1) % 4];
+            }
+            // deterministic non-periodic genomic middle (same splitmix64
+            // mix used by the other `discover_*` fixtures in this file).
+            let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+            for _ in 0..150usize {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+            }
+            // 3' copy: EXACT reverse complement, no error -- strong recovery.
+            read.extend_from_slice(&rc);
+            owned.push(read);
+        }
+        let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let base = AdapterConfig {
+            adapters: vec![],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let found = discover(&sample, &base);
+
+        let both = found
+            .iter()
+            .find(|d| d.adapter.end == End::Both)
+            .expect("the shared 5'/3' adapter must be discovered as a single End::Both entry");
+
+        // near-matches the planted adapter (fuzzy, since recovery is
+        // approximate).
+        let mut s = new_searcher();
+        let k = (0.25 * adapter.len() as f64).ceil() as usize;
+        assert!(
+            !hits(&mut s, &both.adapter.seq, adapter, k).is_empty()
+                || !hits(&mut s, adapter, &both.adapter.seq, k).is_empty(),
+            "Both adapter (seq {:?}) must be within ~25% edit distance of the planted adapter",
+            String::from_utf8_lossy(&both.adapter.seq)
+        );
+
+        // the reported support must reflect the stronger (3') end, not the
+        // weaker 5' end alone (~0.18 -- see the sibling unmerged `Five`
+        // entries this fixture also produces, at that same value, and
+        // dropped independently since 0.18 < KEEP_SUPPORT).
+        assert!(
+            both.support > 0.7,
+            "Both adapter's support ({}) must reflect the max across ends \
+             (3' end recovers at ~1.0 here), not just the weaker 5' end alone (~0.18)",
+            both.support
         );
     }
 

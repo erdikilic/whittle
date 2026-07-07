@@ -648,7 +648,13 @@ fn infer_on_ubam_preserves_mm_ml() {
             orig_seq.ends_with(out_seq.as_slice()),
             "output read {name:?} must be an exact suffix of its original"
         );
-        let cut = orig_seq.len() - out_seq.len();
+        // `checked_sub` (M5): a clear panic message if output ever somehow
+        // exceeded input, instead of an underflow wraparound with a cryptic
+        // "attempt to subtract with overflow" pointing at this line only.
+        let cut = orig_seq
+            .len()
+            .checked_sub(out_seq.len())
+            .expect("output longer than input");
         assert!(
             (15..=60).contains(&cut),
             "read {name:?}: cut length {cut} is not adapter-shaped (planted adapter is 28bp)"
@@ -675,7 +681,12 @@ fn infer_on_ubam_preserves_mm_ml() {
             .get(name)
             .unwrap_or_else(|| panic!("output read {name} has no matching original"));
         let out_seq_len = out_seqs[name].len();
-        let cut = orig_len - out_seq_len;
+        // `checked_sub` (M5): a clear panic message if output ever somehow
+        // exceeded input, instead of an underflow wraparound with a cryptic
+        // "attempt to subtract with overflow" pointing at this line only.
+        let cut = orig_len
+            .checked_sub(out_seq_len)
+            .expect("output longer than input");
         let expected: Vec<_> = orig
             .iter()
             .filter(|(pos, ..)| *pos >= cut)

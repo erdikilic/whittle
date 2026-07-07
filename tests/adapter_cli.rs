@@ -578,12 +578,14 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
 }
 
 // --adapter-infer-only + --adapter-fasta is allowed (unlike --adapter-infer,
-// which rejects a FASTA outright), but v1 descopes cross-naming discovered
-// sequences against the user's FASTA -- naming stays catalog-only. This just
-// checks the one informational line fires so a user combining the two flags
-// isn't left assuming the FASTA did something.
+// which rejects a FASTA outright): naming now covers the built-in catalog
+// PLUS the user's FASTA (FU3 -- see `infer::discover`'s `name_refs`). This
+// just checks the informational line reflects that (not the old "catalog
+// only" wording), so a user combining the two flags isn't left assuming the
+// FASTA did nothing. The actual cross-naming is proven end-to-end by
+// `infer_only_cross_names_against_user_fasta` below.
 #[test]
-fn infer_only_with_fasta_notes_naming_is_catalog_only() {
+fn infer_only_with_fasta_notes_naming_includes_fasta() {
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     writeln!(fa, ">present\nACGTACGTACGTACGTACGT").unwrap();
     let mut fq = tempfile::NamedTempFile::new().unwrap();
@@ -602,7 +604,7 @@ fn infer_only_with_fasta_notes_naming_is_catalog_only() {
         ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("catalog only"));
+        .stderr(predicates::str::contains("plus your FASTA's adapters"));
 }
 
 // --- ab-initio inference wiring (Task 11) -------------------------------
@@ -706,6 +708,57 @@ fn infer_only_prints_and_does_not_trim() {
     );
 }
 
+// FU3: report-only cross-names discovered adapters against the ONT catalog
+// UNION the user's --adapter-fasta, not the catalog alone.
+//
+// `PLANTED_ADAPTER` is byte-identical to the catalog's own `LSK109_front`
+// entry (see `src/adapter/ont_catalog.tsv`), so a discovered consensus that
+// reconstructs it scores identically (same bytes compared, same edit-distance
+// search) against BOTH the catalog entry and our own FASTA-supplied copy --
+// an exact tie in `name_against`'s percent-identity, broken by its
+// alphabetical (name asc) tie-break. The FASTA header is prefixed `AAA_` so
+// it sorts before `LSK109_front` and therefore deterministically wins that
+// tie, becoming `name_hits[0]` -- the only hit `log_discovered` prints -- no
+// matter how `discover` actually reconstructs the consensus. That makes this
+// a genuine proof that naming consulted the user's FASTA (not merely that it
+// also happened to match the catalog): if `discover` still only checked the
+// built-in catalog (pre-fix), the log would show `LSK109_front` instead and
+// this assertion would fail.
+#[test]
+fn infer_only_cross_names_against_user_fasta() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq(dir.path(), 500);
+    // Filename deliberately has no "MY_CUSTOM_ADAPTER" substring, so a stray
+    // path/filename echo elsewhere in the log could never produce a false
+    // pass -- the assertion below can only be satisfied by the discovered
+    // adapter's own cross-name.
+    let fa_path = dir.path().join("cross_name_refs.fa");
+    std::fs::write(
+        &fa_path,
+        format!(">AAA_MY_CUSTOM_ADAPTER\n{PLANTED_ADAPTER}\n"),
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "--adapter-infer-only",
+        "--adapter-fasta",
+        fa_path.to_str().unwrap(),
+        "-t",
+        "1",
+    ]);
+    let assert = cmd.assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("MY_CUSTOM_ADAPTER"),
+        "discovered adapter must be cross-named against the user's --adapter-fasta, \
+         not just the built-in catalog: {stderr}"
+    );
+}
+
 #[test]
 fn infer_trims_planted_adapter() {
     let dir = tempfile::tempdir().unwrap();
@@ -753,7 +806,13 @@ fn infer_trims_planted_adapter() {
         let _qual = lines.next().expect("quality line");
 
         let original = full_read_seq(idx);
-        let cut = original.len() - seq_line.len();
+        // `checked_sub` (M5): a clear panic message if output ever somehow
+        // exceeded input, instead of an underflow wraparound with a cryptic
+        // "attempt to subtract with overflow" pointing at this line only.
+        let cut = original
+            .len()
+            .checked_sub(seq_line.len())
+            .expect("output longer than input");
         assert!(
             original.ends_with(seq_line.as_bytes()),
             "record {idx}'s output must be an exact suffix of its original read"
@@ -919,5 +978,85 @@ fn infer_is_deterministic() {
         run("a.fastq"),
         run("b.fastq"),
         "same input -> byte-identical output"
+    );
+}
+
+// --- marginal-support warning ------------------------------------------
+
+/// Fraction of reads that carry `PLANTED_ADAPTER` at all; the rest are pure
+/// background (no adapter anywhere in the read), modelling a low-prevalence
+/// / barcode-specific adapter rather than a per-read match-quality problem.
+/// Support is now a whole-consensus PRESENCE fraction (see
+/// `infer::assemble`'s doc comment), so a per-read *error rate* no longer
+/// drags a genuine adapter's support down (a real, closely-matching
+/// reconstruction now recovers at support ~1.0, see
+/// `discover_recovers_planted_adapter_under_error`) -- what still lands an
+/// adapter in the marginal band is being present in only a *minority* of
+/// reads. 0.38 * 500 = 190 planted reads out of 500 puts support at ~0.38,
+/// inside `[KEEP_SUPPORT, MARGINAL_SUPPORT)` = `[0.30, 0.45)` with headroom
+/// on both sides.
+const PLANTED_ADAPTER_PREVALENCE: f64 = 0.38;
+
+/// Fixture for the marginal-support warning: `PLANTED_ADAPTER_PREVALENCE` of
+/// `n` reads get an EXACT copy of `PLANTED_ADAPTER` (no injected
+/// substitution error -- error-tolerant recovery is already covered by
+/// `discover_recovers_planted_adapter_under_error`, this fixture targets
+/// marginal *prevalence* instead) followed by a splitmix64 tail; the
+/// remaining reads are pure splitmix64 background of the same total length,
+/// carrying no adapter at all (same non-periodic bit-mix pattern used
+/// throughout this file and in `src/adapter/infer.rs`'s own `discover_*`
+/// unit tests, so it can't itself register as a spurious low-complexity
+/// signal).
+fn write_adapted_fastq_marginal(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
+    // NOTE: deliberately not named "*marginal*" -- the path is itself echoed
+    // into the `[INFO] Input: ...` / `Command: ...` log lines, which would
+    // make `stderr.contains("marginal")` a false positive unrelated to the
+    // actual warning message under test.
+    let path = dir.join("weak_adapter.fastq");
+    let mut f = std::fs::File::create(&path).unwrap();
+    let planted_n = (n as f64 * PLANTED_ADAPTER_PREVALENCE).round() as usize;
+    for i in 0..n {
+        let seq: Vec<u8> = if i < planted_n {
+            let mut s = PLANTED_ADAPTER.as_bytes().to_vec();
+            s.extend(splitmix_tail(i, TAIL_LEN));
+            s
+        } else {
+            // pure background, no adapter -- same total read length as the
+            // planted branch so both groups look alike apart from content.
+            splitmix_tail(i, TAIL_LEN + PLANTED_ADAPTER.len())
+        };
+        let qual = "I".repeat(seq.len());
+        writeln!(
+            f,
+            "@r{i}\n{}\n+\n{qual}",
+            std::str::from_utf8(&seq).unwrap()
+        )
+        .unwrap();
+    }
+    path
+}
+
+/// A kept adapter whose support sits in `[KEEP_SUPPORT, MARGINAL_SUPPORT)`
+/// (here ~0.38, see `write_adapted_fastq_marginal`) must get an explicit
+/// `warn!` in addition to the plain per-adapter info line, so a marginal
+/// discovery doesn't read the same as a confident one.
+#[test]
+fn infer_warns_on_marginal_support() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq_marginal(dir.path(), 500);
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "--adapter-infer-only",
+        "-t",
+        "1",
+    ]);
+    let assert = cmd.assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("marginal"),
+        "a support just above KEEP_SUPPORT must be flagged marginal: {stderr}"
     );
 }
