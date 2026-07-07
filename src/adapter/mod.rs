@@ -567,4 +567,24 @@ mod segment_tests {
         let segs = adapter_segments(&w, &cfg);
         assert_eq!(segs, vec![(20, 60)]);
     }
+
+    #[test]
+    fn inferred_single_end_adapters_on_short_read_keep_insert() {
+        // Short read, overlapping end-zones (end_size >= n). Distinct 5' and 3'
+        // single-end adapters that do NOT cross-match. The insert must survive:
+        // no whole-read drop, no eaten middle. Guards the "downstream reused"
+        // assumption for inferred End::Five/End::Three adapters (spec Prerequisite).
+        let a5 = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
+        let a3 = b"AAAAGGGGAAAAGGGGAAAA"; // 20bp, A/G only: not a5, not revcomp(a5)
+        let mut w = a5.to_vec();
+        w.extend_from_slice(&[b'C'; 40]); // 40bp insert, no match to either adapter/revcomp
+        w.extend_from_slice(a3);
+        let c = AdapterConfig {
+            adapters: vec![ad("five", a5, End::Five), ad("three", a3, End::Three)],
+            error_rate: 0.2,
+            end_size: 150, // >= n, zones overlap
+            split: true,
+        };
+        assert_eq!(adapter_segments(&w, &c), vec![(20, 60)], "insert survives");
+    }
 }
