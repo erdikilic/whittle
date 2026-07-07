@@ -366,6 +366,26 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
     }
 }
 
+/// Pull up to `n` records off the front of `records` into a `Vec`, stopping
+/// early if the iterator is exhausted first. Shared by both buffering points
+/// in `maybe_reduce_adapters` below (the ab-initio inference sample and the
+/// Phase 1.5 presence-detection sample), which otherwise duplicate this loop
+/// verbatim.
+fn buffer_prefix<R>(
+    records: &mut impl Iterator<Item = anyhow::Result<R>>,
+    n: usize,
+) -> anyhow::Result<Vec<R>> {
+    let mut sample = Vec::new();
+    for _ in 0..n {
+        match records.next() {
+            Some(Ok(r)) => sample.push(r),
+            Some(Err(e)) => return Err(e),
+            None => break,
+        }
+    }
+    Ok(sample)
+}
+
 /// The buffer-then-decide seam shared by every FASTQ/BAM dispatch arm in
 /// `run`/`run_folder`. Two independent policies live here, selected by
 /// `cfg.adapter_infer`:
@@ -424,14 +444,7 @@ where
             .clone()
             .expect("adapter_infer != Off implies cfg.adapters is Some (see cli::parse)");
 
-        let mut sample: Vec<R> = Vec::new();
-        for _ in 0..cfg.adapter_sample {
-            match records.next() {
-                Some(Ok(r)) => sample.push(r),
-                Some(Err(e)) => return Err(e),
-                None => break,
-            }
-        }
+        let sample: Vec<R> = buffer_prefix(&mut records, cfg.adapter_sample)?;
         let s = sample.len();
         let chain =
             |sample: Vec<R>, records: I| -> Box<dyn Iterator<Item = anyhow::Result<R>> + Send> {
@@ -478,19 +491,27 @@ where
         return Ok(Some(chain(sample, records)));
     }
 
+    // Pure no-op fast path (M7): no adapters configured at all, or detection
+    // sampling is off (`adapter_sample == 0`) -- nothing below would ever
+    // buffer or reduce anything, so hand `records` straight back rather than
+    // paying for an empty `Vec` plus a `Map<Chain<..>>` wrapper around it.
+    // `Box` is still required (every return path of this fn shares the same
+    // `Box<dyn Iterator>` return type across all six call sites -- see the
+    // fn's doc comment), so this doesn't remove that one layer of dynamic
+    // dispatch, only the unnecessary extra allocation/combinator on top of
+    // it; removing the `Box` itself would need a signature change touching
+    // every caller, which isn't a trivial win for this cost.
+    if cfg.adapters.is_none() || cfg.adapter_sample == 0 {
+        return Ok(Some(Box::new(records)));
+    }
+
     // Phase 1.5 presence detection (unchanged from before ab-initio inference
     // existed).
     let mut sample: Vec<R> = Vec::new();
     if let Some(ac) = cfg.adapters.clone()
         && cfg.adapter_sample > 0
     {
-        for _ in 0..cfg.adapter_sample {
-            match records.next() {
-                Some(Ok(r)) => sample.push(r),
-                Some(Err(e)) => return Err(e),
-                None => break,
-            }
-        }
+        sample = buffer_prefix(&mut records, cfg.adapter_sample)?;
         let s = sample.len();
         let full = ac.adapters.len();
         let kept = if s < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION {

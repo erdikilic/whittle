@@ -806,7 +806,13 @@ fn infer_trims_planted_adapter() {
         let _qual = lines.next().expect("quality line");
 
         let original = full_read_seq(idx);
-        let cut = original.len() - seq_line.len();
+        // `checked_sub` (M5): a clear panic message if output ever somehow
+        // exceeded input, instead of an underflow wraparound with a cryptic
+        // "attempt to subtract with overflow" pointing at this line only.
+        let cut = original
+            .len()
+            .checked_sub(seq_line.len())
+            .expect("output longer than input");
         assert!(
             original.ends_with(seq_line.as_bytes()),
             "record {idx}'s output must be an exact suffix of its original read"

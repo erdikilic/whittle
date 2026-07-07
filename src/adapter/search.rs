@@ -26,8 +26,11 @@ pub fn new_searcher_fwd() -> DnaSearcher {
     Searcher::<Dna>::new_fwd()
 }
 
-/// All matches of `pattern` in `text` with edit distance <= `k` (both strands),
-/// as text spans. Reuses `searcher`'s internal buffers across calls.
+/// All matches of `pattern` in `text` with edit distance <= `k`, as text
+/// spans. Which strand(s) are searched depends on how `searcher` was built:
+/// `new_searcher` (RC-enabled) matches both strands, `new_searcher_fwd`
+/// matches the forward strand only. Reuses `searcher`'s internal buffers
+/// across calls.
 pub fn hits(searcher: &mut DnaSearcher, pattern: &[u8], text: &[u8], k: usize) -> Vec<Hit> {
     searcher
         .search(pattern, text, k)

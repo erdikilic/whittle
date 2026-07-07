@@ -222,29 +222,27 @@ fn bounded_heaviest_path(
         by_suffix.entry(code & suffix_mask).or_default().push(i);
     }
 
+    // deterministic comparator shared by `pick` and `seed`: heaviest wins,
+    // tie -> smaller code. Single source of truth for the tie-break rule (was
+    // previously duplicated between the two `max_by` calls below).
+    let weight_desc_code_asc = |&a: &usize, &b: &usize| {
+        nodes[a]
+            .1
+            .cmp(&nodes[b].1)
+            .then(nodes[b].0.cmp(&nodes[a].0))
+    };
+
     // deterministic pick: heaviest unvisited candidate, tie -> smaller code.
     let pick = |cands: Option<&Vec<usize>>, visited: &[bool]| -> Option<usize> {
         cands?
             .iter()
             .copied()
             .filter(|&i| !visited[i])
-            .max_by(|&a, &b| {
-                nodes[a]
-                    .1
-                    .cmp(&nodes[b].1)
-                    .then(nodes[b].0.cmp(&nodes[a].0))
-            })
+            .max_by(weight_desc_code_asc)
     };
 
     // seed = single heaviest node (tie -> smaller code).
-    let seed = (0..n)
-        .max_by(|&a, &b| {
-            nodes[a]
-                .1
-                .cmp(&nodes[b].1)
-                .then(nodes[b].0.cmp(&nodes[a].0))
-        })
-        .unwrap();
+    let seed = (0..n).max_by(weight_desc_code_asc).unwrap();
     let mut visited = vec![false; n];
     visited[seed] = true;
 
