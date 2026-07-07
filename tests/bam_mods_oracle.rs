@@ -707,3 +707,169 @@ fn infer_on_ubam_preserves_mm_ml() {
          (else the comparison above could trivially pass empty-vs-empty)"
     );
 }
+
+// --- Task 2: a FILTERED sibling segment must not corrupt the kept segment's
+// MM/ML ----------------------------------------------------------------
+//
+// Task 1 moved segment filtering to run AFTER adapter splitting. This is the
+// gap that review flagged: when an interior adapter splits a read into a
+// kept segment plus a segment that then gets filtered (sub `-l`), the kept
+// segment's MM/ML must stay in exactly the same register as if the filtered
+// sibling had never existed -- `reconstruct_mods`/`reconstruct_record` must
+// not be perturbed by a sibling segment that never reaches output.
+
+/// The 12bp KEPT flank: identical to `write_fixture`'s pattern (C at indices
+/// 1,4,7,10), so the mod tag below is a known-good fixture already proven
+/// correct by `trimmed_output_mods_match_oracle` above.
+const KEPT_FLANK: &[u8] = b"ACGGCGGCGGCG";
+/// 16bp interior adapter, G/T only -- can't spuriously match the all-A/C
+/// flanks, and matches the same adapter `tests/adapter_cli.rs`'s naming test
+/// uses.
+const SPLIT_ADAPTER: &[u8] = b"GGGGTTTTGGGGTTTT";
+/// 4bp sibling segment, below `-l 5` -- gets filtered post-split. No `C`, so
+/// it can't perturb `KEPT_FLANK`'s C-occurrence indexing even though MM
+/// encodes modified occurrences over the whole original read.
+const SHORT_FLANK: &[u8] = b"TTTT";
+
+/// Write a one-record uBAM: `seq`, quality 40 throughout, and `KEPT_FLANK`'s
+/// mod tag (`C+m,0,1,0;` / ML `[250,5,200]`, MN = `seq.len()`) — reused
+/// verbatim across both fixtures below so the ONLY difference between them is
+/// whether the adapter + short sibling are physically present in the read.
+fn write_mods_fixture(path: &Path, seq: &[u8]) {
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
+    w.write_header(&header).unwrap();
+
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = Flags::UNMAPPED;
+    *rec.name_mut() = Some(b"r1".to_vec().into());
+    let seq_len = seq.len();
+    *rec.sequence_mut() = seq.to_vec().into();
+    *rec.quality_scores_mut() = vec![40u8; seq_len].into();
+    let data = rec.data_mut();
+    data.insert(
+        Tag::BASE_MODIFICATIONS,
+        Value::String(b"C+m,0,1,0;".to_vec().into()),
+    );
+    data.insert(
+        Tag::BASE_MODIFICATION_PROBABILITIES,
+        Value::Array(Array::UInt8(vec![250, 5, 200])),
+    );
+    data.insert(
+        Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
+        Value::Int32(seq_len as i32),
+    );
+    w.write_alignment_record(&header, &rec).unwrap();
+    w.try_finish().unwrap();
+}
+
+/// The kept segment's MM/ML, decoded from a real interior-adapter split where
+/// its sibling gets filtered post-trim, must be byte-for-byte the same
+/// oracle-decoded set as the SAME 12bp flank run through whittle completely
+/// on its own -- i.e. "identical to the same read where the short piece
+/// simply didn't exist". Any register shift (an off-by-N in the slice bounds
+/// `reconstruct_mods` uses, or the filtered sibling leaking into the kept
+/// segment's tags) would show up as a decoded-position/qual mismatch here.
+#[test]
+fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Split scenario: KEPT_FLANK + interior adapter + a 4bp sibling that -l 5
+    // filters post-split.
+    let mut split_seq = KEPT_FLANK.to_vec();
+    split_seq.extend_from_slice(SPLIT_ADAPTER);
+    split_seq.extend_from_slice(SHORT_FLANK);
+    let split_in = dir.path().join("split_in.ubam");
+    let split_out = dir.path().join("split_out.ubam");
+    write_mods_fixture(&split_in, &split_seq);
+
+    // Reference: the short sibling (and the adapter) simply never existed --
+    // just the 12bp kept flank, same mod tag, run with no adapter config.
+    let solo_in = dir.path().join("solo_in.ubam");
+    let solo_out = dir.path().join("solo_out.ubam");
+    write_mods_fixture(&solo_in, KEPT_FLANK);
+
+    let mut fa = tempfile::NamedTempFile::new().unwrap();
+    {
+        use std::io::Write as _;
+        writeln!(fa, ">mid\n{}", std::str::from_utf8(SPLIT_ADAPTER).unwrap()).unwrap();
+    }
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "--in-format",
+            "bam",
+            "--out-format",
+            "bam",
+            "-i",
+            split_in.to_str().unwrap(),
+            "-o",
+            split_out.to_str().unwrap(),
+            "--adapter-fasta",
+            fa.path().to_str().unwrap(),
+            "--adapter-error-rate",
+            "0.1",
+            "--adapter-end-size",
+            "1",
+            "-l",
+            "5",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "--in-format",
+            "bam",
+            "--out-format",
+            "bam",
+            "-i",
+            solo_in.to_str().unwrap(),
+            "-o",
+            solo_out.to_str().unwrap(),
+            "-l",
+            "5",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    // Exactly one record survives the split (the 4bp sibling was filtered),
+    // and it kept its PRODUCED index (option-b naming: produced == 2, so
+    // even the lone survivor is suffixed) -- confirms this is really
+    // decoding the split scenario's kept segment, not something else.
+    let split_names = read_bam_seqs(&split_out);
+    assert_eq!(
+        split_names.len(),
+        1,
+        "the 4bp sibling must be filtered, not written"
+    );
+    assert!(
+        split_names.contains_key("r1_segment_1"),
+        "kept segment must keep its produced index: {:?}",
+        split_names.keys().collect::<Vec<_>>()
+    );
+
+    let split_mods = hts_mods(&split_out);
+    let solo_mods = hts_mods(&solo_out);
+    let mut a = split_mods.clone();
+    let mut b = solo_mods.clone();
+    a.sort();
+    b.sort();
+    assert_eq!(
+        a, b,
+        "the kept segment's MM/ML must be identical to the same 12bp flank \
+         run as if the filtered sibling never existed: split={split_mods:?} solo={solo_mods:?}"
+    );
+    assert!(
+        a.len() >= 3,
+        "sanity: must decode all 3 modified positions, not an empty-vs-empty pass: {a:?}"
+    );
+}

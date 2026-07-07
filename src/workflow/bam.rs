@@ -637,6 +637,14 @@ where
                         }
                     },
                     Err(e) => {
+                        // `input_reads`/`input_bases` were already bumped above with no
+                        // matching `reads_with_output`/`reads_no_output` bump for this
+                        // read — safe only because capturing the error here means this
+                        // whole function returns `Err` below before `counters.snapshot()`
+                        // ever runs, so its two-level invariant assert never sees this
+                        // read as unaccounted for. A future refactor that let this error
+                        // fall through to a `snapshot()` call would need to bump one of
+                        // the two read-level counters here first.
                         let mut g = proc_err.lock().unwrap();
                         if g.is_none() {
                             *g = Some(e);
