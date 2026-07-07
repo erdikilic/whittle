@@ -163,11 +163,17 @@ fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
     ranked
 }
 
-/// Number of distinct `windows` (capped at `RECOUNT_WINDOWS`) with >=1 forward
-/// approximate occurrence of `kmer` (edit distance <= `max_edits`). Each window
-/// counts at most once, even if `kmer` occurs in it multiple times. `searcher`
-/// must be forward-only (see `new_searcher_fwd`) so a window's own reverse-
-/// complement can't inflate the count.
+/// Number of distinct `windows` with >=1 forward approximate occurrence of
+/// `kmer` (edit distance <= `max_edits`). Each window counts at most once,
+/// even if `kmer` occurs in it multiple times. `searcher` must be
+/// forward-only (see `new_searcher_fwd`) so a window's own reverse-complement
+/// can't inflate the count. Callers are responsible for capping `windows` to
+/// `RECOUNT_WINDOWS` beforehand (see `assemble`'s `recount` sample) -- this
+/// function no longer truncates internally, so it counts over whatever slice
+/// it's handed (Bug 1: a `.take(RECOUNT_WINDOWS)` here silently limited every
+/// caller to the FIRST N windows, biasing both the per-k-mer reweight and the
+/// whole-consensus support toward whatever happened to come first in the
+/// sample).
 fn two_error_freq(
     searcher: &mut DnaSearcher,
     kmer: &[u8],
@@ -175,7 +181,7 @@ fn two_error_freq(
     max_edits: usize,
 ) -> u32 {
     let mut present = 0u32;
-    for &wnd in windows.iter().take(RECOUNT_WINDOWS) {
+    for &wnd in windows {
         if !hits(searcher, kmer, wnd, max_edits).is_empty() {
             present += 1; // per-window presence, counted once
         }
@@ -409,7 +415,17 @@ fn merge_both_ends(
             .position(|(j, t)| !three_used[j] && same_adapter(f, t, error_rate))
         {
             three_used[j] = true;
-            out.push((f.clone(), End::Both));
+            // Keep the LONGER of the two matched reconstructions (Bug 5): a
+            // shorter/truncated recovery at one end shouldn't win just
+            // because it's the 5' one -- the matcher searches both strands,
+            // so orientation is fine either way. Tie -> keep 5' (arbitrary
+            // but deterministic).
+            let kept = if three[j].len() > f.len() {
+                three[j].clone()
+            } else {
+                f.clone()
+            };
+            out.push((kept, End::Both));
         } else {
             out.push((f.clone(), End::Five));
         }
@@ -453,25 +469,59 @@ fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f
     named
 }
 
+/// Deterministically sample <= `cap` windows spread across the WHOLE slice
+/// (stride, not the first `cap`) so the recount/support frame isn't order-
+/// biased (Bug 1: see `assemble`'s `recount` sample below). If `windows.len()
+/// <= cap`, returns every window, in order (step == 1).
+fn stride_sample<'a>(windows: &[&'a [u8]], cap: usize) -> Vec<&'a [u8]> {
+    let step = windows.len().div_ceil(cap.max(1)).max(1);
+    windows.iter().step_by(step).copied().collect()
+}
+
 /// One end's workflow: count -> reweight by 2-error freq -> peel -> drop-trim.
 /// Returns (trimmed consensus, support) candidates for this end.
 fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
     if windows.len() < 3 {
         return Vec::new();
     }
+    // Uppercase owned copies (Bug 2): `encode_kmer` (and the sassy matcher
+    // used by `two_error_freq` below) only recognize uppercase ACGT, so a
+    // lowercase FASTQ contributed zero k-mers here and silently discovered
+    // nothing. Normalizing once, up front, fixes k-mer counting AND every
+    // downstream approximate search in this function. Local to inference
+    // only -- this does not touch the records flowing through the trim
+    // pipeline, which are separate copies (see `discover`'s caller in
+    // `maybe_reduce_adapters`, which passes borrowed slices of the original
+    // records; `assemble` never writes back into them).
+    let upper: Vec<Vec<u8>> = windows.iter().map(|w| w.to_ascii_uppercase()).collect();
+    let windows: Vec<&[u8]> = upper.iter().map(Vec::as_slice).collect();
+    let windows = windows.as_slice();
+
     let exact = top_kmers(windows, KMER_K, TOP_KMERS);
     if exact.is_empty() {
         return Vec::new();
     }
+    // Deterministic stride across the WHOLE window set, capped at
+    // RECOUNT_WINDOWS (Bug 1): the 2-error recount and whole-consensus
+    // support below used to look only at `windows`'s first RECOUNT_WINDOWS
+    // entries, so a real adapter that only showed up after that prefix (e.g.
+    // the first 4000 reads clean, the rest carrying the adapter) was
+    // invisible to both signals -- 0 discovered, adapter left untrimmed.
+    // Striding across the full set instead samples proportionally from
+    // start to end, so no read range is structurally excluded. `top_kmers`
+    // above still ranks over ALL windows -- only the recount/support sample
+    // is capped, for cost.
+    let recount = stride_sample(windows, RECOUNT_WINDOWS);
+    let n_recount = recount.len();
+
     let mut fwd = crate::adapter::search::new_searcher_fwd();
-    let n_recount = windows.len().min(RECOUNT_WINDOWS);
     let weighted: Vec<(u64, u32)> = exact
         .iter()
         .map(|&(code, _)| {
             let kmer = decode_kmer(code, KMER_K);
             (
                 code,
-                two_error_freq(&mut fwd, &kmer, windows, RECOUNT_EDITS),
+                two_error_freq(&mut fwd, &kmer, &recount, RECOUNT_EDITS),
             )
         })
         .filter(|&(_, w)| w > 0)
@@ -482,15 +532,16 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
         if trimmed.len() < MIN_PATTERN_LEN {
             continue;
         }
-        // Whole-consensus presence: what fraction of sampled end-windows
-        // actually contain this trimmed consensus (within an error budget
-        // scaled to its own length), reusing the same forward searcher and
-        // the same per-window presence counter (`two_error_freq`) already
-        // used to reweight individual k-mers above. Unlike a per-position
-        // profile statistic, this can't be dragged down by an internal
-        // low-weight pocket inside an otherwise-correct reconstruction.
+        // Whole-consensus presence: what fraction of the same recount
+        // sample actually contains this trimmed consensus (within an error
+        // budget scaled to its own length), reusing the same forward
+        // searcher and the same per-window presence counter
+        // (`two_error_freq`) already used to reweight individual k-mers
+        // above. Unlike a per-position profile statistic, this can't be
+        // dragged down by an internal low-weight pocket inside an otherwise-
+        // correct reconstruction.
         let k_cons = (base.error_rate * trimmed.len() as f64).floor() as usize;
-        let present = two_error_freq(&mut fwd, &trimmed, windows, k_cons);
+        let present = two_error_freq(&mut fwd, &trimmed, &recount, k_cons);
         let support = present as f64 / n_recount as f64;
         out.push((trimmed, support));
     }
@@ -739,6 +790,30 @@ mod tests {
     }
 
     #[test]
+    fn merge_keeps_longer_of_matched_both_end_pair() {
+        // Bug 5 regression: `merge_both_ends` used to always keep the 5'
+        // sequence for a folded `End::Both` pair, even when the 3'
+        // reconstruction was longer/cleaner (more specific -- e.g. the 5'
+        // recovery only assembled a truncated core of the adapter while the
+        // 3' end recovered the full-length sequence). The matcher searches
+        // both strands, so orientation is fine either way; the LONGER of the
+        // two matched reconstructions must be kept, not whichever end
+        // happened to be scanned first.
+        let core = b"ACGTACGTACGTACGT".to_vec(); // 16bp truncated core (>= MIN_PATTERN_LEN)
+        let mut longer = b"TT".to_vec();
+        longer.extend_from_slice(&core);
+        longer.extend_from_slice(b"TT"); // 20bp: `core` is an exact substring, so same_adapter-equal
+        let five = vec![core.clone()];
+        let three = vec![longer.clone()];
+        let merged = merge_both_ends(five, three, 0.2);
+        assert_eq!(
+            merged,
+            vec![(longer, End::Both)],
+            "the longer (3') reconstruction must be kept, not the shorter 5' core"
+        );
+    }
+
+    #[test]
     fn name_against_matches_catalog_entry() {
         let refs = vec![Adapter {
             name: "SQK-TEST".into(),
@@ -943,6 +1018,177 @@ mod tests {
         assert!(
             found.is_empty(),
             "no spurious adapter in clean reads (got {found:?})"
+        );
+    }
+
+    #[test]
+    fn stride_sample_is_identity_when_within_cap() {
+        // len <= cap: every window is returned, in order (step == 1).
+        let a: &[u8] = b"A";
+        let b: &[u8] = b"C";
+        let c: &[u8] = b"G";
+        let windows: Vec<&[u8]> = vec![a, b, c];
+        assert_eq!(stride_sample(&windows, 4), windows);
+    }
+
+    #[test]
+    fn stride_sample_spans_the_whole_range_not_just_a_prefix() {
+        // 13 distinct one-byte windows, cap=4. A `.take(cap)` bug would only
+        // ever see indices 0..4 (the first third); the real stride
+        // (step = ceil(13/4) = 4) must reach into the last third instead.
+        let bytes: Vec<u8> = (0..13u8).map(|i| b'A' + i).collect();
+        let windows: Vec<&[u8]> = bytes.iter().map(std::slice::from_ref).collect();
+        let sampled = stride_sample(&windows, 4);
+        assert!(sampled.len() <= 4);
+        // Expected indices: 0, 4, 8, 12.
+        assert_eq!(
+            sampled,
+            vec![windows[0], windows[4], windows[8], windows[12]]
+        );
+        let last_idx = 12usize; // where the last sampled window actually lives
+        assert!(
+            last_idx >= (13usize * 2).div_ceil(3),
+            "last sampled window must fall in the last third of the range, not a prefix"
+        );
+        assert_eq!(*sampled.last().unwrap(), windows[last_idx]);
+    }
+
+    // Slow (~64-75s: builds an 8001-read fixture to exceed RECOUNT_WINDOWS),
+    // so it's gated out of the default suite the same way
+    // `bam_mods_oracle.rs`'s real-uBAM oracle sweeps are gated (#[ignore]),
+    // and run on demand instead:
+    //   cargo test --lib discover_is_not_order_biased_by_recount_window_cap -- --ignored
+    // The fast `stride_sample_*` unit tests above cover the striding logic
+    // itself (same helper, same cap semantics) on every default `cargo
+    // test`; this is the on-demand end-to-end regression check that the
+    // same behavior holds through the full `discover` pipeline.
+    #[test]
+    #[ignore]
+    fn discover_is_not_order_biased_by_recount_window_cap() {
+        // Bug 1 regression: pre-fix, `two_error_freq`'s reweight/support
+        // recount only ever looked at `windows.iter().take(RECOUNT_WINDOWS)`
+        // (the first 4000 windows). A planted adapter that only shows up
+        // AFTER the first `RECOUNT_WINDOWS` reads was therefore invisible to
+        // both the per-k-mer reweight and the whole-consensus support --
+        // surfacing 0 discovered adapters even though the adapter is
+        // present, unambiguously, in about half the sample.
+        //
+        // Fixture: `RECOUNT_WINDOWS + 1` (4001) clean (splitmix64
+        // background, no adapter) reads FIRST, then `RECOUNT_WINDOWS` (4000)
+        // reads carrying an exact copy of the planted adapter. A
+        // `.take(RECOUNT_WINDOWS)` recount sees ONLY the clean prefix --
+        // zero adapter evidence -- while a deterministic stride across the
+        // whole 8001-read set sees the adapter in about half of the strided
+        // sample, comfortably above `KEEP_SUPPORT` (0.30).
+        let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT"; // 28bp, same as the other discover_* fixtures
+        let n_clean = RECOUNT_WINDOWS + 1; // 4001: exceeds the old hard cutoff
+        let n_planted = RECOUNT_WINDOWS; // 4000
+
+        // Deterministic non-periodic background, same splitmix64 mix used
+        // throughout this file's other `discover_*` fixtures.
+        let splitmix_tail = |i: usize, len: usize| -> Vec<u8> {
+            let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+            let mut out = Vec::with_capacity(len);
+            for _ in 0..len {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                out.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+            }
+            out
+        };
+
+        let mut owned: Vec<Vec<u8>> = Vec::with_capacity(n_clean + n_planted);
+        for i in 0..n_clean {
+            owned.push(splitmix_tail(i, 40)); // pure background, no adapter
+        }
+        for i in 0..n_planted {
+            let mut read = adapter.to_vec();
+            read.extend(splitmix_tail(n_clean + i, 12));
+            owned.push(read);
+        }
+        let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let base = AdapterConfig {
+            adapters: vec![],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let found = discover(&sample, &base);
+        assert!(
+            !found.is_empty(),
+            "adapter present in a clear majority of reads after the first \
+             RECOUNT_WINDOWS must still be discovered, not hidden by a \
+             first-N window cap (got {found:?})"
+        );
+        let mut s = new_searcher();
+        let k = (0.25 * adapter.len() as f64).ceil() as usize;
+        assert!(
+            found.iter().any(|d| {
+                !hits(&mut s, &d.adapter.seq, adapter, k).is_empty()
+                    || !hits(&mut s, adapter, &d.adapter.seq, k).is_empty()
+            }),
+            "discovered adapter(s) must include one within ~25% edit distance \
+             of the planted adapter: {found:?}"
+        );
+    }
+
+    #[test]
+    fn discover_recovers_planted_adapter_from_lowercase_reads() {
+        // Bug 2 regression: `encode_kmer` only accepts uppercase ACGT, so a
+        // lowercase FASTQ (the owner reproduced this with 500 lowercase
+        // reads) contributes zero k-mers here -- `top_kmers` comes back
+        // empty and `assemble` bails out immediately, discovering nothing.
+        // `assemble` must normalize its windows to uppercase before doing
+        // anything else.
+        let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT"; // 28bp
+        let mut owned: Vec<Vec<u8>> = Vec::new();
+        for i in 0..500usize {
+            let mut read = adapter.to_vec();
+            let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+            for _ in 0..120usize {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+            }
+            // Lowercase the WHOLE read (adapter included) -- the exact bug
+            // scenario is a lowercase FASTQ, not a mixed-case one.
+            let lower: Vec<u8> = read.iter().map(u8::to_ascii_lowercase).collect();
+            owned.push(lower);
+        }
+        let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let base = AdapterConfig {
+            adapters: vec![],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+        };
+        let found = discover(&sample, &base);
+        assert!(
+            !found.is_empty(),
+            "lowercase reads must still be inferable (got {found:?})"
+        );
+        let top = &found[0];
+        let mut s = new_searcher();
+        let k = (0.25 * adapter.len() as f64).ceil() as usize;
+        assert!(
+            !hits(&mut s, &top.adapter.seq, adapter, k).is_empty()
+                || !hits(&mut s, adapter, &top.adapter.seq, k).is_empty(),
+            "discovered adapter (seq {:?}) must be within ~25% edit distance \
+             of the (uppercase) planted adapter",
+            String::from_utf8_lossy(&top.adapter.seq)
+        );
+        // The discovered sequence itself must be valid uppercase ACGT, not
+        // carrying any lowercase byte through from the input.
+        assert!(
+            top.adapter.seq.iter().all(u8::is_ascii_uppercase),
+            "discovered sequence must be uppercase: {:?}",
+            String::from_utf8_lossy(&top.adapter.seq)
         );
     }
 }

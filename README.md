@@ -192,6 +192,8 @@ See **The MM/ML/ML guarantee** below.
 | `--adapter-end-size <N>` | Bases at each read end searched for a terminal adapter (default 150) |
 | `--adapter-ends-only` | Trim adapters at read ends only; never split on an interior adapter |
 | `--adapter-sample <N>` | Opt-in speed optimization: reads to sample (the first N, not random) for adapter presence detection with `--adapter-preset`; trimming then runs only against adapters actually found in the sample (faster, fewer spurious trims), falling back to the full set if detection finds none. **Default `0`: detection is off and every run trims against the full configured set** (always correct). Set to a value >= 100 to opt in (anything from 1-99 is rejected at startup — smaller samples are too few for reliable detection). Always forced back to `0` when `--adapter-fasta` is given — a custom FASTA is searched in full (a WARN is printed if you also pass a positive `--adapter-sample` in that case, since it's ignored). Separately, an input that supplies fewer than 100 reads to sample skips detection and uses the full set, regardless of this setting. Under `--adapter-infer`/`--adapter-infer-only`, this instead sizes the ab-initio discovery buffer (default 40000); its per-adapter presence-support signal saturates at 4000 read-end windows, so sampling more than ~4000 reads doesn't strengthen support — it only widens the k-mer ranking pass |
+| `--adapter-infer` | Discover adapters de novo (ab-initio, Porechop_ABI-style k-mer assembly) from a sampled read prefix, then trim using only the discovered set — ignores `--adapter-preset` for trimming, and is mutually exclusive with `--adapter-fasta`. See **Adapter trimming** below |
+| `--adapter-infer-only` | Like `--adapter-infer`, but only discovers and prints each adapter (sequence + support + catalog/FASTA cross-name) to stdout as FASTA, then exits without trimming or touching the output at all. May be combined with `--adapter-fasta` for cross-naming |
 | `-v`, `-vv` | Increase logging detail: `-v` = debug, `-vv` = trace (default: info). See **Logging & progress** below |
 | `--quiet` | Silence progress and the info-level summary; warnings and errors still print |
 
@@ -378,12 +380,12 @@ needed). Building `whittle` requires Rust >= 1.91.
   flag on every record and errors out (naming the offending read) if it
   finds an aligned one. There is no support for trimming alignments in
   place, adjusting CIGAR/POS, or otherwise handling mapped reads.
-- **No contamination filtering or ab-initio adapter detection.** Adapter
-  trimming (`-a`/`--adapter-preset`, see **Adapter trimming** above) matches
-  a known catalog by approximate search; there is no minimap2-based
-  host-contamination screen, and `whittle` does not infer unrecognized
-  adapter sequences or auto-detect adapter presence (unlike e.g.
-  Porechop_ABI).
+- **No contamination filtering.** There is no minimap2-based
+  host-contamination screen. (Ab-initio adapter *detection* is no longer a
+  gap: `--adapter-infer`/`--adapter-infer-only`, see **Adapter trimming**
+  above, discovers unrecognized adapter sequences de novo from a read
+  sample, Porechop_ABI-style, on top of the known-catalog matching
+  `-a`/`--adapter-preset` already provided.)
 - **No FASTQ→BAM conversion.** FASTQ in, BAM out is explicitly rejected —
   there's no header/tags to build a BAM record from a bare FASTQ read. The
   reverse, BAM→FASTQ, *is* supported; see [Format conversion](#format-conversion)

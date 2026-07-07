@@ -708,6 +708,39 @@ fn infer_only_prints_and_does_not_trim() {
     );
 }
 
+// Bug 3 regression: CLI help promises `--adapter-infer-only` prints
+// "sequences + support + catalog names", but pre-fix `log_discovered` only
+// ever logged the sequence at `debug!` -- invisible at the default INFO
+// level -- so plain `--adapter-infer-only` stdout was completely empty.
+// Report-only must print each discovered adapter to stdout as a FASTA
+// record (header + sequence line), so a user can redirect stdout straight
+// into an adapter FASTA of their own.
+#[test]
+fn infer_only_prints_sequence_to_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq(dir.path(), 500);
+    let mut cmd = Command::cargo_bin("whittle").unwrap();
+    cmd.env_remove("WHITTLE_LOG");
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "--adapter-infer-only",
+        "-t",
+        "1",
+    ]);
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains(PLANTED_ADAPTER),
+        "stdout must contain the discovered adapter's actual bases, not just \
+         its name/support: {stdout}"
+    );
+    assert!(
+        stdout.trim_start().starts_with('>'),
+        "stdout must be FASTA (header line starting with '>'): {stdout}"
+    );
+}
+
 // FU3: report-only cross-names discovered adapters against the ONT catalog
 // UNION the user's --adapter-fasta, not the catalog alone.
 //
@@ -1059,4 +1092,67 @@ fn infer_warns_on_marginal_support() {
         stderr.contains("marginal"),
         "a support just above KEEP_SUPPORT must be flagged marginal: {stderr}"
     );
+}
+
+// --- Bug 4: the binary-stdout TTY guard must not run before report-only's
+// early exit -------------------------------------------------------------
+//
+// `guard_stdout_binary` used to run during output setup, BEFORE
+// `maybe_reduce_adapters`'s `ReportOnly` early-exit, so `whittle -i
+// reads.bam --adapter-infer-only` on a terminal was refused ("would write
+// BAM to terminal") even though report-only writes no BAM at all -- it only
+// ever prints a small FASTA text summary to stdout. The fix makes
+// `guard_stdout_binary` itself exempt `AdapterInfer::ReportOnly`.
+//
+// This process's stdout is piped (not a terminal) under the test harness,
+// so the guard's TTY check would never actually fire here regardless of the
+// fix -- the real regression can only be exercised on a real terminal (see
+// the fix's doc comment in `src/lib.rs` for the code-inspection argument).
+// This is the "cheap assertion" fallback: a sanity check that report-only
+// with a BAM input (which resolves `out_fmt` to `Bam`, the same format the
+// guard used to hard-error on) and no `-o` still completes successfully end
+// to end, rather than tripping over some other BAM-specific issue in the
+// report-only path.
+fn write_minimal_ubam(path: &std::path::Path, n: usize) {
+    use noodles_bam as bam;
+    use noodles_sam::alignment::RecordBuf;
+    use noodles_sam::alignment::io::Write as _;
+    use noodles_sam::alignment::record::Flags;
+    use noodles_sam::{self as sam};
+
+    let header = sam::Header::default();
+    let file = std::fs::File::create(path).unwrap();
+    let mut writer = bam::io::Writer::new(file);
+    writer.write_header(&header).unwrap();
+    for i in 0..n {
+        let seq = full_read_seq(i);
+        let mut r = RecordBuf::default();
+        *r.flags_mut() = Flags::UNMAPPED;
+        *r.name_mut() = Some(format!("r{i}").into_bytes().into());
+        let qual = vec![40u8; seq.len()];
+        *r.sequence_mut() = seq.into();
+        *r.quality_scores_mut() = qual.into();
+        writer.write_alignment_record(&header, &r).unwrap();
+    }
+    writer.try_finish().unwrap();
+}
+
+#[test]
+fn infer_only_on_bam_input_with_piped_stdout_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("in.bam");
+    write_minimal_ubam(&in_path, 500);
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            in_path.to_str().unwrap(),
+            "--adapter-infer-only",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success();
 }
