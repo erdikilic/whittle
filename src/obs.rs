@@ -327,7 +327,11 @@ impl ProgressHandle {
             tracing::info!("{}", line);
         }
 
-        if let Some(line) = no_output_line(stats) {
+        if let Some(line) = trimmed_to_nothing_line(stats) {
+            tracing::info!("{}", line);
+        }
+
+        if let Some(line) = all_filtered_line(stats) {
             tracing::info!("{}", line);
         }
 
@@ -536,20 +540,37 @@ fn bases_line(stats: &Stats) -> Option<String> {
     ))
 }
 
-/// The end-of-run read-level "no surviving output" line, shown right after
-/// `Bases:`: `No output: 1,234 input reads produced no surviving segment`.
-/// Replaces the old single "Dropped:" line's read-level half — this now
-/// covers every reason a read ends up with zero output (empty read, fully
-/// consumed by adapter trimming, or every produced segment filtered), since
-/// per-segment filtering means a read is never "the" dropped reason anymore.
-/// `None` when every input read produced at least one surviving segment.
-fn no_output_line(stats: &Stats) -> Option<String> {
-    if stats.reads_no_output == 0 {
+/// The end-of-run read-level "no segments at all" line, shown right after
+/// `Bases:`: `Trimmed to nothing: 1,234 input reads produced no segments at
+/// all`. Covers the reads for which `trim::apply` returned no intervals to
+/// even run the per-segment filter over — an empty read, a read fully
+/// consumed by adapter trimming, or an over-crop. Distinct from
+/// `all_filtered_line`, which covers reads that DID produce segments but had
+/// every one of them filtered. `None` when no input read was trimmed to
+/// nothing.
+fn trimmed_to_nothing_line(stats: &Stats) -> Option<String> {
+    if stats.reads_trimmed_to_nothing == 0 {
         return None;
     }
     Some(format!(
-        "No output: {} input reads produced no surviving segment",
-        commas(stats.reads_no_output)
+        "Trimmed to nothing: {} input reads produced no segments at all",
+        commas(stats.reads_trimmed_to_nothing)
+    ))
+}
+
+/// The end-of-run read-level "every segment filtered" line, shown right after
+/// `trimmed_to_nothing_line`: `All segments filtered: 567 input reads had
+/// every produced segment filtered`. Covers reads that DID produce at least
+/// one segment (unlike `trimmed_to_nothing_line`) but had every one of them
+/// rejected by post-trim `filter::check`. `None` when no input read had all
+/// of its segments filtered.
+fn all_filtered_line(stats: &Stats) -> Option<String> {
+    if stats.reads_all_filtered == 0 {
+        return None;
+    }
+    Some(format!(
+        "All segments filtered: {} input reads had every produced segment filtered",
+        commas(stats.reads_all_filtered)
     ))
 }
 
@@ -977,20 +998,37 @@ mod tests {
     }
 
     #[test]
-    fn no_output_line_reports_read_level_count() {
+    fn trimmed_to_nothing_line_reports_read_level_count() {
         let stats = Stats {
-            reads_no_output: 42,
+            reads_trimmed_to_nothing: 42,
             ..Default::default()
         };
         assert_eq!(
-            no_output_line(&stats).unwrap(),
-            "No output: 42 input reads produced no surviving segment"
+            trimmed_to_nothing_line(&stats).unwrap(),
+            "Trimmed to nothing: 42 input reads produced no segments at all"
         );
     }
 
     #[test]
-    fn no_output_line_omitted_when_zero() {
-        assert_eq!(no_output_line(&Stats::default()), None);
+    fn trimmed_to_nothing_line_omitted_when_zero() {
+        assert_eq!(trimmed_to_nothing_line(&Stats::default()), None);
+    }
+
+    #[test]
+    fn all_filtered_line_reports_read_level_count() {
+        let stats = Stats {
+            reads_all_filtered: 7,
+            ..Default::default()
+        };
+        assert_eq!(
+            all_filtered_line(&stats).unwrap(),
+            "All segments filtered: 7 input reads had every produced segment filtered"
+        );
+    }
+
+    #[test]
+    fn all_filtered_line_omitted_when_zero() {
+        assert_eq!(all_filtered_line(&Stats::default()), None);
     }
 
     #[test]

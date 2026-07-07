@@ -1334,11 +1334,16 @@ fn produced_index_naming_end_to_end() {
 }
 
 /// Accounting/summary end-to-end: a mix of clean reads, a chimera with one
-/// sub-`-l` half, an all-adapter read (fully consumed by terminal trimming,
-/// so `trim::apply` produces zero segments), and an empty read. Exercises the
-/// two-level counter model (Task 1) through the real binary's rendered
-/// summary (`obs.rs`'s `Summary:`/`No output:`/`Segments dropped:` lines), not
-/// just the `Counters`/`Stats` unit tests in `src/workflow/mod.rs`.
+/// sub-`-l` half, an all-adapter read (fully consumed by terminal trimming, so
+/// `trim::apply` produces zero segments), an empty read, and a read whose sole
+/// produced segment is itself too short. Exercises the three-way read-level
+/// counter split (Fix #2) through the real binary's rendered summary
+/// (`obs.rs`'s `Summary:`/`Trimmed to nothing:`/`All segments filtered:`/
+/// `Segments dropped:` lines), not just the `Counters`/`Stats` unit tests in
+/// `src/workflow/mod.rs`. In particular it distinguishes the all-adapter/empty
+/// reads (`reads_trimmed_to_nothing` — no segments produced at all) from the
+/// short-only read (`reads_all_filtered` — one segment produced, then
+/// filtered).
 #[test]
 fn accounting_summary_end_to_end() {
     let adapter = "GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
@@ -1362,10 +1367,17 @@ fn accounting_summary_end_to_end() {
     .unwrap();
     // All-adapter: the read IS the adapter -- terminal trimming consumes the
     // whole thing, so `trim::apply` produces zero segments (no segment-level
-    // drop; the per-segment filter loop never runs).
+    // drop; the per-segment filter loop never runs) -> reads_trimmed_to_nothing.
     writeln!(fq, "@alladapter\n{adapter}\n+\n{}", "I".repeat(20)).unwrap();
-    // Empty read: 0-length SEQ/QUAL, not silently skipped from accounting.
+    // Empty read: 0-length SEQ/QUAL, not silently skipped from accounting ->
+    // also reads_trimmed_to_nothing.
     write!(fq, "@empty\n\n+\n\n").unwrap();
+    // Short-only: no adapter present, no split -- trim::apply returns the
+    // whole (untrimmed) 3bp read as its single produced segment, which the
+    // length filter then rejects -> reads_all_filtered (distinct from
+    // reads_trimmed_to_nothing: a segment WAS produced, just not one that
+    // survived).
+    writeln!(fq, "@shortonly\n{}\n+\n{}", "A".repeat(3), "I".repeat(3)).unwrap();
 
     let res = Command::cargo_bin("whittle")
         .unwrap()
@@ -1388,21 +1400,26 @@ fn accounting_summary_end_to_end() {
         .success();
     let stderr = String::from_utf8_lossy(&res.get_output().stderr);
 
-    // Read level: 5 input reads; 3 produced output (2 clean + the chimera's
-    // surviving half); 2 produced none (the fully-consumed adapter read, the
-    // empty read) -- the two-level invariant (`reads_with_output +
-    // reads_no_output == input_reads`) holds via `snapshot`'s debug assert.
+    // Read level: 6 input reads; 3 produced output (2 clean + the chimera's
+    // surviving half); 2 trimmed to nothing (the fully-consumed adapter read,
+    // the empty read); 1 with every segment filtered (shortonly) -- the
+    // three-way invariant (`reads_with_output + reads_trimmed_to_nothing +
+    // reads_all_filtered == input_reads`) holds via `snapshot`'s debug assert.
     assert!(
-        stderr.contains("Summary: 5 input reads, 3 output reads"),
-        "input_reads=5, segments written=3: {stderr}"
+        stderr.contains("Summary: 6 input reads, 3 output reads"),
+        "input_reads=6, segments written=3: {stderr}"
     );
     assert!(
-        stderr.contains("No output: 2 input reads produced no surviving segment"),
-        "reads_no_output=2 (alladapter + empty): {stderr}"
+        stderr.contains("Trimmed to nothing: 2 input reads produced no segments at all"),
+        "reads_trimmed_to_nothing=2 (alladapter + empty): {stderr}"
     );
     assert!(
-        stderr.contains("Segments dropped: 1 (1 too short)"),
-        "segments_dropped_short=1 (the chimera's short half): {stderr}"
+        stderr.contains("All segments filtered: 1 input reads had every produced segment filtered"),
+        "reads_all_filtered=1 (shortonly): {stderr}"
+    );
+    assert!(
+        stderr.contains("Segments dropped: 2 (2 too short)"),
+        "segments_dropped_short=2 (the chimera's short half + shortonly's sole segment): {stderr}"
     );
 }
 

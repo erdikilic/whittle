@@ -9,10 +9,10 @@ use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 use rayon::prelude::*;
 
-use super::{Counters, Stats};
+use super::{Counters, Stats, process_read_segments};
 use crate::config::{Config, FastqTags};
 use crate::io::fastq::{format_aux_field, format_mods_aux, write_segment, write_segment_tagged};
-use crate::{filter, mods, trim};
+use crate::{mods, trim};
 
 /// PacBio per-base kinetics tags: one value per SEQ base (`B` arrays), so they
 /// must be sliced in lockstep with the sequence when a read is trimmed. `ip`/`pw`
@@ -513,30 +513,18 @@ fn run_bam_seq(
             malformed_tag_reads += 1;
         }
         let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
-        let total = produced.len();
-        let mut survived = 0usize;
-        let mut out_bases = 0u64;
-        for (idx, (s, e)) in produced.into_iter().enumerate() {
-            let seg_seq = &seq[s..e];
-            let seg_qual = &qual[s..e];
-            if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
-                counters.record_filter_drop(reason);
-                continue;
-            }
-            let out = reconstruct_record(&rec, s, e, total, idx, cfg.update_moves);
-            sink.write_record(header, &out)?;
-            counters.output_reads.fetch_add(1, Ordering::Relaxed);
-            out_bases += (e - s) as u64;
-            survived += 1;
-        }
-        counters
-            .output_bases
-            .fetch_add(out_bases, Ordering::Relaxed);
-        if survived == 0 {
-            counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
-        } else {
-            counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-        }
+        process_read_segments(
+            &produced,
+            &seq,
+            &qual,
+            &cfg.filter,
+            counters,
+            |idx, total, s, e| {
+                let out = reconstruct_record(&rec, s, e, total, idx, cfg.update_moves);
+                sink.write_record(header, &out)?;
+                Ok(())
+            },
+        )?;
     }
     Ok(counters.snapshot(malformed_tag_reads))
 }
@@ -559,11 +547,12 @@ fn run_bam_parallel<T, S, Render, WriteOne>(
 where
     T: Send,
     S: Send,
-    // `Render` returns the surviving segments alongside their total base count
-    // (segments can be `RecordBuf`s or rendered FASTQ byte buffers, so the base
-    // count can't be recovered generically from `T` itself — the caller sums it
-    // from the same intervals it renders from).
-    Render: Fn(&RecordBuf, &Config) -> anyhow::Result<(Vec<T>, u64)> + Sync,
+    // `Render` returns the surviving segments only: per-segment filter/counting
+    // (output_reads/output_bases and the read-level counters) is the shared
+    // `process_read_segments` helper's job, called from inside `render` itself,
+    // so this driver no longer needs to re-derive or re-bump anything from the
+    // returned `Vec<T>`.
+    Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
     WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
 {
     let render_workers = if cfg.render_workers >= 1 {
@@ -619,26 +608,24 @@ where
                     malformed.fetch_add(1, Ordering::Relaxed);
                 }
                 match render(&rec, cfg) {
-                    Ok((items, out_bases)) => {
-                        counters
-                            .output_reads
-                            .fetch_add(items.len() as u64, Ordering::Relaxed);
-                        counters
-                            .output_bases
-                            .fetch_add(out_bases, Ordering::Relaxed);
+                    Ok(items) => {
+                        // output_reads/output_bases and the read-level counters were
+                        // already bumped inside `render`, per segment, by the shared
+                        // `process_read_segments` helper.
                         for it in items {
                             let _ = tx.send(it);
                         }
                     },
                     Err(e) => {
                         // `input_reads`/`input_bases` were already bumped above with no
-                        // matching `reads_with_output`/`reads_no_output` bump for this
-                        // read — safe only because capturing the error here means this
-                        // whole function returns `Err` below before `counters.snapshot()`
-                        // ever runs, so its two-level invariant assert never sees this
-                        // read as unaccounted for. A future refactor that let this error
-                        // fall through to a `snapshot()` call would need to bump one of
-                        // the two read-level counters here first.
+                        // matching `reads_with_output`/`reads_trimmed_to_nothing`/
+                        // `reads_all_filtered` bump for this read — safe only because
+                        // capturing the error here means this whole function returns
+                        // `Err` below before `counters.snapshot()` ever runs, so its
+                        // read-level invariant assert never sees this read as
+                        // unaccounted for. A future refactor that let this error fall
+                        // through to a `snapshot()` call would need to bump one of the
+                        // three read-level counters here first.
                         let mut g = proc_err.lock().unwrap();
                         if g.is_none() {
                             *g = Some(e);
@@ -659,7 +646,7 @@ where
     Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
 }
 
-/// Threads-aware uBAM workflow entry point: refuse aligned reads, filter, trim,
+/// Threads-aware uBAM workflow entry point: refuse aligned reads, trim, filter,
 /// reconstruct. Sequential for `cfg.threads <= 1`; otherwise renders each
 /// record on a rayon work pool and drains the resulting `RecordBuf`s through
 /// `run_bam_parallel`'s bounded channel onto a dedicated writer task. Output
@@ -679,8 +666,8 @@ pub fn run_bam(
         records,
         cfg,
         sink,
-        // render: per-record guards + trim + per-segment filter + reconstruct
-        // survivors -> (Vec<RecordBuf>, output bases)
+        // render: per-record guards + trim, then the shared `process_read_segments`
+        // helper does the per-segment filter + reconstruct survivors -> Vec<RecordBuf>.
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
             let seq = rec.sequence().as_ref().to_vec();
@@ -698,25 +685,19 @@ pub fn run_bam(
                 );
             }
             let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
-            let total = produced.len();
-            let mut items = Vec::with_capacity(total);
-            let mut out_bases = 0u64;
-            for (idx, (s, e)) in produced.into_iter().enumerate() {
-                let seg_seq = &seq[s..e];
-                let seg_qual = &qual[s..e];
-                if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
-                    counters.record_filter_drop(reason);
-                    continue;
-                }
-                items.push(reconstruct_record(rec, s, e, total, idx, cfg.update_moves));
-                out_bases += (e - s) as u64;
-            }
-            if items.is_empty() {
-                counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
-            } else {
-                counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok((items, out_bases))
+            let mut items = Vec::with_capacity(produced.len());
+            process_read_segments(
+                &produced,
+                &seq,
+                &qual,
+                &cfg.filter,
+                counters,
+                |idx, total, s, e| {
+                    items.push(reconstruct_record(rec, s, e, total, idx, cfg.update_moves));
+                    Ok(())
+                },
+            )?;
+            Ok(items)
         },
         // write_one: encode+write on the writer thread (bgzf compress is MT).
         |sink, rec| sink.write_record(header, rec),
@@ -826,40 +807,30 @@ where
         }
         let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
         let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
-        let total = produced.len();
-        let mut survived = 0usize;
-        let mut out_bases = 0u64;
-        for (idx, (s, e)) in produced.into_iter().enumerate() {
-            let seg_seq = &seq[s..e];
-            let seg_qual = &qual[s..e];
-            if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
-                counters.record_filter_drop(reason);
-                continue;
-            }
-            let tags = build_fastq_tags(&rec, &seq, s, e, total, &cfg.fastq_tags);
-            if tags.is_empty() {
-                write_segment(writer, &name, seg_seq, seg_qual, total, idx)?;
-            } else {
-                write_segment_tagged(writer, &name, seg_seq, seg_qual, total, idx, &tags)?;
-            }
-            counters.output_reads.fetch_add(1, Ordering::Relaxed);
-            out_bases += (e - s) as u64;
-            survived += 1;
-        }
-        counters
-            .output_bases
-            .fetch_add(out_bases, Ordering::Relaxed);
-        if survived == 0 {
-            counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
-        } else {
-            counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-        }
+        process_read_segments(
+            &produced,
+            &seq,
+            &qual,
+            &cfg.filter,
+            counters,
+            |idx, total, s, e| {
+                let seg_seq = &seq[s..e];
+                let seg_qual = &qual[s..e];
+                let tags = build_fastq_tags(&rec, &seq, s, e, total, &cfg.fastq_tags);
+                if tags.is_empty() {
+                    write_segment(writer, &name, seg_seq, seg_qual, total, idx)?;
+                } else {
+                    write_segment_tagged(writer, &name, seg_seq, seg_qual, total, idx, &tags)?;
+                }
+                Ok(())
+            },
+        )?;
     }
     Ok(counters.snapshot(malformed_tag_reads))
 }
 
-/// Threads-aware uBAM→FASTQ workflow entry point: refuse aligned reads, filter,
-/// trim, then write each surviving segment as FASTQ with the selected aux tags
+/// Threads-aware uBAM→FASTQ workflow entry point: refuse aligned reads, trim,
+/// filter, then write each surviving segment as FASTQ with the selected aux tags
 /// in the header (MM/ML/MN reconstructed; others verbatim). Sequential for
 /// `cfg.threads <= 1`; otherwise renders each record's FASTQ segments on a
 /// rayon work pool and drains the resulting byte buffers through
@@ -879,8 +850,9 @@ pub fn run_bam_to_fastq<W: Write + Send>(
         records,
         cfg,
         writer,
-        // render: guards + trim + per-segment filter -> (Vec<Vec<u8>>, output
-        // bases) (rendered FASTQ segments, survivors only)
+        // render: guards + trim, then the shared `process_read_segments` helper
+        // does the per-segment filter -> Vec<Vec<u8>> (rendered FASTQ segments,
+        // survivors only).
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
             let seq = rec.sequence().as_ref().to_vec();
@@ -899,32 +871,30 @@ pub fn run_bam_to_fastq<W: Write + Send>(
             }
             let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
             let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
-            let total = produced.len();
-            let mut out = Vec::with_capacity(total);
-            let mut out_bases = 0u64;
-            for (idx, (s, e)) in produced.into_iter().enumerate() {
-                let seg_seq = &seq[s..e];
-                let seg_qual = &qual[s..e];
-                if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
-                    counters.record_filter_drop(reason);
-                    continue;
-                }
-                let tags = build_fastq_tags(rec, &seq, s, e, total, &cfg.fastq_tags);
-                let mut buf = Vec::new();
-                if tags.is_empty() {
-                    write_segment(&mut buf, &name, seg_seq, seg_qual, total, idx)?;
-                } else {
-                    write_segment_tagged(&mut buf, &name, seg_seq, seg_qual, total, idx, &tags)?;
-                }
-                out.push(buf);
-                out_bases += (e - s) as u64;
-            }
-            if out.is_empty() {
-                counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
-            } else {
-                counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok((out, out_bases))
+            let mut out = Vec::with_capacity(produced.len());
+            process_read_segments(
+                &produced,
+                &seq,
+                &qual,
+                &cfg.filter,
+                counters,
+                |idx, total, s, e| {
+                    let seg_seq = &seq[s..e];
+                    let seg_qual = &qual[s..e];
+                    let tags = build_fastq_tags(rec, &seq, s, e, total, &cfg.fastq_tags);
+                    let mut buf = Vec::new();
+                    if tags.is_empty() {
+                        write_segment(&mut buf, &name, seg_seq, seg_qual, total, idx)?;
+                    } else {
+                        write_segment_tagged(
+                            &mut buf, &name, seg_seq, seg_qual, total, idx, &tags,
+                        )?;
+                    }
+                    out.push(buf);
+                    Ok(())
+                },
+            )?;
+            Ok(out)
         },
         // write_one: append rendered bytes to the FastqOut writer.
         |w, buf| w.write_all(buf),
@@ -2035,7 +2005,7 @@ mod tests {
             recs.into_iter(),
             &cfg,
             &mut sink,
-            |_rec, _cfg| anyhow::Ok((vec![()], 0)),
+            |_rec, _cfg| anyhow::Ok(vec![()]),
             |sink, _item: &()| -> io::Result<()> {
                 if sink.written >= sink.limit {
                     return Err(io::Error::new(io::ErrorKind::BrokenPipe, "boom"));
@@ -2109,7 +2079,7 @@ mod tests {
             recs,
             &cfg,
             &mut sink,
-            |_rec, _cfg| anyhow::Ok((vec![()], 0)),
+            |_rec, _cfg| anyhow::Ok(vec![()]),
             |_sink: &mut NullSink, _item: &()| -> io::Result<()> { Ok(()) },
             &Arc::new(Counters::default()),
         );

@@ -4,11 +4,11 @@ use std::sync::atomic::Ordering;
 
 use rayon::prelude::*;
 
-use super::{Counters, Stats};
+use super::{Counters, Stats, process_read_segments};
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
-use crate::{filter, trim};
+use crate::trim;
 
 /// Single-threaded FASTQ workflow: trim -> filter each produced segment -> write
 /// survivors.
@@ -25,61 +25,58 @@ pub fn run_fastq_seq<W: Write>(
             .input_bases
             .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
         let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
-        let total = produced.len();
-        let mut survived = 0usize;
-        let mut out_bases = 0u64;
-        for (idx, (s, e)) in produced.into_iter().enumerate() {
-            let seg_seq = &rec.seq[s..e];
-            let seg_qual = &rec.qual[s..e];
-            if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
-                counters.record_filter_drop(reason);
-                continue;
-            }
-            write_segment(writer, &rec.name, seg_seq, seg_qual, total, idx)?;
-            counters.output_reads.fetch_add(1, Ordering::Relaxed);
-            out_bases += (e - s) as u64;
-            survived += 1;
-        }
-        counters
-            .output_bases
-            .fetch_add(out_bases, Ordering::Relaxed);
-        if survived == 0 {
-            counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
-        } else {
-            counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-        }
+        process_read_segments(
+            &produced,
+            &rec.seq,
+            &rec.qual,
+            &cfg.filter,
+            counters,
+            |idx, total, s, e| {
+                write_segment(
+                    writer,
+                    &rec.name,
+                    &rec.seq[s..e],
+                    &rec.qual[s..e],
+                    total,
+                    idx,
+                )?;
+                Ok(())
+            },
+        )?;
     }
     Ok(counters.snapshot(0))
 }
 
-/// Trim one record, then filter each produced segment, rendering the survivors
-/// into an owned FASTQ byte buffer. Returns the number of segments written and
-/// their total base count, alongside the buffer. Bumps `reads_with_output` /
-/// `reads_no_output` (read level) once for the record, and
-/// `counters.record_filter_drop` (segment level) once per rejected segment.
-fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> (u64, u64, Vec<u8>) {
+/// Trim one record, then filter each produced segment via the shared
+/// `process_read_segments` helper, rendering the survivors into an owned
+/// FASTQ byte buffer. Writing into an in-memory `Vec<u8>` cannot fail, so the
+/// `.expect` below is an assertion, not real error handling — the parallel
+/// caller runs inside a plain `for_each` with no `Result` propagation seam
+/// (see `run_fastq`), matching the pre-refactor `.unwrap()` on the same
+/// write.
+fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> Vec<u8> {
     let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
-    let total = produced.len();
     let mut buf = Vec::new();
-    let mut out = 0u64;
-    let mut out_bases = 0u64;
-    for (idx, (s, e)) in produced.into_iter().enumerate() {
-        let seg_seq = &rec.seq[s..e];
-        let seg_qual = &rec.qual[s..e];
-        if let Some(reason) = filter::check(seg_seq, seg_qual, &cfg.filter) {
-            counters.record_filter_drop(reason);
-            continue;
-        }
-        write_segment(&mut buf, &rec.name, seg_seq, seg_qual, total, idx).unwrap();
-        out += 1;
-        out_bases += (e - s) as u64;
-    }
-    if out == 0 {
-        counters.reads_no_output.fetch_add(1, Ordering::Relaxed);
-    } else {
-        counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-    }
-    (out, out_bases, buf)
+    process_read_segments(
+        &produced,
+        &rec.seq,
+        &rec.qual,
+        &cfg.filter,
+        counters,
+        |idx, total, s, e| {
+            write_segment(
+                &mut buf,
+                &rec.name,
+                &rec.seq[s..e],
+                &rec.qual[s..e],
+                total,
+                idx,
+            )?;
+            Ok(())
+        },
+    )
+    .expect("writing FASTQ segments into an in-memory Vec<u8> cannot fail");
+    buf
 }
 
 /// Threads-aware FASTQ workflow entry point. Sequential (and output-order
@@ -157,12 +154,8 @@ where
                 counters
                     .input_bases
                     .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
-                let (out, out_bases, buf) = render_record(&rec, cfg, counters);
-                if out > 0 {
-                    counters.output_reads.fetch_add(out, Ordering::Relaxed);
-                    counters
-                        .output_bases
-                        .fetch_add(out_bases, Ordering::Relaxed);
+                let buf = render_record(&rec, cfg, counters);
+                if !buf.is_empty() {
                     let _ = tx.send(buf);
                 }
             });
@@ -183,7 +176,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::FilterConfig;
+    use crate::filter::{self, FilterConfig};
     use crate::qual::QualMode;
     use crate::record::ReadRecord;
     use crate::trim::{QualityOp, TrimPlan};
@@ -394,7 +387,9 @@ mod tests {
         // adapters/quality-op configured, `trim::apply` still returns the whole
         // (untrimmed) read as its one produced segment, so the length filter
         // rejects that segment rather than the raw read up front — same
-        // observable drop, but now counted at the segment level.
+        // observable drop, but now counted at the segment level. Since exactly
+        // one segment was produced (not zero) and it was filtered, this is
+        // `reads_all_filtered`, not `reads_trimmed_to_nothing`.
         let mut f = base_filter();
         f.min_length = 10;
         let cfg = Config {
@@ -427,7 +422,8 @@ mod tests {
         let counters = Arc::new(Counters::default());
         let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg, &counters).unwrap();
         assert_eq!(stats.segments_dropped_short, 1);
-        assert_eq!(stats.reads_no_output, 1);
+        assert_eq!(stats.reads_all_filtered, 1);
+        assert_eq!(stats.reads_trimmed_to_nothing, 0);
         assert_eq!(
             counters
                 .segments_dropped_short
@@ -437,12 +433,12 @@ mod tests {
     }
 
     #[test]
-    fn trimmed_to_nothing_bumps_reads_no_output_counter() {
+    fn trimmed_to_nothing_bumps_reads_trimmed_to_nothing_counter() {
         // Reorder regression: `trim::apply` producing zero segments (a head-crop
-        // of 10 exceeds the 4-base read length, so no window survives) now falls
-        // straight through the per-segment loop with `survived == 0`, bumping the
-        // read-level `reads_no_output` counter (the old dedicated
-        // `dropped_trimmed` counter is gone — subsumed into `reads_no_output`).
+        // of 10 exceeds the 4-base read length, so no window survives) never
+        // enters the per-segment loop at all, bumping the read-level
+        // `reads_trimmed_to_nothing` counter (distinct from `reads_all_filtered`,
+        // which requires at least one produced segment that was then filtered).
         let cfg = Config {
             io: crate::config::IoConfig {
                 input: None,
@@ -478,7 +474,8 @@ mod tests {
         )
         .unwrap();
         assert!(out.is_empty());
-        assert_eq!(stats.reads_no_output, 1);
+        assert_eq!(stats.reads_trimmed_to_nothing, 1);
+        assert_eq!(stats.reads_all_filtered, 0);
         assert_eq!(stats.segments_dropped_short, 0);
     }
 
@@ -539,7 +536,8 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-        assert_eq!(stats.reads_no_output, 0);
+        assert_eq!(stats.reads_trimmed_to_nothing, 0);
+        assert_eq!(stats.reads_all_filtered, 0);
         assert_eq!(stats.segments_dropped_low_qual, 0);
     }
 
@@ -614,7 +612,8 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-        assert_eq!(stats.reads_no_output, 0);
+        assert_eq!(stats.reads_trimmed_to_nothing, 0);
+        assert_eq!(stats.reads_all_filtered, 0);
         let s = String::from_utf8(out).unwrap();
         assert!(
             s.starts_with("@r1_segment_1\n"),
@@ -627,11 +626,11 @@ mod tests {
     }
 
     /// Step 8, behavior test 3: an empty input read produces no trim
-    /// intervals at all, so it bumps the read-level `reads_no_output` counter
-    /// with NO segment-level drop (the per-segment filter loop never runs,
-    /// since there is nothing to iterate).
+    /// intervals at all, so it bumps the read-level `reads_trimmed_to_nothing`
+    /// counter with NO segment-level drop (the per-segment filter loop never
+    /// runs, since there is nothing to iterate).
     #[test]
-    fn empty_read_bumps_reads_no_output_with_no_segment_drop() {
+    fn empty_read_bumps_reads_trimmed_to_nothing_with_no_segment_drop() {
         let cfg = Config {
             io: crate::config::IoConfig {
                 input: None,
@@ -664,7 +663,8 @@ mod tests {
         assert!(out.is_empty());
         assert_eq!(stats.input_reads, 1);
         assert_eq!(stats.output_reads, 0);
-        assert_eq!(stats.reads_no_output, 1);
+        assert_eq!(stats.reads_trimmed_to_nothing, 1);
+        assert_eq!(stats.reads_all_filtered, 0);
         assert_eq!(stats.segments_dropped_short, 0);
         assert_eq!(stats.segments_dropped_long, 0);
         assert_eq!(stats.segments_dropped_low_qual, 0);
