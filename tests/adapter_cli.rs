@@ -205,6 +205,8 @@ fn adapter_sample_zero_disables_detection() {
 // Custom --adapter-fasta disables detection outright (no small-sample branch
 // to hit at all), so this now exercises the small-sample path with
 // --adapter-preset instead, which still runs detection for < 100 reads.
+// Detection is opt-in now (default --adapter-sample is 0, i.e. off), so this
+// must explicitly opt in to exercise the small-sample skip branch.
 #[test]
 fn tiny_input_skips_detection() {
     let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, real preset entry
@@ -226,6 +228,8 @@ fn tiny_input_skips_detection() {
             fq.path().to_str().unwrap(),
             "--adapter-preset",
             "ont",
+            "--adapter-sample",
+            "10000",
             "-v",
         ])
         .assert()
@@ -234,6 +238,57 @@ fn tiny_input_skips_detection() {
     assert!(
         stderr.contains("using all"),
         "tiny input must skip detection: {stderr}"
+    );
+}
+
+// Presence detection is opt-in: --adapter-sample defaults to 0 (off), so a
+// preset run with no --adapter-sample flag at all must never engage
+// detection -- no "Adapter presence" line at any point -- while still
+// trimming the preset adapter that's present in every read, since with
+// detection off the full (un-reduced) catalog is what gets searched.
+#[test]
+fn default_does_not_run_detection() {
+    let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, real preset entry
+    // Long insert -- see the comment on
+    // `detection_output_equals_full_set_for_present_adapter` for why a short
+    // insert can be consumed entirely by the catalog's paired front/rear
+    // entries within the default 150bp end-zone (unrelated to detection).
+    let insert = "A".repeat(300);
+    let mut fq = tempfile::NamedTempFile::new().unwrap();
+    for i in 0..200 {
+        writeln!(
+            fq,
+            "@r{i}\n{front}{insert}\n+\n{}",
+            "I".repeat(front.len() + insert.len())
+        )
+        .unwrap();
+    }
+    let res = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.path().to_str().unwrap(),
+            "--adapter-preset",
+            "ont",
+            "-v",
+        ])
+        .assert()
+        .success();
+    let out = res.get_output();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Adapter presence"),
+        "detection must be off by default (no --adapter-sample given): {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&"A".repeat(280)),
+        "insert must still be kept: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&format!("{front}{insert}")),
+        "preset adapter must still be trimmed off by default (full-set search): {stdout}"
     );
 }
 
@@ -296,9 +351,11 @@ fn detection_output_equals_full_set_for_present_adapter() {
         (res.stdout.clone(), res.stderr.clone())
     };
 
-    // Detection ON (default sampling): reduces the 124-entry catalog.
-    let (detect_on, detect_on_err) = run(&[]);
-    // Detection OFF: trims against the full 124-adapter set.
+    // Detection ON (explicit opt-in sampling, since detection defaults to
+    // off): reduces the 124-entry catalog.
+    let (detect_on, detect_on_err) = run(&["--adapter-sample", "10000"]);
+    // Detection OFF (the default: no --adapter-sample flag needed, but pass
+    // 0 explicitly for clarity): trims against the full 124-adapter set.
     let (detect_off, _) = run(&["--adapter-sample", "0"]);
 
     assert!(
@@ -336,8 +393,11 @@ fn detection_output_equals_full_set_for_present_adapter() {
 // every read that followed, including the 10 adapted ones. Fixed by Change 1:
 // a custom --adapter-fasta is a curated set that should always be searched in
 // full, so detection is now forced off unconditionally whenever a FASTA is
-// given, regardless of --adapter-sample's value. This test uses the CLI's
-// default sampling (no --adapter-sample flag) to match the real report.
+// given, regardless of --adapter-sample's value. Detection is opt-in now
+// (default --adapter-sample is 0), so this passes --adapter-sample 10000
+// explicitly -- a value that would otherwise enable detection -- to prove the
+// fasta override still holds "regardless of --adapter-sample's value" rather
+// than merely benefiting from the new off-by-default behavior.
 //
 // Confirmed RED under the pre-fix code (reverting Change 1 only): stderr
 // logged "Adapter presence: sampled 10000 reads, kept 0 of 1 adapters" and
@@ -374,6 +434,8 @@ fn custom_fasta_trims_adapters_after_a_clean_prefix() {
             fq.path().to_str().unwrap(),
             "--adapter-fasta",
             fa.path().to_str().unwrap(),
+            "--adapter-sample",
+            "10000",
             "-t",
             "1",
         ])

@@ -90,9 +90,11 @@ struct Cli {
     /// Trim adapters at read ends only; never split on interior adapters.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
-    /// Reads to sample to detect which adapters are present (0 = disable; trim
-    /// against the full set). Only used when adapter trimming is active.
-    #[arg(long, default_value_t = 10000, help_heading = "Adapter trimming")]
+    /// Reads to sample to detect which adapters are present, reducing the set
+    /// trimmed against (opt-in speed optimization). 0 = off (default, trim against
+    /// the full set); a value >= 100 enables detection. Preset-only (ignored with
+    /// --adapter-fasta).
+    #[arg(long, default_value_t = 0, help_heading = "Adapter trimming")]
     adapter_sample: usize,
 }
 
@@ -250,6 +252,11 @@ pub fn parse() -> anyhow::Result<Config> {
                  (smaller samples are too few for reliable detection)",
                 c.adapter_sample,
                 crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+            );
+        }
+        if c.adapter_fasta.is_some() && c.adapter_sample > 0 {
+            eprintln!(
+                "[WARN] --adapter-sample is ignored with --adapter-fasta (presence detection is preset-only)"
             );
         }
         Some(crate::adapter::AdapterConfig {
