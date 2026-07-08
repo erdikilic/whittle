@@ -127,11 +127,11 @@ whittle -i reads.fastq.gz -o trimmed.fastq.gz \
   -t 8
 ```
 
-The length/quality/GC filters (`-l`/`-q`) are applied to the whole read
-first; then trimming runs — cropping 20 bases off each end (`-H`/`-T`) and
-trimming any remaining low-quality edges below Q8 (`--qual-trim`); each
-resulting output segment must still satisfy `-l`/`--min-length` — all using 8
-worker threads (`-t`).
+Trimming runs first — cropping 20 bases off each end (`-H`/`-T`) and
+trimming any remaining low-quality edges below Q8 (`--qual-trim`); then the
+length/quality/GC filters (`-l`/`-q`) are applied to each resulting output
+segment, so every emitted segment must still satisfy `-l`/`--min-length` —
+all using 8 worker threads (`-t`).
 
 ### Folder input
 
@@ -398,9 +398,9 @@ needed). Building `whittle` requires Rust >= 1.91.
   hint, just like a `.bam` path, plain FASTQ, or `.fastq.gz`. Pass
   `--in-format bam` only to force the interpretation of an unusual or headerless
   stream.
-- **`--min-length` is dual-purpose.** It's both the whole-read minimum-length
-  filter and the minimum length for a segment produced by `--qual-split` to
-  be kept — there's no separate flag for the two.
+- **`--min-length` is post-trim.** It's the minimum length for each output
+  segment after crop/adapter/quality trimming; with no split or trim, that is
+  simply the whole read. There's no separate flag for split segments.
 - **The three quality-trim operations are mutually exclusive.** Pick one of
   `--qual-trim`, `--qual-best-segment`, `--qual-split` (or none, for filtering
   only). `-H`/`-T` fixed crop is independent of all three and always
