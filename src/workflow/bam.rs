@@ -121,6 +121,22 @@ fn signal_int(src: &RecordBuf, tag: &[u8; 2]) -> Option<i64> {
     }
 }
 
+fn signal_offset(blocks: usize, stride: usize) -> Option<i64> {
+    blocks
+        .checked_mul(stride)
+        .and_then(|n| i64::try_from(n).ok())
+}
+
+fn signal_int_value(n: i64) -> Option<Value> {
+    if let Ok(n) = i32::try_from(n) {
+        Some(Value::Int32(n))
+    } else if let Ok(n) = u32::try_from(n) {
+        Some(Value::UInt32(n))
+    } else {
+        None
+    }
+}
+
 /// The parent read id for a subread: the source's own `pi` if it already has one
 /// (so `pi` always names the ultimate ancestor, matching dorado), else the source
 /// read name.
@@ -179,16 +195,20 @@ fn polya_updates(
     if is_split {
         // Re-express into the subread's own frame (subread signal 0 == kept_start;
         // its ts is 0). Sentinels stay untouched. pt (base count) is unchanged.
-        let shifted: Vec<i32> = pa
-            .iter()
-            .map(|&p| {
-                if p >= 0 {
-                    (i64::from(p) - kept_start) as i32
-                } else {
-                    p
-                }
-            })
-            .collect();
+        let mut shifted = Vec::with_capacity(pa.len());
+        for &p in pa {
+            if p >= 0 {
+                let Some(q) = i64::from(p)
+                    .checked_sub(kept_start)
+                    .and_then(|n| i32::try_from(n).ok())
+                else {
+                    return drop_both();
+                };
+                shifted.push(q);
+            } else {
+                shifted.push(p);
+            }
+        }
         vec![(pa_tag, Some(Value::Array(Array::Int32(shifted))))]
     } else {
         // Crop: absolute original-signal positions are still valid; keep pa/pt.
@@ -267,27 +287,56 @@ fn signal_tag_updates(
     // `ns = raw_data_samples + num_trimmed_samples` (a tail crop shrinks ns, a
     // head-only crop leaves it unchanged, a split gets the subread span).
     let ts0 = signal_int(src, b"ts").unwrap_or(0);
-    let kept_start = ts0 + (block_first * stride_n) as i64;
-    let kept_end = ts0 + (block_second * stride_n) as i64;
-    let span = ((block_second - block_first) * stride_n) as i64;
+    let Some(first_offset) = signal_offset(block_first, stride_n) else {
+        return drop_all();
+    };
+    let Some(second_offset) = signal_offset(block_second, stride_n) else {
+        return drop_all();
+    };
+    let Some(span) = signal_offset(block_second - block_first, stride_n) else {
+        return drop_all();
+    };
+    let Some(kept_start) = ts0.checked_add(first_offset) else {
+        return drop_all();
+    };
+    let Some(kept_end) = ts0.checked_add(second_offset) else {
+        return drop_all();
+    };
 
     if total > 1 {
         // Split -> dorado subread: renamed, front trim reset to 0, parent linkage.
-        let sp = signal_int(src, b"sp").unwrap_or(0) + (block_first * stride_n) as i64;
+        let Some(sp) = signal_int(src, b"sp")
+            .unwrap_or(0)
+            .checked_add(first_offset)
+        else {
+            return drop_all();
+        };
+        let Some(ns_value) = signal_int_value(span) else {
+            return drop_all();
+        };
+        let Some(sp_value) = signal_int_value(sp) else {
+            return drop_all();
+        };
         let pi = parent_read_id(src);
         updates.push((Tag::new(b't', b's'), Some(Value::Int32(0))));
-        updates.push((Tag::new(b'n', b's'), Some(Value::Int32(span as i32))));
-        updates.push((Tag::new(b's', b'p'), Some(Value::Int32(sp as i32))));
+        updates.push((Tag::new(b'n', b's'), Some(ns_value)));
+        updates.push((Tag::new(b's', b'p'), Some(sp_value)));
         updates.push((Tag::new(b'p', b'i'), Some(Value::String(pi.into()))));
         // Dorado marks split products with read_number -1.
         updates.push((Tag::new(b'r', b'n'), Some(Value::Int32(-1))));
     } else {
         // Head/tail crop in place: keep the read identity, advance the front trim.
-        updates.push((Tag::new(b't', b's'), Some(Value::Int32(kept_start as i32))));
-        updates.push((
-            Tag::new(b'n', b's'),
-            Some(Value::Int32((kept_start + span) as i32)),
-        ));
+        let Some(ts_value) = signal_int_value(kept_start) else {
+            return drop_all();
+        };
+        let Some(ns) = kept_start.checked_add(span) else {
+            return drop_all();
+        };
+        let Some(ns_value) = signal_int_value(ns) else {
+            return drop_all();
+        };
+        updates.push((Tag::new(b't', b's'), Some(ts_value)));
+        updates.push((Tag::new(b'n', b's'), Some(ns_value)));
     }
     updates.extend(polya_updates(src, kept_start, kept_end, total > 1));
     updates
@@ -343,15 +392,15 @@ pub fn reconstruct_record(
             Some((mm_new, ml_new)) => {
                 data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm_new.into()));
                 match ml_new {
-                    // Source had ML: write the sliced ML.
+                    // Source had a valid ML: write the sliced ML.
                     Some(ml) => {
                         data.insert(
                             Tag::BASE_MODIFICATION_PROBABILITIES,
                             Value::Array(Array::UInt8(ml)),
                         );
                     },
-                    // Source was MM-only: drop the cloned ML so we stay MM-only
-                    // rather than emit an empty (invalid) ML.
+                    // Source was MM-only, or its ML length did not match MM:
+                    // drop the cloned ML rather than emit an invalid tag.
                     None => {
                         data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
                     },
@@ -442,10 +491,10 @@ pub fn reconstruct_record(
 /// Slice MM/ML to the window `[start, end)` and re-serialize. Returns `None`
 /// when the source has no `MM` tag, or when no modified position survives the
 /// window (caller drops MM/ML/MN in that case). The inner `Option<Vec<u8>>` is
-/// the sliced ML, or `None` when the source carried `MM` but no `ML` — ML is
-/// optional per the SAM spec, so an MM-only record must stay MM-only rather than
-/// gain a bogus empty ML. Shared by the BAM→BAM and BAM→FASTQ paths so they
-/// cannot drift.
+/// the sliced ML, or `None` when the source carried `MM` but no valid `ML` — ML
+/// is optional per the SAM spec, so an MM-only or malformed-ML record must not
+/// gain a bogus empty/truncated ML. Shared by the BAM→BAM and BAM→FASTQ paths so
+/// they cannot drift.
 pub fn reconstruct_mods(
     src: &RecordBuf,
     seq: &[u8],
@@ -468,12 +517,19 @@ pub fn reconstruct_mods(
         _ => Vec::new(),
     };
     let parsed = mods::parse(&mm_raw, &ml_raw);
+    let ml_valid = !ml_present
+        || parsed
+            .groups
+            .iter()
+            .map(|g| g.deltas.len() * g.codes.len().max(1))
+            .sum::<usize>()
+            == ml_raw.len();
     let sliced = mods::reconstruct(&parsed, seq, start, end);
     let (mm_new, ml_new) = mods::serialize(&sliced);
     if mm_new.is_empty() {
         None
     } else {
-        Some((mm_new, ml_present.then_some(ml_new)))
+        Some((mm_new, (ml_present && ml_valid).then_some(ml_new)))
     }
 }
 
@@ -1325,6 +1381,77 @@ mod tests {
     }
 
     #[test]
+    fn reconstruct_record_truncated_ml_omits_ml_but_keeps_mm_mn() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"CCC".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 3].into();
+        src.data_mut().insert(
+            Tag::BASE_MODIFICATIONS,
+            Value::String(b"C+m,0,0,0;".to_vec().into()),
+        );
+        // Malformed source: MM declares 3 modified positions, but ML has only 1 byte.
+        src.data_mut().insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(vec![5])),
+        );
+
+        let out = reconstruct_record(&src, 0, 3, 1, 0, false);
+
+        match out.data().get(&Tag::BASE_MODIFICATIONS) {
+            Some(Value::String(s)) => assert_eq!(s.to_vec(), b"C+m,0,0,0;"),
+            other => panic!("expected MM retained, got {other:?}"),
+        }
+        assert!(
+            out.data()
+                .get(&Tag::BASE_MODIFICATION_PROBABILITIES)
+                .is_none(),
+            "truncated ML must be omitted rather than re-emitted invalid"
+        );
+        match out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
+            Some(Value::Int32(3)) => {},
+            other => panic!("expected MN=3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bam2fq_truncated_ml_omits_ml_field() {
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        *rec.name_mut() = Some(b"r1".into());
+        *rec.sequence_mut() = b"CCC".to_vec().into();
+        *rec.quality_scores_mut() = vec![40; 3].into();
+        rec.data_mut().insert(
+            Tag::BASE_MODIFICATIONS,
+            Value::String(b"C+m,0,0,0;".to_vec().into()),
+        );
+        rec.data_mut().insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(vec![5])),
+        );
+
+        let cfg = cfg_bam2fq(None, 0, FastqTags::All);
+        let mut out = Vec::new();
+        run_bam_to_fastq(
+            [Ok(rec)].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("MM:Z:C+m,0,0,0;\tMN:i:3"),
+            "expected MM+MN, got: {s:?}"
+        );
+        assert!(
+            !s.contains("ML:B"),
+            "truncated ML must not be emitted into FASTQ tags: {s:?}"
+        );
+    }
+
+    #[test]
     fn reconstruct_record_slices_kinetics_and_drops_mv() {
         // PacBio-style per-base kinetics (ip/pw, length == read length) must be
         // sliced with the sequence; ONT `mv` (signal-space) must be dropped on
@@ -1535,6 +1662,28 @@ mod tests {
             out.data().get(&Tag::new(b'd', b'u')).is_some(),
             "du kept on crop"
         );
+    }
+
+    #[test]
+    fn update_moves_large_signal_offsets_use_uint32_not_wrapped_i32() {
+        let mut src = ubam_with_moves();
+        src.data_mut()
+            .insert(Tag::new(b't', b's'), Value::UInt32(2_147_483_645));
+        src.data_mut()
+            .insert(Tag::new(b'n', b's'), Value::UInt32(2_147_483_661));
+
+        // head-crop 2 -> block_first=3, stride=2, so ts becomes
+        // 2_147_483_651 (> i32::MAX) and ns becomes 2_147_483_661.
+        let out = reconstruct_record(&src, 2, 6, 1, 0, true);
+
+        match out.data().get(&Tag::new(b't', b's')) {
+            Some(Value::UInt32(2_147_483_651)) => {},
+            other => panic!("large ts must stay positive as UInt32, got {other:?}"),
+        }
+        match out.data().get(&Tag::new(b'n', b's')) {
+            Some(Value::UInt32(2_147_483_661)) => {},
+            other => panic!("large ns must stay positive as UInt32, got {other:?}"),
+        }
     }
 
     #[test]
