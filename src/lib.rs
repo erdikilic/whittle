@@ -161,7 +161,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // showing one number and the workflow running another.
     let budget = config::thread_budget(
         cfg.threads,
-        matches!(in_fmt, Format::Bam),
+        render_heavy_for(in_fmt, out_fmt, &cfg),
         encode_kind_for(out_fmt),
     );
     let out_desc = output_desc(cfg.io.output.as_deref());
@@ -736,7 +736,7 @@ fn run_folder(
     // arm below agree on the same split (see the matching comment in `run`).
     let budget = config::thread_budget(
         cfg.threads,
-        matches!(family, io::dir::Family::Bam),
+        render_heavy_for(family_fmt, out_fmt, cfg),
         encode_kind_for(out_fmt),
     );
     let out_desc = output_desc(cfg.io.output.as_deref());
@@ -870,6 +870,16 @@ fn encode_kind_for(out_fmt: io::Format) -> config::EncodeKind {
         io::Format::FastqGz => config::EncodeKind::Gzip,
         io::Format::Fastq => config::EncodeKind::None,
     }
+}
+
+/// Whether the render stage has substantial per-record work. BAM input remains
+/// render-heavy even for a full-window output because the current parallel path
+/// still clones owned `RecordBuf`s before handing them to the writer.
+fn render_heavy_for(in_fmt: io::Format, _out_fmt: io::Format, _cfg: &Config) -> bool {
+    if !matches!(in_fmt, io::Format::Bam) {
+        return false;
+    }
+    true
 }
 
 /// The startup banner's operation line (LINE mode's item 3 / BAR mode's own
@@ -1445,6 +1455,42 @@ mod tests {
             tail: 0,
             quality: None,
         }
+    }
+
+    fn base_config() -> Config {
+        Config {
+            io: config::IoConfig {
+                input: None,
+                output: None,
+                in_format: None,
+                out_format: None,
+            },
+            filter: base_filter(),
+            trim: base_trim(),
+            adapters: None,
+            adapter_infer: config::AdapterInfer::Off,
+            threads: 8,
+            fastq_tags: config::FastqTags::All,
+            render_workers: 0,
+            adapter_sample: 0,
+            compression_level: 6,
+            update_moves: false,
+            verbosity: 0,
+            quiet: true,
+            threads_clamped: None,
+        }
+    }
+
+    #[test]
+    fn render_heavy_for_treats_bam_as_heavy() {
+        let cfg = base_config();
+        assert!(!render_heavy_for(
+            io::Format::Fastq,
+            io::Format::FastqGz,
+            &cfg
+        ));
+        assert!(render_heavy_for(io::Format::Bam, io::Format::Bam, &cfg));
+        assert!(render_heavy_for(io::Format::Bam, io::Format::Fastq, &cfg));
     }
 
     #[test]
