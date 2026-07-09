@@ -160,7 +160,10 @@ pub fn thread_budget(total: usize, render_heavy: bool, encode: EncodeKind) -> Th
     let (render, encode_n) = match (render_heavy, encode) {
         // No compression pool → render gets everything (encode field unused).
         (_, EncodeKind::None) => (rest, 1),
-        // BAM in + bgzf out: render slightly favored (bgzf/libdeflate is fast). R4E3.
+        // BAM in + bgzf out: give BGZF the larger half only at low thread
+        // counts so -t4 gets two encoder workers; above that, keep render
+        // slightly favored for MM/ML reconstruction.
+        (true, EncodeKind::Bgzf) if rest <= 4 => (rest / 2, rest.div_ceil(2)),
         (true, EncodeKind::Bgzf) => (rest.div_ceil(2), rest / 2),
         // BAM in + gzip out: both heavy, encode slightly favored. R3E4.
         (true, EncodeKind::Gzip) => (rest / 2, rest.div_ceil(2)),
@@ -256,6 +259,14 @@ mod tests {
                 decode: 1,
                 render: 4,
                 encode: 3
+            }
+        );
+        assert_eq!(
+            thread_budget(4, true, Bgzf),
+            ThreadBudget {
+                decode: 1,
+                render: 1,
+                encode: 2
             }
         );
         assert_eq!(

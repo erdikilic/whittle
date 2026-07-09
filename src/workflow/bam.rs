@@ -90,6 +90,16 @@ fn perbase_slice(value: &Value, orig_len: usize, start: usize, end: usize) -> Op
     }
 }
 
+fn full_window_mods_already_consistent(src: &RecordBuf, seq_len: usize) -> bool {
+    let Some(Value::String(_)) = src.data().get(&Tag::BASE_MODIFICATIONS) else {
+        return true;
+    };
+    match src.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
+        Some(Value::Int32(n)) => *n >= 0 && *n as usize == seq_len,
+        _ => false,
+    }
+}
+
 /// Parse an `mv` move table value into `(stride, moves)`. `None` unless it is a
 /// `B:c` (Int8) array with a positive stride. `moves` excludes the stride prefix;
 /// each entry corresponds to `stride` signal samples (1 = a base emitted here, so
@@ -364,11 +374,44 @@ pub fn reconstruct_record(
     idx: usize,
     update_moves: bool,
 ) -> RecordBuf {
+    let orig_len = src.sequence().as_ref().len();
+    if start == 0
+        && end == orig_len
+        && total == 1
+        && full_window_mods_already_consistent(src, orig_len)
+    {
+        return src.clone();
+    }
+
+    let seq = src.sequence().as_ref().to_vec();
+    let qual = src.quality_scores().as_ref().to_vec();
+    reconstruct_record_with_bases(src, &seq, &qual, start, end, total, idx, update_moves)
+}
+
+fn reconstruct_record_with_bases(
+    src: &RecordBuf,
+    seq: &[u8],
+    qual: &[u8],
+    start: usize,
+    end: usize,
+    total: usize,
+    idx: usize,
+    update_moves: bool,
+) -> RecordBuf {
+    let orig_len = seq.len();
+    debug_assert_eq!(src.sequence().as_ref(), seq);
+    debug_assert_eq!(src.quality_scores().as_ref(), qual);
+    if start == 0
+        && end == orig_len
+        && total == 1
+        && full_window_mods_already_consistent(src, orig_len)
+    {
+        return src.clone();
+    }
+
     let mut out = src.clone();
 
     // Slice sequence + quality.
-    let seq = src.sequence().as_ref().to_vec();
-    let qual = src.quality_scores().as_ref().to_vec();
     *out.sequence_mut() = seq[start..end].to_vec().into();
     *out.quality_scores_mut() = qual[start..end].to_vec().into();
 
@@ -421,7 +464,6 @@ pub fn reconstruct_record(
     // ONT signal tags (mv/ts/ns/sp/pi): rewrite for the window under
     // `--update-moves`, else drop on trim. Kept separate from the per-base pass
     // because it decodes the move table and updates several tags together.
-    let orig_len = seq.len();
     for (tag, val) in signal_tag_updates(src, orig_len, start, end, total, update_moves) {
         match val {
             Some(v) => {
@@ -576,7 +618,16 @@ fn run_bam_seq(
             &cfg.filter,
             counters,
             |idx, total, s, e| {
-                let out = reconstruct_record(&rec, s, e, total, idx, cfg.update_moves);
+                let out = reconstruct_record_with_bases(
+                    &rec,
+                    &seq,
+                    &qual,
+                    s,
+                    e,
+                    total,
+                    idx,
+                    cfg.update_moves,
+                );
                 sink.write_record(header, &out)?;
                 Ok(())
             },
@@ -749,7 +800,16 @@ pub fn run_bam(
                 &cfg.filter,
                 counters,
                 |idx, total, s, e| {
-                    items.push(reconstruct_record(rec, s, e, total, idx, cfg.update_moves));
+                    items.push(reconstruct_record_with_bases(
+                        rec,
+                        &seq,
+                        &qual,
+                        s,
+                        e,
+                        total,
+                        idx,
+                        cfg.update_moves,
+                    ));
                     Ok(())
                 },
             )?;
