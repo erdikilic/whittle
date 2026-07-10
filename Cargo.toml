@@ -2,8 +2,17 @@
 name = "whittle"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.91"
 license = "Apache-2.0"
-description = "Tag-aware long-read (ONT/PacBio) trimmer for FASTQ/uBAM that reconstructs MM/ML base-modification tags on every trim and split"
+description = "Tag-aware long-read (ONT/PacBio/Qitan) trimmer for FASTQ/uBAM that reconstructs MM/ML base-modification tags on every trim and split"
+authors = ["Erdi Kilic <erdican266@gmail.com>"]
+repository = "https://github.com/erdikilic/whittle"
+homepage = "https://github.com/erdikilic/whittle"
+documentation = "https://docs.rs/whittle"
+readme = "README.md"
+keywords = ["bioinformatics", "nanopore", "long-read", "fastq", "bam"]
+categories = ["science::bioinformatics", "command-line-utilities"]
+exclude = ["/.github/"]
 
 [[bin]]
 name = "whittle"
@@ -36,8 +45,23 @@ sassy = "0.2"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+
+# rust-htslib links the system HTSlib (a C library) and is used only by the
+# BAM MM/ML oracle test. Gate it to Unix so Windows builds/CI don't have to
+# provision libhts, which is impractical there.
+[target.'cfg(unix)'.dev-dependencies]
 rust-htslib = { version = "1.0", default-features = false, features = ["libdeflate"] }
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
+
+[lints.rust]
+# whittle contains no `unsafe` blocks; keep it that way. Clippy's default
+# groups (correctness/suspicious/style/complexity/perf) already run and pass
+# clean, so they're not re-declared here. `pedantic` is intentionally left off:
+# it flags ~200 subjective items that would fail CI's `-D warnings` gate.
+unsafe_code = "forbid"
+
+[package.metadata.docs.rs]
+all-features = true
