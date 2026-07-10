@@ -266,22 +266,35 @@ fn signal_tag_updates(
     else {
         return drop_all();
     };
-    let ones: Vec<usize> = moves
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| **m != 0)
-        .map(|(i, _)| i)
-        .collect();
-    if ones.len() != seq_len {
+    // The move index of the `start`-th and `end`-th base (each `1` in `moves`
+    // is one emitted base), and the total base count — found in a single pass,
+    // without materializing the whole positions list.
+    let mut ones_seen = 0usize;
+    let mut block_first = None;
+    let mut block_second = None;
+    for (i, &m) in moves.iter().enumerate() {
+        if m != 0 {
+            if ones_seen == start {
+                block_first = Some(i);
+            }
+            if ones_seen == end {
+                block_second = Some(i);
+            }
+            ones_seen += 1;
+        }
+    }
+    if ones_seen != seq_len {
         return drop_all(); // move table inconsistent with the sequence
     }
 
     let stride_n = stride as usize;
-    let block_first = ones[start];
+    // `start < end <= seq_len`, so the start-th base always exists; the end-th
+    // exists only when `end < seq_len`, else the window runs to the table end.
+    let block_first = block_first.expect("start < seq_len == base count");
     let block_second = if end == seq_len {
         moves.len()
     } else {
-        ones[end]
+        block_second.expect("end < seq_len == base count")
     };
 
     let mut new_mv = Vec::with_capacity(1 + block_second - block_first);
