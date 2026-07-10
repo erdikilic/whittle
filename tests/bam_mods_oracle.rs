@@ -290,7 +290,7 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
     }
 }
 
-// --- Real-data sweep (Task 7) -----------------------------------------------
+// --- Real-data sweep --------------------------------------------------------
 //
 // Everything below is only exercised when `WHITTLE_UBAM` points at a real
 // uBAM (e.g. one of the HG002 subsets under `data/`, or any unaligned BAM with
@@ -437,9 +437,9 @@ fn real_ubam_oracle_sweep_t8() {
     }
 }
 
-// --- Task 12: ab-initio inference on uBAM must not disturb MM/ML -----------
+// --- ab-initio inference on uBAM must not disturb MM/ML -----------
 //
-// Task 11 wired `--adapter-infer` through the shared buffer-then-decide seam
+// The infer path wires `--adapter-infer` through the shared buffer-then-decide seam
 // (`maybe_reduce_adapters` in src/lib.rs), which reads each record's SEQ via a
 // generic `seq_of` closure -- for BAM that's the same `rec.sequence().as_ref()`
 // accessor `workflow::bam` already used before inference existed. So running
@@ -648,7 +648,7 @@ fn infer_on_ubam_preserves_mm_ml() {
             orig_seq.ends_with(out_seq.as_slice()),
             "output read {name:?} must be an exact suffix of its original"
         );
-        // `checked_sub` (M5): a clear panic message if output ever somehow
+        // `checked_sub`: a clear panic message if output ever somehow
         // exceeded input, instead of an underflow wraparound with a cryptic
         // "attempt to subtract with overflow" pointing at this line only.
         let cut = orig_seq
@@ -681,7 +681,7 @@ fn infer_on_ubam_preserves_mm_ml() {
             .get(name)
             .unwrap_or_else(|| panic!("output read {name} has no matching original"));
         let out_seq_len = out_seqs[name].len();
-        // `checked_sub` (M5): a clear panic message if output ever somehow
+        // `checked_sub`: a clear panic message if output ever somehow
         // exceeded input, instead of an underflow wraparound with a cryptic
         // "attempt to subtract with overflow" pointing at this line only.
         let cut = orig_len
@@ -708,10 +708,10 @@ fn infer_on_ubam_preserves_mm_ml() {
     );
 }
 
-// --- Task 2: a FILTERED sibling segment must not corrupt the kept segment's
+// --- a FILTERED sibling segment must not corrupt the kept segment's
 // MM/ML ----------------------------------------------------------------
 //
-// Task 1 moved segment filtering to run AFTER adapter splitting. This is the
+// Segment filtering now runs AFTER adapter splitting. This is the
 // gap that review flagged: when an interior adapter splits a read into a
 // kept segment plus a segment that then gets filtered (sub `-l`), the kept
 // segment's MM/ML must stay in exactly the same register as if the filtered
@@ -842,7 +842,7 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
         .success();
 
     // Exactly one record survives the split (the 4bp sibling was filtered),
-    // and it kept its PRODUCED index (option-b naming: produced == 2, so
+    // and it kept its PRODUCED index (produced == 2, so
     // even the lone survivor is suffixed) -- confirms this is really
     // decoding the split scenario's kept segment, not something else.
     let split_names = read_bam_seqs(&split_out);

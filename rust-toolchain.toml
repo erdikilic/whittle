@@ -1,0 +1,6 @@
+[toolchain]
+# Pin an exact stable so contributors and CI build identically; bump this in its
+# own PR (that's when new clippy lints land, deliberately rather than by surprise).
+channel = "1.96.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

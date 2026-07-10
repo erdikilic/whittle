@@ -296,7 +296,7 @@ pub fn parse() -> anyhow::Result<Config> {
         if c.adapter_end_size == 0 {
             anyhow::bail!("--adapter-end-size must be >= 1");
         }
-        // Under infer, the trimming set is discovered later (Task 11 fills
+        // Under infer, the trimming set is discovered later (discovery fills
         // it in); any preset sequences gathered above are ignored here (the
         // preset WARN above already told the user). A report-only FASTA is
         // carried through as `fasta_adapters` instead of being dropped: it's

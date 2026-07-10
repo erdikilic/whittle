@@ -1,0 +1,38 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Run locally with `cargo deny check`.
+
+[advisories]
+version = 2
+# Only fail on unmaintained advisories for our own crates. The two present
+# (derivative via sassy, custom_derive via rust-htslib's dev tree) are deep
+# transitive deps with no available fix; vulnerabilities are still enforced.
+unmaintained = "workspace"
+# Add "RUSTSEC-YYYY-NNNN" here (with a comment) only to consciously accept an
+# advisory that cannot yet be resolved.
+ignore = []
+
+[licenses]
+version = 2
+# whittle is Apache-2.0; keep the dependency tree to permissive (or weak-copyleft,
+# redistributable) licenses. bzip2-1.0.6 rides in only via the Unix-only htslib
+# dev-dependency; MPL-2.0 is file-level copyleft and safe to redistribute.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "bzip2-1.0.6",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -634,7 +634,7 @@ mod segment_tests {
         // Short read, overlapping end-zones (end_size >= n). Distinct 5' and 3'
         // single-end adapters that do NOT cross-match. The insert must survive:
         // no whole-read drop, no eaten middle. Guards the "downstream reused"
-        // assumption for inferred End::Five/End::Three adapters (spec Prerequisite).
+        // assumption for inferred End::Five/End::Three adapters.
         let a5 = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
         let a3 = b"AAAAGGGGAAAAGGGGAAAA"; // 20bp, A/G only: not a5, not revcomp(a5)
         let mut w = a5.to_vec();

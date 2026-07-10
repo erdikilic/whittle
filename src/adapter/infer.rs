@@ -37,7 +37,7 @@ const RECOUNT_EDITS: usize = 2;
 const KEEP_SUPPORT: f64 = 0.30;
 
 /// Cap on the number of windows scanned per k-mer during the 2-error recount
-/// (Task 9's confidence pass), bounding its cost on large samples.
+/// (the confidence pass), bounding its cost on large samples.
 const RECOUNT_WINDOWS: usize = 4000;
 
 /// Max total emitted length of a single `bounded_heaviest_path` consensus,
@@ -170,7 +170,7 @@ fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
 /// can't inflate the count. Callers are responsible for capping `windows` to
 /// `RECOUNT_WINDOWS` beforehand (see `assemble`'s `recount` sample) -- this
 /// function no longer truncates internally, so it counts over whatever slice
-/// it's handed (Bug 1: a `.take(RECOUNT_WINDOWS)` here silently limited every
+/// it's handed (an earlier `.take(RECOUNT_WINDOWS)` here silently limited every
 /// caller to the FIRST N windows, biasing both the per-k-mer reweight and the
 /// whole-consensus support toward whatever happened to come first in the
 /// sample).
@@ -415,7 +415,7 @@ fn merge_both_ends(
             .position(|(j, t)| !three_used[j] && same_adapter(f, t, error_rate))
         {
             three_used[j] = true;
-            // Keep the LONGER of the two matched reconstructions (Bug 5): a
+            // Keep the LONGER of the two matched reconstructions: a
             // shorter/truncated recovery at one end shouldn't win just
             // because it's the 5' one -- the matcher searches both strands,
             // so orientation is fine either way. Tie -> keep 5' (arbitrary
@@ -471,7 +471,7 @@ fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f
 
 /// Deterministically sample <= `cap` windows spread across the WHOLE slice
 /// (stride, not the first `cap`) so the recount/support frame isn't order-
-/// biased (Bug 1: see `assemble`'s `recount` sample below). If `windows.len()
+/// biased (see `assemble`'s `recount` sample below). If `windows.len()
 /// <= cap`, returns every window, in order (step == 1).
 fn stride_sample<'a>(windows: &[&'a [u8]], cap: usize) -> Vec<&'a [u8]> {
     let step = windows.len().div_ceil(cap.max(1)).max(1);
@@ -484,7 +484,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
     if windows.len() < 3 {
         return Vec::new();
     }
-    // Uppercase owned copies (Bug 2): `encode_kmer` (and the sassy matcher
+    // Uppercase owned copies: `encode_kmer` (and the sassy matcher
     // used by `two_error_freq` below) only recognize uppercase ACGT, so a
     // lowercase FASTQ contributed zero k-mers here and silently discovered
     // nothing. Normalizing once, up front, fixes k-mer counting AND every
@@ -502,7 +502,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
         return Vec::new();
     }
     // Deterministic stride across the WHOLE window set, capped at
-    // RECOUNT_WINDOWS (Bug 1): the 2-error recount and whole-consensus
+    // RECOUNT_WINDOWS: the 2-error recount and whole-consensus
     // support below used to look only at `windows`'s first RECOUNT_WINDOWS
     // entries, so a real adapter that only showed up after that prefix (e.g.
     // the first 4000 reads clean, the rest carrying the adapter) was
@@ -615,8 +615,8 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     }
     // deterministic order: support desc, then sequence asc.
     candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap().then(a.0.cmp(&b.0)));
-    // `inferred_N` fallback numbering is assigned AFTER the sort above (M4
-    // fix) so it agrees with the position `log_discovered` prints each entry
+    // `inferred_N` fallback numbering is assigned AFTER the sort above so
+    // it agrees with the position `log_discovered` prints each entry
     // at; assigning it during the first pass (pre-sort `merged` index) could
     // disagree with the post-sort log order whenever sorting reordered
     // entries.
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_longer_of_matched_both_end_pair() {
-        // Bug 5 regression: `merge_both_ends` used to always keep the 5'
+        // Regression test: `merge_both_ends` previously always kept the 5'
         // sequence for a folded `End::Both` pair, even when the 3'
         // reconstruction was longer/cleaner (more specific -- e.g. the 5'
         // recovery only assembled a truncated core of the adapter while the
@@ -1065,7 +1065,7 @@ mod tests {
     #[test]
     #[ignore]
     fn discover_is_not_order_biased_by_recount_window_cap() {
-        // Bug 1 regression: pre-fix, `two_error_freq`'s reweight/support
+        // Regression test: previously, `two_error_freq`'s reweight/support
         // recount only ever looked at `windows.iter().take(RECOUNT_WINDOWS)`
         // (the first 4000 windows). A planted adapter that only shows up
         // AFTER the first `RECOUNT_WINDOWS` reads was therefore invisible to
@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn discover_recovers_planted_adapter_from_lowercase_reads() {
-        // Bug 2 regression: `encode_kmer` only accepts uppercase ACGT, so a
+        // Regression test: `encode_kmer` only accepts uppercase ACGT, so a
         // lowercase FASTQ (the owner reproduced this with 500 lowercase
         // reads) contributes zero k-mers here -- `top_kmers` comes back
         // empty and `assemble` bails out immediately, discovering nothing.

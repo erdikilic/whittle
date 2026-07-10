@@ -579,7 +579,7 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
 
 // --adapter-infer-only + --adapter-fasta is allowed (unlike --adapter-infer,
 // which rejects a FASTA outright): naming now covers the built-in catalog
-// PLUS the user's FASTA (FU3 -- see `infer::discover`'s `name_refs`). This
+// PLUS the user's FASTA (see `infer::discover`'s `name_refs`). This
 // just checks the informational line reflects that (not the old "catalog
 // only" wording), so a user combining the two flags isn't left assuming the
 // FASTA did nothing. The actual cross-naming is proven end-to-end by
@@ -607,7 +607,7 @@ fn infer_only_with_fasta_notes_naming_includes_fasta() {
         .stderr(predicates::str::contains("plus your FASTA's adapters"));
 }
 
-// --- ab-initio inference wiring (Task 11) -------------------------------
+// --- ab-initio inference wiring -----------------------------------------
 //
 // Fixtures below plant an EXACT copy (no injected error -- error-tolerant
 // recovery is already covered by `discover_recovers_planted_adapter_under_error`
@@ -708,7 +708,7 @@ fn infer_only_prints_and_does_not_trim() {
     );
 }
 
-// Bug 3 regression: CLI help promises `--adapter-infer-only` prints
+// Regression test: CLI help promises `--adapter-infer-only` prints
 // "sequences + support + catalog names", but pre-fix `log_discovered` only
 // ever logged the sequence at `debug!` -- invisible at the default INFO
 // level -- so plain `--adapter-infer-only` stdout was completely empty.
@@ -741,7 +741,7 @@ fn infer_only_prints_sequence_to_stdout() {
     );
 }
 
-// FU3: report-only cross-names discovered adapters against the ONT catalog
+// Report-only cross-names discovered adapters against the ONT catalog
 // UNION the user's --adapter-fasta, not the catalog alone.
 //
 // `PLANTED_ADAPTER` is byte-identical to the catalog's own `LSK109_front`
@@ -839,7 +839,7 @@ fn infer_trims_planted_adapter() {
         let _qual = lines.next().expect("quality line");
 
         let original = full_read_seq(idx);
-        // `checked_sub` (M5): a clear panic message if output ever somehow
+        // `checked_sub`: a clear panic message if output ever somehow
         // exceeded input, instead of an underflow wraparound with a cryptic
         // "attempt to subtract with overflow" pointing at this line only.
         let cut = original
@@ -895,7 +895,7 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
     }
 }
 
-// --- Task 11 review-fix regressions: `--adapter-infer-only` must NEVER
+// --- regressions: `--adapter-infer-only` must NEVER
 // write or touch output -------------------------------------------------
 
 /// HIGH bug: the too-few-reads branch of the infer path used to return
@@ -980,7 +980,7 @@ fn infer_only_does_not_clobber_output_file() {
     );
 }
 
-// --- Task 12: determinism ------------------------------------------------
+// --- determinism ---------------------------------------------------------
 
 /// Same input, run twice through `--adapter-infer` at `-t 1`, must produce
 /// byte-identical output. Discovery itself (`infer::discover`) is pure over
@@ -1094,7 +1094,7 @@ fn infer_warns_on_marginal_support() {
     );
 }
 
-// --- Bug 4: the binary-stdout TTY guard must not run before report-only's
+// --- the binary-stdout TTY guard must not run before report-only's
 // early exit -------------------------------------------------------------
 //
 // `guard_stdout_binary` used to run during output setup, BEFORE
@@ -1157,9 +1157,9 @@ fn infer_only_on_bam_input_with_piped_stdout_succeeds() {
         .success();
 }
 
-// --- Task 2: trim-then-filter reorder end-to-end regressions --------------
+// --- trim-then-filter reorder end-to-end regressions ----------------------
 //
-// Task 1 moved `filter::check` from pre-trim (whole raw read) to post-trim
+// The trim-then-filter reorder moved `filter::check` from pre-trim (whole raw read) to post-trim
 // (each produced segment), and split read-level accounting from segment-level
 // drop counts. These pin that behavior change through the compiled binary
 // end-to-end, on top of the internal `run_fastq_seq` unit tests already in
@@ -1337,7 +1337,7 @@ fn produced_index_naming_end_to_end() {
 /// sub-`-l` half, an all-adapter read (fully consumed by terminal trimming, so
 /// `trim::apply` produces zero segments), an empty read, and a read whose sole
 /// produced segment is itself too short. Exercises the three-way read-level
-/// counter split (Fix #2) through the real binary's rendered summary
+/// counter split through the real binary's rendered summary
 /// (`obs.rs`'s `Summary:`/`Trimmed to nothing:`/`All segments filtered:`/
 /// `Segments dropped:` lines), not just the `Counters`/`Stats` unit tests in
 /// `src/workflow/mod.rs`. In particular it distinguishes the all-adapter/empty

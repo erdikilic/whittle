@@ -401,6 +401,10 @@ pub fn reconstruct_record(
     reconstruct_record_with_bases(src, seq, qual, start, end, total, idx, update_moves)
 }
 
+// Rebuilding one output record legitimately needs all of these: the source
+// record, its (already-extracted) bases, the window, the split index/count, and
+// the move-table flag. Bundling them into a struct would only add indirection.
+#[allow(clippy::too_many_arguments)]
 fn reconstruct_record_with_bases(
     src: &RecordBuf,
     seq: &[u8],

@@ -314,7 +314,7 @@ fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
 /// well below a genuine, high-prevalence adapter's typical near-1.0 presence.
 const MARGINAL_SUPPORT: f64 = 0.45;
 
-/// Log each ab-initio discovery (Task 9's `infer::discover` output) at
+/// Log each ab-initio discovery (`infer::discover` output) at
 /// `info!`: `inferred_N ≈ NAME (pct%) · support X.XX` when the discovered
 /// sequence cross-names against the built-in ONT catalog, else `inferred_N
 /// (no catalog match) · support X.XX`. `N` is the 1-based position in
@@ -511,7 +511,7 @@ where
         return Ok(Some(chain(sample, records)));
     }
 
-    // Pure no-op fast path (M7): no adapters configured at all, or detection
+    // Pure no-op fast path: no adapters configured at all, or detection
     // sampling is off (`adapter_sample == 0`) -- nothing below would ever
     // buffer or reduce anything, so hand `records` straight back rather than
     // paying for an empty `Vec` plus a `Map<Chain<..>>` wrapper around it.
@@ -671,7 +671,7 @@ fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bo
 /// binary/gzip bytes on an interactive stdout (see `binary_to_terminal`).
 /// Shared by `run`'s single-file path and `run_folder`.
 ///
-/// `AdapterInfer::ReportOnly` is exempt (Bug 4): report-only never builds a
+/// `AdapterInfer::ReportOnly` is exempt: report-only never builds a
 /// writer for `out_fmt` at all -- it prints a small FASTA text summary to
 /// stdout (`print_discovered_fasta`) and returns before dispatch, from the
 /// `ReportOnly` early-exit in `maybe_reduce_adapters`, which runs AFTER this
@@ -907,7 +907,7 @@ fn operation_line(in_fmt: io::Format, out_fmt: io::Format) -> String {
 }
 
 /// The startup banner's `Output: ...` line: `Output: <stdout>` when writing to
-/// stdout (no compression detail — see Batch 2 spec), else `Output: {path}`, with
+/// stdout (no compression detail), else `Output: {path}`, with
 /// `(gzip|bgzf level {level}, {encode_workers} workers)` appended for compressed
 /// output formats (gzip for `FASTQ.gz`, bgzf for BAM; plain FASTQ gets no suffix).
 fn output_banner_line(
