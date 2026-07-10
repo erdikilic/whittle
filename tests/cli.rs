@@ -341,10 +341,33 @@ fn sequential_threads_label_for_dash_t_1() {
 
 #[test]
 fn bam_to_fastq_conversion_phrasing() {
+    use noodles_bam as bam;
+    use noodles_sam::alignment::RecordBuf;
+    use noodles_sam::alignment::io::Write as _;
+    use noodles_sam::alignment::record::Flags;
+    use noodles_sam::{self as sam};
+
     let dir = tempfile::tempdir().unwrap();
+    let inp = dir.path().join("in.bam");
     let out = dir.path().join("o.fastq");
+
+    // Build a minimal one-read uBAM in the tempdir so the test is hermetic
+    // (it must not depend on a fixture outside the repository).
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(&inp).unwrap());
+    w.write_header(&header).unwrap();
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = Flags::UNMAPPED;
+    *rec.name_mut() = Some(b"r1".into());
+    *rec.sequence_mut() = b"ACGTACGTAC".to_vec().into();
+    *rec.quality_scores_mut() = vec![40; 10].into();
+    w.write_alignment_record(&header, &rec).unwrap();
+    w.try_finish().unwrap();
+
     whittle()
-        .args(["-i", "data/short_eqread/short_eqread.bam", "-o"])
+        .arg("-i")
+        .arg(&inp)
+        .arg("-o")
         .arg(&out)
         .assert()
         .success()
