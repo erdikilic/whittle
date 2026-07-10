@@ -441,7 +441,9 @@ pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
 
 /// Compact magnitude for live progress fields: `750`, `145k`, `1.2M`.
 fn human_count(n: u64) -> String {
-    if n >= 1_000_000 {
+    // `>= 999_500` (not `1_000_000`): a count that rounds up to 1000k at the
+    // `{:.0}k` tier belongs in the M tier, so it reads "1.0M", not "1000k".
+    if n >= 999_500 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
         format!("{:.0}k", n as f64 / 1_000.0)
@@ -460,7 +462,9 @@ pub(crate) fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
     let mut val = n as f64;
     let mut unit = 0usize;
-    while val >= 1000.0 && unit + 1 < UNITS.len() {
+    // `>= 999.5` (not `1000.0`): once a value would round up to "1000" in its
+    // unit (`{:.0}` rounds at .5), promote it so it reads "1.0 MB", not "1000 KB".
+    while val >= 999.5 && unit + 1 < UNITS.len() {
         val /= 1000.0;
         unit += 1;
     }
@@ -512,9 +516,12 @@ fn summary_line(stats: &Stats, elapsed: Option<Duration>) -> String {
 /// "round to a whole number above 10" step, since a fixed one-decimal figure
 /// reads more consistently across the Gbp-scale totals this line is built for.
 fn human_bases(n: u64) -> String {
-    if n >= 1_000_000_000 {
+    // Thresholds sit at `999_950 * tier` (not `1000 * tier`): a value that
+    // rounds up to "1000.0" at the `{:.1}` tier is promoted, so ~1e9 bases read
+    // "1.0 Gbp", not "1000.0 Mbp".
+    if n >= 999_950_000 {
         format!("{:.1} Gbp", n as f64 / 1_000_000_000.0)
-    } else if n >= 1_000_000 {
+    } else if n >= 999_950 {
         format!("{:.1} Mbp", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
         format!("{:.1} kbp", n as f64 / 1_000.0)
@@ -633,13 +640,16 @@ pub fn human_dur(d: Duration) -> String {
     let secs = d.as_secs_f64();
     if secs < 1.0 {
         format!("{}ms", d.as_millis())
-    } else if secs < 60.0 {
+    } else if secs < 59.995 {
+        // Below the value `{:.2}s` would round up to "60.00s".
         format!("{secs:.2}s")
-    } else if secs < 3600.0 {
-        let total = d.as_secs();
+    } else if secs < 3599.5 {
+        // Round to the nearest second (not floor) so 59.996s reads "1m00s"
+        // rather than "60.00s" (from the tier above) or "0m59s" (from a floor).
+        let total = secs.round() as u64;
         format!("{}m{:02}s", total / 60, total % 60)
     } else {
-        let total = d.as_secs();
+        let total = secs.round() as u64;
         format!("{}h{:02}m", total / 3600, (total % 3600) / 60)
     }
 }
@@ -935,6 +945,33 @@ mod tests {
         assert_eq!(human_bases(460_000_000), "460.0 Mbp");
         assert_eq!(human_bases(8_240), "8.2 kbp");
         assert_eq!(human_bases(500), "500 bp");
+    }
+
+    // Unit-boundary rounding: a value that rounds up to the next tier's base
+    // must roll over, not render un-normalized (e.g. "1000k" / "60.00s").
+    #[test]
+    fn human_count_rolls_k_to_m_at_boundary() {
+        assert_eq!(human_count(999_500), "1.0M");
+        assert_eq!(human_count(999_499), "999k");
+    }
+
+    #[test]
+    fn human_bytes_rolls_over_at_unit_boundary() {
+        assert_eq!(human_bytes(999_999), "1.0 MB");
+        assert_eq!(human_bytes(999_999_999), "1.0 GB");
+        assert_eq!(human_bytes(999_499), "999 KB"); // just below: stays KB
+    }
+
+    #[test]
+    fn human_bases_rolls_over_at_unit_boundary() {
+        assert_eq!(human_bases(999_999_999), "1.0 Gbp");
+        assert_eq!(human_bases(999_950), "1.0 Mbp");
+    }
+
+    #[test]
+    fn human_dur_rolls_seconds_to_minutes_at_boundary() {
+        assert_eq!(human_dur(Duration::from_millis(59_996)), "1m00s");
+        assert_eq!(human_dur(Duration::from_millis(59_990)), "59.99s");
     }
 
     #[test]
