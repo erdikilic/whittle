@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Long-read (ONT / PacBio / Qitan) trimming for FASTQ, gzipped FASTQ, and
+- Long-read (ONT / PacBio) trimming for FASTQ, gzipped FASTQ, and
   unaligned BAM: fixed head/tail crop, quality trimming (Mott, best-segment,
   quality-split), and adapter trimming with interior-chimera splitting.
 - Length / quality / GC filtering, applied per surviving segment after trimming.

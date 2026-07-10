@@ -9,11 +9,11 @@ It rewrites `MM`/`ML` base-modification tags on every trim and split, so a trimm
 [![CI](https://github.com/erdikilic/whittle/actions/workflows/ci.yml/badge.svg)](https://github.com/erdikilic/whittle/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 ![Rust](https://img.shields.io/badge/rust-2024%20edition-000000?logo=rust&logoColor=white)
-![Long reads](https://img.shields.io/badge/long--reads-ONT%20%7C%20PacBio%20%7C%20Qitan-1f6feb)
+![Long reads](https://img.shields.io/badge/long--reads-ONT%20%7C%20PacBio-1f6feb)
 
 </div>
 
-whittle filters and trims long reads (ONT, PacBio, Qitan) in FASTQ, gzipped FASTQ, and unaligned BAM. It does the usual length/quality/GC filtering and head/tail/quality/adapter trimming — and, on uBAM, it reconstructs the base-modification (`MM`/`ML`/`MN`), per-base kinetics, and ONT signal tags so every output read stays valid instead of silently decoding to nonsense.
+whittle filters and trims long reads (ONT, PacBio) in FASTQ, gzipped FASTQ, and unaligned BAM. It does the usual length/quality/GC filtering and head/tail/quality/adapter trimming — and, on uBAM, it reconstructs the base-modification (`MM`/`ML`/`MN`), per-base kinetics, and ONT signal tags so every output read stays valid instead of silently decoding to nonsense.
 
 ## Highlights
 
