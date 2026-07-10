@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+# The toolchain (channel + rustfmt/clippy components) comes from
+# rust-toolchain.toml, which rustup auto-installs on the first cargo call.
+# rust-htslib (a dev-dependency, Unix-only) builds bundled HTSlib from C, so the
+# jobs that compile test/dev targets install a C toolchain + compression libs.
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install HTSlib build deps
+        run: sudo apt-get update && sudo apt-get install -y
+             build-essential autoconf automake zlib1g-dev libbz2-dev
+             liblzma-dev libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install HTSlib build deps
+        run: sudo apt-get update && sudo apt-get install -y
+             build-essential autoconf automake zlib1g-dev libbz2-dev
+             liblzma-dev libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-features --locked
+
+  # Verifies the crate still builds on its declared MSRV (Cargo.toml
+  # `rust-version`). RUSTUP_TOOLCHAIN overrides the pinned rust-toolchain.toml.
+  msrv:
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.91.0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.91.0 --profile minimal
+      - name: Install HTSlib build deps
+        run: sudo apt-get update && sudo apt-get install -y
+             build-essential autoconf automake zlib1g-dev libbz2-dev
+             liblzma-dev libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-features --locked
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
