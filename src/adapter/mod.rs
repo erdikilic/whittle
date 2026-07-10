@@ -47,28 +47,47 @@ pub const MIN_PATTERN_LEN: usize = 11;
 enum Terminal {
     Five,
     Three,
+    /// Eligible for BOTH ends (short read, overlapping end-zones): excise the
+    /// adapter span and keep BOTH flanks. See `classify_terminal`.
+    Excise,
     None,
 }
 
 /// Classify a hit at window coords `[start, end)` in a length-`n` window.
-/// A hit eligible for BOTH ends (short read, overlapping end-zones) trims
-/// toward the NEARER end, so the adapter + its shorter outboard flank is
-/// removed — never the insert between two ends.
+///
+/// A hit eligible for BOTH ends means the read is short enough that the two
+/// end-zones overlap (`n <= 2*end_size`), so the adapter sits within `end_size`
+/// of each end. Trimming toward the nearer end here would delete the whole
+/// outboard arm — which, for a central chimera-junction adapter, is real
+/// insert. Instead classify it as `Excise`: cut out just the adapter and keep
+/// both flanks. For a genuinely terminal adapter (abutting an end) the outboard
+/// flank is empty, so excising is identical to trimming that end; only a central
+/// adapter — which cannot be a terminal leader — is actually split.
 fn classify_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: End) -> Terminal {
     let near5 = start <= end_size && matches!(tag, End::Five | End::Both);
     let near3 = end >= n.saturating_sub(end_size) && matches!(tag, End::Three | End::Both);
     match (near5, near3) {
-        (true, true) => {
-            // dist to 5' start = `start`; dist to 3' end = `n - end`.
+        (true, true) => Terminal::Excise,
+        (true, false) => Terminal::Five,
+        (false, true) => Terminal::Three,
+        (false, false) => Terminal::None,
+    }
+}
+
+/// Ends-only variant of `classify_terminal`: splitting is disabled, so an
+/// `Excise` hit can't keep both flanks. Resolve it back to a terminal trim
+/// toward the nearer end (`start` vs `n - end`) — the pre-split behavior —
+/// leaving every other outcome untouched.
+fn ends_only_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: End) -> Terminal {
+    match classify_terminal(start, end, n, end_size, tag) {
+        Terminal::Excise => {
             if start <= n - end {
                 Terminal::Five
             } else {
                 Terminal::Three
             }
         },
-        (true, false) => Terminal::Five,
-        (false, true) => Terminal::Three,
-        (false, false) => Terminal::None,
+        other => other,
     }
 }
 
@@ -105,11 +124,15 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
         let k_mid = (0.5 * cfg.error_rate * len as f64).floor() as usize;
         if cfg.split {
             // Whole-window search: terminal hits trim, interior hits (within
-            // k_mid) collect for splitting.
+            // k_mid) collect for splitting. An `Excise` hit (adapter within
+            // end_size of both ends on a short read) is cut like an interior
+            // adapter, keeping both flanks — but at the terminal `k_end` budget
+            // it already passed, not the stricter `k_mid` interior gate.
             for h in hits(&mut searcher, &ad.seq, window, k_end) {
                 match classify_terminal(h.start, h.end, n, end_size, ad.end) {
                     Terminal::Five => lo = lo.max(h.end),
                     Terminal::Three => hi = hi.min(h.start),
+                    Terminal::Excise => interior.push((h.start, h.end)),
                     Terminal::None => {
                         if h.cost <= k_mid {
                             interior.push((h.start, h.end));
@@ -129,14 +152,14 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
             let head_end = (end_size + len + k_end).min(n);
             for h in hits(&mut searcher, &ad.seq, &window[..head_end], k_end) {
                 // Zone starts at 0, so h's coords are already window coords.
-                if classify_terminal(h.start, h.end, n, end_size, ad.end) == Terminal::Five {
+                if ends_only_terminal(h.start, h.end, n, end_size, ad.end) == Terminal::Five {
                     lo = lo.max(h.end);
                 }
             }
             let tail_start = n.saturating_sub(end_size + len + k_end);
             for h in hits(&mut searcher, &ad.seq, &window[tail_start..], k_end) {
                 let (s, e) = (tail_start + h.start, tail_start + h.end);
-                if classify_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
+                if ends_only_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
                     hi = hi.min(s);
                 }
             }
@@ -215,6 +238,32 @@ mod segment_tests {
         w.extend_from_slice(b"AAAAAAAAAAAA");
         let c = cfg(vec![ad("a", adapter, End::Five)], false);
         assert_eq!(adapter_segments(&w, &c), vec![(12, 24)]);
+    }
+
+    #[test]
+    fn central_chimera_on_short_read_splits_both_arms() {
+        // With the default end_size=150, both end-zones overlap for any read
+        // <= 2*end_size (300bp). A chimera-junction adapter sitting within
+        // end_size of BOTH ends must SPLIT the read (keep both inserts), not be
+        // treated as a terminal adapter — which discarded the entire outboard
+        // arm (up to ~end_size bases of real insert).
+        let adapter = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only (no A/C to collide)
+        let mut w = vec![b'A'; 115]; // insert1
+        let cut = w.len();
+        w.extend_from_slice(adapter); // junction adapter at [115,135)
+        w.extend_from_slice(&[b'C'; 115]); // insert2 -> n=250
+        let c = AdapterConfig {
+            adapters: vec![ad("mid", adapter, End::Both)],
+            error_rate: 0.2,
+            end_size: 150, // default: end-zones overlap on this 250bp read
+            split: true,
+        };
+        let segs = adapter_segments(&w, &c);
+        assert_eq!(
+            segs,
+            vec![(0, cut), (cut + adapter.len(), w.len())],
+            "central chimera must split into both arms, not lose insert1"
+        );
     }
 
     #[test]
