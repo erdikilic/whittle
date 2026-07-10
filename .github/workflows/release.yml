@@ -23,7 +23,7 @@ jobs:
           - { target: aarch64-apple-darwin, os: macos-14 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Linux: install the cross C toolchain + Rust target. This covers the
       # aarch64 cross-compile and both musl targets, using native cross GCCs on
