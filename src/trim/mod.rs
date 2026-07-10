@@ -39,29 +39,35 @@ pub fn apply(
         return vec![];
     }
 
-    // Adapter stage on the cropped window, mapped back to original coordinates.
-    let adapter_segs: Vec<(usize, usize)> = match adapters {
-        Some(cfg) => crate::adapter::adapter_segments(&seq[start..end], cfg)
-            .into_iter()
-            .map(|(s, e)| (s + start, e + start))
-            .collect(),
-        None => vec![(start, end)],
+    // Quality op within one `[s, e)` segment, results offset back to original
+    // coordinates and appended to `out`. No length filter here — the caller
+    // filters each returned segment (length/quality/GC).
+    let quality_in = |s: usize, e: usize, out: &mut Vec<(usize, usize)>| {
+        let wp = &phred[s..e];
+        let offset = |v: Vec<(usize, usize)>, out: &mut Vec<(usize, usize)>| {
+            out.extend(v.into_iter().map(|(is, ie)| (is + s, ie + s)));
+        };
+        match &plan.quality {
+            None => out.push((s, e)),
+            Some(QualityOp::TrimQual(q)) => offset(trim_by_quality(wp, *q), out),
+            Some(QualityOp::BestSegment(q)) => offset(best_segment(wp, *q), out),
+            Some(QualityOp::Split { cutoff, window }) => {
+                offset(split_low_quality(wp, *cutoff, *window), out)
+            },
+        }
     };
 
-    // Quality op within each adapter segment, offset back. No length filter here
-    // — the caller filters each returned segment (length/quality/GC).
+    // Adapter stage on the cropped window, mapped back to original coordinates,
+    // then the quality op within each segment. The common no-adapter path skips
+    // straight to the quality op with no intermediate segment vector.
     let mut out = Vec::new();
-    for (s, e) in adapter_segs {
-        let window_phred = &phred[s..e];
-        let inner = match &plan.quality {
-            None => vec![(0, window_phred.len())],
-            Some(QualityOp::TrimQual(q)) => trim_by_quality(window_phred, *q),
-            Some(QualityOp::BestSegment(q)) => best_segment(window_phred, *q),
-            Some(QualityOp::Split { cutoff, window }) => {
-                split_low_quality(window_phred, *cutoff, *window)
-            },
-        };
-        out.extend(inner.into_iter().map(|(is, ie)| (is + s, ie + s)));
+    match adapters {
+        None => quality_in(start, end, &mut out),
+        Some(cfg) => {
+            for (s, e) in crate::adapter::adapter_segments(&seq[start..end], cfg) {
+                quality_in(s + start, e + start, &mut out);
+            }
+        },
     }
     out
 }

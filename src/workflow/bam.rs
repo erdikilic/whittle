@@ -266,22 +266,35 @@ fn signal_tag_updates(
     else {
         return drop_all();
     };
-    let ones: Vec<usize> = moves
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| **m != 0)
-        .map(|(i, _)| i)
-        .collect();
-    if ones.len() != seq_len {
+    // The move index of the `start`-th and `end`-th base (each `1` in `moves`
+    // is one emitted base), and the total base count — found in a single pass,
+    // without materializing the whole positions list.
+    let mut ones_seen = 0usize;
+    let mut block_first = None;
+    let mut block_second = None;
+    for (i, &m) in moves.iter().enumerate() {
+        if m != 0 {
+            if ones_seen == start {
+                block_first = Some(i);
+            }
+            if ones_seen == end {
+                block_second = Some(i);
+            }
+            ones_seen += 1;
+        }
+    }
+    if ones_seen != seq_len {
         return drop_all(); // move table inconsistent with the sequence
     }
 
     let stride_n = stride as usize;
-    let block_first = ones[start];
+    // `start < end <= seq_len`, so the start-th base always exists; the end-th
+    // exists only when `end < seq_len`, else the window runs to the table end.
+    let block_first = block_first.expect("start < seq_len == base count");
     let block_second = if end == seq_len {
         moves.len()
     } else {
-        ones[end]
+        block_second.expect("end < seq_len == base count")
     };
 
     let mut new_mv = Vec::with_capacity(1 + block_second - block_first);
@@ -383,9 +396,9 @@ pub fn reconstruct_record(
         return src.clone();
     }
 
-    let seq = src.sequence().as_ref().to_vec();
-    let qual = src.quality_scores().as_ref().to_vec();
-    reconstruct_record_with_bases(src, &seq, &qual, start, end, total, idx, update_moves)
+    let seq = src.sequence().as_ref();
+    let qual = src.quality_scores().as_ref();
+    reconstruct_record_with_bases(src, seq, qual, start, end, total, idx, update_moves)
 }
 
 fn reconstruct_record_with_bases(
@@ -431,7 +444,7 @@ fn reconstruct_record_with_bases(
         Some(Value::String(_))
     ) {
         let data = out.data_mut();
-        match reconstruct_mods(src, &seq, start, end) {
+        match reconstruct_mods(src, seq, start, end) {
             Some((mm_new, ml_new)) => {
                 data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm_new.into()));
                 match ml_new {
@@ -543,22 +556,21 @@ pub fn reconstruct_mods(
     start: usize,
     end: usize,
 ) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    let mm_raw = match src.data().get(&Tag::BASE_MODIFICATIONS) {
-        Some(Value::String(s)) => s.to_vec(),
+    let mm_raw: &[u8] = match src.data().get(&Tag::BASE_MODIFICATIONS) {
+        Some(Value::String(s)) => AsRef::<[u8]>::as_ref(s),
         _ => return None,
     };
     // Whether the source actually carried an ML array. If it didn't, we must not
     // emit one: declaring N modified positions with zero probabilities is an
-    // invalid record that samtools/modkit reject.
-    let ml_present = matches!(
-        src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES),
-        Some(Value::Array(Array::UInt8(_)))
-    );
-    let ml_raw: Vec<u8> = match src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
-        Some(Value::Array(Array::UInt8(v))) => v.clone(),
-        _ => Vec::new(),
+    // invalid record that samtools/modkit reject. Borrow the bytes rather than
+    // cloning — `parse` copies only what it keeps into owned groups.
+    let ml_opt: Option<&[u8]> = match src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
+        Some(Value::Array(Array::UInt8(v))) => Some(v.as_slice()),
+        _ => None,
     };
-    let parsed = mods::parse(&mm_raw, &ml_raw);
+    let ml_present = ml_opt.is_some();
+    let ml_raw: &[u8] = ml_opt.unwrap_or(&[]);
+    let parsed = mods::parse(mm_raw, ml_raw);
     let ml_valid = !ml_present
         || parsed
             .groups
@@ -590,11 +602,11 @@ fn run_bam_seq(
         crate::io::bam::ensure_unaligned(&rec)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
-        let seq = rec.sequence().as_ref().to_vec();
+        let seq = rec.sequence().as_ref();
         counters
             .input_bases
             .fetch_add(seq.len() as u64, Ordering::Relaxed);
-        let qual = rec.quality_scores().as_ref().to_vec();
+        let qual = rec.quality_scores().as_ref();
         if qual.len() != seq.len() {
             let name = rec
                 .name()
@@ -610,18 +622,18 @@ fn run_bam_seq(
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
-        let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
+        let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
         process_read_segments(
             &produced,
-            &seq,
-            &qual,
+            seq,
+            qual,
             &cfg.filter,
             counters,
             |idx, total, s, e| {
                 let out = reconstruct_record_with_bases(
                     &rec,
-                    &seq,
-                    &qual,
+                    seq,
+                    qual,
                     s,
                     e,
                     total,
@@ -777,8 +789,8 @@ pub fn run_bam(
         // helper does the per-segment filter + reconstruct survivors -> Vec<RecordBuf>.
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
-            let seq = rec.sequence().as_ref().to_vec();
-            let qual = rec.quality_scores().as_ref().to_vec();
+            let seq = rec.sequence().as_ref();
+            let qual = rec.quality_scores().as_ref();
             if qual.len() != seq.len() {
                 let name = rec
                     .name()
@@ -791,19 +803,19 @@ pub fn run_bam(
                     qual.len()
                 );
             }
-            let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
+            let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
             let mut items = Vec::with_capacity(produced.len());
             process_read_segments(
                 &produced,
-                &seq,
-                &qual,
+                seq,
+                qual,
                 &cfg.filter,
                 counters,
                 |idx, total, s, e| {
                     items.push(reconstruct_record_with_bases(
                         rec,
-                        &seq,
-                        &qual,
+                        seq,
+                        qual,
                         s,
                         e,
                         total,
@@ -901,11 +913,11 @@ where
         crate::io::bam::ensure_unaligned(&rec)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
-        let seq = rec.sequence().as_ref().to_vec();
+        let seq = rec.sequence().as_ref();
         counters
             .input_bases
             .fetch_add(seq.len() as u64, Ordering::Relaxed);
-        let qual = rec.quality_scores().as_ref().to_vec();
+        let qual = rec.quality_scores().as_ref();
         if qual.len() != seq.len() {
             let name = rec
                 .name()
@@ -922,17 +934,17 @@ where
             malformed_tag_reads += 1;
         }
         let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
-        let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
+        let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
         process_read_segments(
             &produced,
-            &seq,
-            &qual,
+            seq,
+            qual,
             &cfg.filter,
             counters,
             |idx, total, s, e| {
                 let seg_seq = &seq[s..e];
                 let seg_qual = &qual[s..e];
-                let tags = build_fastq_tags(&rec, &seq, s, e, total, &cfg.fastq_tags);
+                let tags = build_fastq_tags(&rec, seq, s, e, total, &cfg.fastq_tags);
                 if tags.is_empty() {
                     write_segment(writer, &name, seg_seq, seg_qual, total, idx)?;
                 } else {
@@ -971,8 +983,8 @@ pub fn run_bam_to_fastq<W: Write + Send>(
         // survivors only).
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
-            let seq = rec.sequence().as_ref().to_vec();
-            let qual = rec.quality_scores().as_ref().to_vec();
+            let seq = rec.sequence().as_ref();
+            let qual = rec.quality_scores().as_ref();
             if qual.len() != seq.len() {
                 let name = rec
                     .name()
@@ -986,18 +998,18 @@ pub fn run_bam_to_fastq<W: Write + Send>(
                 );
             }
             let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
-            let produced = trim::apply(&seq, &qual, &cfg.trim, cfg.adapters.as_ref());
+            let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
             let mut out = Vec::with_capacity(produced.len());
             process_read_segments(
                 &produced,
-                &seq,
-                &qual,
+                seq,
+                qual,
                 &cfg.filter,
                 counters,
                 |idx, total, s, e| {
                     let seg_seq = &seq[s..e];
                     let seg_qual = &qual[s..e];
-                    let tags = build_fastq_tags(rec, &seq, s, e, total, &cfg.fastq_tags);
+                    let tags = build_fastq_tags(rec, seq, s, e, total, &cfg.fastq_tags);
                     let mut buf = Vec::new();
                     if tags.is_empty() {
                         write_segment(&mut buf, &name, seg_seq, seg_qual, total, idx)?;

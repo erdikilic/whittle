@@ -3,7 +3,17 @@ pub mod infer;
 pub mod preset;
 pub mod search;
 
-use search::{hits, new_searcher};
+use std::cell::RefCell;
+
+use search::{DnaSearcher, hits, new_searcher};
+
+thread_local! {
+    /// One reverse-complement searcher per thread, reused across reads so
+    /// `adapter_segments` doesn't allocate a fresh searcher (and its scratch
+    /// buffers) on every call. Per-thread, so the parallel workflows stay
+    /// data-race-free without sharing.
+    static RC_SEARCHER: RefCell<DnaSearcher> = RefCell::new(new_searcher());
+}
 
 /// Which read end a catalog sequence is expected at — this gates TERMINAL
 /// trimming only: `Five` trims at the 5' end, `Three` at the 3' end, `Both` at
@@ -109,62 +119,63 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
         return vec![(0, n)];
     }
     let end_size = cfg.end_size.min(n);
-    let mut searcher = new_searcher();
 
     let mut lo = 0usize; // 5' keep-boundary (advances inward on terminal hits)
     let mut hi = n; // 3' keep-boundary (retreats inward on terminal hits)
     let mut interior: Vec<(usize, usize)> = Vec::new();
 
-    for ad in &cfg.adapters {
-        let len = ad.seq.len();
-        if len < MIN_PATTERN_LEN {
-            continue;
+    RC_SEARCHER.with_borrow_mut(|searcher| {
+        for ad in &cfg.adapters {
+            let len = ad.seq.len();
+            if len < MIN_PATTERN_LEN {
+                continue;
+            }
+            let k_end = (cfg.error_rate * len as f64).floor() as usize;
+            let k_mid = (0.5 * cfg.error_rate * len as f64).floor() as usize;
+            if cfg.split {
+                // Whole-window search: terminal hits trim, interior hits (within
+                // k_mid) collect for splitting. An `Excise` hit (adapter within
+                // end_size of both ends on a short read) is cut like an interior
+                // adapter, keeping both flanks — but at the terminal `k_end`
+                // budget it already passed, not the stricter `k_mid` interior gate.
+                for h in hits(searcher, &ad.seq, window, k_end) {
+                    match classify_terminal(h.start, h.end, n, end_size, ad.end) {
+                        Terminal::Five => lo = lo.max(h.end),
+                        Terminal::Three => hi = hi.min(h.start),
+                        Terminal::Excise => interior.push((h.start, h.end)),
+                        Terminal::None => {
+                            if h.cost <= k_mid {
+                                interior.push((h.start, h.end));
+                            }
+                        },
+                    }
+                }
+            } else {
+                // Ends-only: search only the two end-zones, never the interior.
+                // A terminal 5' hit has `h.start <= end_size` but its `h.end` can
+                // extend up to `end_size + len + k_end`: `sassy::search` allows up
+                // to `k_end` edits INCLUDING INSERTIONS, and an insertion
+                // lengthens the matched TEXT span beyond the pattern length. So
+                // the head zone must be `end_size + len + k_end` wide, or a
+                // terminal hit with indel errors near the boundary would be
+                // under-trimmed or missed entirely. Symmetric for the tail zone.
+                let head_end = (end_size + len + k_end).min(n);
+                for h in hits(searcher, &ad.seq, &window[..head_end], k_end) {
+                    // Zone starts at 0, so h's coords are already window coords.
+                    if ends_only_terminal(h.start, h.end, n, end_size, ad.end) == Terminal::Five {
+                        lo = lo.max(h.end);
+                    }
+                }
+                let tail_start = n.saturating_sub(end_size + len + k_end);
+                for h in hits(searcher, &ad.seq, &window[tail_start..], k_end) {
+                    let (s, e) = (tail_start + h.start, tail_start + h.end);
+                    if ends_only_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
+                        hi = hi.min(s);
+                    }
+                }
+            }
         }
-        let k_end = (cfg.error_rate * len as f64).floor() as usize;
-        let k_mid = (0.5 * cfg.error_rate * len as f64).floor() as usize;
-        if cfg.split {
-            // Whole-window search: terminal hits trim, interior hits (within
-            // k_mid) collect for splitting. An `Excise` hit (adapter within
-            // end_size of both ends on a short read) is cut like an interior
-            // adapter, keeping both flanks — but at the terminal `k_end` budget
-            // it already passed, not the stricter `k_mid` interior gate.
-            for h in hits(&mut searcher, &ad.seq, window, k_end) {
-                match classify_terminal(h.start, h.end, n, end_size, ad.end) {
-                    Terminal::Five => lo = lo.max(h.end),
-                    Terminal::Three => hi = hi.min(h.start),
-                    Terminal::Excise => interior.push((h.start, h.end)),
-                    Terminal::None => {
-                        if h.cost <= k_mid {
-                            interior.push((h.start, h.end));
-                        }
-                    },
-                }
-            }
-        } else {
-            // Ends-only: search only the two end-zones, never the interior.
-            // A terminal 5' hit has `h.start <= end_size` but its `h.end` can
-            // extend up to `end_size + len + k_end`: `sassy::search` allows up
-            // to `k_end` edits INCLUDING INSERTIONS, and an insertion lengthens
-            // the matched TEXT span beyond the pattern length. So the head
-            // zone must be `end_size + len + k_end` wide, or a terminal hit
-            // with indel errors near the boundary would be under-trimmed or
-            // missed entirely. Symmetric for the tail zone.
-            let head_end = (end_size + len + k_end).min(n);
-            for h in hits(&mut searcher, &ad.seq, &window[..head_end], k_end) {
-                // Zone starts at 0, so h's coords are already window coords.
-                if ends_only_terminal(h.start, h.end, n, end_size, ad.end) == Terminal::Five {
-                    lo = lo.max(h.end);
-                }
-            }
-            let tail_start = n.saturating_sub(end_size + len + k_end);
-            for h in hits(&mut searcher, &ad.seq, &window[tail_start..], k_end) {
-                let (s, e) = (tail_start + h.start, tail_start + h.end);
-                if ends_only_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
-                    hi = hi.min(s);
-                }
-            }
-        }
-    }
+    });
 
     if lo >= hi {
         return vec![]; // whole window consumed by terminal adapters

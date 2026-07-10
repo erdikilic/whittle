@@ -119,8 +119,15 @@ pub fn write_segment_tagged<W: Write>(
     w.write_all(b"\n")?;
     w.write_all(seq)?;
     w.write_all(b"\n+\n")?;
-    let ascii: Vec<u8> = phred.iter().map(|&q| q.saturating_add(33)).collect();
-    w.write_all(&ascii)?;
+    // Encode phred -> ASCII in fixed stack chunks, avoiding a per-segment heap
+    // allocation (this runs once per output segment).
+    let mut ascii = [0u8; 1024];
+    for chunk in phred.chunks(ascii.len()) {
+        for (dst, &q) in ascii.iter_mut().zip(chunk) {
+            *dst = q.saturating_add(33);
+        }
+        w.write_all(&ascii[..chunk.len()])?;
+    }
     w.write_all(b"\n")
 }
 

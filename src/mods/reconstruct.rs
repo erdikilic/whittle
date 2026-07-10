@@ -2,25 +2,37 @@ use super::{MmGroup, Mods, counting_base};
 
 pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
     let mut out = Vec::new();
+    // Positions of each distinct counting base along SEQ, computed once and
+    // reused across groups that share it (e.g. `C+h` and `C+m` both count 'C',
+    // and a `+`/`-` pair on the same base share the same complement scan).
+    let mut positions_cache: Vec<(u8, Vec<usize>)> = Vec::new();
 
     for g in &mods.groups {
         let ncodes = g.codes.len().max(1);
         let cbase = counting_base(g.base, g.strand);
 
         // All positions of the counting base along the whole SEQ (ascending).
-        let positions: Vec<usize> = seq
-            .iter()
-            .enumerate()
-            .filter(|&(_, &b)| b.to_ascii_uppercase() == cbase)
-            .map(|(i, _)| i)
-            .collect();
+        // Index-based lookup (not a returned borrow) so the conditional insert
+        // doesn't fight the borrow checker.
+        let cache_idx = match positions_cache.iter().position(|(b, _)| *b == cbase) {
+            Some(i) => i,
+            None => {
+                let p: Vec<usize> = seq
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &b)| b.to_ascii_uppercase() == cbase)
+                    .map(|(i, _)| i)
+                    .collect();
+                positions_cache.push((cbase, p));
+                positions_cache.len() - 1
+            },
+        };
+        let positions = &positions_cache[cache_idx].1;
 
-        // Positions inside the output window (ascending), for renumbering.
-        let window: Vec<usize> = positions
-            .iter()
-            .copied()
-            .filter(|&p| p >= start && p < end)
-            .collect();
+        // First position at/after the window start, so an in-window position's
+        // renumbered index is `(its index in positions) - w0` — no separate
+        // window vector or per-position binary search.
+        let w0 = positions.partition_point(|&p| p < start);
 
         // Walk the group's deltas to recover each modified absolute position and
         // its ML byte run, then keep the ones inside the window.
@@ -42,8 +54,9 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
             if abs < start || abs >= end {
                 continue;
             }
-            // Index of `abs` within the window (present by construction).
-            let widx = window.partition_point(|&p| p < abs) as isize;
+            // `abs == positions[cursor - 1]`, so its in-window index is
+            // `(cursor - 1) - w0` (positions is strictly ascending).
+            let widx = (cursor - 1 - w0) as isize;
             new_deltas.push((widx - prev_widx - 1) as usize);
             prev_widx = widx;
 
