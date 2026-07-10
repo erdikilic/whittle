@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # manual runs build the binaries without publishing a release
+
+# Builds a release binary for each target on a NATIVE runner. Native runners are
+# used deliberately: whittle's compression dependencies (zlib-ng, libdeflate)
+# build C code, so cross-compiling from x86_64 would need a full cross C/CMake
+# toolchain per target. Each native runner already has the right compiler.
+# sassy's SIMD comes out right per arch: x86_64 gets AVX2 via the repo's
+# .cargo/config.toml (target-cpu=x86-64-v3); aarch64 uses baseline NEON.
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # required to attach binaries to the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          tar -C "target/${{ matrix.target }}/release" -czf \
+            "whittle-${{ matrix.target }}.tar.gz" whittle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whittle-${{ matrix.target }}
+          path: whittle-${{ matrix.target }}.tar.gz
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: whittle-${{ matrix.target }}.tar.gz

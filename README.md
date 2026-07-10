@@ -13,6 +13,10 @@ correct instead of silently drifting out of register with the sequence.
 
 ## Install
 
+Grab a prebuilt binary (Linux/macOS, x86-64/arm64) from the
+[Releases](https://github.com/erdikilic/whittle/releases) page, or build from a
+clone of this repository:
+
 ```bash
 cargo build --release
 ```
@@ -374,6 +378,16 @@ approximate (edit-distance) search, which needs its AVX2 SIMD path on
 x86-64: `.cargo/config.toml` sets `target-cpu=x86-64-v3` automatically for
 `cfg(target_arch = "x86_64")` builds (aarch64 uses NEON by default, no flag
 needed). Building `whittle` requires Rust >= 1.91.
+
+That config applies only to builds **inside this repository**. A `cargo install`
+from crates.io does not inherit it, so on x86-64 pass the flag yourself:
+
+```bash
+RUSTFLAGS="-C target-cpu=x86-64-v3" cargo install whittle
+```
+
+Prebuilt binaries from the [Releases](https://github.com/erdikilic/whittle/releases)
+page already bake in the right per-architecture flags, so they need no setup.
 
 ## v1 limitations
 
