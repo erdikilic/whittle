@@ -85,7 +85,11 @@ pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format>
 /// on an `out.fastq.gz` path. `None` when there's no forced format, the path
 /// has no recognized extension, it's stdin/stdout (`path` is `None`), or the
 /// two agree. `flag` names the CLI flag for the message.
-pub fn format_mismatch_warning(flag: &str, forced: Option<Format>, path: Option<&Path>) -> Option<String> {
+pub fn format_mismatch_warning(
+    flag: &str,
+    forced: Option<Format>,
+    path: Option<&Path>,
+) -> Option<String> {
     let forced = forced?;
     let detected = from_extension(path?)?;
     (detected != forced).then(|| {
