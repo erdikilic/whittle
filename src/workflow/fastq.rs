@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(stats.segments_dropped_short, 0);
     }
 
-    /// The core fix (Step 8, behavior test 1): a read's RAW mean quality is
+    /// A read's RAW mean quality is
     /// dragged below `-q` only by a low-quality head flank; once that flank is
     /// cropped away (crop runs before the filter in the new order), the
     /// trimmed insert's own mean passes. Pre-fix (filter-before-trim), this
@@ -541,10 +541,10 @@ mod tests {
         assert_eq!(stats.segments_dropped_low_qual, 0);
     }
 
-    /// Step 8, behavior test 2 (+ naming): an interior adapter splits a read
+    /// An interior adapter splits a read
     /// into a long insert (survives length filtering) and a short insert
-    /// (rejected `TooShort`). The survivor keeps its PRODUCED index (option-b
-    /// naming): it is named `_segment_1` (not renamed to look unsplit), even
+    /// (rejected `TooShort`). The survivor keeps its PRODUCED index: it
+    /// is named `_segment_1` (not renamed to look unsplit), even
     /// though its sibling `_segment_2` never made it to output — a lone
     /// suffix with a gap correctly signals "this read was split".
     #[test]
@@ -625,7 +625,7 @@ mod tests {
         );
     }
 
-    /// Step 8, behavior test 3: an empty input read produces no trim
+    /// An empty input read produces no trim
     /// intervals at all, so it bumps the read-level `reads_trimmed_to_nothing`
     /// counter with NO segment-level drop (the per-segment filter loop never
     /// runs, since there is nothing to iterate).
