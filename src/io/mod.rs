@@ -66,13 +66,35 @@ pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format>
     } else if sniff.starts_with(&[0x1f, 0x8b]) {
         Ok(Format::FastqGz)
     } else if sniff.starts_with(b"BAM\x01") {
-        // A naked (non-BGZF) BAM stream — unusual, but accept it rather than fail.
-        Ok(Format::Bam)
+        // A naked (non-BGZF) BAM stream: the reader always wraps input in a
+        // bgzf decoder, so this could never actually be read — fail with a
+        // precise message instead of surfacing an opaque bgzf framing error.
+        anyhow::bail!(
+            "input looks like an uncompressed (non-BGZF) BAM stream; a BGZF-compressed BAM \
+             is required (re-compress with `samtools view -b`)"
+        )
     } else if sniff.first() == Some(&b'@') {
         Ok(Format::Fastq)
     } else {
         anyhow::bail!("cannot determine input format; pass --in-format")
     }
+}
+
+/// Advisory text when an explicit `--in-format`/`--out-format` (`forced`)
+/// disagrees with what `path`'s extension suggests — e.g. `--out-format fastq`
+/// on an `out.fastq.gz` path. `None` when there's no forced format, the path
+/// has no recognized extension, it's stdin/stdout (`path` is `None`), or the
+/// two agree. `flag` names the CLI flag for the message.
+pub fn format_mismatch_warning(flag: &str, forced: Option<Format>, path: Option<&Path>) -> Option<String> {
+    let forced = forced?;
+    let detected = from_extension(path?)?;
+    (detected != forced).then(|| {
+        format!(
+            "{flag} {} but the file extension looks like {}",
+            forced.label(),
+            detected.label()
+        )
+    })
 }
 
 /// True if `sniff` begins with a BGZF block header: gzip magic + deflate method +
@@ -143,13 +165,58 @@ mod tests {
 
     #[test]
     fn stdin_sniff_falls_back_to_magic() {
-        // no path -> sniff. gzip magic 1f 8b -> FastqGz; '@' -> Fastq; BAM magic -> Bam.
+        // no path -> sniff. gzip magic 1f 8b -> FastqGz; '@' -> Fastq.
         assert_eq!(
             detect_input(None, &[0x1f, 0x8b, 0x08]).unwrap(),
             Format::FastqGz
         );
         assert_eq!(detect_input(None, b"@read").unwrap(), Format::Fastq);
-        assert_eq!(detect_input(None, b"BAM\x01").unwrap(), Format::Bam);
+    }
+
+    #[test]
+    fn naked_non_bgzf_bam_is_rejected() {
+        // A bare `BAM\x01` stream (no BGZF framing) cannot be read by the
+        // bgzf-wrapping reader, so detection must fail with a clear message
+        // rather than claim Format::Bam and then surface an opaque bgzf error.
+        let err = detect_input(None, b"BAM\x01rest").unwrap_err().to_string();
+        assert!(
+            err.to_ascii_lowercase().contains("bgzf"),
+            "message should name BGZF, got: {err}"
+        );
+    }
+
+    #[test]
+    fn format_mismatch_warning_fires_on_disagreement() {
+        let w = format_mismatch_warning(
+            "--out-format",
+            Some(Format::Fastq),
+            Some(Path::new("out.fastq.gz")),
+        );
+        assert_eq!(
+            w.as_deref(),
+            Some("--out-format FASTQ but the file extension looks like FASTQ.gz")
+        );
+    }
+
+    #[test]
+    fn format_mismatch_warning_silent_when_absent_or_agreeing() {
+        // no forced format, matching extension, unknown extension, and stdin all stay silent.
+        assert_eq!(
+            format_mismatch_warning("--in-format", None, Some(Path::new("x.bam"))),
+            None
+        );
+        assert_eq!(
+            format_mismatch_warning("--in-format", Some(Format::Bam), Some(Path::new("x.bam"))),
+            None
+        );
+        assert_eq!(
+            format_mismatch_warning("--in-format", Some(Format::Bam), Some(Path::new("x.txt"))),
+            None
+        );
+        assert_eq!(
+            format_mismatch_warning("--in-format", Some(Format::Bam), None),
+            None
+        );
     }
 
     #[test]
