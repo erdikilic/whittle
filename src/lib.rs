@@ -107,24 +107,17 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         },
     };
 
-    // Advisory only: an explicit --in-format always wins for actual detection
-    // (this never changes behavior), but it usually signals a mistake when it
-    // disagrees with the file's own extension — e.g. `--in-format bam` on a
-    // `.fastq` file. Extension-only check: skipped for stdin / no-extension.
-    // The warning itself fires later, after the banner (see the comment above
-    // the consolidated warnings block below) — only the detection runs here.
-    let mismatch_warn = if let Some(forced) = cfg.io.in_format
-        && let Some(detected) = in_path.and_then(io::from_extension)
-        && detected != forced
-    {
-        Some(format!(
-            "--in-format {} but the file extension looks like {}",
-            forced.label(),
-            detected.label()
-        ))
-    } else {
-        None
-    };
+    // Advisory only: an explicit --in-format/--out-format always wins for
+    // actual detection (this never changes behavior), but it usually signals a
+    // mistake when it disagrees with the path's own extension — e.g.
+    // `--in-format bam` on a `.fastq` file, or `--out-format fastq` on an
+    // `out.fastq.gz` path (which would write a plain FASTQ into a .gz name).
+    // Extension-only check: skipped for stdin/stdout / no-extension. Both
+    // warnings fire later, after the banner (see the consolidated warnings
+    // block below) — only the detection runs here.
+    let mismatch_warn = io::format_mismatch_warning("--in-format", cfg.io.in_format, in_path);
+    let out_mismatch_warn =
+        io::format_mismatch_warning("--out-format", cfg.io.out_format, cfg.io.output.as_deref());
 
     let out_fmt = cfg
         .io
@@ -208,6 +201,9 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
     }
     if let Some(msg) = mismatch_warn {
+        tracing::warn!("{msg}");
+    }
+    if let Some(msg) = out_mismatch_warn {
         tracing::warn!("{msg}");
     }
     if no_op_warn {
@@ -718,6 +714,12 @@ fn run_folder(
     // inside `-i <dir>` — it could be a real input or a stale prior output, and
     // overwriting either while merging the rest is silent data loss. The merged
     // output must live outside the input directory.
+    // --in-format has no effect here: a directory's family is decided per file
+    // by extension (see io::dir::classify), so a forced input format is inert.
+    // Warn rather than silently ignore it (the warning proper fires below, with
+    // the other advisories, after the banner).
+    let folder_in_format_ignored = cfg.io.in_format.is_some();
+
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
     let family_fmt = match family {
         io::dir::Family::Fastq => Format::Fastq,
@@ -782,6 +784,12 @@ fn run_folder(
     // banner, not before it.
     if let Some((requested, ncpu)) = cfg.threads_clamped {
         tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
+    }
+    if folder_in_format_ignored {
+        tracing::warn!(
+            "--in-format is ignored for a directory input; folder files are classified \
+             by extension per file"
+        );
     }
 
     let counters = std::sync::Arc::new(workflow::Counters::default());
