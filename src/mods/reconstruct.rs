@@ -52,7 +52,11 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
             new_ml.extend_from_slice(&g.ml[ml_start..ml_end]);
         }
 
-        if !new_deltas.is_empty() {
+        // Keep a group that has surviving positions, OR one that was already
+        // empty in the source (`g.deltas.is_empty()` — a valid "assessed, none
+        // found" record, often carrying a `?`/`.` status). A group that HAD
+        // positions but lost every one to the window is genuinely dropped.
+        if !new_deltas.is_empty() || g.deltas.is_empty() {
             out.push(MmGroup {
                 base: g.base,
                 strand: g.strand,
@@ -88,6 +92,25 @@ mod tests {
         assert_eq!(m.groups.len(), 1);
         assert_eq!(m.groups[0].deltas, vec![0, 0]);
         assert_eq!(m.groups[0].ml, vec![22, 33]);
+    }
+
+    #[test]
+    fn preserves_originally_empty_group() {
+        // An MM group with zero positions (e.g. `C+m?;` — "assessed, none
+        // found") is valid SAM and must survive windowing, distinct from
+        // a group whose positions all fell OUTSIDE the window (dropped).
+        let seq = b"ACAC"; // A at 0,2 ; C at 1,3
+        // A+a has a modified A at occ 0 (pos 0, in window); C+m? is empty.
+        let m = recon(b"A+a,0;C+m?;", &[9], seq, 0, 4);
+        assert_eq!(m.groups.len(), 2, "empty C+m? group kept alongside A+a");
+        let cm = m
+            .groups
+            .iter()
+            .find(|g| g.base == b'C')
+            .expect("empty C+m? group preserved");
+        assert!(cm.deltas.is_empty());
+        assert!(cm.ml.is_empty());
+        assert_eq!(cm.status, Some(b'?'));
     }
 
     #[test]

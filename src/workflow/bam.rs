@@ -1185,6 +1185,27 @@ mod tests {
     }
 
     #[test]
+    fn reconstruct_record_preserves_originally_empty_mm_group() {
+        // A record carrying an "assessed, none found" group (`C+m;`, zero
+        // positions) alongside a real one must keep BOTH through a trim.
+        // Pre-fix the empty group was silently dropped by reconstruct/serialize.
+        // seq CACA: C at 0,2 ; A at 1,3. A+a modifies A-occ 0 (pos1). C+m empty.
+        let src = ubam_with_mods(b"CACA", vec![30, 31, 32, 33], b"A+a,0;C+m;", vec![7]);
+        // Untrimmed whole read, but no MN tag, so full_window_mods_already_
+        // consistent is false and the record is still reconstructed (the exact
+        // shape from the bug report). The empty group must survive that pass.
+        let out = reconstruct_record(&src, 0, 4, 1, 0, false);
+        let mm = match out.data().get(&Tag::BASE_MODIFICATIONS) {
+            Some(Value::String(s)) => s.to_vec(),
+            other => panic!("MM must survive, got {other:?}"),
+        };
+        assert_eq!(
+            mm, b"A+a,0;C+m;",
+            "the empty C+m assessment group must be preserved"
+        );
+    }
+
+    #[test]
     fn split_suffixes_name_and_drops_empty_mods() {
         let src = ubam_with_mods(b"CCAC", vec![30, 31, 32, 33], b"C+m,0;", vec![10]); // mod at pos0
         // segment [2,4) has no surviving C mod -> MM/ML removed entirely.
