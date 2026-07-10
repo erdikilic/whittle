@@ -32,7 +32,9 @@ fn adapter_present_in(
     let k_mid = (0.5 * error_rate * len as f64).floor() as usize;
     for h in hits(searcher, &ad.seq, window, k_end) {
         match classify_terminal(h.start, h.end, n, end_size, ad.end) {
-            Terminal::Five | Terminal::Three => return true,
+            // `Excise` (adapter within end_size of both ends on a short read)
+            // acts either way: split when `split`, terminal-trim otherwise.
+            Terminal::Five | Terminal::Three | Terminal::Excise => return true,
             Terminal::None => {
                 if split && h.cost <= k_mid {
                     return true;
