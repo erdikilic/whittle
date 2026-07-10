@@ -431,7 +431,7 @@ fn reconstruct_record_with_bases(
         Some(Value::String(_))
     ) {
         let data = out.data_mut();
-        match reconstruct_mods(src, &seq, start, end) {
+        match reconstruct_mods(src, seq, start, end) {
             Some((mm_new, ml_new)) => {
                 data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm_new.into()));
                 match ml_new {

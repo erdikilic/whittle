@@ -882,12 +882,14 @@ fn encode_kind_for(out_fmt: io::Format) -> config::EncodeKind {
 
 /// Whether the render stage has substantial per-record work. BAM input remains
 /// render-heavy even for a full-window output because the current parallel path
-/// still clones owned `RecordBuf`s before handing them to the writer.
-fn render_heavy_for(in_fmt: io::Format, _out_fmt: io::Format, _cfg: &Config) -> bool {
-    if !matches!(in_fmt, io::Format::Bam) {
-        return false;
-    }
-    true
+/// still clones owned `RecordBuf`s before handing them to the writer. FASTQ
+/// input is normally trim-only (light), but adapter matching or ab-initio
+/// inference runs an approximate search per read, which is heavy too — so it
+/// gets a render-pool share rather than being starved as pure compression.
+fn render_heavy_for(in_fmt: io::Format, _out_fmt: io::Format, cfg: &Config) -> bool {
+    matches!(in_fmt, io::Format::Bam)
+        || cfg.adapters.is_some()
+        || cfg.adapter_infer != AdapterInfer::Off
 }
 
 /// The startup banner's operation line (LINE mode's item 3 / BAR mode's own
