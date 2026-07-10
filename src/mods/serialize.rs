@@ -5,9 +5,11 @@ pub fn serialize(mods: &Mods) -> (Vec<u8>, Vec<u8>) {
     let mut ml = Vec::new();
 
     for g in &mods.groups {
-        if g.deltas.is_empty() {
-            continue;
-        }
+        // Empty-delta groups ARE emitted: `reconstruct` only ever keeps an
+        // empty group that was empty in the source (a valid "assessed, none
+        // found" record), and dropping it here would silently erase that
+        // information. A group that lost all its positions to the window is
+        // already excluded upstream, so it never reaches here.
         mm.push(g.base);
         mm.push(g.strand);
         for code in &g.codes {
@@ -51,8 +53,9 @@ mod tests {
     }
 
     #[test]
-    fn skips_empty_groups() {
-        // A group with no deltas should not be emitted.
+    fn emits_empty_groups() {
+        // A zero-position group is valid SAM ("assessed, none found") and must
+        // be re-emitted, not dropped. Contributes no ML bytes.
         let mut mods = parse(b"C+m,0;", &[7]);
         mods.groups.push(crate::mods::MmGroup {
             base: b'A',
@@ -62,7 +65,8 @@ mod tests {
             deltas: vec![],
             ml: vec![],
         });
-        let (mm, _) = serialize(&mods);
-        assert_eq!(mm, b"C+m,0;");
+        let (mm, ml) = serialize(&mods);
+        assert_eq!(mm, b"C+m,0;A+a;");
+        assert_eq!(ml, vec![7]);
     }
 }
