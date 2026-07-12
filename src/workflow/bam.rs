@@ -9,7 +9,7 @@ use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 use rayon::prelude::*;
 
-use super::{Counters, Stats, process_read_segments};
+use super::{Batches, Counters, Stats, process_read_segments};
 use crate::config::{Config, FastqTags};
 use crate::io::fastq::{format_aux_field, format_mods_aux, write_segment, write_segment_tagged};
 use crate::{mods, trim};
@@ -686,7 +686,8 @@ where
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(render_workers)
         .build()?;
-    let (tx, rx) = crossbeam_channel::bounded::<T>(render_workers * 4);
+    let queue_batches = (render_workers / 2).max(2);
+    let (tx, rx) = crossbeam_channel::bounded::<Vec<T>>(queue_batches);
     let malformed = AtomicU64::new(0);
     let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
     let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
@@ -700,60 +701,68 @@ where
         let write_err_ref = &write_err;
         s.spawn(move || {
             let mut errored = false;
-            for item in rx.iter() {
+            for batch in rx.iter() {
                 if errored {
                     continue; // keep draining so bounded-channel producers never block
                 }
-                if let Err(e) = write_one(sink, &item) {
-                    *write_err_ref.lock().unwrap() = Some(e);
-                    errored = true;
+                for item in batch {
+                    if let Err(e) = write_one(sink, &item) {
+                        *write_err_ref.lock().unwrap() = Some(e);
+                        errored = true;
+                        break;
+                    }
                 }
             }
         });
 
         pool.install(|| {
-            records.par_bridge().for_each(|rec| {
-                let rec = match rec {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let mut g = proc_err.lock().unwrap();
-                        if g.is_none() {
-                            *g = Some(e);
-                        }
-                        return;
-                    },
-                };
-                counters.input_reads.fetch_add(1, Ordering::Relaxed);
+            let batches = Batches::bam(records, |rec: &anyhow::Result<RecordBuf>| {
+                rec.as_ref().map_or(0, |r| r.sequence().as_ref().len())
+            });
+            batches.par_bridge().for_each(|batch| {
+                let mut rendered = Vec::with_capacity(batch.len());
+                let mut input_reads = 0u64;
+                let mut input_bases = 0u64;
+                let mut malformed_reads = 0u64;
+                for rec in batch {
+                    let rec = match rec {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let mut g = proc_err.lock().unwrap();
+                            if g.is_none() {
+                                *g = Some(e);
+                            }
+                            continue;
+                        },
+                    };
+                    let seq_len = rec.sequence().as_ref().len();
+                    input_reads += 1;
+                    input_bases += seq_len as u64;
+                    malformed_reads += u64::from(has_malformed_perbase_tag(&rec, seq_len));
+                    match render(&rec, cfg) {
+                        Ok(items) => {
+                            // output_reads/output_bases and the read-level counters were
+                            // already bumped inside `render`, per segment, by the shared
+                            // `process_read_segments` helper.
+                            rendered.extend(items);
+                        },
+                        Err(e) => {
+                            let mut g = proc_err.lock().unwrap();
+                            if g.is_none() {
+                                *g = Some(e);
+                            }
+                        },
+                    }
+                }
+                counters
+                    .input_reads
+                    .fetch_add(input_reads, Ordering::Relaxed);
                 counters
                     .input_bases
-                    .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
-                if has_malformed_perbase_tag(&rec, rec.sequence().as_ref().len()) {
-                    malformed.fetch_add(1, Ordering::Relaxed);
-                }
-                match render(&rec, cfg) {
-                    Ok(items) => {
-                        // output_reads/output_bases and the read-level counters were
-                        // already bumped inside `render`, per segment, by the shared
-                        // `process_read_segments` helper.
-                        for it in items {
-                            let _ = tx.send(it);
-                        }
-                    },
-                    Err(e) => {
-                        // `input_reads`/`input_bases` were already bumped above with no
-                        // matching `reads_with_output`/`reads_trimmed_to_nothing`/
-                        // `reads_all_filtered` bump for this read — safe only because
-                        // capturing the error here means this whole function returns
-                        // `Err` below before `counters.snapshot()` ever runs, so its
-                        // read-level invariant assert never sees this read as
-                        // unaccounted for. A future refactor that let this error fall
-                        // through to a `snapshot()` call would need to bump one of the
-                        // three read-level counters here first.
-                        let mut g = proc_err.lock().unwrap();
-                        if g.is_none() {
-                            *g = Some(e);
-                        }
-                    },
+                    .fetch_add(input_bases, Ordering::Relaxed);
+                malformed.fetch_add(malformed_reads, Ordering::Relaxed);
+                if !rendered.is_empty() {
+                    let _ = tx.send(rendered);
                 }
             });
         });

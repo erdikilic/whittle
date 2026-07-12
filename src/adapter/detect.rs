@@ -1,5 +1,6 @@
 use super::search::{DnaSearcher, hits, new_searcher};
 use super::{Adapter, MIN_PATTERN_LEN, Terminal, classify_terminal};
+use rayon::prelude::*;
 
 /// Below this many sampled reads, presence detection is unreliable; callers
 /// skip it and use the full adapter set.
@@ -54,22 +55,30 @@ pub fn present(
     end_size: usize,
     split: bool,
     min_count: usize,
+    threads: usize,
 ) -> Vec<Adapter> {
-    let mut searcher = new_searcher();
-    let mut counts = vec![0usize; adapters.len()];
-    for &seq in sample {
-        for (i, ad) in adapters.iter().enumerate() {
-            if adapter_present_in(&mut searcher, seq, ad, error_rate, end_size, split) {
-                counts[i] += 1;
-            }
-        }
-    }
-    adapters
-        .iter()
-        .zip(counts)
-        .filter(|(_, c)| *c >= min_count)
-        .map(|(a, _)| a.clone())
-        .collect()
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.max(1))
+        .build()
+        .expect("a positive Rayon worker count must build");
+    pool.install(|| {
+        adapters
+            .par_iter()
+            .filter_map(|ad| {
+                let mut searcher = new_searcher();
+                let mut count = 0usize;
+                for &seq in sample {
+                    if adapter_present_in(&mut searcher, seq, ad, error_rate, end_size, split) {
+                        count += 1;
+                        if count >= min_count {
+                            return Some(ad.clone());
+                        }
+                    }
+                }
+                None
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -106,7 +115,15 @@ mod tests {
         }
         let seqs: Vec<&[u8]> = reads.iter().map(|r| r.as_slice()).collect();
         let adapters = vec![ad("P", p, End::Both), ad("Q", q, End::Both)];
-        let kept = present(&seqs, &adapters, 0.2, 150, true, presence_min(seqs.len()));
+        let kept = present(
+            &seqs,
+            &adapters,
+            0.2,
+            150,
+            true,
+            presence_min(seqs.len()),
+            2,
+        );
         let names: Vec<&str> = kept.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, vec!["P"], "present kept, absent dropped");
     }

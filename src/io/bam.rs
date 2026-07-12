@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{self, Write};
-use std::num::NonZero;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use noodles_bam as bam;
 use noodles_bgzf as bgzf;
@@ -11,6 +11,41 @@ use noodles_sam::{self as sam};
 
 /// A boxed, owning iterator over decoded `RecordBuf`s (or per-record errors).
 type RecordBufIterBox = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
+
+static BGZF_RAYON_WORKERS: OnceLock<usize> = OnceLock::new();
+
+/// Noodles 0.48 submits BGZF jobs to Rayon's global registry from internal I/O
+/// threads. Configure that registry once to the codec share of whittle's staged
+/// thread budget; render work continues to use its own bounded local pool.
+#[allow(deprecated)]
+fn configure_bgzf_pool(workers: usize) -> anyhow::Result<()> {
+    let workers = workers.max(1);
+    if let Some(&configured) = BGZF_RAYON_WORKERS.get() {
+        if configured != workers {
+            tracing::debug!(
+                "BGZF global Rayon pool is already configured for {configured} workers; requested {workers}"
+            );
+        }
+        return Ok(());
+    }
+
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .breadth_first()
+        .thread_name(|i| format!("whittle-bgzf-{i}"))
+        .build_global()
+    {
+        Ok(()) => {},
+        Err(e) => {
+            let configured = rayon::current_num_threads();
+            tracing::debug!(
+                "Using an existing {configured}-thread global Rayon pool for BGZF (requested {workers}): {e}"
+            );
+        },
+    }
+    let _ = BGZF_RAYON_WORKERS.set(rayon::current_num_threads());
+    Ok(())
+}
 
 /// Error (naming the read) if the record is aligned. uBAM only in v1.
 pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
@@ -47,8 +82,8 @@ pub fn reader_from(
     workers: usize,
 ) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
     if workers > 1 {
-        let mt =
-            bgzf::io::MultithreadedReader::with_worker_count(NonZero::new(workers).unwrap(), inner);
+        configure_bgzf_pool(workers)?;
+        let mt = bgzf::io::MultithreadedReader::new(inner);
         let mut r = bam::io::Reader::from(mt);
         let header = r.read_header()?;
         let hc = header.clone();
@@ -112,9 +147,9 @@ pub fn writer(
         None => Box::new(io::stdout()),
     };
     if workers > 1 {
+        configure_bgzf_pool(workers)?;
         let mt = bgzf::io::multithreaded_writer::Builder::default()
             .set_compression_level(clevel)
-            .set_worker_count(NonZero::new(workers).unwrap())
             .build_from_writer(inner);
         let mut w = bam::io::Writer::from(mt);
         w.write_header(header)?;

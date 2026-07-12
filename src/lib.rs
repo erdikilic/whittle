@@ -549,6 +549,7 @@ where
                 ac.end_size,
                 ac.split,
                 crate::adapter::detect::presence_min(s),
+                cfg.threads,
             );
             if detected.is_empty() {
                 tracing::warn!(
