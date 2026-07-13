@@ -154,6 +154,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 20,
             split: false,
+            candidate_index: std::sync::OnceLock::new(),
         };
         assert_eq!(apply(&seq, &phred, &plan, Some(&ac)), vec![(12, 24)]);
     }

@@ -316,6 +316,7 @@ pub fn parse() -> anyhow::Result<Config> {
             error_rate: c.adapter_error_rate,
             end_size: c.adapter_end_size,
             split: !c.adapter_ends_only,
+            candidate_index: std::sync::OnceLock::new(),
         })
     };
 

@@ -10,6 +10,7 @@ pub mod record;
 pub mod trim;
 pub mod workflow;
 
+use std::borrow::Cow;
 use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 
 use config::AdapterInfer;
@@ -231,7 +232,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             // re-opening stdin would drop the BGZF header. For a file, `source` is
             // the same handle positioned at the start.
             let (header, records) = io::bam::reader_from(source, budget.decode)?;
-            let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))? else {
+            let Some(records) = maybe_reduce_adapters(records, &mut cfg, bam_seq)? else {
                 return Ok(());
             };
             // Provenance: append our @PG line to a cloned header before writing.
@@ -256,7 +257,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         (Format::Bam, Format::Fastq | Format::FastqGz) => {
             // See the note in the (Bam, Bam) arm: read from the chained `source`.
             let (_header, records) = io::bam::reader_from(source, budget.decode)?;
-            let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))? else {
+            let Some(records) = maybe_reduce_adapters(records, &mut cfg, bam_seq)? else {
                 return Ok(());
             };
             let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
@@ -283,7 +284,9 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // writes no records at all.
     let gz_in = matches!(in_fmt, Format::FastqGz);
     let records = io::fastq::reader_from(source, gz_in);
-    let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| r.seq.as_slice())? else {
+    let Some(records) =
+        maybe_reduce_adapters(records, &mut cfg, |r| Cow::Borrowed(r.seq.as_slice()))?
+    else {
         return Ok(());
     };
     let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
@@ -295,12 +298,11 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The noodles `RecordBuf` SEQ accessor: the base bytes (A/C/G/T/...), the same
-/// ones `workflow/bam.rs` slices via `rec.sequence().as_ref()`. Kept as a named
-/// `fn` (rather than an inline closure per call site) so it can be passed as
-/// `seq_of` to `maybe_reduce_adapters` from both BAM dispatch arms.
-fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
-    rec.sequence().as_ref()
+/// Decode the packed SEQ of a lazy raw BAM record only when adapter sampling
+/// needs it. Normal workflow records stay packed until a render worker converts
+/// them to `RecordBuf`.
+fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
+    Cow::Owned(rec.sequence().iter().collect())
 }
 
 /// A kept adapter's support below this is close enough to `infer::KEEP_SUPPORT`
@@ -452,7 +454,7 @@ where
     // iterator), so it needs no `Send`/`'static` bound.
     I: Iterator<Item = anyhow::Result<R>> + Send + 'static,
     R: Send + 'static,
-    F: for<'a> Fn(&'a R) -> &'a [u8],
+    F: for<'a> Fn(&'a R) -> Cow<'a, [u8]>,
 {
     if cfg.adapter_infer != AdapterInfer::Off {
         // Always `Some` here: `cli::parse` never resolves `adapters` to `None`
@@ -485,12 +487,13 @@ where
                 return Ok(None);
             }
             let mut reduced = base;
-            reduced.adapters = Vec::new();
+            reduced.replace_adapters(Vec::new());
             cfg.adapters = Some(reduced);
             return Ok(Some(chain(sample, records)));
         }
 
-        let seqs: Vec<&[u8]> = sample.iter().map(&seq_of).collect();
+        let seq_storage: Vec<Cow<'_, [u8]>> = sample.iter().map(&seq_of).collect();
+        let seqs: Vec<&[u8]> = seq_storage.iter().map(|s| s.as_ref()).collect();
         let discovered = crate::adapter::infer::discover(&seqs, &base);
         log_discovered(&discovered, s);
 
@@ -506,7 +509,7 @@ where
             );
         }
         let mut reduced = base;
-        reduced.adapters = discovered.into_iter().map(|d| d.adapter).collect();
+        reduced.replace_adapters(discovered.into_iter().map(|d| d.adapter).collect());
         cfg.adapters = Some(reduced);
         return Ok(Some(chain(sample, records)));
     }
@@ -541,7 +544,8 @@ where
             );
             ac.adapters.clone()
         } else {
-            let seqs: Vec<&[u8]> = sample.iter().map(&seq_of).collect();
+            let seq_storage: Vec<Cow<'_, [u8]>> = sample.iter().map(&seq_of).collect();
+            let seqs: Vec<&[u8]> = seq_storage.iter().map(|s| s.as_ref()).collect();
             let detected = crate::adapter::detect::present(
                 &seqs,
                 &ac.adapters,
@@ -578,7 +582,7 @@ where
             }
         };
         let mut reduced = ac;
-        reduced.adapters = kept;
+        reduced.replace_adapters(kept);
         cfg.adapters = Some(reduced);
     }
     Ok(Some(Box::new(
@@ -815,7 +819,9 @@ fn run_folder(
             // truncating `File::create`) only after `maybe_reduce_adapters`
             // has had its chance to return `Ok(None)` for `ReportOnly`.
             let records = io::dir::fastq_records(&paths);
-            let Some(records) = maybe_reduce_adapters(records, cfg, |r| r.seq.as_slice())? else {
+            let Some(records) =
+                maybe_reduce_adapters(records, cfg, |r| Cow::Borrowed(r.seq.as_slice()))?
+            else {
                 return Ok(());
             };
             let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
@@ -833,7 +839,7 @@ fn run_folder(
                 // declare different read groups (relevant only for BAM output).
                 io::dir::warn_on_bam_header_mismatch(&paths);
                 let (header, records) = io::dir::bam_reader(&paths, budget.decode)?;
-                let Some(records) = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))? else {
+                let Some(records) = maybe_reduce_adapters(records, cfg, bam_seq)? else {
                     return Ok(());
                 };
                 let out_header = provenance_header(header);
@@ -852,7 +858,7 @@ fn run_folder(
             },
             Format::Fastq | Format::FastqGz => {
                 let (_header, records) = io::dir::bam_reader(&paths, budget.decode)?;
-                let Some(records) = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))? else {
+                let Some(records) = maybe_reduce_adapters(records, cfg, bam_seq)? else {
                     return Ok(());
                 };
                 let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
@@ -1630,6 +1636,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let line = adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off).unwrap();
         assert!(line.contains("1 sequences"));
@@ -1654,6 +1661,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: false,
+            candidate_index: std::sync::OnceLock::new(),
         };
         assert!(
             adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off)
@@ -1669,6 +1677,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let trim_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::Trim).unwrap();
         assert!(trim_line.ends_with("infer"), "{trim_line}");

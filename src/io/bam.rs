@@ -9,8 +9,11 @@ use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::io::Write as _; // write_header / write_alignment_record
 use noodles_sam::{self as sam};
 
-/// A boxed, owning iterator over decoded `RecordBuf`s (or per-record errors).
-type RecordBufIterBox = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
+/// A boxed, owning iterator over raw BAM records (or per-record errors). A
+/// `bam::Record` owns the validated BAM record bytes but decodes fields lazily;
+/// the workflow converts it to `RecordBuf` on a render worker instead of doing
+/// all structured decoding on the serial reader thread.
+pub type RawRecordIter = Box<dyn Iterator<Item = anyhow::Result<bam::Record>> + Send>;
 
 static BGZF_RAYON_WORKERS: OnceLock<usize> = OnceLock::new();
 
@@ -60,11 +63,11 @@ pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
 }
 
 /// Open a BAM reader; MT-bgzf when `workers > 1`. Returns the header and a Send
-/// owning `RecordBuf` iterator.
+/// owning raw-record iterator.
 pub fn reader(
     input: Option<&Path>,
     workers: usize,
-) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
+) -> anyhow::Result<(sam::Header, RawRecordIter)> {
     let inner: Box<dyn io::Read + Send> = match input {
         Some(p) => Box::new(File::open(p)?),
         None => Box::new(io::stdin()),
@@ -80,46 +83,31 @@ pub fn reader(
 pub fn reader_from(
     inner: Box<dyn io::Read + Send>,
     workers: usize,
-) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
+) -> anyhow::Result<(sam::Header, RawRecordIter)> {
     if workers > 1 {
         configure_bgzf_pool(workers)?;
         let mt = bgzf::io::MultithreadedReader::new(inner);
         let mut r = bam::io::Reader::from(mt);
         let header = r.read_header()?;
-        let hc = header.clone();
-        Ok((
-            header,
-            Box::new(RecordBufIter {
-                reader: r,
-                header: hc,
-            }),
-        ))
+        Ok((header, Box::new(RawRecordIterImpl { reader: r })))
     } else {
         let mut r = bam::io::Reader::new(inner);
         let header = r.read_header()?;
-        let hc = header.clone();
-        Ok((
-            header,
-            Box::new(RecordBufIter {
-                reader: r,
-                header: hc,
-            }),
-        ))
+        Ok((header, Box::new(RawRecordIterImpl { reader: r })))
     }
 }
 
-struct RecordBufIter<R: io::Read> {
+struct RawRecordIterImpl<R: io::Read> {
     reader: bam::io::Reader<R>,
-    header: sam::Header,
 }
 
-impl<R: io::Read> Iterator for RecordBufIter<R> {
-    type Item = anyhow::Result<RecordBuf>;
+impl<R: io::Read> Iterator for RawRecordIterImpl<R> {
+    type Item = anyhow::Result<bam::Record>;
     fn next(&mut self) -> Option<Self::Item> {
-        let mut buf = RecordBuf::default();
-        match self.reader.read_record_buf(&self.header, &mut buf) {
+        let mut record = bam::Record::default();
+        match self.reader.read_record(&mut record) {
             Ok(0) => None,
-            Ok(_) => Some(Ok(buf)),
+            Ok(_) => Some(Ok(record)),
             Err(e) => Some(Err(e.into())),
         }
     }

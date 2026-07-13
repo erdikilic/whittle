@@ -4,7 +4,10 @@ pub mod preset;
 pub mod search;
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
+use aho_corasick::AhoCorasick;
 use search::{DnaSearcher, hits, new_searcher};
 
 thread_local! {
@@ -45,6 +48,126 @@ pub struct AdapterConfig {
     pub end_size: usize,
     /// Split on interior adapters. False = ends-only (`--adapter-ends-only`).
     pub split: bool,
+    /// Exact-seed automaton for lossless whole-read candidate filtering. Built
+    /// lazily after presence detection/inference has finalized `adapters`.
+    pub(crate) candidate_index: OnceLock<CandidateIndex>,
+}
+
+impl AdapterConfig {
+    pub(crate) fn replace_adapters(&mut self, adapters: Vec<Adapter>) {
+        self.adapters = adapters;
+        self.candidate_index = OnceLock::new();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CandidateIndex {
+    matcher: Option<AhoCorasick>,
+    seed_adapters: Vec<Vec<usize>>,
+    adapter_lens: Vec<usize>,
+    error_rate: f64,
+}
+
+impl CandidateIndex {
+    fn new(adapters: &[Adapter], error_rate: f64) -> Self {
+        let mut seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+        for (adapter_idx, adapter) in adapters.iter().enumerate() {
+            let len = adapter.seq.len();
+            if len < MIN_PATTERN_LEN {
+                continue;
+            }
+            let k_mid = (0.5 * error_rate * len as f64).floor() as usize;
+            add_partition_seeds(&mut seeds, adapter_idx, &adapter.seq, k_mid);
+            let rc = reverse_complement(&adapter.seq);
+            add_partition_seeds(&mut seeds, adapter_idx, &rc, k_mid);
+        }
+
+        let patterns: Vec<Vec<u8>> = seeds.keys().cloned().collect();
+        let seed_adapters: Vec<Vec<usize>> = seeds.into_values().collect();
+        let matcher = (!patterns.is_empty()).then(|| {
+            AhoCorasick::builder()
+                .ascii_case_insensitive(true)
+                .build(&patterns)
+                .expect("adapter seeds are nonempty ASCII DNA patterns")
+        });
+        Self {
+            matcher,
+            seed_adapters,
+            adapter_lens: adapters.iter().map(|adapter| adapter.seq.len()).collect(),
+            error_rate,
+        }
+    }
+
+    fn candidate_windows(&self, text: &[u8], adapter_count: usize) -> Vec<Vec<(usize, usize)>> {
+        let mut windows = vec![Vec::new(); adapter_count];
+        let Some(matcher) = &self.matcher else {
+            return windows;
+        };
+        for m in matcher.find_overlapping_iter(text) {
+            for &adapter_idx in &self.seed_adapters[m.pattern().as_usize()] {
+                let len = self.adapter_lens[adapter_idx];
+                let k_end = (self.error_rate * len as f64).floor() as usize;
+                // The exact seed lies inside the <=k_mid alignment. A radius of
+                // pattern length + k_end on each side necessarily contains that
+                // entire alignment and enough context for the original k_end
+                // Sassy search to reproduce its span/tie behavior.
+                let radius = len + k_end;
+                windows[adapter_idx].push((
+                    m.start().saturating_sub(radius),
+                    m.end().saturating_add(radius).min(text.len()),
+                ));
+            }
+        }
+        for adapter_windows in &mut windows {
+            adapter_windows.sort_unstable();
+            let mut merged: Vec<(usize, usize)> = Vec::with_capacity(adapter_windows.len());
+            for &(start, end) in adapter_windows.iter() {
+                if let Some(last) = merged.last_mut()
+                    && start <= last.1
+                {
+                    last.1 = last.1.max(end);
+                } else {
+                    merged.push((start, end));
+                }
+            }
+            *adapter_windows = merged;
+        }
+        windows
+    }
+}
+
+fn add_partition_seeds(
+    seeds: &mut BTreeMap<Vec<u8>, Vec<usize>>,
+    adapter_idx: usize,
+    pattern: &[u8],
+    max_edits: usize,
+) {
+    let parts = (max_edits + 1).min(pattern.len());
+    for i in 0..parts {
+        let start = i * pattern.len() / parts;
+        let end = (i + 1) * pattern.len() / parts;
+        let owners = seeds.entry(pattern[start..end].to_vec()).or_default();
+        if owners.last() != Some(&adapter_idx) {
+            owners.push(adapter_idx);
+        }
+    }
+}
+
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&b| match b {
+            b'A' => b'T',
+            b'a' => b't',
+            b'C' => b'G',
+            b'c' => b'g',
+            b'G' => b'C',
+            b'g' => b'c',
+            b'T' => b'A',
+            b't' => b'a',
+            _ => b,
+        })
+        .collect()
 }
 
 /// Sequences shorter than this are never searched standalone — a <11 bp pattern
@@ -123,9 +246,14 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
     let mut lo = 0usize; // 5' keep-boundary (advances inward on terminal hits)
     let mut hi = n; // 3' keep-boundary (retreats inward on terminal hits)
     let mut interior: Vec<(usize, usize)> = Vec::new();
+    let interior_windows = cfg.split.then(|| {
+        cfg.candidate_index
+            .get_or_init(|| CandidateIndex::new(&cfg.adapters, cfg.error_rate))
+            .candidate_windows(window, cfg.adapters.len())
+    });
 
     RC_SEARCHER.with_borrow_mut(|searcher| {
-        for ad in &cfg.adapters {
+        for (adapter_idx, ad) in cfg.adapters.iter().enumerate() {
             let len = ad.seq.len();
             if len < MIN_PATTERN_LEN {
                 continue;
@@ -133,21 +261,48 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
             let k_end = (cfg.error_rate * len as f64).floor() as usize;
             let k_mid = (0.5 * cfg.error_rate * len as f64).floor() as usize;
             if cfg.split {
-                // Whole-window search: terminal hits trim, interior hits (within
-                // k_mid) collect for splitting. An `Excise` hit (adapter within
-                // end_size of both ends on a short read) is cut like an interior
-                // adapter, keeping both flanks — but at the terminal `k_end`
-                // budget it already passed, not the stricter `k_mid` interior gate.
-                for h in hits(searcher, &ad.seq, window, k_end) {
+                // Loose terminal matching only needs bounded end windows. Search
+                // enough extra text to include the longest k-edit alignment whose
+                // start/end is still inside an end zone.
+                let head_end = (end_size + len + k_end).min(n);
+                for h in hits(searcher, &ad.seq, &window[..head_end], k_end) {
                     match classify_terminal(h.start, h.end, n, end_size, ad.end) {
                         Terminal::Five => lo = lo.max(h.end),
-                        Terminal::Three => hi = hi.min(h.start),
                         Terminal::Excise => interior.push((h.start, h.end)),
-                        Terminal::None => {
-                            if h.cost <= k_mid {
-                                interior.push((h.start, h.end));
+                        Terminal::Three | Terminal::None => {},
+                    }
+                }
+                let tail_start = n.saturating_sub(end_size + len + k_end);
+                for h in hits(searcher, &ad.seq, &window[tail_start..], k_end) {
+                    let (s, e) = (tail_start + h.start, tail_start + h.end);
+                    match classify_terminal(s, e, n, end_size, ad.end) {
+                        Terminal::Three => hi = hi.min(s),
+                        Terminal::Excise => interior.push((s, e)),
+                        Terminal::Five | Terminal::None => {},
+                    }
+                }
+
+                // The exact-seed automaton is a lossless rejection filter for
+                // k_mid-edit interior alignments. Candidate adapters still run
+                // through the original Sassy k_end search, and the same k_mid
+                // cost gate is applied to its hits, preserving match spans and
+                // tie behavior from the former all-adapter whole-window loop.
+                if let Some(candidate_windows) = &interior_windows {
+                    for &(candidate_start, candidate_end) in &candidate_windows[adapter_idx] {
+                        for h in hits(
+                            searcher,
+                            &ad.seq,
+                            &window[candidate_start..candidate_end],
+                            k_end,
+                        ) {
+                            let start = candidate_start + h.start;
+                            let end = candidate_start + h.end;
+                            if classify_terminal(start, end, n, end_size, ad.end) == Terminal::None
+                                && h.cost <= k_mid
+                            {
+                                interior.push((start, end));
                             }
-                        },
+                        }
                     }
                 }
             } else {
@@ -226,6 +381,7 @@ mod segment_tests {
             error_rate: 0.2,
             end_size: 20,
             split,
+            candidate_index: std::sync::OnceLock::new(),
         }
     }
     fn ad(name: &str, seq: &[u8], end: End) -> Adapter {
@@ -233,6 +389,251 @@ mod segment_tests {
             name: name.into(),
             seq: seq.to_vec(),
             end,
+        }
+    }
+
+    /// Pre-candidate implementation retained as a differential oracle. It runs
+    /// every adapter across the whole window at `k_end`, then applies `k_mid` to
+    /// interior hits exactly as the production code did before optimization.
+    fn reference_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
+        let n = window.len();
+        if n == 0 {
+            return vec![];
+        }
+        if cfg.adapters.is_empty() {
+            return vec![(0, n)];
+        }
+        let end_size = cfg.end_size.min(n);
+        let mut lo = 0usize;
+        let mut hi = n;
+        let mut interior = Vec::new();
+        let mut searcher = new_searcher();
+
+        for adapter in &cfg.adapters {
+            let len = adapter.seq.len();
+            if len < MIN_PATTERN_LEN {
+                continue;
+            }
+            let k_end = (cfg.error_rate * len as f64).floor() as usize;
+            let k_mid = (0.5 * cfg.error_rate * len as f64).floor() as usize;
+            if cfg.split {
+                for hit in hits(&mut searcher, &adapter.seq, window, k_end) {
+                    match classify_terminal(hit.start, hit.end, n, end_size, adapter.end) {
+                        Terminal::Five => lo = lo.max(hit.end),
+                        Terminal::Three => hi = hi.min(hit.start),
+                        Terminal::Excise => interior.push((hit.start, hit.end)),
+                        Terminal::None if hit.cost <= k_mid => {
+                            interior.push((hit.start, hit.end));
+                        },
+                        Terminal::None => {},
+                    }
+                }
+            } else {
+                let head_end = (end_size + len + k_end).min(n);
+                for hit in hits(&mut searcher, &adapter.seq, &window[..head_end], k_end) {
+                    if ends_only_terminal(hit.start, hit.end, n, end_size, adapter.end)
+                        == Terminal::Five
+                    {
+                        lo = lo.max(hit.end);
+                    }
+                }
+                let tail_start = n.saturating_sub(end_size + len + k_end);
+                for hit in hits(&mut searcher, &adapter.seq, &window[tail_start..], k_end) {
+                    let (start, end) = (tail_start + hit.start, tail_start + hit.end);
+                    if ends_only_terminal(start, end, n, end_size, adapter.end) == Terminal::Three {
+                        hi = hi.min(start);
+                    }
+                }
+            }
+        }
+
+        if lo >= hi {
+            return vec![];
+        }
+        let mut cuts: Vec<_> = interior
+            .into_iter()
+            .filter_map(|(start, end)| {
+                let start = start.max(lo);
+                let end = end.min(hi);
+                (start < end).then_some((start, end))
+            })
+            .collect();
+        cuts.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (start, end) in cuts {
+            if let Some(last) = merged.last_mut()
+                && start <= last.1
+            {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        let mut segments = Vec::new();
+        let mut cursor = lo;
+        for (start, end) in merged {
+            if start > cursor {
+                segments.push((cursor, start));
+            }
+            cursor = cursor.max(end);
+        }
+        if cursor < hi {
+            segments.push((cursor, hi));
+        }
+        segments
+    }
+
+    #[test]
+    fn candidate_search_matches_full_search_randomized() {
+        struct Lcg(u64);
+        impl Lcg {
+            fn next(&mut self) -> usize {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (self.0 >> 32) as usize
+            }
+            fn below(&mut self, n: usize) -> usize {
+                self.next() % n
+            }
+            fn dna(&mut self, n: usize) -> Vec<u8> {
+                (0..n).map(|_| b"ACGT"[self.below(4)]).collect()
+            }
+        }
+
+        let mut rng = Lcg(0x4e4f_4f44_4c45_5301);
+        for case in 0..400 {
+            let adapters: Vec<Adapter> = (0..(1 + rng.below(10)))
+                .map(|i| {
+                    let len = 11 + rng.below(40);
+                    Adapter {
+                        name: format!("a{i}"),
+                        seq: rng.dna(len),
+                        end: match rng.below(3) {
+                            0 => End::Five,
+                            1 => End::Three,
+                            _ => End::Both,
+                        },
+                    }
+                })
+                .collect();
+            let window_len = 80 + rng.below(660);
+            let mut window = rng.dna(window_len);
+
+            // Plant one adapter with up to k_mid substitutions at an end or in
+            // the interior. Random background also exercises false candidates.
+            let planted = rng.below(adapters.len());
+            let pattern = &adapters[planted].seq;
+            if pattern.len() <= window.len() {
+                let max_edits = (0.1 * pattern.len() as f64).floor() as usize;
+                let mut copy = pattern.clone();
+                for _ in 0..rng.below(max_edits + 1) {
+                    match rng.below(3) {
+                        0 => {
+                            let p = rng.below(copy.len());
+                            let old = copy[p];
+                            copy[p] =
+                                b"ACGT"[(b"ACGT".iter().position(|&b| b == old).unwrap() + 1) % 4];
+                        },
+                        1 => {
+                            let p = rng.below(copy.len() + 1);
+                            copy.insert(p, b"ACGT"[rng.below(4)]);
+                        },
+                        _ => {
+                            let p = rng.below(copy.len());
+                            copy.remove(p);
+                        },
+                    }
+                }
+                let planted_len = copy.len();
+                let pos = match rng.below(3) {
+                    0 => rng.below(8.min(window.len() - planted_len + 1)),
+                    1 => {
+                        window.len()
+                            - planted_len
+                            - rng.below(8.min(window.len() - planted_len + 1))
+                    },
+                    _ => rng.below(window.len() - planted_len + 1),
+                };
+                window[pos..pos + planted_len].copy_from_slice(&copy);
+                if case % 7 == 0 {
+                    window.make_ascii_lowercase();
+                }
+            }
+
+            let cfg = AdapterConfig {
+                adapters,
+                error_rate: 0.2,
+                end_size: 1 + rng.below(180),
+                split: true,
+                candidate_index: std::sync::OnceLock::new(),
+            };
+            assert_eq!(
+                adapter_segments(&window, &cfg),
+                reference_segments(&window, &cfg),
+                "candidate/reference mismatch in randomized case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn partition_seeds_survive_random_indels_and_substitutions() {
+        struct Lcg(u64);
+        impl Lcg {
+            fn next(&mut self) -> usize {
+                self.0 = self
+                    .0
+                    .wrapping_mul(2862933555777941757)
+                    .wrapping_add(3037000493);
+                (self.0 >> 32) as usize
+            }
+            fn below(&mut self, n: usize) -> usize {
+                self.next() % n
+            }
+            fn base(&mut self) -> u8 {
+                b"ACGT"[self.below(4)]
+            }
+        }
+
+        let mut rng = Lcg(0x5049_4745_4f4e_484f);
+        for case in 0..1000 {
+            let pattern: Vec<u8> = (0..(11 + rng.below(50))).map(|_| rng.base()).collect();
+            let k = (0.1 * pattern.len() as f64).floor() as usize;
+            let mut mutated = pattern.clone();
+            for _ in 0..rng.below(k + 1) {
+                match rng.below(3) {
+                    0 => {
+                        let p = rng.below(mutated.len());
+                        mutated[p] = rng.base();
+                    },
+                    1 => {
+                        let p = rng.below(mutated.len() + 1);
+                        mutated.insert(p, rng.base());
+                    },
+                    _ if mutated.len() > 1 => {
+                        let p = rng.below(mutated.len());
+                        mutated.remove(p);
+                    },
+                    _ => {},
+                }
+            }
+            let adapter = Adapter {
+                name: "a".into(),
+                seq: pattern,
+                end: End::Both,
+            };
+            let index = CandidateIndex::new(&[adapter], 0.2);
+            let mut text: Vec<u8> = (0..17).map(|_| rng.base()).collect();
+            text.extend_from_slice(&mutated);
+            text.extend((0..19).map(|_| rng.base()));
+            if case % 2 == 0 {
+                text.make_ascii_lowercase();
+            }
+            assert!(
+                !index.candidate_windows(&text, 1)[0].is_empty(),
+                "lossless seed filter rejected <=k edit case {case}"
+            );
         }
     }
 
@@ -268,6 +669,7 @@ mod segment_tests {
             error_rate: 0.2,
             end_size: 150, // default: end-zones overlap on this 250bp read
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let segs = adapter_segments(&w, &c);
         assert_eq!(
@@ -341,6 +743,7 @@ mod segment_tests {
             error_rate: 0.2,
             end_size: 4,
             split: false, // ends-only
+            candidate_index: std::sync::OnceLock::new(),
         };
         let segs = adapter_segments(&w, &c);
         assert_eq!(segs, vec![(14, w.len())]);
@@ -436,6 +839,7 @@ mod segment_tests {
             error_rate: 0.2,
             end_size: 9,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let segs = adapter_segments(&w, &c);
         assert_eq!(
@@ -479,6 +883,7 @@ mod segment_tests {
             error_rate: 0.5,
             end_size: 10,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         assert_eq!(
             adapter_segments(&w, &c),
@@ -527,6 +932,7 @@ mod segment_tests {
             error_rate: 0.3,
             end_size: 4,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let c_ends_only = AdapterConfig {
             split: false,
@@ -562,6 +968,7 @@ mod segment_tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let ends = AdapterConfig {
             split: false,
@@ -581,6 +988,7 @@ mod segment_tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         assert_eq!(adapter_segments(&w, &split), vec![(20, 60)]);
     }
@@ -624,6 +1032,7 @@ mod segment_tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let segs = adapter_segments(&w, &cfg);
         assert_eq!(segs, vec![(20, 60)]);
@@ -645,6 +1054,7 @@ mod segment_tests {
             error_rate: 0.2,
             end_size: 150, // >= n, zones overlap
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         assert_eq!(adapter_segments(&w, &c), vec![(20, 60)], "insert survives");
     }
