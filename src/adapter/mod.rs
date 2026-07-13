@@ -283,20 +283,21 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
                 }
 
                 // Exact partition seeds identify every possible interior match.
-                // Sassy then verifies candidates with the configured edit limits.
+                // Interior hits are accepted only up to `k_mid`, so Sassy searches
+                // the candidate window at that limit rather than `k_end`: a match
+                // within `k_mid` edits is found identically at the narrower band,
+                // and the wider band would only surface hits this loop discards.
                 if let Some(candidate_windows) = &interior_windows {
                     for &(candidate_start, candidate_end) in &candidate_windows[adapter_idx] {
                         for h in hits(
                             searcher,
                             &ad.seq,
                             &window[candidate_start..candidate_end],
-                            k_end,
+                            k_mid,
                         ) {
                             let start = candidate_start + h.start;
                             let end = candidate_start + h.end;
-                            if classify_terminal(start, end, n, end_size, ad.end) == Terminal::None
-                                && h.cost <= k_mid
-                            {
+                            if classify_terminal(start, end, n, end_size, ad.end) == Terminal::None {
                                 interior.push((start, end));
                             }
                         }
