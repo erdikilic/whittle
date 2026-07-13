@@ -297,7 +297,8 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
                         ) {
                             let start = candidate_start + h.start;
                             let end = candidate_start + h.end;
-                            if classify_terminal(start, end, n, end_size, ad.end) == Terminal::None {
+                            if classify_terminal(start, end, n, end_size, ad.end) == Terminal::None
+                            {
                                 interior.push((start, end));
                             }
                         }
