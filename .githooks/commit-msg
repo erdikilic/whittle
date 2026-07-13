@@ -2,4 +2,12 @@
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
+
+# Skip merge commits: git runs commit-msg for them too, but their default
+# "Merge ..." subject is not a Conventional Commit. MERGE_HEAD exists only
+# while a merge is being committed.
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    exit 0
+fi
+
 exec "$repo_root/scripts/validate-commit-message.sh" "$1"
