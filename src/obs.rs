@@ -441,8 +441,7 @@ pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
 
 /// Compact magnitude for live progress fields: `750`, `145k`, `1.2M`.
 fn human_count(n: u64) -> String {
-    // `>= 999_500` (not `1_000_000`): a count that rounds up to 1000k at the
-    // `{:.0}k` tier belongs in the M tier, so it reads "1.0M", not "1000k".
+    // Promote values that would round to 1000k so the result stays normalized.
     if n >= 999_500 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
@@ -511,14 +510,10 @@ fn summary_line(stats: &Stats, elapsed: Option<Duration>) -> String {
 }
 
 /// Human-readable base count for the yield summary's `Bases:` line: `12.4 Gbp`,
-/// `460.0 Mbp`, `8.2 kbp`, `500 bp`. Decimal (1000-based) tiers, always one
-/// decimal place above the `bp` tier — unlike `human_bytes`, there's no
-/// "round to a whole number above 10" step, since a fixed one-decimal figure
-/// reads more consistently across the Gbp-scale totals this line is built for.
+/// `460.0 Mbp`, `8.2 kbp`, `500 bp`. Uses decimal units and one decimal place
+/// for kbp and larger values.
 fn human_bases(n: u64) -> String {
-    // Thresholds sit at `999_950 * tier` (not `1000 * tier`): a value that
-    // rounds up to "1000.0" at the `{:.1}` tier is promoted, so ~1e9 bases read
-    // "1.0 Gbp", not "1000.0 Mbp".
+    // Promote values that would round to 1000.0 in the current unit.
     if n >= 999_950_000 {
         format!("{:.1} Gbp", n as f64 / 1_000_000_000.0)
     } else if n >= 999_950 {
@@ -644,8 +639,7 @@ pub fn human_dur(d: Duration) -> String {
         // Below the value `{:.2}s` would round up to "60.00s".
         format!("{secs:.2}s")
     } else if secs < 3599.5 {
-        // Round to the nearest second (not floor) so 59.996s reads "1m00s"
-        // rather than "60.00s" (from the tier above) or "0m59s" (from a floor).
+        // Round to the nearest second so 59.996s reads "1m00s".
         let total = secs.round() as u64;
         format!("{}m{:02}s", total / 60, total % 60)
     } else {
@@ -718,11 +712,7 @@ fn periodic_line(input_reads: u64, bytes: u64, total: Option<u64>, elapsed: Dura
 mod tests {
     use super::*;
 
-    /// Regression test for the RAII `Drop` cleanup: dropping a handle whose ticker
-    /// thread is still running (e.g. via an early `?`/`bail!` return in `run` that
-    /// never calls `finish()`) must stop and join that thread rather than leaking
-    /// it or hanging the process. Built non-TTY / `Mode::Line` so no real
-    /// spinner/terminal is needed; the ticker still spawns and must join cleanly.
+    /// Dropping an active line-mode handle joins its ticker thread.
     #[test]
     fn dropping_started_handle_stops_ticker_without_hanging() {
         let mut h = ProgressHandle {
@@ -738,9 +728,7 @@ mod tests {
         drop(h); // must join the ticker thread and return, not hang
     }
 
-    /// Same regression as above, exercised through the `Mode::Bar` ticker branch
-    /// (which additionally owns a live indicatif bar) rather than `Mode::Line`'s —
-    /// both branches must stop/join/clear without hanging on drop.
+    /// Dropping an active bar-mode handle joins its ticker and clears the bar.
     #[test]
     fn dropping_started_bar_handle_stops_ticker_without_hanging() {
         let mut h = ProgressHandle {
@@ -912,9 +900,7 @@ mod tests {
 
     #[test]
     fn summary_line_is_split_safe_with_no_percentage() {
-        // Regression: --qual-split can turn one input read into several output
-        // segments, so output_reads > input_reads is legitimate. The summary
-        // must not compute a "kept X%" figure off these counts.
+        // Split reads can produce more output records than input records.
         let stats = Stats {
             input_reads: 1,
             output_reads: 3,
@@ -947,8 +933,7 @@ mod tests {
         assert_eq!(human_bases(500), "500 bp");
     }
 
-    // Unit-boundary rounding: a value that rounds up to the next tier's base
-    // must roll over, not render un-normalized (e.g. "1000k" / "60.00s").
+    // Boundary values must remain normalized after rounding.
     #[test]
     fn human_count_rolls_k_to_m_at_boundary() {
         assert_eq!(human_count(999_500), "1.0M");

@@ -96,8 +96,7 @@ fn empty_folder_errors() {
 
 #[test]
 fn folder_output_matching_a_real_input_is_rejected_and_preserves_it() {
-    // `whittle -i dir -o dir/a.fastq` where a.fastq is a real input must
-    // hard-error, not merge the rest over a.fastq (the reported data-loss bug).
+    // A folder merge cannot overwrite one of its input files.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.fastq"), "@a\nACGT\n+\nIIII\n").unwrap();
     std::fs::write(dir.path().join("b.fastq"), "@b\nTTTT\n+\nIIII\n").unwrap();
@@ -207,13 +206,7 @@ fn write_ubam_with_rg(path: &Path, name: &[u8], rg: &str) {
     w.try_finish().unwrap();
 }
 
-// Folder-merge mirror of `adapter_cli::custom_fasta_never_reduces_even_with_an_absent_adapter`:
-// two FASTQ files (100 reads each) all carrying adapter `present`, merged by
-// `-i <dir>`. A custom --adapter-fasta now disables presence detection
-// outright (a curated FASTA should always be searched in full), so no
-// "Adapter presence" reduction is ever logged here -- but the merge, and
-// trimming of the present adapter, must still work correctly on the merged
-// stream.
+// Folder merge preserves custom-FASTA semantics across the combined stream.
 #[test]
 fn folder_merge_custom_fasta_never_reduces_still_trims() {
     let present = "GGGGTTTTGGGGTTTTGGGG"; // 20bp present adapter

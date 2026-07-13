@@ -164,13 +164,9 @@ fn first_rg_mismatch(paths: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-/// Warn (once) if the folder's BAM files don't all share the same `@RG` set.
-/// Folder merge writes only the first file's header (samtools-cat semantics), so
-/// records from later files that carry `RG` tags for read groups absent from that
-/// header would reference `@RG` lines missing from the output. Homogeneous
-/// single-run uBAM — the intended input — shares one header and stays silent.
-/// This is a header-only pre-pass (cheap for uBAM); a future "better method"
-/// would union the `@RG`/`@PG` records into the output header instead.
+/// Warn once when folder BAM inputs do not share the same `@RG` set. Folder
+/// merge writes the first file's header, so later records can otherwise refer
+/// to read groups absent from the output header. This check reads headers only.
 pub fn warn_on_bam_header_mismatch(paths: &[PathBuf]) {
     if let Some((first, offender)) = first_rg_mismatch(paths) {
         tracing::warn!(

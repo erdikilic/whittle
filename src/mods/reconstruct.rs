@@ -189,13 +189,7 @@ mod tests {
         assert_eq!(m.groups[0].ml, vec![1, 2, 3]);
     }
 
-    /// Property test: over many random sequences, modification patterns, and
-    /// windows, the reconstructed ML array must stay byte-aligned — its length
-    /// equals the number of surviving modified positions (single code), and the
-    /// kept bytes are EXACTLY those of the in-window positions, in order. It
-    /// independently re-derives the survivors (a simpler oracle) rather than
-    /// trusting `reconstruct`, so it catches the ML-misalignment class of bug
-    /// that would silently shift every downstream probability.
+    /// Random windows preserve the ML bytes associated with surviving positions.
     #[test]
     fn ml_stays_byte_aligned_over_random_windows() {
         // Deterministic LCG — reproducible, no external rng dependency.

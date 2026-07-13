@@ -397,14 +397,8 @@ mod tests {
 
     #[test]
     fn too_short_segment_bumps_segments_dropped_short_counter() {
-        // Reorder regression: `filter::check` now runs POST-trim, per produced
-        // segment (previously it ran pre-trim on the whole raw read). With no
-        // adapters/quality-op configured, `trim::apply` still returns the whole
-        // (untrimmed) read as its one produced segment, so the length filter
-        // rejects that segment rather than the raw read up front — same
-        // observable drop, but now counted at the segment level. Since exactly
-        // one segment was produced (not zero) and it was filtered, this is
-        // `reads_all_filtered`, not `reads_trimmed_to_nothing`.
+        // One produced segment rejected by length counts as all-filtered, not
+        // trimmed-to-nothing.
         let mut f = base_filter();
         f.min_length = 10;
         let cfg = Config {
@@ -449,11 +443,7 @@ mod tests {
 
     #[test]
     fn trimmed_to_nothing_bumps_reads_trimmed_to_nothing_counter() {
-        // Reorder regression: `trim::apply` producing zero segments (a head-crop
-        // of 10 exceeds the 4-base read length, so no window survives) never
-        // enters the per-segment loop at all, bumping the read-level
-        // `reads_trimmed_to_nothing` counter (distinct from `reads_all_filtered`,
-        // which requires at least one produced segment that was then filtered).
+        // A crop that removes the complete read produces no segments.
         let cfg = Config {
             io: crate::config::IoConfig {
                 input: None,
@@ -494,11 +484,7 @@ mod tests {
         assert_eq!(stats.segments_dropped_short, 0);
     }
 
-    /// A read's RAW mean quality is
-    /// dragged below `-q` only by a low-quality head flank; once that flank is
-    /// cropped away (crop runs before the filter in the new order), the
-    /// trimmed insert's own mean passes. Pre-fix (filter-before-trim), this
-    /// read would have been rejected on the raw mean; post-fix it SURVIVES.
+    /// Filtering uses the cropped sequence rather than the original read.
     #[test]
     fn quality_below_raw_mean_but_above_trimmed_insert_survives() {
         let mut f = base_filter();
@@ -529,15 +515,12 @@ mod tests {
             quiet: true,
             threads_clamped: None,
         };
-        // 4 low-quality bases (phred 2) then 6 high-quality bases (phred 40).
-        // Raw arithmetic mean = (2*4 + 40*6) / 10 = 24.8 < 30 (would fail the
-        // OLD pre-trim whole-read filter). After a head-crop of 4, the
-        // trimmed insert's mean is 40 >= 30 -> passes.
+        // Original mean: 24.8. Cropping four Q2 bases leaves six Q40 bases.
         let mut phred = vec![2u8; 4];
         phred.extend(std::iter::repeat_n(40u8, 6));
         assert!(
             filter::check(b"AAAAAAAAAA", &phred, &cfg.filter).is_some(),
-            "sanity: the RAW whole read must fail the filter on its own"
+            "the complete input read must fail the quality filter"
         );
         let recs = vec![Ok(rec("r1", b"AAAAAAAAAA", phred))];
         let mut out = Vec::new();
@@ -801,8 +784,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
         };
-        // Far more records than the bounded channel capacity (threads*4), so a
-        // pre-fix build would deadlock instead of returning.
+        // Exceed the bounded channel capacity before the writer fails.
         let recs: Vec<ReadRecord> = (0..2000)
             .map(|i| rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10]))
             .collect();

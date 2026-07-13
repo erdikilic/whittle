@@ -1,10 +1,5 @@
-//! Regression coverage for two related fixes:
-//! - output is never auto-compressed just because the input was `.gz`
-//!   (`io::resolve_output` defaults an unspecified output to plain FASTQ);
-//! - when gz output IS requested, it's produced by `gzp`'s parallel encoder,
-//!   which requires an explicit `finish()` to flush its last block + gzip
-//!   footer — a missing `finish()` would truncate/corrupt the file instead of
-//!   just being slow.
+//! Compressed FASTQ output coverage. Unspecified output remains plain FASTQ,
+//! while requested gzip output is finalized with a complete footer.
 
 use std::io::{Read, Write};
 
@@ -32,8 +27,7 @@ fn plain_output_by_default_even_with_gz_input() {
     enc.write_all(b"@r1\nACGTACGTAC\n+\nIIIIIIIIII\n").unwrap();
     enc.finish().unwrap();
 
-    // No -o, no --out-format: with the old "mirror the input format"
-    // behavior this would silently gzip-compress stdout. It must not.
+    // Input compression does not implicitly compress stdout.
     let assert = whittle()
         .arg("-i")
         .arg(&input)

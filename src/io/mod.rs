@@ -62,10 +62,8 @@ pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format>
     if let Some(f) = path.and_then(from_extension) {
         return Ok(f);
     }
-    // A BAM file is BGZF-compressed, which shares gzip's `1f 8b` magic, so BGZF
-    // must be recognised BEFORE the plain-gzip branch — otherwise every real BAM
-    // read from stdin or an unrecognised extension is misdetected as gzipped
-    // FASTQ (the `BAM\x01` magic only appears *after* bgzf decompression).
+    // BAM is BGZF-compressed and shares gzip's magic, so test BGZF first. The
+    // `BAM\x01` magic becomes visible only after decompression.
     if is_bgzf(sniff) {
         Ok(Format::Bam)
     } else if sniff.starts_with(&[0x1f, 0x8b]) {
