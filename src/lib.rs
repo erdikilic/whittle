@@ -15,7 +15,7 @@ use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 
 pub use config::Config;
 use config::{AdapterInfer, AdapterInferAction, AdapterInferPolicy};
-use gzp::deflate::Gzip;
+use gzp::deflate::Mgzip;
 use gzp::par::compress::{ParCompress, ParCompressBuilder};
 use gzp::{Compression, ZWriter};
 
@@ -164,10 +164,12 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // Resolved once, here, so the banner's Threads line and the actual dispatch
     // arm below agree on the same split — recomputing per arm risked the banner
     // showing one number and the workflow running another.
+    // BAM and bgzf-FASTQ inputs are both BGZF containers, so their decode can
+    // run on the multithreaded reader; grant them a parallel decode budget.
     let budget = config::thread_budget(
         cfg.threads,
         render_heavy_for(in_fmt, out_fmt, &cfg),
-        matches!(in_fmt, Format::FastqBgzf),
+        matches!(in_fmt, Format::FastqBgzf | Format::Bam),
         encode_kind_for(out_fmt),
     );
     configure_shared_bgzf_pool(
@@ -595,7 +597,7 @@ where
 /// failure mode as an ordinary `Err`.
 enum FastqOut {
     Plain(BufWriter<Box<dyn Write + Send>>),
-    Gz(ParCompress<'static, Gzip, Box<dyn Write + Send>>),
+    Gz(ParCompress<'static, Mgzip, Box<dyn Write + Send>>),
     Bgzf(noodles_bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>),
 }
 
@@ -650,7 +652,11 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
     };
     match out_fmt {
         io::Format::FastqGz => {
-            let w = ParCompressBuilder::<Gzip>::new()
+            // gzp's `Mgzip` (libdeflate-backed blocked gzip) rather than `Gzip`
+            // (flate2/zlib-ng). libdeflater is already linked, and the output is
+            // a valid multi-member gzip stream that `MultiGzDecoder` and standard
+            // gzip tools decode.
+            let w = ParCompressBuilder::<Mgzip>::new()
                 .num_threads(gz_workers)
                 .unwrap()
                 .compression_level(Compression::new(cfg.compression_level as u32))
@@ -746,9 +752,10 @@ fn run_folder(
     let budget = config::thread_budget(
         cfg.threads,
         render_heavy_for(family_fmt, out_fmt, cfg),
-        paths
-            .iter()
-            .any(|p| io::from_extension(p) == Some(Format::FastqBgzf)),
+        family_fmt == Format::Bam
+            || paths
+                .iter()
+                .any(|p| io::from_extension(p) == Some(Format::FastqBgzf)),
         encode_kind_for(out_fmt),
     );
     configure_shared_bgzf_pool(
