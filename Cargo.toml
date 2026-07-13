@@ -39,7 +39,8 @@ indicatif = "0.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 jiff = "0.2"
-sassy = "0.2"
+sassy = { version = "0.2", default-features = false }
+aho-corasick = "1"
 
 [dev-dependencies]
 assert_cmd = "2"

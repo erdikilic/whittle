@@ -160,13 +160,13 @@ pub fn thread_budget(total: usize, render_heavy: bool, encode: EncodeKind) -> Th
     let (render, encode_n) = match (render_heavy, encode) {
         // No compression pool → render gets everything (encode field unused).
         (_, EncodeKind::None) => (rest, 1),
-        // BAM in + bgzf out: split nearly evenly through eight total threads.
-        // At higher counts, Noodles 0.48's per-block Rayon scheduling needs a
-        // larger codec share; MM/ML rendering still scales well with one third.
+        // BAM in + bgzf out: split nearly evenly. Raw BAM field/tag conversion
+        // now runs in the render pool alongside MM/ML reconstruction, while the
+        // Noodles BGZF stage uses the other half for ordered block encoding.
         (true, EncodeKind::Bgzf) if rest <= 4 => (rest / 2, rest.div_ceil(2)),
         (true, EncodeKind::Bgzf) if rest <= 8 => (rest.div_ceil(2), rest / 2),
         (true, EncodeKind::Bgzf) => {
-            let render = (rest / 3).max(1);
+            let render = rest.div_ceil(2).max(1);
             (render, rest - render)
         },
         // BAM in + gzip out: both heavy, encode slightly favored. R3E4.
@@ -269,8 +269,8 @@ mod tests {
             thread_budget(16, true, Bgzf),
             ThreadBudget {
                 decode: 1,
-                render: 5,
-                encode: 10
+                render: 8,
+                encode: 7
             }
         );
         assert_eq!(

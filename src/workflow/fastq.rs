@@ -599,6 +599,7 @@ mod tests {
                 // and the read splits rather than being terminal-trimmed.
                 end_size: 1,
                 split: true,
+                candidate_index: std::sync::OnceLock::new(),
             }),
             adapter_infer: crate::config::AdapterInfer::Off,
             threads: 1,

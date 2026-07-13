@@ -864,6 +864,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let found = discover(&sample, &base);
         assert!(!found.is_empty(), "at least one adapter discovered");
@@ -948,6 +949,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let found = discover(&sample, &base);
 
@@ -1013,6 +1015,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let found = discover(&sample, &base);
         assert!(
@@ -1115,6 +1118,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let found = discover(&sample, &base);
         assert!(
@@ -1167,6 +1171,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let found = discover(&sample, &base);
         assert!(

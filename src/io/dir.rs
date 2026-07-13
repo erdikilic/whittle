@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use noodles_sam::alignment::RecordBuf;
 use noodles_sam::{self as sam};
 
 use crate::io::{Format, from_extension};
@@ -90,15 +89,15 @@ pub fn fastq_records(
     ))
 }
 
-/// A boxed, owning iterator over decoded `RecordBuf`s (or per-record errors).
+/// A boxed, owning iterator over lazy raw BAM records (or per-record errors).
 /// Named to satisfy `clippy::type_complexity` on the `bam_reader` signature below.
 /// `Send` so it can feed `workflow::run_bam`'s parallel path.
-type BamRecordIter = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
+type BamRecordIter = crate::io::bam::RawRecordIter;
 
 /// The first file's header plus one chained record stream over all BAM files
 /// (each file's own header is read and discarded past the first; records
-/// stream under the first header — `samtools cat` semantics for homogeneous
-/// uBAM).
+/// stream as lazy raw records under the first header — `samtools cat` semantics
+/// for homogeneous uBAM).
 ///
 /// `workers` is the MT-bgzf decode worker count (same knob as the single-file
 /// `io::bam::reader`), passed through to every per-file reader. This is safe
