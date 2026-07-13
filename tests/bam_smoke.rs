@@ -138,6 +138,35 @@ fn bam_to_bam_end_to_end() {
     assert_eq!(mn, 6, "MN should equal the output segment length");
 }
 
+#[test]
+fn bam_raw_full_window_path_filters_without_rebuilding_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("raw_in.bam");
+    let out_path = dir.path().join("raw_out.bam");
+    write_fixture(&in_path);
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["--min-length", "9", "-t", "4", "-i"])
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .assert()
+        .success();
+
+    let mut reader = bam::io::Reader::new(std::fs::File::open(out_path).unwrap());
+    let header = reader.read_header().unwrap();
+    let records: Vec<_> = reader
+        .record_bufs(&header)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].name().unwrap().to_vec(), b"read1");
+    assert_eq!(records[0].sequence().as_ref(), b"ACGTACGTAC");
+    assert_eq!(records[0].quality_scores().as_ref(), &[40; 10]);
+}
+
 /// End-to-end: a PacBio-style uBAM with per-base kinetics (`ip`/`pw`, one value
 /// per base) must have those arrays sliced in lockstep with the sequence when the
 /// read is trimmed — otherwise the output record is invalid (array length != SEQ

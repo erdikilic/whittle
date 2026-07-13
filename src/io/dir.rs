@@ -33,8 +33,10 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
             continue;
         }
         let format = from_extension(&path);
-        if matches!(format, Some(Format::Fastq | Format::FastqGz | Format::Bam))
-            && output.is_some_and(|o| crate::same_path(&path, o))
+        if matches!(
+            format,
+            Some(Format::Fastq | Format::FastqGz | Format::FastqBgzf | Format::Bam)
+        ) && output.is_some_and(|o| crate::same_path(&path, o))
         {
             anyhow::bail!(
                 "output {} is a read file inside the input directory {}; refusing to \
@@ -46,7 +48,7 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
             );
         }
         match format {
-            Some(Format::Fastq | Format::FastqGz) => fastq.push(path),
+            Some(Format::Fastq | Format::FastqGz | Format::FastqBgzf) => fastq.push(path),
             Some(Format::Bam) => bam.push(path),
             None => {}, // ignore non-read files
         }
@@ -76,12 +78,21 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
 /// A file-open error surfaces as an `Err` item rather than aborting construction.
 pub fn fastq_records(
     paths: &[PathBuf],
+    bgzf_workers: usize,
 ) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
     let paths = paths.to_vec();
     Box::new(paths.into_iter().flat_map(
-        |p| -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
-            let gz = matches!(from_extension(&p), Some(Format::FastqGz));
-            match crate::io::fastq::reader(Some(&p), gz) {
+        move |p| -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
+            let reader = match from_extension(&p) {
+                Some(Format::FastqBgzf) => std::fs::File::open(&p)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|file| {
+                        crate::io::fastq::reader_from_bgzf(Box::new(file), bgzf_workers)
+                    }),
+                Some(Format::FastqGz) => crate::io::fastq::reader(Some(&p), true),
+                _ => crate::io::fastq::reader(Some(&p), false),
+            };
+            match reader {
                 Ok(reader) => reader,
                 Err(e) => Box::new(std::iter::once(Err(e))),
             }

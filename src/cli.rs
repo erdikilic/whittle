@@ -111,6 +111,8 @@ struct Cli {
 enum FormatArg {
     Fastq,
     FastqGz,
+    #[value(name = "fastq-bgz", alias = "fastq-bgzf")]
+    FastqBgzf,
     Bam,
 }
 
@@ -119,6 +121,7 @@ impl From<FormatArg> for Format {
         match f {
             FormatArg::Fastq => Format::Fastq,
             FormatArg::FastqGz => Format::FastqGz,
+            FormatArg::FastqBgzf => Format::FastqBgzf,
             FormatArg::Bam => Format::Bam,
         }
     }

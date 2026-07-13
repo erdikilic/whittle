@@ -899,6 +899,301 @@ where
     Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
 }
 
+enum BamOutputRecord {
+    Raw(bam::Record),
+    Decoded(RecordBuf),
+}
+
+fn raw_array_len(value: &noodles_sam::alignment::record::data::field::Value<'_>) -> Option<usize> {
+    use noodles_sam::alignment::record::data::field::Value as RawValue;
+    use noodles_sam::alignment::record::data::field::value::Array as RawArray;
+
+    match value {
+        RawValue::Array(RawArray::Int8(v)) => Some(v.len()),
+        RawValue::Array(RawArray::UInt8(v)) => Some(v.len()),
+        RawValue::Array(RawArray::Int16(v)) => Some(v.len()),
+        RawValue::Array(RawArray::UInt16(v)) => Some(v.len()),
+        RawValue::Array(RawArray::Int32(v)) => Some(v.len()),
+        RawValue::Array(RawArray::UInt32(v)) => Some(v.len()),
+        RawValue::Array(RawArray::Float(v)) => Some(v.len()),
+        _ => None,
+    }
+}
+
+/// Inspect only the aux metadata that can change or affect advisories on an
+/// otherwise full-window record. Returns `(mods_already_consistent,
+/// malformed_perbase_tag)` without allocating owned tag values.
+fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(bool, bool)> {
+    use noodles_sam::alignment::record::data::field::Value as RawValue;
+
+    let seq_len = record.sequence().len();
+    let mut mm_is_string = false;
+    let mut mn = None;
+    let mut malformed_perbase = false;
+
+    for result in record.data().iter() {
+        let (tag, value) = result?;
+        if tag == Tag::BASE_MODIFICATIONS {
+            mm_is_string = matches!(value, RawValue::String(_));
+        } else if tag == Tag::BASE_MODIFICATION_SEQUENCE_LENGTH {
+            mn = match value {
+                RawValue::Int32(n) => Some(i64::from(n)),
+                _ => None,
+            };
+        }
+
+        let tag_bytes = <[u8; 2]>::from(tag);
+        if KNOWN_PERBASE_TAGS.contains(&tag_bytes)
+            && raw_array_len(&value).is_some_and(|len| len != seq_len)
+        {
+            malformed_perbase = true;
+        }
+    }
+
+    let mods_consistent = !mm_is_string || mn == i64::try_from(seq_len).ok();
+    Ok((mods_consistent, malformed_perbase))
+}
+
+fn ensure_raw_unaligned(record: &bam::Record) -> anyhow::Result<()> {
+    if record.flags().is_unmapped() {
+        return Ok(());
+    }
+    let name = record
+        .name()
+        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+        .unwrap_or_else(|| "<unnamed>".to_string());
+    anyhow::bail!("read {name} is aligned (mapped); whittle v1 supports unaligned BAM (uBAM) only")
+}
+
+fn raw_gc_fraction(record: &bam::Record) -> f64 {
+    let sequence = record.sequence();
+    if sequence.is_empty() {
+        return 0.0;
+    }
+    let gc = sequence
+        .iter()
+        .filter(|&b| matches!(b, b'G' | b'g' | b'C' | b'c'))
+        .count();
+    gc as f64 / sequence.len() as f64
+}
+
+fn process_raw_full_window(
+    record: bam::Record,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<(Option<BamOutputRecord>, bool)> {
+    let seq_len = record.sequence().len();
+    let qualities = record.quality_scores();
+    let qual = qualities.as_ref();
+    if qual.len() != seq_len {
+        let name = record
+            .name()
+            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+            .unwrap_or_else(|| "<unnamed>".to_string());
+        anyhow::bail!(
+            "read {name}: BAM record SEQ length {} != QUAL length {} \
+             (records without full per-base quality are not supported)",
+            seq_len,
+            qual.len()
+        );
+    }
+
+    let (mods_consistent, malformed_perbase) = raw_full_window_metadata(&record)?;
+    if seq_len == 0 {
+        counters
+            .reads_trimmed_to_nothing
+            .fetch_add(1, Ordering::Relaxed);
+        return Ok((None, malformed_perbase));
+    }
+
+    let gc = (cfg.filter.min_gc.is_some() || cfg.filter.max_gc.is_some())
+        .then(|| raw_gc_fraction(&record));
+    if let Some(reason) = crate::filter::check_metrics(seq_len, qual, gc, &cfg.filter) {
+        counters.record_segment_drop(reason);
+        counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
+        return Ok((None, malformed_perbase));
+    }
+
+    counters.output_reads.fetch_add(1, Ordering::Relaxed);
+    counters
+        .output_bases
+        .fetch_add(seq_len as u64, Ordering::Relaxed);
+    counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+
+    let output = if mods_consistent {
+        BamOutputRecord::Raw(record)
+    } else {
+        let decoded = decode_raw_record(&record)?;
+        BamOutputRecord::Decoded(reconstruct_record(
+            &decoded,
+            0,
+            seq_len,
+            1,
+            0,
+            cfg.update_moves,
+        ))
+    };
+    Ok((Some(output), malformed_perbase))
+}
+
+fn run_raw_bam_full_window_seq(
+    header: &sam::Header,
+    records: impl Iterator<Item = anyhow::Result<bam::Record>>,
+    sink: &mut crate::io::bam::BamSink,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<Stats> {
+    let mut malformed = 0;
+    for record in records {
+        let record = record?;
+        ensure_raw_unaligned(&record)?;
+        let seq_len = record.sequence().len();
+        counters.input_reads.fetch_add(1, Ordering::Relaxed);
+        counters
+            .input_bases
+            .fetch_add(seq_len as u64, Ordering::Relaxed);
+        let (output, is_malformed) = process_raw_full_window(record, cfg, counters)?;
+        malformed += u64::from(is_malformed);
+        match output {
+            Some(BamOutputRecord::Raw(record)) => sink.write_raw_record(header, &record)?,
+            Some(BamOutputRecord::Decoded(record)) => sink.write_record(header, &record)?,
+            None => {},
+        }
+    }
+    Ok(counters.snapshot(malformed))
+}
+
+fn run_raw_bam_full_window_parallel(
+    header: &sam::Header,
+    records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
+    sink: &mut crate::io::bam::BamSink,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<Stats> {
+    let render_workers = cfg.render_workers.max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(render_workers)
+        .build()?;
+    let (tx, rx) = crossbeam_channel::bounded::<Vec<BamOutputRecord>>((render_workers / 2).max(2));
+    let malformed = AtomicU64::new(0);
+    let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
+    let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut errored = false;
+            for batch in rx.iter() {
+                if errored {
+                    continue;
+                }
+                for output in batch {
+                    let result = match output {
+                        BamOutputRecord::Raw(record) => sink.write_raw_record(header, &record),
+                        BamOutputRecord::Decoded(record) => sink.write_record(header, &record),
+                    };
+                    if let Err(e) = result {
+                        *write_err.lock().unwrap() = Some(e);
+                        errored = true;
+                        break;
+                    }
+                }
+            }
+        });
+
+        pool.install(|| {
+            Batches::bam(records, |record: &anyhow::Result<bam::Record>| {
+                record.as_ref().map_or(0, |record| record.sequence().len())
+            })
+            .par_bridge()
+            .for_each(|batch| {
+                let mut output = Vec::with_capacity(batch.len());
+                let mut input_reads = 0u64;
+                let mut input_bases = 0u64;
+                let mut malformed_reads = 0u64;
+                for result in batch {
+                    let record = match result {
+                        Ok(record) => record,
+                        Err(e) => {
+                            let mut error = proc_err.lock().unwrap();
+                            if error.is_none() {
+                                *error = Some(e);
+                            }
+                            continue;
+                        },
+                    };
+                    input_reads += 1;
+                    input_bases += record.sequence().len() as u64;
+                    if let Err(e) = ensure_raw_unaligned(&record) {
+                        let mut error = proc_err.lock().unwrap();
+                        if error.is_none() {
+                            *error = Some(e);
+                        }
+                        continue;
+                    }
+                    match process_raw_full_window(record, cfg, counters) {
+                        Ok((Some(record), is_malformed)) => {
+                            output.push(record);
+                            malformed_reads += u64::from(is_malformed);
+                        },
+                        Ok((None, is_malformed)) => {
+                            malformed_reads += u64::from(is_malformed);
+                        },
+                        Err(e) => {
+                            let mut error = proc_err.lock().unwrap();
+                            if error.is_none() {
+                                *error = Some(e);
+                            }
+                        },
+                    }
+                }
+                counters
+                    .input_reads
+                    .fetch_add(input_reads, Ordering::Relaxed);
+                counters
+                    .input_bases
+                    .fetch_add(input_bases, Ordering::Relaxed);
+                malformed.fetch_add(malformed_reads, Ordering::Relaxed);
+                if !output.is_empty() {
+                    let _ = tx.send(output);
+                }
+            });
+        });
+        drop(tx);
+    });
+
+    if let Some(e) = proc_err.lock().unwrap().take() {
+        return Err(e);
+    }
+    if let Some(e) = write_err.lock().unwrap().take() {
+        return Err(e.into());
+    }
+    Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
+}
+
+/// Raw-record entry point used by production BAM readers. Full-window runs can
+/// filter and write unchanged records without building an owned `RecordBuf`;
+/// any operation that can alter sequence or tags uses the established path.
+pub fn run_raw_bam(
+    header: &sam::Header,
+    records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
+    sink: &mut crate::io::bam::BamSink,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<Stats> {
+    let full_window = cfg.trim.head == 0
+        && cfg.trim.tail == 0
+        && cfg.trim.quality.is_none()
+        && cfg.adapters.is_none();
+    if !full_window {
+        return run_bam(header, records, sink, cfg, counters);
+    }
+    if cfg.threads <= 1 {
+        run_raw_bam_full_window_seq(header, records, sink, cfg, counters)
+    } else {
+        run_raw_bam_full_window_parallel(header, records, sink, cfg, counters)
+    }
+}
+
 /// Threads-aware uBAM workflow entry point: decode, refuse aligned reads, trim,
 /// filter, reconstruct. Sequential for `cfg.threads <= 1`; otherwise converts
 /// lazy raw records and renders them on a Rayon work pool, then drains the

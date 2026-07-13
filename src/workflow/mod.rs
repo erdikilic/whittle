@@ -3,7 +3,7 @@ mod fastq;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub use bam::{reconstruct_mods, reconstruct_record, run_bam, run_bam_to_fastq};
+pub use bam::{reconstruct_mods, reconstruct_record, run_bam, run_bam_to_fastq, run_raw_bam};
 pub use fastq::{run_fastq, run_fastq_seq};
 
 use crate::filter::{DropReason, FilterConfig};
