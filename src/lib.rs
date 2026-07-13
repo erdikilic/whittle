@@ -13,8 +13,8 @@ pub mod workflow;
 use std::borrow::Cow;
 use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 
-use config::AdapterInfer;
 pub use config::Config;
+use config::{AdapterInfer, AdapterInferAction, AdapterInferPolicy};
 use gzp::deflate::Gzip;
 use gzp::par::compress::{ParCompress, ParCompressBuilder};
 use gzp::{Compression, ZWriter};
@@ -295,7 +295,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
 
     // Writer construction (a `File::create`, which eagerly truncates any
     // existing `-o` target) happens AFTER `maybe_reduce_adapters`, not before
-    // — matching the BAM arms above. A `ReportOnly` early-exit (`Ok(None)`)
+    // — matching the BAM arms above. An inference-report early exit (`Ok(None)`)
     // must return before any output file is touched; building the writer
     // first would truncate a pre-existing `-o` file even though report-only
     // writes no records at all.
@@ -373,7 +373,7 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
         if d.support < MARGINAL_SUPPORT {
             tracing::warn!(
                 "adapter '{}' support {:.2} is marginal (near the KEEP_SUPPORT floor); \
-                 verify with --adapter-infer-only",
+                 verify with --adapter-infer report",
                 d.adapter.name,
                 d.support
             );
@@ -382,7 +382,7 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
             tracing::warn!(
                 "adapter '{}' uses a conservative {} bp terminal anchor; {} bp of the \
                  {} bp recurrent consensus remain uncertain and will not be trimmed \
-                 (--adapter-infer-mode aggressive opts into the full consensus)",
+                 (--adapter-infer-policy aggressive opts into the full consensus)",
                 d.adapter.name,
                 d.adapter.seq.len(),
                 d.uncertain_bases(),
@@ -478,7 +478,7 @@ where
                  keeping reads untrimmed",
                 crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
             );
-            if cfg.adapter_infer.is_report_only() {
+            if cfg.adapter_infer.is_report() {
                 return Ok(None);
             }
             let mut reduced = base;
@@ -496,7 +496,7 @@ where
         );
         log_discovered(&discovered, s);
 
-        if cfg.adapter_infer.is_report_only() {
+        if cfg.adapter_infer.is_report() {
             print_discovered_fasta(&discovered);
             return Ok(None);
         }
@@ -687,7 +687,7 @@ fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bo
 /// Report-only inference is exempt because it emits textual FASTA and exits
 /// before workflow dispatch.
 fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> {
-    if cfg.adapter_infer.is_report_only() {
+    if cfg.adapter_infer.is_report() {
         return Ok(());
     }
     let stdout_is_tty = std::io::stdout().is_terminal();
@@ -1091,13 +1091,13 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
 /// `cfg.adapter_sample`) whether presence detection will sample the input —
 /// `sample {N}` when active, `sample off` when `N == 0` disables detection.
 ///
-/// Under `AdapterInfer::Trim`/`ReportOnly`, the count printed here is always
+/// Under enabled inference, the count printed here is always
 /// `0` (discovery hasn't run yet — it replaces `cfg.adapters` only once the
-/// buffer-then-decide seam runs, after this banner prints), so a `· infer` /
-/// `· infer-only` suffix is appended to make clear the set is about to be
+/// buffer-then-decide seam runs, after this banner prints), so an inference
+/// action/policy suffix is appended to make clear the set is about to be
 /// discovered, not that trimming is configured with zero adapters. This is
 /// forced to `0` explicitly (rather than read off `a.adapters.len()`) because
-/// under `ReportOnly` with a `--adapter-fasta`, `a.adapters` may itself hold
+/// under report mode with a `--adapter-fasta`, `a.adapters` may itself hold
 /// the user's FASTA entries (see `cli::parse`'s `trim_adapters`) -- carried
 /// through purely as extra naming refs for `infer::discover`, never as a
 /// trimming set, so they must not be counted here as if they were one.
@@ -1115,10 +1115,22 @@ fn adapter_banner_line(
     };
     let infer_suffix = match adapter_infer {
         AdapterInfer::Off => "",
-        AdapterInfer::Trim => " \u{b7} infer",
-        AdapterInfer::TrimAggressive => " \u{b7} infer-aggressive",
-        AdapterInfer::ReportOnly => " \u{b7} infer-only",
-        AdapterInfer::ReportOnlyAggressive => " \u{b7} infer-only-aggressive",
+        AdapterInfer::Enabled {
+            action: AdapterInferAction::Trim,
+            policy: AdapterInferPolicy::Conservative,
+        } => " \u{b7} infer trim \u{b7} conservative",
+        AdapterInfer::Enabled {
+            action: AdapterInferAction::Trim,
+            policy: AdapterInferPolicy::Aggressive,
+        } => " \u{b7} infer trim \u{b7} aggressive",
+        AdapterInfer::Enabled {
+            action: AdapterInferAction::Report,
+            policy: AdapterInferPolicy::Conservative,
+        } => " \u{b7} infer report \u{b7} conservative",
+        AdapterInfer::Enabled {
+            action: AdapterInferAction::Report,
+            policy: AdapterInferPolicy::Aggressive,
+        } => " \u{b7} infer report \u{b7} aggressive",
     };
     let n_adapters = if adapter_infer == AdapterInfer::Off {
         a.adapters.len()
@@ -1691,12 +1703,33 @@ mod tests {
             split: true,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let trim_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::Trim).unwrap();
-        assert!(trim_line.ends_with("infer"), "{trim_line}");
-        assert!(!trim_line.ends_with("infer-only"), "{trim_line}");
+        let trim_line = adapter_banner_line(
+            Some(&cfg),
+            40000,
+            AdapterInfer::Enabled {
+                action: AdapterInferAction::Trim,
+                policy: AdapterInferPolicy::Conservative,
+            },
+        )
+        .unwrap();
+        assert!(
+            trim_line.ends_with("infer trim · conservative"),
+            "{trim_line}"
+        );
 
-        let report_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::ReportOnly).unwrap();
-        assert!(report_line.ends_with("infer-only"), "{report_line}");
+        let report_line = adapter_banner_line(
+            Some(&cfg),
+            40000,
+            AdapterInfer::Enabled {
+                action: AdapterInferAction::Report,
+                policy: AdapterInferPolicy::Conservative,
+            },
+        )
+        .unwrap();
+        assert!(
+            report_line.ends_with("infer report · conservative"),
+            "{report_line}"
+        );
     }
 
     #[test]

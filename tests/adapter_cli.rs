@@ -27,7 +27,7 @@ fn adapter_help_lists_flags() {
         .stdout(predicates::str::contains("--adapter-preset"))
         .stdout(predicates::str::contains("--adapter-error-rate"))
         .stdout(predicates::str::contains("--adapter-ends-only"))
-        .stdout(predicates::str::contains("--adapter-infer-mode"));
+        .stdout(predicates::str::contains("--adapter-infer-policy"));
 }
 
 #[test]
@@ -514,31 +514,20 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
 }
 
 #[test]
-fn infer_mode_requires_an_inference_operation() {
+fn infer_policy_requires_an_inference_operation() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["-i", "x.fastq", "--adapter-infer-mode", "aggressive"])
+        .args(["-i", "x.fastq", "--adapter-infer-policy", "aggressive"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "--adapter-infer-mode requires --adapter-infer or --adapter-infer-only",
+            "--adapter-infer [<ADAPTER_INFER>]",
         ));
 }
 
 #[test]
-fn removed_infer_aggressive_flag_is_rejected() {
-    Command::cargo_bin("whittle")
-        .unwrap()
-        .env_remove("WHITTLE_LOG")
-        .args(["-i", "x.fastq", "--adapter-infer-aggressive"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("unexpected argument"));
-}
-
-#[test]
-fn infer_mode_rejects_unknown_policy() {
+fn infer_policy_rejects_unknown_value() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
@@ -546,7 +535,7 @@ fn infer_mode_rejects_unknown_policy() {
             "-i",
             "x.fastq",
             "--adapter-infer",
-            "--adapter-infer-mode",
+            "--adapter-infer-policy",
             "balanced",
         ])
         .assert()
@@ -557,7 +546,7 @@ fn infer_mode_rejects_unknown_policy() {
 // Report-only inference names discoveries against the built-in catalog and
 // user-supplied FASTA entries.
 #[test]
-fn infer_only_with_fasta_notes_naming_includes_fasta() {
+fn infer_report_with_fasta_notes_naming_includes_fasta() {
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     writeln!(fa, ">present\nACGTACGTACGTACGTACGT").unwrap();
     let mut fq = tempfile::NamedTempFile::new().unwrap();
@@ -570,7 +559,8 @@ fn infer_only_with_fasta_notes_naming_includes_fasta() {
         .args([
             "-i",
             fq.path().to_str().unwrap(),
-            "--adapter-infer-only",
+            "--adapter-infer",
+            "report",
             "--adapter-fasta",
             fa.path().to_str().unwrap(),
         ])
@@ -640,7 +630,38 @@ fn write_adapted_fastq(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
 }
 
 #[test]
-fn infer_only_prints_and_does_not_trim() {
+fn infer_action_and_policy_map_to_banner() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq(dir.path(), 10);
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["-i", fq.to_str().unwrap(), "--adapter-infer", "-t", "1"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("infer trim · conservative"));
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            fq.to_str().unwrap(),
+            "--adapter-infer",
+            "report",
+            "--adapter-infer-policy",
+            "aggressive",
+            "-t",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("infer report · aggressive"));
+}
+
+#[test]
+fn infer_report_prints_and_does_not_trim() {
     let dir = tempfile::tempdir().unwrap();
     let fq = write_adapted_fastq(dir.path(), 500);
     let mut cmd = Command::cargo_bin("whittle").unwrap();
@@ -648,7 +669,8 @@ fn infer_only_prints_and_does_not_trim() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--adapter-infer-only",
+        "--adapter-infer",
+        "report",
         "-t",
         "1",
     ]);
@@ -669,7 +691,7 @@ fn infer_only_prints_and_does_not_trim() {
 
 // Report-only emits discovered adapters as FASTA records on stdout.
 #[test]
-fn infer_only_prints_sequence_to_stdout() {
+fn infer_report_prints_sequence_to_stdout() {
     let dir = tempfile::tempdir().unwrap();
     let fq = write_adapted_fastq(dir.path(), 500);
     let mut cmd = Command::cargo_bin("whittle").unwrap();
@@ -677,7 +699,8 @@ fn infer_only_prints_sequence_to_stdout() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--adapter-infer-only",
+        "--adapter-infer",
+        "report",
         "-t",
         "1",
     ]);
@@ -703,7 +726,7 @@ fn infer_only_prints_sequence_to_stdout() {
 // Cross-naming considers both the ONT catalog and the user's FASTA. The custom
 // name sorts first and deterministically wins an equal-identity tie.
 #[test]
-fn infer_only_cross_names_against_user_fasta() {
+fn infer_report_cross_names_against_user_fasta() {
     let dir = tempfile::tempdir().unwrap();
     let fq = write_adapted_fastq(dir.path(), 500);
     // Filename deliberately has no "MY_CUSTOM_ADAPTER" substring, so a stray
@@ -722,7 +745,8 @@ fn infer_only_cross_names_against_user_fasta() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--adapter-infer-only",
+        "--adapter-infer",
+        "report",
         "--adapter-fasta",
         fa_path.to_str().unwrap(),
         "-t",
@@ -835,12 +859,12 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
     }
 }
 
-// `--adapter-infer-only` must not write or modify record output.
+// `--adapter-infer report` must not write or modify record output.
 
 /// Report-only writes no records when discovery is skipped for insufficient
 /// input reads.
 #[test]
-fn infer_only_tiny_input_writes_no_output() {
+fn infer_report_tiny_input_writes_no_output() {
     let dir = tempfile::tempdir().unwrap();
     let n = 10; // < MIN_SAMPLE_FOR_DETECTION (100)
     let fq = write_adapted_fastq(dir.path(), n);
@@ -852,7 +876,8 @@ fn infer_only_tiny_input_writes_no_output() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--adapter-infer-only",
+        "--adapter-infer",
+        "report",
         "-t",
         "1",
     ]);
@@ -881,7 +906,7 @@ fn infer_only_tiny_input_writes_no_output() {
 
 /// Report-only leaves an existing output path unchanged.
 #[test]
-fn infer_only_does_not_clobber_output_file() {
+fn infer_report_does_not_clobber_output_file() {
     let dir = tempfile::tempdir().unwrap();
     // Adequate (>= MIN_SAMPLE_FOR_DETECTION) planted-adapter input, so
     // discovery actually runs (not the too-few-reads path exercised above).
@@ -897,7 +922,8 @@ fn infer_only_does_not_clobber_output_file() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--adapter-infer-only",
+        "--adapter-infer",
+        "report",
         "-t",
         "1",
     ]);
@@ -1012,7 +1038,8 @@ fn infer_warns_on_marginal_support() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--adapter-infer-only",
+        "--adapter-infer",
+        "report",
         "-t",
         "1",
     ]);
@@ -1050,7 +1077,7 @@ fn write_minimal_ubam(path: &std::path::Path, n: usize) {
 }
 
 #[test]
-fn infer_only_on_bam_input_with_piped_stdout_succeeds() {
+fn infer_report_on_bam_input_with_piped_stdout_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let in_path = dir.path().join("in.bam");
     write_minimal_ubam(&in_path, 500);
@@ -1061,7 +1088,8 @@ fn infer_only_on_bam_input_with_piped_stdout_succeeds() {
         .args([
             "-i",
             in_path.to_str().unwrap(),
-            "--adapter-infer-only",
+            "--adapter-infer",
+            "report",
             "-t",
             "1",
         ])
