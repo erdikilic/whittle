@@ -148,6 +148,35 @@ pub fn write_segment_tagged<W: Write>(
 
 /// One SAM aux field as text `XX:T:VALUE` (no leading TAB). Integers of any
 /// source width serialize with SAM type code `i`; `B` arrays keep their subtype.
+/// Append `n` as ASCII decimal without invoking `core::fmt`. The aux `B` arrays
+/// (notably `ML` and the per-base kinetics tags) can each hold tens of thousands
+/// of integers per record; formatting them through a stack buffer and a digit
+/// loop avoids the per-call overhead of `write!` on a `Vec` at that volume.
+#[inline]
+pub(crate) fn push_u64(out: &mut Vec<u8>, mut n: u64) {
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
+/// Signed counterpart to [`push_u64`]. `unsigned_abs` yields the correct
+/// magnitude even for `i64::MIN`, where `-n` would overflow.
+#[inline]
+pub(crate) fn push_i64(out: &mut Vec<u8>, n: i64) {
+    if n < 0 {
+        out.push(b'-');
+    }
+    push_u64(out, n.unsigned_abs());
+}
+
 pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&tag);
@@ -157,12 +186,30 @@ pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
             out.extend_from_slice(b"A:");
             out.push(*c);
         },
-        Value::Int8(n) => write!(out, "i:{n}").unwrap(),
-        Value::UInt8(n) => write!(out, "i:{n}").unwrap(),
-        Value::Int16(n) => write!(out, "i:{n}").unwrap(),
-        Value::UInt16(n) => write!(out, "i:{n}").unwrap(),
-        Value::Int32(n) => write!(out, "i:{n}").unwrap(),
-        Value::UInt32(n) => write!(out, "i:{n}").unwrap(),
+        Value::Int8(n) => {
+            out.extend_from_slice(b"i:");
+            push_i64(&mut out, i64::from(*n));
+        },
+        Value::UInt8(n) => {
+            out.extend_from_slice(b"i:");
+            push_u64(&mut out, u64::from(*n));
+        },
+        Value::Int16(n) => {
+            out.extend_from_slice(b"i:");
+            push_i64(&mut out, i64::from(*n));
+        },
+        Value::UInt16(n) => {
+            out.extend_from_slice(b"i:");
+            push_u64(&mut out, u64::from(*n));
+        },
+        Value::Int32(n) => {
+            out.extend_from_slice(b"i:");
+            push_i64(&mut out, i64::from(*n));
+        },
+        Value::UInt32(n) => {
+            out.extend_from_slice(b"i:");
+            push_u64(&mut out, u64::from(*n));
+        },
         Value::Float(x) => write!(out, "f:{x}").unwrap(),
         Value::String(s) => {
             out.extend_from_slice(b"Z:");
@@ -184,38 +231,44 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
     match a {
         Array::Int8(v) => {
             out.push(b'c');
-            for x in v {
-                write!(out, ",{x}").unwrap();
+            for &x in v {
+                out.push(b',');
+                push_i64(out, i64::from(x));
             }
         },
         Array::UInt8(v) => {
             out.push(b'C');
-            for x in v {
-                write!(out, ",{x}").unwrap();
+            for &x in v {
+                out.push(b',');
+                push_u64(out, u64::from(x));
             }
         },
         Array::Int16(v) => {
             out.push(b's');
-            for x in v {
-                write!(out, ",{x}").unwrap();
+            for &x in v {
+                out.push(b',');
+                push_i64(out, i64::from(x));
             }
         },
         Array::UInt16(v) => {
             out.push(b'S');
-            for x in v {
-                write!(out, ",{x}").unwrap();
+            for &x in v {
+                out.push(b',');
+                push_u64(out, u64::from(x));
             }
         },
         Array::Int32(v) => {
             out.push(b'i');
-            for x in v {
-                write!(out, ",{x}").unwrap();
+            for &x in v {
+                out.push(b',');
+                push_i64(out, i64::from(x));
             }
         },
         Array::UInt32(v) => {
             out.push(b'I');
-            for x in v {
-                write!(out, ",{x}").unwrap();
+            for &x in v {
+                out.push(b',');
+                push_u64(out, u64::from(x));
             }
         },
         Array::Float(v) => {
@@ -237,11 +290,13 @@ pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
     out.extend_from_slice(mm);
     if let Some(ml) = ml {
         out.extend_from_slice(b"\tML:B:C");
-        for b in ml {
-            write!(out, ",{b}").unwrap();
+        for &b in ml {
+            out.push(b',');
+            push_u64(&mut out, u64::from(b));
         }
     }
-    write!(out, "\tMN:i:{mn}").unwrap();
+    out.extend_from_slice(b"\tMN:i:");
+    push_u64(&mut out, mn as u64);
     out
 }
 
