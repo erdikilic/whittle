@@ -382,7 +382,7 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
             tracing::warn!(
                 "adapter '{}' uses a conservative {} bp terminal anchor; {} bp of the \
                  {} bp recurrent consensus remain uncertain and will not be trimmed \
-                 (--adapter-infer-aggressive opts into the full consensus)",
+                 (--adapter-infer-mode aggressive opts into the full consensus)",
                 d.adapter.name,
                 d.adapter.seq.len(),
                 d.uncertain_bases(),

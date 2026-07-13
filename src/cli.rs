@@ -105,11 +105,17 @@ struct Cli {
     /// adapters -- see the printed note).
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_infer_only: bool,
-    /// Use the complete recurrent end consensus for inferred trimming instead
-    /// of the conservative terminal anchor. This can remove conserved amplicon
-    /// sequence and permits interior splitting unless --adapter-ends-only is set.
-    #[arg(long, help_heading = "Adapter trimming")]
-    adapter_infer_aggressive: bool,
+    /// Boundary policy for ab-initio inference (default: conservative).
+    /// Aggressive uses the complete recurrent consensus and permits interior
+    /// splitting unless --adapter-ends-only is set.
+    #[arg(long, value_enum, help_heading = "Adapter trimming")]
+    adapter_infer_mode: Option<AdapterInferModeArg>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum AdapterInferModeArg {
+    Conservative,
+    Aggressive,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -228,19 +234,18 @@ pub fn parse() -> anyhow::Result<Config> {
     };
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
 
-    if c.adapter_infer_aggressive && !c.adapter_infer && !c.adapter_infer_only {
-        anyhow::bail!(
-            "--adapter-infer-aggressive requires --adapter-infer or --adapter-infer-only"
-        );
+    if c.adapter_infer_mode.is_some() && !c.adapter_infer && !c.adapter_infer_only {
+        anyhow::bail!("--adapter-infer-mode requires --adapter-infer or --adapter-infer-only");
     }
+    let infer_aggressive = c.adapter_infer_mode == Some(AdapterInferModeArg::Aggressive);
     let adapter_infer = if c.adapter_infer_only {
-        if c.adapter_infer_aggressive {
+        if infer_aggressive {
             AdapterInfer::ReportOnlyAggressive
         } else {
             AdapterInfer::ReportOnly
         }
     } else if c.adapter_infer {
-        if c.adapter_infer_aggressive {
+        if infer_aggressive {
             AdapterInfer::TrimAggressive
         } else {
             AdapterInfer::Trim
@@ -341,7 +346,7 @@ pub fn parse() -> anyhow::Result<Config> {
         if infer_forces_ends_only && !c.adapter_ends_only {
             eprintln!(
                 "[INFO] conservative adapter inference trims read ends only; use \
-                 --adapter-infer-aggressive to enable full-consensus interior splitting"
+                 --adapter-infer-mode aggressive to enable full-consensus interior splitting"
             );
         }
         Some(crate::adapter::AdapterConfig {

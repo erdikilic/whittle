@@ -27,7 +27,7 @@ fn adapter_help_lists_flags() {
         .stdout(predicates::str::contains("--adapter-preset"))
         .stdout(predicates::str::contains("--adapter-error-rate"))
         .stdout(predicates::str::contains("--adapter-ends-only"))
-        .stdout(predicates::str::contains("--adapter-infer-aggressive"));
+        .stdout(predicates::str::contains("--adapter-infer-mode"));
 }
 
 #[test]
@@ -514,16 +514,44 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
 }
 
 #[test]
-fn infer_aggressive_requires_an_inference_mode() {
+fn infer_mode_requires_an_inference_operation() {
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["-i", "x.fastq", "--adapter-infer-mode", "aggressive"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--adapter-infer-mode requires --adapter-infer or --adapter-infer-only",
+        ));
+}
+
+#[test]
+fn removed_infer_aggressive_flag_is_rejected() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
         .args(["-i", "x.fastq", "--adapter-infer-aggressive"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "requires --adapter-infer or --adapter-infer-only",
-        ));
+        .stderr(predicates::str::contains("unexpected argument"));
+}
+
+#[test]
+fn infer_mode_rejects_unknown_policy() {
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            "x.fastq",
+            "--adapter-infer",
+            "--adapter-infer-mode",
+            "balanced",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid value 'balanced'"));
 }
 
 // Report-only inference names discoveries against the built-in catalog and
