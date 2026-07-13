@@ -41,11 +41,16 @@ jobs:
             head=$PUSH_HEAD_SHA
           fi
 
+          # Skip merge commits: their default "Merge ..." subjects are not
+          # Conventional Commits, and the real work lands in their parents,
+          # which are validated on their own.
           zero=0000000000000000000000000000000000000000
           if [ -n "$base" ] && [ "$base" != "$zero" ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
-            commits=$(git rev-list --reverse "$base..$head")
-          else
+            commits=$(git rev-list --no-merges --reverse "$base..$head")
+          elif [ "$(git rev-list --no-walk --count --merges "$head")" = 0 ]; then
             commits=$head
+          else
+            commits=
           fi
 
           status=0
