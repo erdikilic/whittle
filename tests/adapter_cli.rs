@@ -26,7 +26,8 @@ fn adapter_help_lists_flags() {
         .stdout(predicates::str::contains("--adapter-fasta"))
         .stdout(predicates::str::contains("--adapter-preset"))
         .stdout(predicates::str::contains("--adapter-error-rate"))
-        .stdout(predicates::str::contains("--adapter-ends-only"));
+        .stdout(predicates::str::contains("--adapter-ends-only"))
+        .stdout(predicates::str::contains("--adapter-infer-mode"));
 }
 
 #[test]
@@ -512,6 +513,47 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
         .stderr(predicates::str::contains("must be 0"));
 }
 
+#[test]
+fn infer_mode_requires_an_inference_operation() {
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["-i", "x.fastq", "--adapter-infer-mode", "aggressive"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--adapter-infer-mode requires --adapter-infer or --adapter-infer-only",
+        ));
+}
+
+#[test]
+fn removed_infer_aggressive_flag_is_rejected() {
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["-i", "x.fastq", "--adapter-infer-aggressive"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unexpected argument"));
+}
+
+#[test]
+fn infer_mode_rejects_unknown_policy() {
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            "x.fastq",
+            "--adapter-infer",
+            "--adapter-infer-mode",
+            "balanced",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid value 'balanced'"));
+}
+
 // Report-only inference names discoveries against the built-in catalog and
 // user-supplied FASTA entries.
 #[test]
@@ -649,6 +691,12 @@ fn infer_only_prints_sequence_to_stdout() {
     assert!(
         stdout.trim_start().starts_with('>'),
         "stdout must be FASTA (header line starting with '>'): {stdout}"
+    );
+    assert!(
+        stdout.contains("boundary=")
+            && stdout.contains("assembled_length=")
+            && stdout.contains("uncertain_bases="),
+        "FASTA header must expose boundary uncertainty: {stdout}"
     );
 }
 

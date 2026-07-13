@@ -127,6 +127,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --qual-trim 10
 | `--adapter-sample <N>` | Sample the first N reads for presence detection (default 0 = off; N ≥ 100) |
 | `--adapter-infer` | Discover adapters de novo, then trim with the discovered set |
 | `--adapter-infer-only` | Discover and print adapters, then exit without trimming |
+| `--adapter-infer-aggressive` | Use the full recurrent consensus and allow inferred interior splits (review carefully for amplicons) |
 | `-v`, `-vv` | Increase log detail (debug, trace) |
 | `--quiet` | Silence progress and the summary; warnings and errors still print |
 
@@ -178,7 +179,9 @@ It is off by default (`--adapter-sample 0`) and preset-only: a custom `--adapter
 
 ### Ab-initio inference
 
-`--adapter-infer` discovers adapters de novo from a sampled read prefix (Porechop_ABI-style k-mer assembly) and trims with the discovered set instead of a catalog. `--adapter-infer-only` discovers and prints them — sequence, support, and any catalog/FASTA cross-name — as FASTA, then exits without trimming or touching the output.
+`--adapter-infer` discovers recurrent read-end sequences de novo from a sampled read prefix (Porechop_ABI-style k-mer assembly). By default it trims ends only with a conservative, physical-end-facing anchor of at most 32 bp. Any longer insert-facing part of the assembled consensus is reported as uncertain rather than assumed to be technical. This matters for amplicons: without a known primer or reference, a primer and a conserved marker-gene prefix can be statistically indistinguishable.
+
+`--adapter-infer-only` prints the recommended anchor, support, assembled length, uncertain-base count, and any catalog/FASTA cross-name as FASTA, then exits without touching record output. Add `-v` to log the complete review-only recurrent consensus. `--adapter-infer-aggressive` restores full-consensus trimming and permits interior splitting unless `--adapter-ends-only` is also given; use it only when overtrimming conserved biological sequence has been ruled out.
 
 ### Built-in ONT catalog
 
