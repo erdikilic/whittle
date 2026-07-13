@@ -1,4 +1,5 @@
 use super::{ModCode, Mods};
+use crate::io::fastq::push_u64;
 
 pub fn serialize(mods: &Mods) -> (Vec<u8>, Vec<u8>) {
     let mut mm = Vec::new();
@@ -15,7 +16,7 @@ pub fn serialize(mods: &Mods) -> (Vec<u8>, Vec<u8>) {
         for code in &g.codes {
             match code {
                 ModCode::Char(c) => mm.push(*c),
-                ModCode::Chebi(id) => mm.extend_from_slice(id.to_string().as_bytes()),
+                ModCode::Chebi(id) => push_u64(&mut mm, u64::from(*id)),
             }
         }
         if let Some(s) = g.status {
@@ -23,7 +24,7 @@ pub fn serialize(mods: &Mods) -> (Vec<u8>, Vec<u8>) {
         }
         for d in &g.deltas {
             mm.push(b',');
-            mm.extend_from_slice(d.to_string().as_bytes());
+            push_u64(&mut mm, *d as u64);
         }
         mm.push(b';');
         ml.extend_from_slice(&g.ml);
