@@ -60,28 +60,50 @@ impl FastqTags {
     }
 }
 
-/// Whether ab-initio adapter inference runs, and whether it also trims.
+/// What an enabled ab-initio adapter inference run does with its discoveries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterInferAction {
+    Trim,
+    Report,
+}
+
+/// How much of an inferred recurrent consensus is trusted as technical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterInferPolicy {
+    Conservative,
+    Aggressive,
+}
+
+/// Whether ab-initio adapter inference runs, and its independent action/policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AdapterInfer {
     #[default]
     Off,
-    /// Infer a conservative terminal anchor and trim ends only.
-    Trim,
-    /// Infer the full recurrent consensus and permit the configured split mode.
-    TrimAggressive,
-    /// Report conservative terminal anchors without trimming.
-    ReportOnly,
-    /// Report the full recurrent consensus without trimming.
-    ReportOnlyAggressive,
+    Enabled {
+        action: AdapterInferAction,
+        policy: AdapterInferPolicy,
+    },
 }
 
 impl AdapterInfer {
-    pub fn is_report_only(self) -> bool {
-        matches!(self, Self::ReportOnly | Self::ReportOnlyAggressive)
+    pub fn is_report(self) -> bool {
+        matches!(
+            self,
+            Self::Enabled {
+                action: AdapterInferAction::Report,
+                ..
+            }
+        )
     }
 
     pub fn is_aggressive(self) -> bool {
-        matches!(self, Self::TrimAggressive | Self::ReportOnlyAggressive)
+        matches!(
+            self,
+            Self::Enabled {
+                policy: AdapterInferPolicy::Aggressive,
+                ..
+            }
+        )
     }
 }
 

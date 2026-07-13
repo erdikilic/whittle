@@ -552,9 +552,9 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
 /// discoveries into `End::Both` via `merge_both_ends`, drop anything too
 /// short or too weakly supported, then name each survivor against the
 /// built-in ONT catalog UNION `base.adapters` -- extra naming refs, e.g. the
-/// user's `--adapter-fasta` entries under `AdapterInfer::ReportOnly` (see
+/// user's `--adapter-fasta` entries under inference report mode (see
 /// `cli::parse`'s `trim_adapters`; empty under `Trim`, which rejects a FASTA
-/// outright, and under a `ReportOnly` run with no FASTA). Deterministic
+/// outright, and under a report run with no FASTA). Deterministic
 /// order: support desc, then sequence asc.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
     discover_with_policy(sample, base, false)

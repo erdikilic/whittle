@@ -8,6 +8,30 @@ fn whittle() -> Command {
 }
 
 #[test]
+fn version_is_long_only() {
+    whittle()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+
+    whittle()
+        .arg("-V")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument '-V'"));
+}
+
+#[test]
+fn verbosity_above_trace_is_rejected() {
+    whittle()
+        .args(["-vvv", "-i", "/dev/null"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("accepts at most -vv"));
+}
+
+#[test]
 fn head_tail_crop_over_stdin() {
     whittle()
         .args([

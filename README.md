@@ -101,6 +101,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --qual-trim 10
 
 | Flag | Meaning |
 |---|---|
+| `--version` | Print the version and exit |
 | `-i, --input <PATH>` | Input file or directory (omit for stdin) |
 | `-o, --output <PATH>` | Output file (omit for stdout) |
 | `--in-format`, `--out-format {fastq,fastq-gz,fastq-bgz,bam}` | Force a format instead of detecting it |
@@ -120,15 +121,14 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --qual-trim 10
 | `--qual-split-window <N>` | Tolerate low-quality runs shorter than N without splitting (default 1) |
 | `--update-moves` | Rewrite ONT signal tags through trimming instead of dropping them (BAM→BAM) |
 | `-a, --adapter-fasta <FILE>` | Adapter/primer FASTA; enables adapter trimming |
-| `--adapter-preset ont` | Use the built-in ONT catalog; enables adapter trimming |
+| `--adapter-preset {none,ont}` | Built-in adapter catalog (default `none`; `ont` enables trimming) |
 | `--adapter-error-rate <F>` | End-match tolerance as a fraction of adapter length (default 0.2) |
 | `--adapter-end-size <N>` | End-zone width searched for terminal adapters (default 150) |
 | `--adapter-ends-only` | Trim ends only; never split on an interior adapter |
-| `--adapter-sample <N>` | Sample the first N reads for presence detection (default 0 = off; N ≥ 100) |
-| `--adapter-infer` | Discover adapters de novo, then trim with the discovered set |
-| `--adapter-infer-only` | Discover and print adapters, then exit without trimming |
-| `--adapter-infer-aggressive` | Use the full recurrent consensus and allow inferred interior splits (review carefully for amplicons) |
-| `-v`, `-vv` | Increase log detail (debug, trace) |
+| `--adapter-sample <N>` | Reads sampled for preset detection or inference (defaults `0` and `40000`, respectively) |
+| `--adapter-infer [trim\|report]` | Discover adapters de novo; omitted value defaults to `trim` |
+| `--adapter-infer-policy {conservative,aggressive}` | Trust policy for inferred adapters (default `conservative`) |
+| `-v`, `-vv` | Increase log detail (debug, trace); higher counts are rejected |
 | `--quiet` | Silence progress and the summary; warnings and errors still print |
 
 `--qual-trim`, `--qual-best-segment`, and `--qual-split` are three strategies for the same step and are mutually exclusive — pass at most one. `-H`/`-T` are independent and compose with whichever you pick.
@@ -179,9 +179,9 @@ It is off by default (`--adapter-sample 0`) and preset-only: a custom `--adapter
 
 ### Ab-initio inference
 
-`--adapter-infer` discovers recurrent read-end sequences de novo from a sampled read prefix (Porechop_ABI-style k-mer assembly). By default it trims ends only with a conservative, physical-end-facing anchor of at most 32 bp. Any longer insert-facing part of the assembled consensus is reported as uncertain rather than assumed to be technical. This matters for amplicons: without a known primer or reference, a primer and a conserved marker-gene prefix can be statistically indistinguishable.
+`--adapter-infer` (equivalent to `--adapter-infer trim`) discovers recurrent read-end sequences de novo from a sampled read prefix (Porechop_ABI-style k-mer assembly), then trims with the discoveries. By default it trims ends only with a conservative, physical-end-facing anchor of at most 32 bp. Any longer insert-facing part of the assembled consensus is reported as uncertain rather than assumed to be technical. This matters for amplicons: without a known primer or reference, a primer and a conserved marker-gene prefix can be statistically indistinguishable.
 
-`--adapter-infer-only` prints the recommended anchor, support, assembled length, uncertain-base count, and any catalog/FASTA cross-name as FASTA, then exits without touching record output. Add `-v` to log the complete review-only recurrent consensus. `--adapter-infer-aggressive` restores full-consensus trimming and permits interior splitting unless `--adapter-ends-only` is also given; use it only when overtrimming conserved biological sequence has been ruled out.
+`--adapter-infer report` prints the recommended anchor, support, assembled length, uncertain-base count, and any catalog/FASTA cross-name as FASTA, then exits without touching record output. Add `-v` to log the complete review-only recurrent consensus. `--adapter-infer-policy aggressive` restores full-consensus trimming and permits interior splitting unless `--adapter-ends-only` is also given; use it only when overtrimming conserved biological sequence has been ruled out. The default policy is `conservative`.
 
 ### Built-in ONT catalog
 
@@ -198,6 +198,24 @@ The log level is `-v`/`-vv` (debug/trace) or `--quiet` (warnings and errors only
 - **No contamination screen.** There's no minimap2-based host filter; adapter discovery, however, is covered by `--adapter-infer`.
 - **`--min-length` is post-trim**, applied per output segment rather than to the whole raw read.
 - **One quality-trim strategy at a time.** `--qual-trim`, `--qual-best-segment`, and `--qual-split` are mutually exclusive; `-H`/`-T` compose with any of them.
+
+## Development
+
+### Commit messages
+
+Commit subjects use [Conventional Commits](https://www.conventionalcommits.org/), for example `feat(adapter): add a trimming mode`, `fix: handle empty input`, or `perf: improve processing throughput`. Enable the repository's versioned validation hook once after cloning:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook rejects invalid subjects before a commit is created. Git does not enable repository-provided hooks automatically for security reasons, so CI validates every pushed or pull-request commit as the repository-wide backstop. The local hook can be bypassed with `--no-verify`; configure branch protection to require the `commit-message` CI job before merging.
+
+Give manual merge commits a compliant subject instead of Git's default `Merge ...` message:
+
+```bash
+git merge --no-ff feature-branch -m "perf: integrate throughput improvements"
+```
 
 ## License
 

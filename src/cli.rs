@@ -2,26 +2,42 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{AdapterInfer, Config, FastqTags, IoConfig};
+use crate::config::{
+    AdapterInfer, AdapterInferAction, AdapterInferPolicy, Config, FastqTags, IoConfig,
+};
 use crate::filter::FilterConfig;
 use crate::io::Format;
 use crate::qual::QualMode;
 use crate::trim::{QualityOp, TrimPlan};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Tag-aware long-read trimmer", long_about = None)]
+#[command(
+    author,
+    version,
+    disable_version_flag = true,
+    about = "Tag-aware long-read trimmer",
+    long_about = None
+)]
 struct Cli {
+    /// Print version information and exit.
+    #[arg(long, action = clap::ArgAction::Version, help_heading = "Setup")]
+    version: Option<bool>,
+    /// Input FASTQ-family file, unaligned BAM, or directory. Reads stdin when omitted.
     #[arg(short = 'i', long, help_heading = "Setup")]
     input: Option<PathBuf>,
+    /// Output file. Writes stdout when omitted; the path extension selects its format.
     #[arg(short = 'o', long, help_heading = "Setup")]
     output: Option<PathBuf>,
+    /// Force the input format instead of detecting it from the path or stream.
     #[arg(long, value_enum, help_heading = "Setup")]
     in_format: Option<FormatArg>,
+    /// Force the output format instead of selecting it from the output path.
     #[arg(long, value_enum, help_heading = "Setup")]
     out_format: Option<FormatArg>,
     /// Worker threads (default: all detected CPUs; values above the CPU count are clamped).
     #[arg(short = 't', long, help_heading = "Setup")]
     threads: Option<usize>,
+    /// BAM auxiliary tags copied into BAM-to-FASTQ headers: all, none, or a list such as MM,ML,RG.
     #[arg(long, default_value = "all", help_heading = "Setup")]
     fastq_tags: String,
     /// DEFLATE compression level for compressed output (bgzf for BAM, gzip for
@@ -29,19 +45,23 @@ struct Cli {
     #[arg(short = 'c', long, default_value_t = 6, help_heading = "Setup")]
     compression_level: u8,
 
-    /// Increase logging detail: -v = debug, -vv = trace. Overridden by WHITTLE_LOG.
+    /// Increase logging detail: -v = debug, -vv = trace (maximum two). Overridden by WHITTLE_LOG.
     #[arg(short = 'v', long, action = clap::ArgAction::Count, help_heading = "Logging")]
     verbose: u8,
     /// Silence progress and info output; warnings and errors still print.
     #[arg(long, conflicts_with = "verbose", help_heading = "Logging")]
     quiet: bool,
 
+    /// Minimum post-trim segment length.
     #[arg(short = 'l', long, default_value_t = 1, help_heading = "Filtering")]
     min_length: usize,
+    /// Maximum post-trim segment length.
     #[arg(short = 'L', long, help_heading = "Filtering")]
     max_length: Option<usize>,
+    /// Minimum post-trim read quality under --qual-mode.
     #[arg(short = 'q', long, default_value_t = 0.0, help_heading = "Filtering")]
     min_qual: f64,
+    /// Maximum post-trim read quality under --qual-mode.
     #[arg(
         short = 'Q',
         long,
@@ -49,23 +69,32 @@ struct Cli {
         help_heading = "Filtering"
     )]
     max_qual: f64,
+    /// Minimum post-trim GC fraction (0-1).
     #[arg(short = 'g', long, help_heading = "Filtering")]
     min_gc: Option<f64>,
+    /// Maximum post-trim GC fraction (0-1).
     #[arg(short = 'G', long, help_heading = "Filtering")]
     max_gc: Option<f64>,
+    /// Read-quality summary used by the quality filters.
     #[arg(short = 'm', long, value_enum, default_value_t = QualModeArg::Mean, help_heading = "Filtering")]
     qual_mode: QualModeArg,
 
+    /// Remove this many bases from the 5' end before other trimming.
     #[arg(short = 'H', long, default_value_t = 0, help_heading = "Trimming")]
     head_crop: usize,
+    /// Remove this many bases from the 3' end before other trimming.
     #[arg(short = 'T', long, default_value_t = 0, help_heading = "Trimming")]
     tail_crop: usize,
+    /// Trim low-quality bases from both ends until each boundary reaches Q.
     #[arg(long, help_heading = "Trimming")]
     qual_trim: Option<u8>,
+    /// Keep the longest contiguous segment whose bases are all at least Q.
     #[arg(long, help_heading = "Trimming")]
     qual_best_segment: Option<u8>,
+    /// Split at low-quality runs below Q and keep the surviving segments.
     #[arg(long, help_heading = "Trimming")]
     qual_split: Option<u8>,
+    /// Tolerate low-quality runs shorter than this many bases when splitting.
     #[arg(long, default_value_t = 1, help_heading = "Trimming")]
     qual_split_window: usize,
     /// Keep ONT signal tags consistent through trimming (slice `mv`, update
@@ -90,32 +119,63 @@ struct Cli {
     /// Trim adapters at read ends only; never split on interior adapters.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
-    /// Reads to sample. Detection (>=100) or, under --adapter-infer, the inference
-    /// buffer (default 40000). Omitted = mode default; explicit 0 = off (no infer).
+    /// Reads sampled for preset detection or ab-initio inference. Defaults to 0
+    /// for preset detection and 40000 for inference; inference requires >=100.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_sample: Option<usize>,
-    /// Discover adapters de novo from a read sample, then trim with only the
-    /// discovered set (ignores --adapter-preset for trimming; conflicts with
-    /// --adapter-fasta). Off by default.
-    #[arg(long, help_heading = "Adapter trimming")]
-    adapter_infer: bool,
-    /// Discover adapters and print them (sequences + support + catalog names),
-    /// then exit without trimming. Implies --adapter-infer. May be combined with
-    /// --adapter-fasta (naming covers the built-in catalog plus your FASTA's
-    /// adapters -- see the printed note).
-    #[arg(long, help_heading = "Adapter trimming")]
-    adapter_infer_only: bool,
-    /// Boundary policy for ab-initio inference (default: conservative).
-    /// Aggressive uses the complete recurrent consensus and permits interior
-    /// splitting unless --adapter-ends-only is set.
-    #[arg(long, value_enum, help_heading = "Adapter trimming")]
-    adapter_infer_mode: Option<AdapterInferModeArg>,
+    /// Discover adapters de novo. With no value, defaults to trim; report prints
+    /// inferred FASTA and exits without writing read output.
+    #[arg(
+        long,
+        value_enum,
+        num_args = 0..=1,
+        default_missing_value = "trim",
+        help_heading = "Adapter trimming"
+    )]
+    adapter_infer: Option<AdapterInferActionArg>,
+    /// Trust policy for inferred consensuses (default: conservative). Aggressive
+    /// uses the complete consensus and permits splitting unless ends-only is set.
+    #[arg(
+        long,
+        value_enum,
+        requires = "adapter_infer",
+        help_heading = "Adapter trimming"
+    )]
+    adapter_infer_policy: Option<AdapterInferPolicyArg>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum AdapterInferModeArg {
+enum AdapterInferActionArg {
+    /// Trim reads with the inferred sequences.
+    Trim,
+    /// Print inferred FASTA to stdout and do not write read output.
+    Report,
+}
+
+impl From<AdapterInferActionArg> for AdapterInferAction {
+    fn from(value: AdapterInferActionArg) -> Self {
+        match value {
+            AdapterInferActionArg::Trim => Self::Trim,
+            AdapterInferActionArg::Report => Self::Report,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum AdapterInferPolicyArg {
+    /// Use a short end-facing anchor and disable inferred interior splitting.
     Conservative,
+    /// Use the complete recurrent consensus and allow interior splitting.
     Aggressive,
+}
+
+impl From<AdapterInferPolicyArg> for AdapterInferPolicy {
+    fn from(value: AdapterInferPolicyArg) -> Self {
+        match value {
+            AdapterInferPolicyArg::Conservative => Self::Conservative,
+            AdapterInferPolicyArg::Aggressive => Self::Aggressive,
+        }
+    }
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -140,8 +200,11 @@ impl From<FormatArg> for Format {
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
 enum QualModeArg {
+    /// Average error probabilities, then convert the result back to Phred Q.
     Mean,
+    /// Take the arithmetic mean of the per-base Phred scores.
     Arithmetic,
+    /// Take the median per-base Phred score.
     Median,
 }
 
@@ -157,12 +220,18 @@ impl From<QualModeArg> for QualMode {
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 enum AdapterPresetArg {
+    /// Do not load a built-in adapter catalog.
     None,
+    /// Load the built-in Oxford Nanopore adapter and barcode catalog.
     Ont,
 }
 
 pub fn parse() -> anyhow::Result<Config> {
     let c = Cli::parse();
+
+    if c.verbose > 2 {
+        anyhow::bail!("verbosity accepts at most -vv (debug with -v, trace with -vv)");
+    }
 
     // Mutual exclusion of the three quality trim ops.
     let n_quality = [
@@ -234,37 +303,30 @@ pub fn parse() -> anyhow::Result<Config> {
     };
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
 
-    if c.adapter_infer_mode.is_some() && !c.adapter_infer && !c.adapter_infer_only {
-        anyhow::bail!("--adapter-infer-mode requires --adapter-infer or --adapter-infer-only");
-    }
-    let infer_aggressive = c.adapter_infer_mode == Some(AdapterInferModeArg::Aggressive);
-    let adapter_infer = if c.adapter_infer_only {
-        if infer_aggressive {
-            AdapterInfer::ReportOnlyAggressive
-        } else {
-            AdapterInfer::ReportOnly
-        }
-    } else if c.adapter_infer {
-        if infer_aggressive {
-            AdapterInfer::TrimAggressive
-        } else {
-            AdapterInfer::Trim
-        }
-    } else {
-        AdapterInfer::Off
-    };
+    let adapter_infer = c
+        .adapter_infer
+        .map_or(AdapterInfer::Off, |action| AdapterInfer::Enabled {
+            action: action.into(),
+            policy: c
+                .adapter_infer_policy
+                .unwrap_or(AdapterInferPolicyArg::Conservative)
+                .into(),
+        });
 
     // Mutual exclusion with an explicit FASTA (trim mode only; report-only
     // allows a FASTA so it can be cross-named against what inference finds).
     if matches!(
         adapter_infer,
-        AdapterInfer::Trim | AdapterInfer::TrimAggressive
+        AdapterInfer::Enabled {
+            action: AdapterInferAction::Trim,
+            ..
+        }
     ) && c.adapter_fasta.is_some()
     {
         anyhow::bail!(
             "--adapter-infer and --adapter-fasta are mutually exclusive (one discovers \
              the set, the other supplies it). To trim with your FASTA and also see what \
-             inference finds, run --adapter-infer-only --adapter-fasta <file> first."
+             inference finds, run --adapter-infer report --adapter-fasta <file> first."
         );
     }
     // The preset is redundant for trimming under infer (inference builds its
@@ -275,14 +337,14 @@ pub fn parse() -> anyhow::Result<Config> {
              (used only for naming discovered adapters)"
         );
     }
-    // --adapter-infer-only + --adapter-fasta is allowed (unlike --adapter-infer,
-    // which rejects a FASTA outright above): report-only names discovered
+    // --adapter-infer report + --adapter-fasta is allowed (unlike trim,
+    // which rejects a FASTA outright above): report mode names discovered
     // adapters against the built-in ONT catalog UNION the user's FASTA (see
     // `infer::discover`), so a user combining the two flags gets their own
     // adapter names surfaced too, not just catalog matches.
-    if adapter_infer.is_report_only() && c.adapter_fasta.is_some() {
+    if adapter_infer.is_report() && c.adapter_fasta.is_some() {
         eprintln!(
-            "[INFO] --adapter-infer-only with --adapter-fasta: discovered adapters are named \
+            "[INFO] --adapter-infer report with --adapter-fasta: discovered adapters are named \
              against the built-in ONT catalog plus your FASTA's adapters"
         );
     }
@@ -346,7 +408,7 @@ pub fn parse() -> anyhow::Result<Config> {
         if infer_forces_ends_only && !c.adapter_ends_only {
             eprintln!(
                 "[INFO] conservative adapter inference trims read ends only; use \
-                 --adapter-infer-mode aggressive to enable full-consensus interior splitting"
+                 --adapter-infer-policy aggressive to enable full-consensus interior splitting"
             );
         }
         Some(crate::adapter::AdapterConfig {
