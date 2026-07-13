@@ -21,7 +21,7 @@ static BGZF_RAYON_WORKERS: OnceLock<usize> = OnceLock::new();
 /// threads. Configure that registry once to the codec share of whittle's staged
 /// thread budget; render work continues to use its own bounded local pool.
 #[allow(deprecated)]
-fn configure_bgzf_pool(workers: usize) -> anyhow::Result<()> {
+pub(crate) fn configure_bgzf_pool(workers: usize) -> anyhow::Result<()> {
     let workers = workers.max(1);
     if let Some(&configured) = BGZF_RAYON_WORKERS.get() {
         if configured != workers {
@@ -160,6 +160,13 @@ impl BamSink {
         match self {
             BamSink::Single(w) => w.write_alignment_record(header, rec),
             BamSink::Multi(w) => w.write_alignment_record(header, rec),
+        }
+    }
+
+    pub fn write_raw_record(&mut self, header: &sam::Header, rec: &bam::Record) -> io::Result<()> {
+        match self {
+            BamSink::Single(w) => w.write_record(header, rec),
+            BamSink::Multi(w) => w.write_record(header, rec),
         }
     }
 

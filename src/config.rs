@@ -154,8 +154,52 @@ pub enum EncodeKind {
 /// trim only), and the encode stage's kind. Empirically tuned (2026-07-03 sweep,
 /// mid_eqbase): decode never benefits (serial inflate keeps up → 1); the rest is
 /// split so the heavier stage gets more threads.
-pub fn thread_budget(total: usize, render_heavy: bool, encode: EncodeKind) -> ThreadBudget {
+pub fn thread_budget(
+    total: usize,
+    render_heavy: bool,
+    parallel_decode: bool,
+    encode: EncodeKind,
+) -> ThreadBudget {
     let total = total.max(1);
+
+    if parallel_decode && total == 2 {
+        return ThreadBudget {
+            decode: 2,
+            render: 1,
+            encode: 1,
+        };
+    }
+
+    if parallel_decode && total >= 3 {
+        let (decode, render, encode_n) = match encode {
+            EncodeKind::None if render_heavy => {
+                let decode = (total / 3).max(2);
+                (decode, total - decode - 1, 1)
+            },
+            EncodeKind::None => {
+                let decode = (total * 2 / 3).max(2);
+                (decode, total - decode - 1, 1)
+            },
+            EncodeKind::Gzip | EncodeKind::Bgzf if render_heavy => {
+                let render = (total * 2 / 5).max(1);
+                let remaining = total - render;
+                let decode = (remaining / 3).max(1);
+                (decode, render, remaining - decode)
+            },
+            EncodeKind::Gzip | EncodeKind::Bgzf => {
+                let render = 1;
+                let remaining = total - render;
+                let decode = (remaining / 3).max(1);
+                (decode, render, remaining - decode)
+            },
+        };
+        return ThreadBudget {
+            decode,
+            render,
+            encode: encode_n,
+        };
+    }
+
     let rest = total.saturating_sub(1).max(2); // >= 2 so both stages can get >= 1
     let (render, encode_n) = match (render_heavy, encode) {
         // No compression pool → render gets everything (encode field unused).
@@ -258,7 +302,7 @@ mod tests {
     fn thread_budget_split() {
         use EncodeKind::*;
         assert_eq!(
-            thread_budget(8, true, Bgzf),
+            thread_budget(8, true, false, Bgzf),
             ThreadBudget {
                 decode: 1,
                 render: 4,
@@ -266,7 +310,7 @@ mod tests {
             }
         );
         assert_eq!(
-            thread_budget(16, true, Bgzf),
+            thread_budget(16, true, false, Bgzf),
             ThreadBudget {
                 decode: 1,
                 render: 8,
@@ -274,7 +318,7 @@ mod tests {
             }
         );
         assert_eq!(
-            thread_budget(4, true, Bgzf),
+            thread_budget(4, true, false, Bgzf),
             ThreadBudget {
                 decode: 1,
                 render: 1,
@@ -282,7 +326,7 @@ mod tests {
             }
         );
         assert_eq!(
-            thread_budget(8, true, Gzip),
+            thread_budget(8, true, false, Gzip),
             ThreadBudget {
                 decode: 1,
                 render: 3,
@@ -290,7 +334,7 @@ mod tests {
             }
         );
         assert_eq!(
-            thread_budget(8, false, Gzip),
+            thread_budget(8, false, false, Gzip),
             ThreadBudget {
                 decode: 1,
                 render: 1,
@@ -298,7 +342,7 @@ mod tests {
             }
         );
         assert_eq!(
-            thread_budget(8, true, None),
+            thread_budget(8, true, false, None),
             ThreadBudget {
                 decode: 1,
                 render: 7,
@@ -308,7 +352,7 @@ mod tests {
         for t in [1usize, 2, 3, 4, 16] {
             for rh in [true, false] {
                 for e in [None, Bgzf, Gzip] {
-                    let b = thread_budget(t, rh, e);
+                    let b = thread_budget(t, rh, false, e);
                     assert!(b.decode >= 1 && b.render >= 1 && b.encode >= 1);
                 }
             }
@@ -321,7 +365,7 @@ mod tests {
         for t in [1usize, 2, 8, 16] {
             for rh in [true, false] {
                 for e in [None, Bgzf, Gzip] {
-                    let b = thread_budget(t, rh, e);
+                    let b = thread_budget(t, rh, false, e);
                     assert_eq!(b.total(), b.decode + b.render + b.encode);
                 }
             }
@@ -343,5 +387,25 @@ mod tests {
         // MN alone does not turn on the mod block:
         let mn_only = FastqTags::parse("MN").unwrap();
         assert!(!mn_only.carries_mods());
+    }
+
+    #[test]
+    fn bgzf_fastq_plain_output_favors_parallel_decode() {
+        assert_eq!(
+            thread_budget(16, false, true, EncodeKind::None),
+            ThreadBudget {
+                decode: 10,
+                render: 5,
+                encode: 1,
+            }
+        );
+        assert_eq!(
+            thread_budget(2, false, true, EncodeKind::None),
+            ThreadBudget {
+                decode: 2,
+                render: 1,
+                encode: 1,
+            }
+        );
     }
 }

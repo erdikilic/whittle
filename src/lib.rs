@@ -101,8 +101,19 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
                     }
                     n += r;
                 }
-                let fmt = io::detect_input(in_path, &probe[..n])?;
-                source = Box::new(std::io::Cursor::new(probe[..n].to_vec()).chain(source));
+                let mut replay = probe[..n].to_vec();
+                let fmt = if io::is_bgzf(&replay) {
+                    let block_size = usize::from(u16::from_le_bytes([replay[16], replay[17]])) + 1;
+                    if block_size < replay.len() {
+                        anyhow::bail!("invalid BGZF block size {block_size}");
+                    }
+                    replay.resize(block_size, 0);
+                    source.read_exact(&mut replay[n..])?;
+                    io::detect_bgzf_block(&replay)?
+                } else {
+                    io::detect_input(in_path, &replay)?
+                };
+                source = Box::new(std::io::Cursor::new(replay).chain(source));
                 fmt
             },
         },
@@ -156,8 +167,14 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let budget = config::thread_budget(
         cfg.threads,
         render_heavy_for(in_fmt, out_fmt, &cfg),
+        matches!(in_fmt, Format::FastqBgzf),
         encode_kind_for(out_fmt),
     );
+    configure_shared_bgzf_pool(
+        matches!(in_fmt, Format::FastqBgzf | Format::Bam),
+        matches!(out_fmt, Format::FastqBgzf | Format::Bam),
+        budget,
+    )?;
     let out_desc = output_desc(cfg.io.output.as_deref());
 
     if obs.shows_lines() {
@@ -244,7 +261,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
                 cfg.compression_level,
             )?;
             cfg.render_workers = budget.render;
-            let stats = workflow::run_bam(&out_header, records, &mut sink, &cfg, &counters)?;
+            let stats = workflow::run_raw_bam(&out_header, records, &mut sink, &cfg, &counters)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded — an I/O
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
@@ -254,7 +271,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             obs.finish(&stats, &out_desc);
             return Ok(());
         },
-        (Format::Bam, Format::Fastq | Format::FastqGz) => {
+        (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
             // See the note in the (Bam, Bam) arm: read from the chained `source`.
             let (_header, records) = io::bam::reader_from(source, budget.decode)?;
             let Some(records) = maybe_reduce_adapters(records, &mut cfg, bam_seq)? else {
@@ -268,7 +285,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             obs.finish(&stats, &out_desc);
             return Ok(());
         },
-        (Format::Fastq | Format::FastqGz, Format::Bam) => {
+        (Format::Fastq | Format::FastqGz | Format::FastqBgzf, Format::Bam) => {
             anyhow::bail!("cross-format FASTQ->BAM conversion is not supported")
         },
         _ => {},
@@ -282,8 +299,12 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // must return before any output file is touched; building the writer
     // first would truncate a pre-existing `-o` file even though report-only
     // writes no records at all.
-    let gz_in = matches!(in_fmt, Format::FastqGz);
-    let records = io::fastq::reader_from(source, gz_in);
+    let records = match in_fmt {
+        Format::Fastq => io::fastq::reader_from(source, false),
+        Format::FastqGz => io::fastq::reader_from(source, true),
+        Format::FastqBgzf => io::fastq::reader_from_bgzf(source, budget.decode)?,
+        Format::Bam => unreachable!("BAM dispatch returned above"),
+    };
     let Some(records) =
         maybe_reduce_adapters(records, &mut cfg, |r| Cow::Borrowed(r.seq.as_slice()))?
     else {
@@ -607,6 +628,7 @@ where
 enum FastqOut {
     Plain(BufWriter<Box<dyn Write + Send>>),
     Gz(ParCompress<'static, Gzip, Box<dyn Write + Send>>),
+    Bgzf(noodles_bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>),
 }
 
 impl Write for FastqOut {
@@ -614,12 +636,14 @@ impl Write for FastqOut {
         match self {
             FastqOut::Plain(w) => w.write(buf),
             FastqOut::Gz(w) => w.write(buf),
+            FastqOut::Bgzf(w) => w.write(buf),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             FastqOut::Plain(w) => w.flush(),
             FastqOut::Gz(w) => w.flush(),
+            FastqOut::Bgzf(w) => w.flush(),
         }
     }
 }
@@ -638,6 +662,10 @@ impl FastqOut {
                 w.finish()?;
                 Ok(())
             },
+            FastqOut::Bgzf(mut w) => {
+                w.finish()?;
+                Ok(())
+            },
         }
     }
 }
@@ -652,15 +680,25 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
         Some(p) => Box::new(std::fs::File::create(p)?),
         None => Box::new(std::io::stdout()),
     };
-    if matches!(out_fmt, io::Format::FastqGz) {
-        let w = ParCompressBuilder::<Gzip>::new()
-            .num_threads(gz_workers)
-            .unwrap()
-            .compression_level(Compression::new(cfg.compression_level as u32))
-            .from_writer(base);
-        Ok(FastqOut::Gz(w))
-    } else {
-        Ok(FastqOut::Plain(BufWriter::new(base)))
+    match out_fmt {
+        io::Format::FastqGz => {
+            let w = ParCompressBuilder::<Gzip>::new()
+                .num_threads(gz_workers)
+                .unwrap()
+                .compression_level(Compression::new(cfg.compression_level as u32))
+                .from_writer(base);
+            Ok(FastqOut::Gz(w))
+        },
+        io::Format::FastqBgzf => {
+            io::bam::configure_bgzf_pool(gz_workers)?;
+            let level = noodles_bgzf::io::writer::CompressionLevel::new(cfg.compression_level)
+                .ok_or_else(|| anyhow::anyhow!("invalid BGZF compression level"))?;
+            let w = noodles_bgzf::io::multithreaded_writer::Builder::default()
+                .set_compression_level(level)
+                .build_from_writer(base);
+            Ok(FastqOut::Bgzf(w))
+        },
+        io::Format::Fastq | io::Format::Bam => Ok(FastqOut::Plain(BufWriter::new(base))),
     }
 }
 
@@ -669,7 +707,12 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
 /// almost always a forgotten `-o`/redirect. Plain FASTQ text is always fine.
 /// Pure (no I/O) so it's trivial to unit-test without a real TTY.
 fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bool) -> bool {
-    output_is_stdout && stdout_is_tty && matches!(fmt, io::Format::Bam | io::Format::FastqGz)
+    output_is_stdout
+        && stdout_is_tty
+        && matches!(
+            fmt,
+            io::Format::Bam | io::Format::FastqGz | io::Format::FastqBgzf
+        )
 }
 
 /// Hard-error before any writer/output file is created if `out_fmt` would land
@@ -694,6 +737,7 @@ fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> 
         let ext = match out_fmt {
             io::Format::Bam => "bam",
             io::Format::FastqGz => "fastq.gz",
+            io::Format::FastqBgzf => "fastq.bgz",
             io::Format::Fastq => "fastq", // unreachable via binary_to_terminal, kept exhaustive
         };
         anyhow::bail!(
@@ -744,8 +788,19 @@ fn run_folder(
     let budget = config::thread_budget(
         cfg.threads,
         render_heavy_for(family_fmt, out_fmt, cfg),
+        paths
+            .iter()
+            .any(|p| io::from_extension(p) == Some(Format::FastqBgzf)),
         encode_kind_for(out_fmt),
     );
+    configure_shared_bgzf_pool(
+        matches!(family_fmt, Format::Bam)
+            || paths
+                .iter()
+                .any(|p| io::from_extension(p) == Some(Format::FastqBgzf)),
+        matches!(out_fmt, Format::FastqBgzf | Format::Bam),
+        budget,
+    )?;
     let out_desc = output_desc(cfg.io.output.as_deref());
 
     if obs.shows_lines() {
@@ -818,7 +873,7 @@ fn run_folder(
             // Same ordering fix as `run`'s FASTQ arm: build the writer (a
             // truncating `File::create`) only after `maybe_reduce_adapters`
             // has had its chance to return `Ok(None)` for `ReportOnly`.
-            let records = io::dir::fastq_records(&paths);
+            let records = io::dir::fastq_records(&paths, budget.decode);
             let Some(records) =
                 maybe_reduce_adapters(records, cfg, |r| Cow::Borrowed(r.seq.as_slice()))?
             else {
@@ -850,13 +905,13 @@ fn run_folder(
                     cfg.compression_level,
                 )?;
                 cfg.render_workers = budget.render;
-                let stats = workflow::run_bam(&out_header, records, &mut sink, cfg, &counters)?;
+                let stats = workflow::run_raw_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
                 tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
                 obs.finish(&stats, &out_desc);
                 Ok(())
             },
-            Format::Fastq | Format::FastqGz => {
+            Format::Fastq | Format::FastqGz | Format::FastqBgzf => {
                 let (_header, records) = io::dir::bam_reader(&paths, budget.decode)?;
                 let Some(records) = maybe_reduce_adapters(records, cfg, bam_seq)? else {
                     return Ok(());
@@ -883,8 +938,25 @@ fn encode_kind_for(out_fmt: io::Format) -> config::EncodeKind {
     match out_fmt {
         io::Format::Bam => config::EncodeKind::Bgzf,
         io::Format::FastqGz => config::EncodeKind::Gzip,
+        io::Format::FastqBgzf => config::EncodeKind::Bgzf,
         io::Format::Fastq => config::EncodeKind::None,
     }
+}
+
+/// Noodles decode and encode jobs share Rayon's one global registry. When both
+/// sides are BGZF, configure it before either reader or writer can lock in only
+/// its own smaller stage allocation.
+fn configure_shared_bgzf_pool(
+    bgzf_input: bool,
+    bgzf_output: bool,
+    budget: config::ThreadBudget,
+) -> anyhow::Result<()> {
+    let workers = usize::from(bgzf_input && budget.decode > 1) * budget.decode
+        + usize::from(bgzf_output && budget.encode > 1) * budget.encode;
+    if workers > 1 {
+        io::bam::configure_bgzf_pool(workers)?;
+    }
+    Ok(())
 }
 
 /// Whether the render stage has substantial per-record work. BAM input remains
@@ -933,6 +1005,9 @@ fn output_banner_line(
         },
         io::Format::FastqGz => {
             line.push_str(&format!(" (gzip level {level}, {encode_workers} workers)"));
+        },
+        io::Format::FastqBgzf => {
+            line.push_str(&format!(" (bgzf level {level}, {encode_workers} workers)"));
         },
         io::Format::Fastq => {},
     }
@@ -1415,7 +1490,7 @@ mod tests {
 
     #[test]
     fn threads_banner_line_shows_requested_threads_not_the_stage_sum() {
-        let b = config::thread_budget(8, true, config::EncodeKind::Bgzf);
+        let b = config::thread_budget(8, true, false, config::EncodeKind::Bgzf);
         assert_eq!(
             threads_banner_line(8, b),
             format!(
@@ -1436,7 +1511,7 @@ mod tests {
         // `EncodeKind::None` sums to 9 (1 decode + 7 render + 1 encode) for a
         // requested `-t 8` — the header must still read the requested 8, not
         // that 9-thread stage sum.
-        let b = config::thread_budget(8, true, config::EncodeKind::None);
+        let b = config::thread_budget(8, true, false, config::EncodeKind::None);
         assert_eq!(b.total(), 9);
         assert_eq!(
             threads_banner_line(8, b),
@@ -1450,7 +1525,7 @@ mod tests {
         // read/trim/write split would otherwise show e.g. "(read 1, trim 1,
         // write 1)" for what is actually a single-threaded run — collapse it
         // to a plain "sequential" label instead.
-        let b = config::thread_budget(1, true, config::EncodeKind::Bgzf);
+        let b = config::thread_budget(1, true, false, config::EncodeKind::Bgzf);
         assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");
     }
 

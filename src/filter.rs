@@ -44,7 +44,19 @@ pub enum DropReason {
 /// necessarily the whole input read. Logic/thresholds are unchanged; only the
 /// call site (and what counts as "the read" being judged) moved.
 pub fn check(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> Option<DropReason> {
-    let len = seq.len();
+    let gc = (cfg.min_gc.is_some() || cfg.max_gc.is_some()).then(|| gc_fraction(seq));
+    check_metrics(seq.len(), phred, gc, cfg)
+}
+
+/// Filter from precomputed sequence metrics. The raw BAM fast path can obtain
+/// length and GC directly from packed sequence views without materializing an
+/// owned decoded sequence. `gc` is required only when a GC bound is active.
+pub(crate) fn check_metrics(
+    len: usize,
+    phred: &[u8],
+    gc: Option<f64>,
+    cfg: &FilterConfig,
+) -> Option<DropReason> {
     if len == 0 || len < cfg.min_length {
         return Some(DropReason::TooShort);
     }
@@ -61,7 +73,7 @@ pub fn check(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> Option<DropReason>
         }
     }
     if cfg.min_gc.is_some() || cfg.max_gc.is_some() {
-        let gc = gc_fraction(seq);
+        let gc = gc.unwrap_or(0.0);
         if gc < cfg.min_gc.unwrap_or(0.0) || gc > cfg.max_gc.unwrap_or(1.0) {
             return Some(DropReason::Gc);
         }
