@@ -41,9 +41,10 @@ struct Cli {
     #[arg(long, default_value = "all", help_heading = "Setup")]
     fastq_tags: String,
     /// DEFLATE compression level for compressed output (bgzf for BAM, gzip for
-    /// FASTQ.gz). Lower = faster/larger. Ignored for plain FASTQ.
-    #[arg(short = 'c', long, default_value_t = 6, help_heading = "Setup")]
-    compression_level: u8,
+    /// FASTQ.gz). Lower = faster/larger. Ignored for plain FASTQ. Default when
+    /// unset: 4 for gzip FASTQ output, 6 for BGZF (BAM and .bgz).
+    #[arg(short = 'c', long, help_heading = "Setup")]
+    compression_level: Option<u8>,
 
     /// Increase logging detail: -v = debug, -vv = trace (maximum two). Overridden by WHITTLE_LOG.
     #[arg(short = 'v', long, action = clap::ArgAction::Count, help_heading = "Logging")]
@@ -247,12 +248,22 @@ pub fn parse() -> anyhow::Result<Config> {
     }
     // bgzf (libdeflate) accepts up to 12 and gzip up to 9; cap at the common 0-9
     // so a single flag is valid for both compressed output formats.
-    if c.compression_level > 9 {
-        anyhow::bail!(
-            "--compression-level must be between 0 and 9 (got {})",
-            c.compression_level
-        );
+    if let Some(level) = c.compression_level
+        && level > 9
+    {
+        anyhow::bail!("--compression-level must be between 0 and 9 (got {level})");
     }
+    // Default the compression level by output format when -c is unset. A trimmer's
+    // gzip FASTQ output is usually a transient pipeline hand-off, where libdeflate
+    // level 4 runs markedly faster than 6 for a ~2% larger file; BGZF (BAM and
+    // .bgz, archival / random-access) keeps the samtools-parity default of 6. An
+    // explicit -c always wins.
+    let out_is_gz = match c.out_format {
+        Some(FormatArg::FastqGz) => true,
+        Some(_) => false,
+        None => c.output.as_deref().and_then(crate::io::from_extension) == Some(Format::FastqGz),
+    };
+    let compression_level = c.compression_level.unwrap_or(if out_is_gz { 4 } else { 6 });
 
     // Reject contradictory or out-of-domain filter bounds up front, rather than
     // silently keeping zero reads and exiting successfully.
@@ -504,7 +515,7 @@ pub fn parse() -> anyhow::Result<Config> {
         fastq_tags,
         render_workers: 0,
         adapter_sample,
-        compression_level: c.compression_level,
+        compression_level,
         update_moves: c.update_moves,
         verbosity: c.verbose,
         quiet: c.quiet,
