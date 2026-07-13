@@ -19,6 +19,46 @@ env:
 # rust-htslib (a dev-dependency, Unix-only) builds bundled HTSlib from C, so the
 # jobs that compile test/dev targets install a C toolchain + compression libs.
 jobs:
+  commit-message:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate commit messages
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            base=$PR_BASE_SHA
+            head=$PR_HEAD_SHA
+          else
+            base=$PUSH_BEFORE_SHA
+            head=$PUSH_HEAD_SHA
+          fi
+
+          zero=0000000000000000000000000000000000000000
+          if [ -n "$base" ] && [ "$base" != "$zero" ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
+            commits=$(git rev-list --reverse "$base..$head")
+          else
+            commits=$head
+          fi
+
+          status=0
+          for commit in $commits; do
+            message_file="$RUNNER_TEMP/commit-message-$commit"
+            git show -s --format=%B "$commit" > "$message_file"
+            if ! scripts/validate-commit-message.sh "$message_file"; then
+              printf 'Commit %s has an invalid message.\n' "$commit" >&2
+              status=1
+            fi
+          done
+          exit "$status"
+
   fmt:
     runs-on: ubuntu-latest
     steps:
