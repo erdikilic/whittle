@@ -65,8 +65,24 @@ impl FastqTags {
 pub enum AdapterInfer {
     #[default]
     Off,
+    /// Infer a conservative terminal anchor and trim ends only.
     Trim,
+    /// Infer the full recurrent consensus and permit the configured split mode.
+    TrimAggressive,
+    /// Report conservative terminal anchors without trimming.
     ReportOnly,
+    /// Report the full recurrent consensus without trimming.
+    ReportOnlyAggressive,
+}
+
+impl AdapterInfer {
+    pub fn is_report_only(self) -> bool {
+        matches!(self, Self::ReportOnly | Self::ReportOnlyAggressive)
+    }
+
+    pub fn is_aggressive(self) -> bool {
+        matches!(self, Self::TrimAggressive | Self::ReportOnlyAggressive)
+    }
 }
 
 #[derive(Debug, Clone)]

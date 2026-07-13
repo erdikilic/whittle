@@ -49,13 +49,33 @@ const DROP_WINDOW: usize = 7;
 /// to form `drop_trim`'s cut threshold.
 const CUT_RATIO: f64 = 0.075;
 
+/// Maximum length of the end-facing anchor used by conservative inference.
+/// Two independent 16-mers are long enough to be specific in ordinary long
+/// reads while avoiding the unidentifiable insert-facing tail of a recurrent
+/// amplicon consensus. Terminal trimming still removes everything between the
+/// physical read end and this anchor.
+const CONSERVATIVE_ANCHOR_LEN: usize = 2 * KMER_K;
+
 /// One discovered adapter with inference metadata. Convert to a bare `Adapter`
 /// (dropping `support`/`name_hits`) only when building the trim config.
 #[derive(Debug, Clone)]
 pub struct InferredAdapter {
+    /// Sequence actually used for trimming (or printed as the recommendation).
     pub adapter: Adapter,
+    /// Complete recurrent consensus assembled before conservative anchoring.
+    pub assembled_seq: Vec<u8>,
     pub support: f64,
     pub name_hits: Vec<(String, f32)>,
+}
+
+impl InferredAdapter {
+    /// Number of insert-facing consensus bases deliberately excluded from the
+    /// trimming anchor because their technical/biological status is unknown.
+    pub fn uncertain_bases(&self) -> usize {
+        self.assembled_seq
+            .len()
+            .saturating_sub(self.adapter.seq.len())
+    }
 }
 
 /// 2-bit-encode a k-mer (A=0,C=1,G=2,T=3). `None` if it contains any non-ACGT
@@ -386,6 +406,7 @@ fn merge_both_ends(
     five: Vec<Vec<u8>>,
     three: Vec<Vec<u8>>,
     error_rate: f64,
+    aggressive: bool,
 ) -> Vec<(Vec<u8>, End)> {
     let mut out: Vec<(Vec<u8>, End)> = Vec::new();
     let mut three_used = vec![false; three.len()];
@@ -396,12 +417,11 @@ fn merge_both_ends(
             .position(|(j, t)| !three_used[j] && same_adapter(f, t, error_rate))
         {
             three_used[j] = true;
-            // Keep the LONGER of the two matched reconstructions: a
-            // shorter/truncated recovery at one end shouldn't win just
-            // because it's the 5' one -- the matcher searches both strands,
-            // so orientation is fine either way. Tie -> keep 5' (arbitrary
-            // but deterministic).
-            let kept = if three[j].len() > f.len() {
+            // Conservative inference keeps the 5' representation so its
+            // prefix remains the physical-end-facing side when we extract a
+            // terminal anchor below. Aggressive inference preserves the old
+            // full-consensus behaviour and keeps the longer reconstruction.
+            let kept = if aggressive && three[j].len() > f.len() {
                 three[j].clone()
             } else {
                 f.clone()
@@ -417,6 +437,21 @@ fn merge_both_ends(
         }
     }
     out
+}
+
+/// Return only the physical-end-facing part of an assembled consensus. The
+/// insert-facing extension is fundamentally ambiguous for reference-free
+/// amplicon data: an unknown primer and a conserved marker-gene prefix can be
+/// recurrent at exactly the same rate. For 5' (and merged candidates stored
+/// in 5' orientation) the outer anchor is the prefix; for 3' it is the suffix.
+fn conservative_terminal_anchor(seq: &[u8], end: End) -> Vec<u8> {
+    if seq.len() <= CONSERVATIVE_ANCHOR_LEN {
+        return seq.to_vec();
+    }
+    match end {
+        End::Five | End::Both => seq[..CONSERVATIVE_ANCHOR_LEN].to_vec(),
+        End::Three => seq[seq.len() - CONSERVATIVE_ANCHOR_LEN..].to_vec(),
+    }
 }
 
 /// Best catalog matches for `seq` as `(name, percent_identity)`, sorted desc,
@@ -522,6 +557,18 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
 /// outright, and under a `ReportOnly` run with no FASTA). Deterministic
 /// order: support desc, then sequence asc.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
+    discover_with_policy(sample, base, false)
+}
+
+/// Discover adapters with an explicit boundary policy. Conservative mode
+/// (the default exposed by [`discover`]) trims with a short physical-end-facing
+/// anchor and never asserts that the complete recurrent consensus is
+/// technical. Aggressive mode preserves the historical full-consensus output.
+pub fn discover_with_policy(
+    sample: &[&[u8]],
+    base: &AdapterConfig,
+    aggressive: bool,
+) -> Vec<InferredAdapter> {
     let (five_w, three_w) = end_windows(sample, WINDOW_LEN);
     let five = assemble(&five_w, base);
     let three = assemble(&three_w, base);
@@ -540,6 +587,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         five.iter().map(|(s, _)| s.clone()).collect(),
         three.iter().map(|(s, _)| s.clone()).collect(),
         base.error_rate,
+        aggressive,
     );
 
     // Use the ONT catalog and optional user entries only as naming references.
@@ -555,16 +603,16 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     // Candidate fields: sequence, end, support, and catalog matches.
     type Candidate = (Vec<u8>, End, f64, Vec<(String, f32)>);
     let mut candidates: Vec<Candidate> = Vec::new();
-    for (seq, end) in merged.into_iter() {
-        if seq.len() < MIN_PATTERN_LEN {
+    for (assembled_seq, end) in merged.into_iter() {
+        if assembled_seq.len() < MIN_PATTERN_LEN {
             continue;
         }
-        let support = support_of(&seq);
+        let support = support_of(&assembled_seq);
         if support < KEEP_SUPPORT {
             continue;
         }
-        let name_hits = name_against(&seq, &name_refs, base.error_rate);
-        candidates.push((seq, end, support, name_hits));
+        let name_hits = name_against(&assembled_seq, &name_refs, base.error_rate);
+        candidates.push((assembled_seq, end, support, name_hits));
     }
     // Stable presentation order: support descending, then sequence ascending.
     candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap().then(a.0.cmp(&b.0)));
@@ -572,13 +620,19 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     candidates
         .into_iter()
         .enumerate()
-        .map(|(i, (seq, end, support, name_hits))| {
+        .map(|(i, (assembled_seq, end, support, name_hits))| {
             let name = name_hits
                 .first()
                 .map(|(n, _)| n.clone())
                 .unwrap_or_else(|| format!("inferred_{}", i + 1));
+            let seq = if aggressive {
+                assembled_seq.clone()
+            } else {
+                conservative_terminal_anchor(&assembled_seq, end)
+            };
             InferredAdapter {
                 adapter: Adapter { name, seq, end },
+                assembled_seq,
                 support,
                 name_hits,
             }
@@ -727,7 +781,7 @@ mod tests {
         let a = b"ACGTACGTACGTACGT".to_vec();
         let five = vec![a.clone(), b"TTTTGGGGTTTTGGGG".to_vec()];
         let three = vec![a.clone()]; // same adapter seen at 3' too
-        let merged = merge_both_ends(five, three, 0.2);
+        let merged = merge_both_ends(five, three, 0.2, false);
         // a -> Both; the 5'-only one stays Five; no 3'-only left.
         assert!(merged.iter().any(|(s, e)| s == &a && *e == End::Both));
         assert!(
@@ -739,20 +793,54 @@ mod tests {
     }
 
     #[test]
-    fn merge_keeps_longer_of_matched_both_end_pair() {
-        // Fuzzy-equivalent end assemblies retain the longer consensus.
+    fn aggressive_merge_keeps_longer_of_matched_both_end_pair() {
+        // Aggressive fuzzy-equivalent end assemblies retain the longer consensus.
         let core = b"ACGTACGTACGTACGT".to_vec(); // 16bp truncated core (>= MIN_PATTERN_LEN)
         let mut longer = b"TT".to_vec();
         longer.extend_from_slice(&core);
         longer.extend_from_slice(b"TT"); // 20bp: `core` is an exact substring, so same_adapter-equal
         let five = vec![core.clone()];
         let three = vec![longer.clone()];
-        let merged = merge_both_ends(five, three, 0.2);
+        let merged = merge_both_ends(five, three, 0.2, true);
         assert_eq!(
             merged,
             vec![(longer, End::Both)],
             "the longer (3') reconstruction must be kept, not the shorter 5' core"
         );
+    }
+
+    #[test]
+    fn conservative_merge_keeps_five_prime_orientation() {
+        let core = b"ACGTACGTACGTACGT".to_vec();
+        let mut longer_three = b"TT".to_vec();
+        longer_three.extend_from_slice(&core);
+        longer_three.extend_from_slice(b"TT");
+        let merged = merge_both_ends(vec![core.clone()], vec![longer_three], 0.2, false);
+        assert_eq!(merged, vec![(core, End::Both)]);
+    }
+
+    #[test]
+    fn conservative_anchor_uses_physical_end_facing_side() {
+        let seq: Vec<u8> = (0..64).map(|i| b"ACGT"[i % 4]).collect();
+        assert_eq!(
+            conservative_terminal_anchor(&seq, End::Five),
+            seq[..CONSERVATIVE_ANCHOR_LEN]
+        );
+        assert_eq!(
+            conservative_terminal_anchor(&seq, End::Both),
+            seq[..CONSERVATIVE_ANCHOR_LEN]
+        );
+        assert_eq!(
+            conservative_terminal_anchor(&seq, End::Three),
+            seq[seq.len() - CONSERVATIVE_ANCHOR_LEN..]
+        );
+    }
+
+    #[test]
+    fn conservative_anchor_does_not_pad_short_consensus() {
+        let seq = b"AATGTACTTCGTTCAGTTACGTATTGCT";
+        assert_eq!(conservative_terminal_anchor(seq, End::Five), seq);
+        assert_eq!(conservative_terminal_anchor(seq, End::Three), seq);
     }
 
     #[test]

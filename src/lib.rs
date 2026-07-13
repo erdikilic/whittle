@@ -378,10 +378,27 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
                 d.support
             );
         }
+        if d.uncertain_bases() > 0 {
+            tracing::warn!(
+                "adapter '{}' uses a conservative {} bp terminal anchor; {} bp of the \
+                 {} bp recurrent consensus remain uncertain and will not be trimmed \
+                 (--adapter-infer-aggressive opts into the full consensus)",
+                d.adapter.name,
+                d.adapter.seq.len(),
+                d.uncertain_bases(),
+                d.assembled_seq.len(),
+            );
+        }
         tracing::debug!(
-            "inferred_{n} sequence: {}",
+            "inferred_{n} trimming sequence: {}",
             String::from_utf8_lossy(&d.adapter.seq)
         );
+        if d.uncertain_bases() > 0 {
+            tracing::debug!(
+                "inferred_{n} full recurrent consensus (review only): {}",
+                String::from_utf8_lossy(&d.assembled_seq)
+            );
+        }
     }
 }
 
@@ -394,7 +411,17 @@ fn print_discovered_fasta(discovered: &[crate::adapter::infer::InferredAdapter])
             Some((name, pct)) => format!(" [\u{2248} {name} ({pct:.0}%)]"),
             None => String::new(),
         };
-        println!(">inferred_{n} support={:.2}{name_suffix}", d.support);
+        println!(
+            ">inferred_{n} support={:.2} boundary={} assembled_length={} uncertain_bases={}{name_suffix}",
+            d.support,
+            if d.uncertain_bases() == 0 {
+                "full"
+            } else {
+                "conservative"
+            },
+            d.assembled_seq.len(),
+            d.uncertain_bases(),
+        );
         println!("{}", String::from_utf8_lossy(&d.adapter.seq));
     }
 }
@@ -451,7 +478,7 @@ where
                  keeping reads untrimmed",
                 crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
             );
-            if cfg.adapter_infer == AdapterInfer::ReportOnly {
+            if cfg.adapter_infer.is_report_only() {
                 return Ok(None);
             }
             let mut reduced = base;
@@ -462,10 +489,14 @@ where
 
         let seq_storage: Vec<Cow<'_, [u8]>> = sample.iter().map(&seq_of).collect();
         let seqs: Vec<&[u8]> = seq_storage.iter().map(|s| s.as_ref()).collect();
-        let discovered = crate::adapter::infer::discover(&seqs, &base);
+        let discovered = crate::adapter::infer::discover_with_policy(
+            &seqs,
+            &base,
+            cfg.adapter_infer.is_aggressive(),
+        );
         log_discovered(&discovered, s);
 
-        if cfg.adapter_infer == AdapterInfer::ReportOnly {
+        if cfg.adapter_infer.is_report_only() {
             print_discovered_fasta(&discovered);
             return Ok(None);
         }
@@ -656,7 +687,7 @@ fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bo
 /// Report-only inference is exempt because it emits textual FASTA and exits
 /// before workflow dispatch.
 fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> {
-    if cfg.adapter_infer == AdapterInfer::ReportOnly {
+    if cfg.adapter_infer.is_report_only() {
         return Ok(());
     }
     let stdout_is_tty = std::io::stdout().is_terminal();
@@ -1085,7 +1116,9 @@ fn adapter_banner_line(
     let infer_suffix = match adapter_infer {
         AdapterInfer::Off => "",
         AdapterInfer::Trim => " \u{b7} infer",
+        AdapterInfer::TrimAggressive => " \u{b7} infer-aggressive",
         AdapterInfer::ReportOnly => " \u{b7} infer-only",
+        AdapterInfer::ReportOnlyAggressive => " \u{b7} infer-only-aggressive",
     };
     let n_adapters = if adapter_infer == AdapterInfer::Off {
         a.adapters.len()

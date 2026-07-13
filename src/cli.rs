@@ -105,6 +105,11 @@ struct Cli {
     /// adapters -- see the printed note).
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_infer_only: bool,
+    /// Use the complete recurrent end consensus for inferred trimming instead
+    /// of the conservative terminal anchor. This can remove conserved amplicon
+    /// sequence and permits interior splitting unless --adapter-ends-only is set.
+    #[arg(long, help_heading = "Adapter trimming")]
+    adapter_infer_aggressive: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -223,17 +228,34 @@ pub fn parse() -> anyhow::Result<Config> {
     };
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
 
+    if c.adapter_infer_aggressive && !c.adapter_infer && !c.adapter_infer_only {
+        anyhow::bail!(
+            "--adapter-infer-aggressive requires --adapter-infer or --adapter-infer-only"
+        );
+    }
     let adapter_infer = if c.adapter_infer_only {
-        AdapterInfer::ReportOnly
+        if c.adapter_infer_aggressive {
+            AdapterInfer::ReportOnlyAggressive
+        } else {
+            AdapterInfer::ReportOnly
+        }
     } else if c.adapter_infer {
-        AdapterInfer::Trim
+        if c.adapter_infer_aggressive {
+            AdapterInfer::TrimAggressive
+        } else {
+            AdapterInfer::Trim
+        }
     } else {
         AdapterInfer::Off
     };
 
     // Mutual exclusion with an explicit FASTA (trim mode only; report-only
     // allows a FASTA so it can be cross-named against what inference finds).
-    if adapter_infer == AdapterInfer::Trim && c.adapter_fasta.is_some() {
+    if matches!(
+        adapter_infer,
+        AdapterInfer::Trim | AdapterInfer::TrimAggressive
+    ) && c.adapter_fasta.is_some()
+    {
         anyhow::bail!(
             "--adapter-infer and --adapter-fasta are mutually exclusive (one discovers \
              the set, the other supplies it). To trim with your FASTA and also see what \
@@ -253,7 +275,7 @@ pub fn parse() -> anyhow::Result<Config> {
     // adapters against the built-in ONT catalog UNION the user's FASTA (see
     // `infer::discover`), so a user combining the two flags gets their own
     // adapter names surfaced too, not just catalog matches.
-    if adapter_infer == AdapterInfer::ReportOnly && c.adapter_fasta.is_some() {
+    if adapter_infer.is_report_only() && c.adapter_fasta.is_some() {
         eprintln!(
             "[INFO] --adapter-infer-only with --adapter-fasta: discovered adapters are named \
              against the built-in ONT catalog plus your FASTA's adapters"
@@ -314,11 +336,19 @@ pub fn parse() -> anyhow::Result<Config> {
         } else {
             fasta_adapters
         };
+        let infer_forces_ends_only =
+            adapter_infer != AdapterInfer::Off && !adapter_infer.is_aggressive();
+        if infer_forces_ends_only && !c.adapter_ends_only {
+            eprintln!(
+                "[INFO] conservative adapter inference trims read ends only; use \
+                 --adapter-infer-aggressive to enable full-consensus interior splitting"
+            );
+        }
         Some(crate::adapter::AdapterConfig {
             adapters: trim_adapters,
             error_rate: c.adapter_error_rate,
             end_size: c.adapter_end_size,
-            split: !c.adapter_ends_only,
+            split: !c.adapter_ends_only && !infer_forces_ends_only,
             candidate_index: std::sync::OnceLock::new(),
         })
     };
