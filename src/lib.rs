@@ -164,12 +164,17 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // Resolved once, here, so the banner's Threads line and the actual dispatch
     // arm below agree on the same split — recomputing per arm risked the banner
     // showing one number and the workflow running another.
-    // BAM and bgzf-FASTQ inputs are both BGZF containers, so their decode can
-    // run on the multithreaded reader; grant them a parallel decode budget.
+    // BAM and bgzf-FASTQ inputs are BGZF containers whose decode can run on the
+    // multithreaded reader. Grant a parallel decode budget only when the render
+    // stage is light: adapter search (preset, FASTA, or inference) makes render
+    // the bottleneck, so those threads are better left to it.
+    let parallel_decode = matches!(in_fmt, Format::FastqBgzf | Format::Bam)
+        && cfg.adapters.is_none()
+        && cfg.adapter_infer == AdapterInfer::Off;
     let budget = config::thread_budget(
         cfg.threads,
         render_heavy_for(in_fmt, out_fmt, &cfg),
-        matches!(in_fmt, Format::FastqBgzf | Format::Bam),
+        parallel_decode,
         encode_kind_for(out_fmt),
     );
     configure_shared_bgzf_pool(
@@ -749,13 +754,17 @@ fn run_folder(
 
     // Resolved once, here, so the banner's Threads line and the actual dispatch
     // arm below agree on the same split (see the matching comment in `run`).
+    let bgzf_input = family_fmt == Format::Bam
+        || paths
+            .iter()
+            .any(|p| io::from_extension(p) == Some(Format::FastqBgzf));
+    // See `run`: parallel decode only when render is light (no adapter search).
+    let parallel_decode =
+        bgzf_input && cfg.adapters.is_none() && cfg.adapter_infer == AdapterInfer::Off;
     let budget = config::thread_budget(
         cfg.threads,
         render_heavy_for(family_fmt, out_fmt, cfg),
-        family_fmt == Format::Bam
-            || paths
-                .iter()
-                .any(|p| io::from_extension(p) == Some(Format::FastqBgzf)),
+        parallel_decode,
         encode_kind_for(out_fmt),
     );
     configure_shared_bgzf_pool(
