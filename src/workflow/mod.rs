@@ -171,18 +171,11 @@ impl Counters {
     }
 }
 
-/// Per-segment filter + counting + read-level accounting, shared by every
-/// workflow loop (FASTQ and uBAM, sequential and parallel, BAM→BAM and
-/// BAM→FASTQ) so `filter::check` and the read-level counter bumps live in
-/// exactly one place. `produced` is the segment interval list from
-/// `trim::apply`; `seq`/`qual` are the *whole* (untrimmed) read's own bases,
-/// sliced internally per segment. For each surviving segment, `render` is
-/// called with `(idx, total, start, end)` — the produced index/count and the
-/// segment's byte range into `seq`/`qual` — to write/reconstruct that segment;
-/// a `render` error propagates immediately via `?`, before any further
-/// segments are processed and before `reads_with_output`/
-/// `reads_trimmed_to_nothing`/`reads_all_filtered` are bumped for this read
-/// (mirroring the old inline loops, which aborted the same way).
+/// Filter produced segments and update segment- and read-level counters for all
+/// workflows. `seq` and `qual` contain the complete input read and `produced`
+/// contains the ranges to evaluate. For each surviving segment, `render`
+/// receives `(idx, total, start, end)`. A render error stops processing before
+/// the read-level outcome counter is updated.
 pub(crate) fn process_read_segments<Rn>(
     produced: &[(usize, usize)],
     seq: &[u8],
@@ -334,9 +327,7 @@ mod tests {
         assert_eq!(stats.segments_dropped_gc, 0);
     }
 
-    /// Direct unit test for the shared `process_read_segments` helper (Fix
-    /// #3): pins its three read-level outcomes and the exact `render`
-    /// arguments, independent of any particular workflow loop.
+    /// Cover all read-level outcomes and the corresponding render arguments.
     #[test]
     fn process_read_segments_dispatches_and_counts_all_three_outcomes() {
         let filter_cfg = FilterConfig {

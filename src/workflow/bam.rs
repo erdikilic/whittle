@@ -1541,14 +1541,7 @@ mod tests {
         assert_eq!(mn, 2);
     }
 
-    /// Regression test for a QUAL-absent uBAM record: `quality_scores()`
-    /// decodes to empty while `sequence()` keeps its bases, so `seq.len() !=
-    /// qual.len()`. Pre-fix, `run_bam` fed this straight into `trim::apply`,
-    /// which slices `phred[start..end]` using `seq.len()`-derived bounds and
-    /// panics (via `debug_assert_eq!` in debug builds, or an out-of-bounds
-    /// slice panic in release) instead of returning an `Err`. Post-fix, the
-    /// length-mismatch guard in `run_bam` must bail with an `Err` before any
-    /// of that runs.
+    /// A BAM record with unequal SEQ and QUAL lengths returns an error.
     #[test]
     fn qual_seq_length_mismatch_errors_without_panicking() {
         use crate::config::IoConfig;
@@ -1614,15 +1607,7 @@ mod tests {
         );
     }
 
-    /// Regression test for the outer gate in `reconstruct_record`: a spec-invalid
-    /// `MM` tag (typed as anything other than `Value::String`, e.g. `Int32`) must
-    /// leave `MM`/`ML`/`MN` completely untouched. Pre-fix, the gate was a bare
-    /// `.is_some()` check, which let this record enter the mod-rebuild block;
-    /// `reconstruct_mods`'s `Some(Value::String(s)) => ... , _ => return None`
-    /// match then falls through to `None` for a non-string MM, and the `None`
-    /// branch in `reconstruct_record` REMOVES all three tags instead of leaving
-    /// them alone. The fix narrows the gate to `matches!(.., Some(Value::String(_)))`
-    /// so a spec-invalid MM never enters the rebuild block at all.
+    /// A non-string MM value is outside the supported schema and remains untouched.
     #[test]
     fn reconstruct_record_leaves_non_string_mm_untouched() {
         let mut src = RecordBuf::default();
@@ -1656,14 +1641,10 @@ mod tests {
 
     #[test]
     fn reconstruct_record_preserves_originally_empty_mm_group() {
-        // A record carrying an "assessed, none found" group (`C+m;`, zero
-        // positions) alongside a real one must keep BOTH through a trim.
-        // Pre-fix the empty group was silently dropped by reconstruct/serialize.
+        // An empty assessment group remains present alongside populated groups.
         // seq CACA: C at 0,2 ; A at 1,3. A+a modifies A-occ 0 (pos1). C+m empty.
         let src = ubam_with_mods(b"CACA", vec![30, 31, 32, 33], b"A+a,0;C+m;", vec![7]);
-        // Untrimmed whole read, but no MN tag, so full_window_mods_already_
-        // consistent is false and the record is still reconstructed (the exact
-        // shape from the bug report). The empty group must survive that pass.
+        // Missing MN requires reconstruction even for the complete sequence.
         let out = reconstruct_record(&src, 0, 4, 1, 0, false);
         let mm = match out.data().get(&Tag::BASE_MODIFICATIONS) {
             Some(Value::String(s)) => s.to_vec(),
@@ -1857,11 +1838,7 @@ mod tests {
         assert_eq!(out, b"@plain\nACGT\n+\nIIII\n");
     }
 
-    /// Regression test: a source uBAM carrying `MM` but NO `ML` (valid — ML is
-    /// optional per the SAM spec) must be rewritten as an MM-only record, NOT gain
-    /// an empty `ML:B:C`. Pre-fix, `reconstruct_record` inserted `Array::UInt8([])`
-    /// unconditionally, producing an MM that declares modified positions with zero
-    /// probabilities — a record samtools/modkit reject as invalid.
+    /// MM without optional ML remains MM-only after reconstruction.
     #[test]
     fn reconstruct_record_mm_without_ml_stays_mm_only() {
         let mut src = RecordBuf::default();
@@ -2456,8 +2433,7 @@ mod tests {
 
     #[test]
     fn update_moves_does_not_reslice_read_length_pa() {
-        // Regression (review F1): a pa array whose length happens to equal the read
-        // length must NOT be treated as a per-base array and sliced.
+        // `pa` uses signal coordinates and is not a per-base array.
         let mut src = RecordBuf::default();
         *src.flags_mut() = Flags::UNMAPPED;
         *src.name_mut() = Some(b"r1".into());
@@ -2640,12 +2616,7 @@ mod tests {
         );
     }
 
-    /// Mirrors `workflow::fastq`'s `parallel_surfaces_write_error_without_deadlock`,
-    /// but drives `run_bam_parallel` directly with a stub sink whose `write_one`
-    /// starts erroring after `limit` writes. Record count (3000) exceeds the
-    /// bounded channel capacity (`threads * 4` = 16), so a pre-fix build that
-    /// stops draining `rx` on the first write error would deadlock instead of
-    /// returning.
+    /// Writer errors remain observable after the bounded channel reaches capacity.
     #[test]
     fn run_bam_parallel_surfaces_write_error_without_deadlock() {
         use std::io;

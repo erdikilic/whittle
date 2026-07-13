@@ -85,8 +85,8 @@ pub struct Config {
     /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
     /// `--adapter-preset ont` was given (adapter trimming off — no per-read cost).
     pub adapters: Option<crate::adapter::AdapterConfig>,
-    /// Whether ab-initio adapter inference runs, and whether it also trims
-    /// (`Off` by default — no behavior change from before this field existed).
+    /// Whether ab-initio adapter inference runs and whether inferred adapters
+    /// are also used for trimming.
     pub adapter_infer: AdapterInfer,
     pub threads: usize,
     pub fastq_tags: FastqTags,
@@ -149,11 +149,9 @@ pub enum EncodeKind {
     Gzip,
 }
 
-/// Split a `-t` total worker budget across decode/render/encode, given whether
-/// RENDER is heavy (BAM input → MM/ML reconstruction) vs light (FASTQ input →
-/// trim only), and the encode stage's kind. Empirically tuned (2026-07-03 sweep,
-/// mid_eqbase): decode never benefits (serial inflate keeps up → 1); the rest is
-/// split so the heavier stage gets more threads.
+/// Split a `-t` worker budget across decode, render, and encode. Parallel input
+/// receives multiple decode workers; otherwise decoding stays serial and the
+/// remaining workers are weighted toward the more expensive downstream stage.
 pub fn thread_budget(
     total: usize,
     render_heavy: bool,
@@ -213,9 +211,9 @@ pub fn thread_budget(
             let render = rest.div_ceil(2).max(1);
             (render, rest - render)
         },
-        // BAM in + gzip out: both heavy, encode slightly favored. R3E4.
+        // BAM input with gzip output slightly favors encoding.
         (true, EncodeKind::Gzip) => (rest / 2, rest.div_ceil(2)),
-        // FASTQ in (light render) + any compression: encode dominates. R1E6.
+        // FASTQ rendering is light, so compressed output favors encoding.
         (false, _) => {
             let r = (rest / 6).max(1);
             (r, rest - r)

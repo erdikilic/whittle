@@ -252,7 +252,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             let Some(records) = maybe_reduce_adapters(records, &mut cfg, bam_seq)? else {
                 return Ok(());
             };
-            // Provenance: append our @PG line to a cloned header before writing.
+            // Append the invocation's @PG provenance line before writing.
             let out_header = provenance_header(header);
             let mut sink = io::bam::writer(
                 cfg.io.output.as_deref(),
@@ -385,17 +385,8 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
     }
 }
 
-/// `--adapter-infer-only`'s stdout contract: print each discovered adapter as
-/// a bare FASTA record -- header `>inferred_N support=X.XX [\u{2248} NAME
-/// (pct%)]` (the bracketed cross-name suffix omitted when there's no catalog/
-/// FASTA hit), then the sequence on its own line. CLI help promises
-/// "sequences + support + catalog names" for report-only, but pre-fix the
-/// sequence only ever appeared at `debug!` (see `log_discovered`), so plain
-/// `--adapter-infer-only` stdout was empty -- nothing to redirect into an
-/// adapter FASTA of your own. `N` matches `log_discovered`'s own 1-based
-/// numbering (both iterate `discovered` in the same post-sort order from
-/// `infer::discover`). Trim mode keeps the sequence at `debug!` only -- this
-/// is report-only's stdout output, not an additional log line.
+/// Print inferred adapters as FASTA with support and the best catalog match.
+/// Numbering follows the final discovery order used by the status log.
 fn print_discovered_fasta(discovered: &[crate::adapter::infer::InferredAdapter]) {
     for (i, d) in discovered.iter().enumerate() {
         let n = i + 1;
@@ -408,11 +399,7 @@ fn print_discovered_fasta(discovered: &[crate::adapter::infer::InferredAdapter])
     }
 }
 
-/// Pull up to `n` records off the front of `records` into a `Vec`, stopping
-/// early if the iterator is exhausted first. Shared by both buffering points
-/// in `maybe_reduce_adapters` below (the ab-initio inference sample and the
-/// Phase 1.5 presence-detection sample), which otherwise duplicate this loop
-/// verbatim.
+/// Buffer at most `n` records, stopping when the input is exhausted.
 fn buffer_prefix<R>(
     records: &mut impl Iterator<Item = anyhow::Result<R>>,
     n: usize,
@@ -428,59 +415,24 @@ fn buffer_prefix<R>(
     Ok(sample)
 }
 
-/// The buffer-then-decide seam shared by every FASTQ/BAM dispatch arm in
-/// `run`/`run_folder`. Two independent policies live here, selected by
-/// `cfg.adapter_infer`:
-///
-/// - `AdapterInfer::Off` (unchanged from before ab-initio inference existed):
-///   Phase 1.5 presence detection. When `cfg.adapter_sample > 0`, buffer up
-///   to that many records, detect which of the *configured* adapters are
-///   actually present, and reduce `cfg.adapters` to that set — falling back
-///   to the full configured set (with a WARN) if detection keeps zero (an
-///   empty result more likely means an unrepresentative sample than a truly
-///   adapter-free run).
-/// - `AdapterInfer::Trim` / `AdapterInfer::ReportOnly` (Phase 2, ab-initio):
-///   buffer up to `cfg.adapter_sample` records (always > 0 here — see
-///   `cli::parse`) and run `infer::discover` on them to build the working
-///   adapter set from scratch, ignoring whatever `cfg.adapters` held before
-///   (it's always an empty list under infer; see `cli::parse`). Too small a
-///   sample (< `detect::MIN_SAMPLE_FOR_DETECTION`) skips discovery entirely:
-///   under `Trim` there is no "full set" to fall back to here (unlike Off's
-///   presence detection), so it trims nothing and dispatch still runs; under
-///   `ReportOnly` there is nothing to report, so it warns and returns
-///   `Ok(None)` just like the post-discovery `ReportOnly` case below — its
-///   "never write or touch output" contract does not depend on discovery
-///   itself having run. A `ReportOnly` run that does complete discovery logs
-///   what it found and likewise returns `Ok(None)`.
-///
-/// Returns `Ok(None)` when the caller must stop immediately — no writer, no
-/// workflow dispatch, no output file (currently only `ReportOnly`, whether or
-/// not discovery ran). Otherwise `Ok(Some(buffered ++ rest))`, boxed (rather
-/// than `impl Iterator`, as before ab-initio inference existed) because the
-/// two policies above buffer/reduce differently but must still hand the same
-/// iterator type back to each of the six call sites. `seq_of` extracts a
-/// record's SEQ.
+/// Resolve adapter inference or presence sampling before workflow dispatch.
+/// Report-only mode returns `None` so callers do not create an output writer;
+/// trimming modes return the buffered prefix chained with the remaining input.
+/// `seq_of` exposes a record's sequence without constraining its storage type.
 fn maybe_reduce_adapters<R, I, F>(
     mut records: I,
     cfg: &mut Config,
-    // Explicit HRTB so the returned SEQ borrows the record arg (elision may not
-    // link them on its own).
+    // The returned sequence view borrows the record passed to `seq_of`.
     seq_of: F,
 ) -> anyhow::Result<Option<Box<dyn Iterator<Item = anyhow::Result<R>> + Send>>>
 where
-    // `+ Send` / `R: Send`: the FASTQ and BAM workflows' parallel paths require a
-    // `Send` record iterator. `+ 'static`: needed to box the returned iterator
-    // (every real caller already hands in an already-boxed, owning iterator).
-    // `seq_of` is only used inside this fn (not captured by the returned
-    // iterator), so it needs no `Send`/`'static` bound.
+    // Workflow iterators are boxed and may cross worker-thread boundaries.
     I: Iterator<Item = anyhow::Result<R>> + Send + 'static,
     R: Send + 'static,
     F: for<'a> Fn(&'a R) -> Cow<'a, [u8]>,
 {
     if cfg.adapter_infer != AdapterInfer::Off {
-        // Always `Some` here: `cli::parse` never resolves `adapters` to `None`
-        // while `adapter_infer != Off` (an empty adapter list, not `None`, is
-        // how it represents "the trimming set is discovered later").
+        // Inference mode stores an empty configuration until discovery completes.
         let base = cfg
             .adapters
             .clone()
@@ -493,12 +445,7 @@ where
                 Box::new(sample.into_iter().map(anyhow::Ok).chain(records))
             };
         if s < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION {
-            // Discovery never ran, so there is no discovered set to print --
-            // but `ReportOnly`'s contract ("never write or touch output") still
-            // applies even when discovery itself was skipped. Gate on it here,
-            // the same way the post-discovery `ReportOnly` check below does:
-            // warn, then hand back the "stop now, no dispatch" signal instead
-            // of falling through to `chain(sample, records)`.
+            // Report-only mode must not create output when the sample is too small.
             tracing::warn!(
                 "adapter inference: too few reads ({s}, need >= {}) to infer reliably; \
                  keeping reads untrimmed",
@@ -535,22 +482,12 @@ where
         return Ok(Some(chain(sample, records)));
     }
 
-    // Pure no-op fast path: no adapters configured at all, or detection
-    // sampling is off (`adapter_sample == 0`) -- nothing below would ever
-    // buffer or reduce anything, so hand `records` straight back rather than
-    // paying for an empty `Vec` plus a `Map<Chain<..>>` wrapper around it.
-    // `Box` is still required (every return path of this fn shares the same
-    // `Box<dyn Iterator>` return type across all six call sites -- see the
-    // fn's doc comment), so this doesn't remove that one layer of dynamic
-    // dispatch, only the unnecessary extra allocation/combinator on top of
-    // it; removing the `Box` itself would need a signature change touching
-    // every caller, which isn't a trivial win for this cost.
+    // Avoid buffering when neither inference nor presence sampling is active.
     if cfg.adapters.is_none() || cfg.adapter_sample == 0 {
         return Ok(Some(Box::new(records)));
     }
 
-    // Phase 1.5 presence detection (unchanged from before ab-initio inference
-    // existed).
+    // Reduce configured adapters using the sampled prefix.
     let mut sample: Vec<R> = Vec::new();
     if let Some(ac) = cfg.adapters.clone()
         && cfg.adapter_sample > 0
@@ -715,19 +652,9 @@ fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bo
         )
 }
 
-/// Hard-error before any writer/output file is created if `out_fmt` would land
-/// binary/gzip bytes on an interactive stdout (see `binary_to_terminal`).
-/// Shared by `run`'s single-file path and `run_folder`.
-///
-/// `AdapterInfer::ReportOnly` is exempt: report-only never builds a
-/// writer for `out_fmt` at all -- it prints a small FASTA text summary to
-/// stdout (`print_discovered_fasta`) and returns before dispatch, from the
-/// `ReportOnly` early-exit in `maybe_reduce_adapters`, which runs AFTER this
-/// guard. Pre-fix, this guard ran first and could refuse e.g. `whittle -i
-/// reads.bam --adapter-infer-only` on a terminal ("would write BAM to
-/// terminal") even though that run writes no BAM at all. A non-report-only
-/// run reaching an actual binary write on a TTY is still refused exactly as
-/// before.
+/// Reject binary output to an interactive terminal before creating a writer.
+/// Report-only inference is exempt because it emits textual FASTA and exits
+/// before workflow dispatch.
 fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> {
     if cfg.adapter_infer == AdapterInfer::ReportOnly {
         return Ok(());
@@ -870,9 +797,7 @@ fn run_folder(
                 );
             }
             note_tags_ignored(cfg, family_fmt, out_fmt);
-            // Same ordering fix as `run`'s FASTQ arm: build the writer (a
-            // truncating `File::create`) only after `maybe_reduce_adapters`
-            // has had its chance to return `Ok(None)` for `ReportOnly`.
+            // Resolve report-only mode before creating the output file.
             let records = io::dir::fastq_records(&paths, budget.decode);
             let Some(records) =
                 maybe_reduce_adapters(records, cfg, |r| Cow::Borrowed(r.seq.as_slice()))?
@@ -1354,19 +1279,11 @@ mod tests {
         assert!(!binary_to_terminal(true, io::Format::FastqGz, false));
     }
 
-    /// Regression test for `d481c48`: a header with a dangling `@PG PP:` chain
-    /// (a `PP` value that names a program ID not present in the header) used
-    /// to panic inside `noodles_sam::header::Programs::add` — called via
-    /// `provenance_header` — because `Programs::leaves` indexes the program
-    /// map directly by the `PP` id without checking it exists first. Real
-    /// ONT/samtools headers hit this in the wild (see `d481c48`'s commit
-    /// message). `provenance_header` must detect the dangling reference via
-    /// `has_dangling_program_chain` and return the header unchanged instead
-    /// of calling `Programs::add`.
+    /// A dangling `@PG PP:` reference must leave the header unchanged because
+    /// Noodles requires every parent program ID to exist.
     #[test]
     fn provenance_header_does_not_panic_on_dangling_pp_chain() {
-        // "pg1" claims a previous program "ghost", but "ghost" is never
-        // added to the header — a genuinely dangling reference.
+        // `pg1` references a parent that is absent from the header.
         let dangling_program = Map::<Program>::builder()
             .insert(tag::PREVIOUS_PROGRAM_ID, "ghost")
             .build()
@@ -1376,16 +1293,8 @@ mod tests {
             .add_program("pg1", dangling_program)
             .build();
 
-        // Sanity-check that the header really is dangling (i.e. this test
-        // isn't accidentally exercising the clean path).
         assert!(has_dangling_program_chain(&header));
 
-        // Pre-fix, this call panicked inside `Programs::add` -> `leaves`
-        // -> `has_cycle`, which indexes the program map with the `PP` id
-        // and panics when that id isn't a key (`ghost` isn't present here).
-        // Post-fix, `provenance_header` must return without panicking, and
-        // since the chain is dangling it must skip adding the `whittle`
-        // `@PG` line entirely.
         let out_header = provenance_header(header);
 
         assert!(
@@ -1394,9 +1303,7 @@ mod tests {
         );
     }
 
-    /// Companion positive-path test: a plain header with no dangling `@PG`
-    /// chain must still get the `whittle` provenance record added, so the
-    /// dangling-chain guard doesn't accidentally suppress the common case.
+    /// A valid program chain receives the `whittle` provenance record.
     #[test]
     fn provenance_header_adds_whittle_program_on_clean_header() {
         let header = noodles_sam::Header::default();
@@ -1507,10 +1414,7 @@ mod tests {
 
     #[test]
     fn threads_banner_line_header_is_requested_even_when_stage_sum_differs() {
-        // Regression for the confusing pre-fix wording: `render_heavy=true` with
-        // `EncodeKind::None` sums to 9 (1 decode + 7 render + 1 encode) for a
-        // requested `-t 8` — the header must still read the requested 8, not
-        // that 9-thread stage sum.
+        // The banner reports the requested limit, not the sum of stage fields.
         let b = config::thread_budget(8, true, false, config::EncodeKind::None);
         assert_eq!(b.total(), 9);
         assert_eq!(

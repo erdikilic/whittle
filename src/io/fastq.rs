@@ -85,11 +85,8 @@ fn write_head<W: Write>(
 ) -> io::Result<()> {
     w.write_all(b"@")?;
     if total_segments > 1 {
-        // Suffix the read id (everything up to the first ASCII whitespace) and
-        // re-emit the original delimiter + remainder verbatim. This preserves both
-        // a space-separated description AND a tab-delimited tag list (`samtools
-        // fastq -T` style) — the old space-only split appended the suffix past the
-        // tab, mutating the first tag's value.
+        // Insert the suffix after the read ID while preserving the original
+        // delimiter, description, and tab-delimited tags.
         match name.iter().position(|&b| b == b' ' || b == b'\t') {
             Some(i) => {
                 w.write_all(&name[..i])?;

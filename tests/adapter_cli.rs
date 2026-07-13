@@ -128,12 +128,8 @@ fn adapter_fasta_with_no_usable_entries_errors() {
         .stderr(predicates::str::contains("no usable adapters"));
 }
 
-// Build a FASTQ where every read starts with adapter A (present) and none
-// contains adapter B (absent). With a *custom* FASTA, detection is disabled
-// outright (Change 1: a curated FASTA should always be searched in full), so
-// neither adapter is ever reduced -- both stay active, no "Adapter presence"
-// log appears, and trimming on the present adapter still works exactly as
-// without detection.
+// Custom FASTA entries remain active without presence-based reduction, including
+// entries absent from the sampled reads.
 #[test]
 fn custom_fasta_never_reduces_even_with_an_absent_adapter() {
     let present = "GGGGTTTTGGGGTTTTGGGG"; // 20bp present adapter
@@ -202,11 +198,7 @@ fn adapter_sample_zero_disables_detection() {
     );
 }
 
-// Custom --adapter-fasta disables detection outright (no small-sample branch
-// to hit at all), so this now exercises the small-sample path with
-// --adapter-preset instead, which still runs detection for < 100 reads.
-// Detection is opt-in now (default --adapter-sample is 0, i.e. off), so this
-// must explicitly opt in to exercise the small-sample skip branch.
+// Preset detection skips samples below the minimum discovery size.
 #[test]
 fn tiny_input_skips_detection() {
     let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, real preset entry
@@ -292,25 +284,9 @@ fn default_does_not_run_detection() {
     );
 }
 
-// The key correctness guarantee (Phase 1.5 spec): detection only ever *drops*
-// adapters that don't act, so trimming a present adapter with detection ON
-// must be byte-identical to trimming with detection OFF (`--adapter-sample
-// 0`, i.e. the full set). Custom `--adapter-fasta` now disables detection
-// outright (Change 1), so this equivalence can only be exercised against a
-// preset. Uses `--adapter-preset ont` (124 real catalog entries) with the
-// real LSK114 front ligation adapter present in every read; detection reduces
-// 124 -> a handful (confirmed empirically: kept 4 -- LSK114_front/_rear and
-// LSK109_front/_rear, whose sequences overlap the front adapter's tail).
-//
-// The insert is 300bp (not the usual 40bp): with a short ~67bp read, the
-// catalog's paired front/rear entries (Y-adapter chemistry means a "rear"
-// entry's sequence is a near-reverse-complement of the "front" one) can both
-// match within the same read when `--adapter-end-size` (default 150) spans
-// the whole thing, consuming it entirely (empirically: 0 output reads for
-// *both* detection on and off -- technically "byte-identical" but violates
-// the "non-empty" sanity check and isn't a meaningful comparison). A 300bp
-// insert pushes the tail well outside the 150bp end-zone, so only the front
-// adapter acts and the insert survives trimming, for both settings.
+// Presence detection may remove inactive preset entries but must not change the
+// output for a present adapter. The long insert keeps the paired rear entry
+// outside the default end-search region.
 #[test]
 fn detection_output_equals_full_set_for_present_adapter() {
     let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, 27bp
@@ -385,27 +361,8 @@ fn detection_output_equals_full_set_for_present_adapter() {
     );
 }
 
-// Owner reproduction (a): 10000 clean reads followed by 10 adapted ones lost
-// ALL adapter trimming on the tail, because presence detection sampled
-// exactly the (adapter-free) first `adapter_sample` reads -- default 10000,
-// matching this fixture's clean-read count precisely -- kept zero adapters,
-// and reduced the active set to nothing, silently disabling trimming for
-// every read that followed, including the 10 adapted ones. Fixed by Change 1:
-// a custom --adapter-fasta is a curated set that should always be searched in
-// full, so detection is now forced off unconditionally whenever a FASTA is
-// given, regardless of --adapter-sample's value. Detection is opt-in now
-// (default --adapter-sample is 0), so this passes --adapter-sample 10000
-// explicitly -- a value that would otherwise enable detection -- to prove the
-// fasta override still holds "regardless of --adapter-sample's value" rather
-// than merely benefiting from the new off-by-default behavior.
-//
-// Confirmed RED under the pre-fix code (reverting Change 1 only): stderr
-// logged "Adapter presence: sampled 10000 reads, kept 0 of 1 adapters" and
-// the summary showed "10,010 input reads, 10,010 output reads ... 100.0%
-// kept" -- i.e. the 10 adapted reads passed through completely untouched,
-// their adapter+insert line appearing verbatim in stdout. GREEN after the
-// fix: the banner reports "sample off", and the 10 adapted reads are
-// trimmed down to their bare insert.
+// An adapter-free prefix must not disable a custom FASTA for later reads, even
+// when an adapter sample size is explicitly supplied.
 #[test]
 fn custom_fasta_trims_adapters_after_a_clean_prefix() {
     let adapter = "GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
@@ -460,30 +417,8 @@ fn custom_fasta_trims_adapters_after_a_clean_prefix() {
     );
 }
 
-// Owner reproduction (b): a preset run where the sampled prefix happens to
-// contain zero adapters (e.g. a run of clean reads ahead of the adapted
-// ones) used to reduce the active set to *nothing*, silently disabling
-// trimming for the rest of the file -- including the adapted reads outside
-// the sample. Fixed by Change 2: when detection keeps zero adapters, fall
-// back to the full configured set (with a WARN) instead of reducing to an
-// empty one.
-//
-// Fixture: 100 clean reads (the entire sample, since --adapter-sample 100 ==
-// MIN_SAMPLE_FOR_DETECTION, so detection runs rather than skipping), then 10
-// reads carrying the real LSK114 front adapter. The clean reads are pure C,
-// which cannot spuriously match any preset adapter (all are mixed-base)
-// within the default edit budget -- confirmed empirically: detection keeps 0
-// on the clean-only sample.
-//
-// Confirmed RED under the pre-fix code (reverting Change 2 only): stderr
-// logged "Adapter presence: sampled 100 reads, kept 0 of 124 adapters" (no
-// fallback), and the summary showed "110 input reads, 110 output reads ...
-// 100.0% kept" -- the 10 adapted reads' untrimmed line appeared verbatim in
-// stdout. GREEN after the fix: stderr carries the fallback WARN and the 10
-// adapted reads are trimmed (dropped entirely here, since the short fixture
-// read is fully consumed by the catalog's paired front/rear entries within
-// the default 150bp end-zone -- see the comment on
-// `detection_output_equals_full_set_for_present_adapter` for why).
+// When a sampled prefix contains no preset adapters, detection falls back to
+// the full preset so adapters in later reads are still processed.
 #[test]
 fn preset_detection_falls_back_when_prefix_has_no_adapters() {
     let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, real preset entry
@@ -577,13 +512,8 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
         .stderr(predicates::str::contains("must be 0"));
 }
 
-// --adapter-infer-only + --adapter-fasta is allowed (unlike --adapter-infer,
-// which rejects a FASTA outright): naming now covers the built-in catalog
-// PLUS the user's FASTA (see `infer::discover`'s `name_refs`). This
-// just checks the informational line reflects that (not the old "catalog
-// only" wording), so a user combining the two flags isn't left assuming the
-// FASTA did nothing. The actual cross-naming is proven end-to-end by
-// `infer_only_cross_names_against_user_fasta` below.
+// Report-only inference names discoveries against the built-in catalog and
+// user-supplied FASTA entries.
 #[test]
 fn infer_only_with_fasta_notes_naming_includes_fasta() {
     let mut fa = tempfile::NamedTempFile::new().unwrap();
@@ -607,21 +537,8 @@ fn infer_only_with_fasta_notes_naming_includes_fasta() {
         .stderr(predicates::str::contains("plus your FASTA's adapters"));
 }
 
-// --- ab-initio inference wiring -----------------------------------------
-//
-// Fixtures below plant an EXACT copy (no injected error -- error-tolerant
-// recovery is already covered by `discover_recovers_planted_adapter_under_error`
-// in src/adapter/infer.rs) of a real catalog-neighborhood adapter at the 5'
-// end of every read, followed by a deterministic splitmix64-mixed genomic
-// tail distinct per read index.
-//
-// IMPORTANT: a naive `(a*i + b*j) % 4` background generator is periodic
-// (linear in `j` mod 4) and collapses into a phase-rotated ACGT tandem
-// repeat -- a spurious, low-complexity-but-not-homopolymer signal that the
-// k-mer discoverer picks up as a fake "adapter" of its own, breaking these
-// tests. The splitmix64 bit-mix below is the same fixture pattern
-// `src/adapter/infer.rs`'s own `discover_*` unit tests use, and does not
-// have that defect.
+// Inference fixtures plant an exact adapter before deterministic, non-periodic
+// genomic backgrounds. Error-tolerant recovery is covered by unit tests.
 
 /// The 28bp adapter planted at the 5' end of every synthetic read below (an
 /// SQK-NSK007/LSK109-neighborhood front sequence -- same one used by
@@ -708,13 +625,7 @@ fn infer_only_prints_and_does_not_trim() {
     );
 }
 
-// Regression test: CLI help promises `--adapter-infer-only` prints
-// "sequences + support + catalog names", but pre-fix `log_discovered` only
-// ever logged the sequence at `debug!` -- invisible at the default INFO
-// level -- so plain `--adapter-infer-only` stdout was completely empty.
-// Report-only must print each discovered adapter to stdout as a FASTA
-// record (header + sequence line), so a user can redirect stdout straight
-// into an adapter FASTA of their own.
+// Report-only emits discovered adapters as FASTA records on stdout.
 #[test]
 fn infer_only_prints_sequence_to_stdout() {
     let dir = tempfile::tempdir().unwrap();
@@ -741,22 +652,8 @@ fn infer_only_prints_sequence_to_stdout() {
     );
 }
 
-// Report-only cross-names discovered adapters against the ONT catalog
-// UNION the user's --adapter-fasta, not the catalog alone.
-//
-// `PLANTED_ADAPTER` is byte-identical to the catalog's own `LSK109_front`
-// entry (see `src/adapter/ont_catalog.tsv`), so a discovered consensus that
-// reconstructs it scores identically (same bytes compared, same edit-distance
-// search) against BOTH the catalog entry and our own FASTA-supplied copy --
-// an exact tie in `name_against`'s percent-identity, broken by its
-// alphabetical (name asc) tie-break. The FASTA header is prefixed `AAA_` so
-// it sorts before `LSK109_front` and therefore deterministically wins that
-// tie, becoming `name_hits[0]` -- the only hit `log_discovered` prints -- no
-// matter how `discover` actually reconstructs the consensus. That makes this
-// a genuine proof that naming consulted the user's FASTA (not merely that it
-// also happened to match the catalog): if `discover` still only checked the
-// built-in catalog (pre-fix), the log would show `LSK109_front` instead and
-// this assertion would fail.
+// Cross-naming considers both the ONT catalog and the user's FASTA. The custom
+// name sorts first and deterministically wins an equal-identity tie.
 #[test]
 fn infer_only_cross_names_against_user_fasta() {
     let dir = tempfile::tempdir().unwrap();
@@ -822,13 +719,8 @@ fn infer_trims_planted_adapter() {
         "the planted adapter must not survive anywhere in the output: {trimmed}"
     );
 
-    // Genuine trimming check (not just "the adapter substring is gone"):
-    // every surviving record's sequence must be an exact SUFFIX of the read
-    // whittle actually read in (reconstructed independently via
-    // `full_read_seq`, not re-derived from the output), and the amount cut
-    // off the front must land in a sane window around the 28bp planted
-    // adapter's length -- proving real per-read adapter-shaped trimming, not
-    // a no-op, a fixed head-crop, or a whole-read wipe.
+    // Each surviving sequence must be a suffix of its independently rebuilt
+    // input, with a cut length consistent with the planted adapter.
     let mut lines = trimmed.lines();
     let mut n_records = 0;
     while let Some(header) = lines.next() {
@@ -895,15 +787,10 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
     }
 }
 
-// --- regressions: `--adapter-infer-only` must NEVER
-// write or touch output -------------------------------------------------
+// `--adapter-infer-only` must not write or modify record output.
 
-/// HIGH bug: the too-few-reads branch of the infer path used to return
-/// `Ok(Some(chain(sample, records)))` unconditionally, so `--adapter-infer-only`
-/// on an undersized input warned, then still dispatched and wrote the full
-/// (untrimmed) input back out through `-o`. `ReportOnly` must never write
-/// output, no matter whether discovery itself ran or was skipped for too few
-/// reads.
+/// Report-only writes no records when discovery is skipped for insufficient
+/// input reads.
 #[test]
 fn infer_only_tiny_input_writes_no_output() {
     let dir = tempfile::tempdir().unwrap();
@@ -944,12 +831,7 @@ fn infer_only_tiny_input_writes_no_output() {
     }
 }
 
-/// LOW bug: the FASTQ dispatch arm used to construct the output writer (a
-/// truncating `File::create`) BEFORE the buffer-and-decide seam
-/// (`maybe_reduce_adapters`), so `--adapter-infer-only -o existing.txt`
-/// truncated `existing.txt` to zero bytes even though report-only writes no
-/// records at all. The writer must only be created after the seam has had
-/// its chance to return the "stop now, no dispatch" signal.
+/// Report-only leaves an existing output path unchanged.
 #[test]
 fn infer_only_does_not_clobber_output_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -1094,25 +976,7 @@ fn infer_warns_on_marginal_support() {
     );
 }
 
-// --- the binary-stdout TTY guard must not run before report-only's
-// early exit -------------------------------------------------------------
-//
-// `guard_stdout_binary` used to run during output setup, BEFORE
-// `maybe_reduce_adapters`'s `ReportOnly` early-exit, so `whittle -i
-// reads.bam --adapter-infer-only` on a terminal was refused ("would write
-// BAM to terminal") even though report-only writes no BAM at all -- it only
-// ever prints a small FASTA text summary to stdout. The fix makes
-// `guard_stdout_binary` itself exempt `AdapterInfer::ReportOnly`.
-//
-// This process's stdout is piped (not a terminal) under the test harness,
-// so the guard's TTY check would never actually fire here regardless of the
-// fix -- the real regression can only be exercised on a real terminal (see
-// the fix's doc comment in `src/lib.rs` for the code-inspection argument).
-// This is the "cheap assertion" fallback: a sanity check that report-only
-// with a BAM input (which resolves `out_fmt` to `Bam`, the same format the
-// guard used to hard-error on) and no `-o` still completes successfully end
-// to end, rather than tripping over some other BAM-specific issue in the
-// report-only path.
+// BAM report-only mode emits FASTA text and completes without record output.
 fn write_minimal_ubam(path: &std::path::Path, n: usize) {
     use noodles_bam as bam;
     use noodles_sam::alignment::RecordBuf;
@@ -1157,29 +1021,10 @@ fn infer_only_on_bam_input_with_piped_stdout_succeeds() {
         .success();
 }
 
-// --- trim-then-filter reorder end-to-end regressions ----------------------
-//
-// The trim-then-filter reorder moved `filter::check` from pre-trim (whole raw read) to post-trim
-// (each produced segment), and split read-level accounting from segment-level
-// drop counts. These pin that behavior change through the compiled binary
-// end-to-end, on top of the internal `run_fastq_seq` unit tests already in
-// `src/workflow/fastq.rs`.
+// End-to-end trim-then-filter behavior and accounting.
 
-/// The headline behavior change: quality is judged on the TRIMMED insert, not
-/// the raw read. `r1` is 4 low-quality bases (phred 2, `'#'`) then 6
-/// high-quality bases (phred 40, `'I'`); raw arithmetic mean = (2*4 + 40*6) /
-/// 10 = 24.8.
-///
-/// Run 1 (sanity): no head-crop, `-q 30 -m arithmetic` -> the filter runs on
-/// the whole raw read (its only produced segment, since there's no adapter/
-/// crop to carve it up) and 24.8 < 30 fails -> no output. This reproduces
-/// what the OLD pre-reorder (filter-before-trim) code measured, for real,
-/// through the binary.
-/// Run 2 (the fix): `-H 4` crops the bad flank away BEFORE filtering, SAME
-/// `-q 30` -> the surviving 6-base insert's own mean (40) passes -> written.
-/// Run 3 (guard): same crop, but `-q 45` (above the insert's own mean of 40)
-/// -> dropped again, proving the insert's own quality is still enforced, not
-/// that trimming silently disabled filtering.
+/// Quality filtering evaluates the surviving segment. The complete read has
+/// mean quality 24.8; cropping four Q2 bases leaves a Q40 segment.
 #[test]
 fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
     let mut fq = tempfile::NamedTempFile::new().unwrap();
@@ -1258,14 +1103,8 @@ fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
     );
 }
 
-/// Naming (produced-index, "option b"): a survivor keeps the index it was
-/// PRODUCED at, not renumbered by how many segments survived. Three reads in
-/// one run, exact output asserted: `one_seg` has no adapter match (produced
-/// == 1) -> name unchanged; `two_seg` splits into two 10bp flanks that both
-/// clear `-l 5` -> `_segment_1`/`_segment_2`; `gap_seg` splits into a 3bp
-/// flank (< `-l 5`, filtered `TooShort`) and a 10bp flank (survives) -> the
-/// survivor is a LONE `_segment_2`, signalling the split even though only the
-/// second piece made it to output.
+/// Surviving segments retain their produced index rather than being
+/// renumbered after filtering.
 #[test]
 fn produced_index_naming_end_to_end() {
     let adapter = "GGGGTTTTGGGGTTTT"; // 16bp, G/T only -> no accidental match in the A flanks
@@ -1423,16 +1262,8 @@ fn accounting_summary_end_to_end() {
     );
 }
 
-/// Owner-reported regression: `--qual-split` must emit *every* high-quality
-/// piece (even ones shorter than `-l`) and let the post-trim filter drop the
-/// short ones -- it must not suppress them inside the trim stage itself.
-/// `AAAATAAAAAA` / `IIII#IIIIII` with `--qual-split-window 1` splits on the
-/// single low-quality base at index 4 into two produced pieces: `AAAA` at
-/// [0,4) and `AAAAAA` at [5,11). With `-l 5` the first (len 4) is filtered
-/// TooShort and the second (len 6) survives -- as the *second* produced
-/// segment, so it must be named `_segment_2`, not `_segment_1` (which would
-/// happen if the short piece were dropped pre-filter, shrinking the produced
-/// count to 1).
+/// Quality splitting emits both high-quality pieces before length filtering.
+/// The surviving second piece retains the `_segment_2` suffix.
 #[test]
 fn qual_split_emits_short_pieces_for_post_trim_filter_to_own() {
     let mut fq = tempfile::NamedTempFile::new().unwrap();

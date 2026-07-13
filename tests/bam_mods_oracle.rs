@@ -1,10 +1,6 @@
-// Decode-equivalence oracle: build a synthetic uBAM fixture with known C+m mods,
-// head-crop it via `whittle::run`, then decode BOTH the original and our output
-// with rust-htslib's `basemods_iter()` (an independent implementation of MM/ML
-// decoding). Assert the output's per-position (canonical, modified, strand, qual)
-// set equals the original's mods filtered to [start, len) and offset by `start`.
-// This is independent of MM's multiple valid encodings — it only cares that the
-// decoded modification calls match, not the byte-for-byte MM string.
+// Decode-equivalence tests compare synthetic uBAM input and trimmed output with
+// rust-htslib's independent MM/ML decoder. Comparisons use decoded modification
+// calls because MM permits multiple equivalent encodings.
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -172,14 +168,8 @@ fn trimmed_output_multimod_mods_match_oracle() {
     );
 }
 
-/// Threaded (t=8) variant of `trimmed_output_multimod_mods_match_oracle`: same
-/// fixture, same head/tail crop, but driven through the parallel BAM dispatch
-/// (`cfg.threads = 8`) via `config_for_test_threads`. `whittle::run` builds a
-/// rayon pool regardless of record count, so this still exercises the
-/// unordered render -> bounded-channel -> MT-bgzf-writer path end to end; the
-/// assertion body is identical to the t1 oracle (order-independent by
-/// construction — both sides are sorted before comparison), so this proves
-/// MM/ML reconstruction is correct under parallelism, not just under t1.
+/// Validate MM/ML reconstruction through the parallel render, channel, and
+/// BGZF writer path. Sorting makes the comparison independent of output order.
 #[test]
 fn trimmed_output_multimod_mods_match_oracle_t8() {
     let dir = tempfile::tempdir().unwrap();
@@ -211,24 +201,8 @@ fn trimmed_output_multimod_mods_match_oracle_t8() {
     );
 }
 
-/// Multi-record cross-check at t=8: ~200 differently-named reads (each a copy
-/// of the multi-mod fixture, but with a per-read-distinct ML payload — see
-/// below), decoded and compared per-read via `hts_mods_by_read` rather than as
-/// one flattened bag. `run_bam`'s parallel path is unordered (records land in
-/// arrival order, not input order), so this specifically stresses that
-/// per-read MM/ML reconstruction stays correct even when many records are in
-/// flight across the rayon pool concurrently, not just that the aggregate
-/// multiset matches.
-///
-/// Each read's 7 ML bytes are shifted by its own index `i` (`byte.wrapping_add(i
-/// as u8)`, `i` in 0..200 so no wraparound), giving every read a distinct qual
-/// fingerprint while keeping the same modified positions (MM unchanged) and
-/// the same ML count (7, matching the 7 modified positions). Since the
-/// per-read comparison below checks read `i`'s *own* decoded quals against
-/// its *own* filtered original, a name<->payload mis-pairing bug (e.g. read
-/// `i`'s output compared against read `j`'s original mods) would now produce
-/// a qual mismatch and fail the test — with the old identical-payload fixture
-/// such a mis-pairing was invisible because every read's mods were the same.
+/// Compare many parallel records by name using distinct per-read ML payloads,
+/// so record/payload mismatches are observable despite unordered output.
 #[test]
 fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -290,16 +264,7 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
     }
 }
 
-// --- Real-data sweep --------------------------------------------------------
-//
-// Everything below is only exercised when `WHITTLE_UBAM` points at a real
-// uBAM (e.g. one of the HG002 subsets under `data/`, or any unaligned BAM with
-// MM/ML). It runs a fixed head=10/tail=10 crop — small enough that any real
-// long read survives with exactly one output segment, so output read names
-// are unchanged and can be matched 1:1 against the input by name — and checks
-// every output read's htslib-decoded mods against the original read's mods
-// filtered to the crop window and offset, exactly like the synthetic test
-// above but per-read over a whole real file instead of one hand-built record.
+// Optional real-data sweep enabled by `WHITTLE_UBAM`.
 
 /// One decoded base-modification call: (0-based read pos, canonical base,
 /// modified base, strand, qual) — the same tuple shape `hts_mods` above
@@ -437,27 +402,7 @@ fn real_ubam_oracle_sweep_t8() {
     }
 }
 
-// --- ab-initio inference on uBAM must not disturb MM/ML -----------
-//
-// The infer path wires `--adapter-infer` through the shared buffer-then-decide seam
-// (`maybe_reduce_adapters` in src/lib.rs), which reads each record's SEQ via a
-// generic `seq_of` closure -- for BAM that's the same `rec.sequence().as_ref()`
-// accessor `workflow::bam` already used before inference existed. So running
-// `--adapter-infer` on a uBAM should "just work" with no BAM-specific code,
-// and MM/ML reconstruction through the resulting trim is the same
-// `reconstruct_record` path already proven correct by every oracle test above
-// -- this is a wiring check, not new logic. This plants the SAME 28bp adapter
-// used by `tests/adapter_cli.rs`'s FASTQ inference fixtures at the 5' end of
-// >=100 uBAM records, each carrying a real MM/ML (`C+m`) tag anchored deep
-// enough into the per-read genomic tail that no plausible adapter-fuzzy-match
-// cut could ever reach it, runs `--adapter-infer` BAM->BAM through the CLI
-// binary, and checks: (a) the output BAM parses, (b) every surviving read's
-// SEQ is a genuine adapter-shaped suffix of its original (same suffix +
-// cut-length sanity check `infer_trims_planted_adapter` uses on FASTQ), and
-// (c) MM/ML decodes -- via the same htslib oracle used by every test above --
-// to exactly the original's mod calls filtered to the surviving window and
-// offset by that read's own actual (per-read, since the fuzzy match cut
-// length varies) cut length.
+// Adapter inference on uBAM must preserve MM/ML coordinates after trimming.
 
 /// The 28bp adapter planted at the 5' end of every fixture read below -- the
 /// same SQK-NSK007/LSK109-neighborhood sequence `tests/adapter_cli.rs` plants
@@ -468,10 +413,7 @@ const INFER_MM_ML_ADAPTER: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT";
 /// Length of the per-read genomic tail appended after `INFER_MM_ML_ADAPTER`.
 const INFER_MM_ML_TAIL_LEN: usize = 150;
 
-/// A chosen mod position's absolute read offset must be >= this, comfortably
-/// past `infer_trims_planted_adapter`'s empirical 20..=50bp fuzzy-match cut
-/// window (see the `(15..=60)` sanity check below), so a real modified base
-/// can never land inside the part adapter trimming removes.
+/// Minimum modification offset, beyond the accepted inferred-adapter cut range.
 const INFER_MM_ML_MOD_MIN_ABS: usize = 70;
 
 /// Same splitmix64 bit-mixer as `tests/adapter_cli.rs`'s `splitmix_tail`:
@@ -535,9 +477,7 @@ fn mm_segment(canonical: u8, code: char, occ_indices: &[usize], ml_seed: u8) -> 
             .collect::<Vec<_>>()
             .join(",")
     );
-    // Per-read-distinct ML bytes (mirrors the `wrapping_add(i as u8)` trick in
-    // `trimmed_output_multimod_mods_match_oracle_t8_many_reads` above), so a
-    // name<->payload mispairing bug would show up as a qual mismatch.
+    // Distinct ML values make record/payload mismatches observable.
     let ml: Vec<u8> = (0..occ_indices.len())
         .map(|k| 100u8.wrapping_add(ml_seed).wrapping_add(k as u8 * 7))
         .collect();
@@ -629,7 +569,7 @@ fn infer_on_ubam_preserves_mm_ml() {
         .assert()
         .success();
 
-    // (a) Output BAM parses.
+    // Output BAM parses and retains every long read.
     let in_seqs = read_bam_seqs(&input);
     let out_seqs = read_bam_seqs(&output);
     assert_eq!(
@@ -638,10 +578,7 @@ fn infer_on_ubam_preserves_mm_ml() {
         "all {n} reads must survive (long inserts, default min-length 1)"
     );
 
-    // (b) Every output SEQ is a genuine adapter-shaped suffix of its original
-    // -- proves real per-read trimming happened, not a no-op or a whole-read
-    // wipe (same check `infer_trims_planted_adapter` in adapter_cli.rs makes
-    // on the FASTQ path).
+    // Each output sequence is an adapter-trimmed suffix of its input.
     for (name, out_seq) in &out_seqs {
         let orig_seq = in_seqs.get(name).expect("matching input read");
         assert!(
@@ -661,12 +598,8 @@ fn infer_on_ubam_preserves_mm_ml() {
         );
     }
 
-    // (c) MM/ML present and in register: decode both files with the htslib
-    // oracle (independent MM/ML implementation, same one every other test in
-    // this file uses) and check, per read, that the output's mod calls equal
-    // the original's filtered to [cut, len) and offset by that read's own
-    // actual cut length (not a fixed head/tail crop like the tests above --
-    // the fuzzy adapter match cuts a slightly different amount per read).
+    // Decoded output modifications equal the input calls retained by each
+    // read's actual cut interval.
     let orig_mods = hts_mods_by_read(&input);
     let out_mods = hts_mods_by_read(&output);
     assert_eq!(
@@ -708,19 +641,9 @@ fn infer_on_ubam_preserves_mm_ml() {
     );
 }
 
-// --- a FILTERED sibling segment must not corrupt the kept segment's
-// MM/ML ----------------------------------------------------------------
-//
-// Segment filtering now runs AFTER adapter splitting. This is the
-// gap that review flagged: when an interior adapter splits a read into a
-// kept segment plus a segment that then gets filtered (sub `-l`), the kept
-// segment's MM/ML must stay in exactly the same register as if the filtered
-// sibling had never existed -- `reconstruct_mods`/`reconstruct_record` must
-// not be perturbed by a sibling segment that never reaches output.
+// Filtering one sibling segment must not change the retained segment's MM/ML.
 
-/// The 12bp KEPT flank: identical to `write_fixture`'s pattern (C at indices
-/// 1,4,7,10), so the mod tag below is a known-good fixture already proven
-/// correct by `trimmed_output_mods_match_oracle` above.
+/// Twelve-base retained flank with C at indices 1, 4, 7, and 10.
 const KEPT_FLANK: &[u8] = b"ACGGCGGCGGCG";
 /// 16bp interior adapter, G/T only -- can't spuriously match the all-A/C
 /// flanks, and matches the same adapter `tests/adapter_cli.rs`'s naming test
@@ -732,9 +655,7 @@ const SPLIT_ADAPTER: &[u8] = b"GGGGTTTTGGGGTTTT";
 const SHORT_FLANK: &[u8] = b"TTTT";
 
 /// Write a one-record uBAM: `seq`, quality 40 throughout, and `KEPT_FLANK`'s
-/// mod tag (`C+m,0,1,0;` / ML `[250,5,200]`, MN = `seq.len()`) — reused
-/// verbatim across both fixtures below so the ONLY difference between them is
-/// whether the adapter + short sibling are physically present in the read.
+/// mod tag (`C+m,0,1,0;` / ML `[250,5,200]`, MN = `seq.len()`).
 fn write_mods_fixture(path: &Path, seq: &[u8]) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -763,13 +684,8 @@ fn write_mods_fixture(path: &Path, seq: &[u8]) {
     w.try_finish().unwrap();
 }
 
-/// The kept segment's MM/ML, decoded from a real interior-adapter split where
-/// its sibling gets filtered post-trim, must be byte-for-byte the same
-/// oracle-decoded set as the SAME 12bp flank run through whittle completely
-/// on its own -- i.e. "identical to the same read where the short piece
-/// simply didn't exist". Any register shift (an off-by-N in the slice bounds
-/// `reconstruct_mods` uses, or the filtered sibling leaking into the kept
-/// segment's tags) would show up as a decoded-position/qual mismatch here.
+/// A retained segment has the same decoded modifications with or without a
+/// sibling that is removed by post-trim filtering.
 #[test]
 fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     let dir = tempfile::tempdir().unwrap();
@@ -841,10 +757,7 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
         .assert()
         .success();
 
-    // Exactly one record survives the split (the 4bp sibling was filtered),
-    // and it kept its PRODUCED index (produced == 2, so
-    // even the lone survivor is suffixed) -- confirms this is really
-    // decoding the split scenario's kept segment, not something else.
+    // The retained record keeps its produced index after its sibling is filtered.
     let split_names = read_bam_seqs(&split_out);
     assert_eq!(
         split_names.len(),

@@ -209,8 +209,8 @@ fn classify_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: E
 
 /// Ends-only variant of `classify_terminal`: splitting is disabled, so an
 /// `Excise` hit can't keep both flanks. Resolve it back to a terminal trim
-/// toward the nearer end (`start` vs `n - end`) — the pre-split behavior —
-/// leaving every other outcome untouched.
+/// toward the nearer end (`start` vs `n - end`), leaving every other outcome
+/// untouched.
 fn ends_only_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: End) -> Terminal {
     match classify_terminal(start, end, n, end_size, tag) {
         Terminal::Excise => {
@@ -282,11 +282,8 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
                     }
                 }
 
-                // The exact-seed automaton is a lossless rejection filter for
-                // k_mid-edit interior alignments. Candidate adapters still run
-                // through the original Sassy k_end search, and the same k_mid
-                // cost gate is applied to its hits, preserving match spans and
-                // tie behavior from the former all-adapter whole-window loop.
+                // Exact partition seeds identify every possible interior match.
+                // Sassy then verifies candidates with the configured edit limits.
                 if let Some(candidate_windows) = &interior_windows {
                     for &(candidate_start, candidate_end) in &candidate_windows[adapter_idx] {
                         for h in hits(
@@ -392,9 +389,7 @@ mod segment_tests {
         }
     }
 
-    /// Pre-candidate implementation retained as a differential oracle. It runs
-    /// every adapter across the whole window at `k_end`, then applies `k_mid` to
-    /// interior hits exactly as the production code did before optimization.
+    /// Exhaustive reference implementation for candidate-filter comparisons.
     fn reference_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
         let n = window.len();
         if n == 0 {
@@ -809,19 +804,8 @@ mod segment_tests {
 
     #[test]
     fn straddling_cut_is_clipped_not_leaked() {
-        // `t` (End::Five, matches at [0,16)) is a terminal hit that advances `lo` to
-        // 16. `s` (End::Both) is a DIFFERENT adapter whose only hit is [10,26) —
-        // straddling `lo`: it starts inside t's terminal span (< lo) and ends well
-        // past it. `t` and `s` share a 6 bp overlap ("GTTGGT", t's tail / s's head)
-        // so both get an exact (cost 0) hit from the same physical bytes.
-        // end_size=9 keeps s's hit (start=10) out of the near-5' terminal check
-        // (10 > end_size, so `h.start <= end_size` is false) so it is classified
-        // interior, not terminal.
-        //
-        // Pre-fix, the interior filter required the WHOLE cut inside [lo, hi) and
-        // dropped [10,26) entirely (10 < lo=16), leaking bytes [16,26) — which
-        // belong to `s` — into the kept segment as (16, 60). Post-fix, the cut is
-        // clipped to (16, 26) and excised, so the kept segment starts at 26.
+        // The terminal hit [0,16) overlaps the interior hit [10,26).
+        // Clipping the interior interval to the keep window must still excise [16,26).
         let t_prefix = b"GGTGTGGTTT"; // 10 bp
         let overlap = b"GTTGGT"; // 6 bp, shared
         let s_suffix = b"TGGTGTTGGG"; // 10 bp
@@ -847,7 +831,7 @@ mod segment_tests {
             vec![(26, 60)],
             "s is fully excised, no leaked bases before 26"
         );
-        // Explicit invariant: no kept segment contains s's sequence.
+        // No retained segment may contain the interior adapter.
         for &(seg_start, seg_end) in &segs {
             assert!(
                 !w[seg_start..seg_end]
@@ -859,11 +843,7 @@ mod segment_tests {
 
     #[test]
     fn interior_above_k_mid_does_not_split() {
-        // len=12, error_rate=0.5 -> k_end = floor(0.5*12) = 6, k_mid = floor(0.25*12) = 3.
-        // A copy with exactly 4 substitutions (positions 1,4,7,10) sits in the
-        // interior. Verified empirically (see probe run in review) that sassy finds
-        // it at cost 4 — strictly between k_mid(3) and k_end(6) — so the hit is
-        // found but must NOT be actioned as an interior cut: the read stays whole.
+        // The cost-4 hit is within k_end=6 but exceeds the interior k_mid=3 limit.
         let adapter = b"GGTTGGTTGGTT"; // 12 bp
         let mut mutated = adapter.to_vec();
         for &i in &[1usize, 4, 7, 10] {
@@ -894,29 +874,9 @@ mod segment_tests {
 
     #[test]
     fn ends_only_equals_split_on_indel_terminal_adapter() {
-        // A terminal 5' adapter copy with a 6 bp INSERTION spliced into its
-        // middle: the matched TEXT span (26 bp) is 6 bp longer than the
-        // pattern (20 bp), because sassy's edit budget `k_end` covers
-        // insertions, not just substitutions. This is the exact shape of the
-        // bug: the old ends-only zone (`end_size + len` = 24) is too narrow
-        // to contain the full match (which ends at 28), while the fixed zone
-        // (`end_size + len + k_end` = 30) does contain it and matches
-        // split-mode's (whole-window) result exactly.
-        //
-        // Construction (verified empirically, see probe run below):
-        //   adapter = 20 bp; extra = 6 bp foreign splice inserted after the
-        //   first 10 bp of a copy of `adapter`, giving a 26 bp copy at [2,28).
-        //   error_rate=0.3, len=20 -> k_end = floor(0.3*20) = 6.
-        //
-        // sassy finds TWO cost-6 hits for this copy: a short one (2,18) that
-        // only accounts for the first ~16 bp (skips the spliced tail via
-        // deletions) and the full one (2,28) that spans the whole spliced
-        // copy via a genuine 6 bp insertion. Split-mode sees both hits and
-        // takes the max `h.end` (28) for the terminal-5' boundary. The old
-        // ends-only zone (0..24) only contains the short hit (2,18) — the
-        // full hit's end (28) is beyond it — so old ends-only under-trims to
-        // 18, leaving 10 residual adapter bases. The fixed zone (0..30)
-        // contains both hits, so ends-only matches split-mode exactly.
+        // A six-base insertion expands the terminal alignment from 20 to 26 bases.
+        // The terminal search window includes `k_end` additional bases so ends-only
+        // and split modes select the same [2,28) alignment.
         let adapter = b"AAAACCCCGGGGTTTTACGT"; // 20 bp
         let extra = b"CTGACT"; // 6 bp splice, foreign bases -> forces insertion
         let mut copy = adapter[..10].to_vec();
@@ -995,33 +955,8 @@ mod segment_tests {
 
     #[test]
     fn both_adapters_at_both_ends_keep_middle() {
-        // [20bp adapter][40bp insert][20bp adapter], End::Both, short read.
-        //
-        // `new_searcher()` builds a `Searcher::<Dna>::new_rc()`, which matches
-        // a pattern on BOTH the forward and reverse-complement strands of the
-        // window. Two pitfalls to dodge when picking a5/a3, both found
-        // empirically via a probe on `search::hits` directly:
-        //
-        // 1. a3 must not equal (or nearly equal) revcomp(a5), or searching for
-        //    a5 finds a second hit at a3's location. revcomp(a5) here is
-        //    "CCCCAAAACCCCAAAACCCC" (swap G<->C, T<->A — this particular
-        //    string is its own reverse since it's block-palindromic).
-        // 2. a3 must NOT use a self-complementary 2-letter block alphabet
-        //    (i.e. only {A,T} or only {C,G}), or its own reverse-complement
-        //    lands back in the same 2-letter alphabet and produces a cheap
-        //    *shifted* self-collision against the neighboring insert. A first
-        //    attempt using a3 = "CCCCGGGGCCCCGGGGCCCC" (a {C,G} alphabet)
-        //    failed exactly this way: revcomp(a3) = "GGGGCCCCGGGGCCCCGGGG"
-        //    (still {C,G}), and a hit shifted 4bp left into the T-insert
-        //    (text "TTTT" + a3[0:16)) matched revcomp(a3) at cost 4 (only the
-        //    leading TTTT-vs-GGGG substitutions differ) — exactly at the
-        //    k_end = floor(0.2*20) = 4 budget, silently widening the trim.
-        //
-        // Using a3 with a purine-only {A,G} alphabet sidesteps both: its
-        // revcomp lands in the disjoint pyrimidine alphabet {T,C}, so no
-        // shifted self-collision is possible, and it differs from revcomp(a5)
-        // in all 20 positions (checked empirically: only the true (60,80)
-        // cost-0 hit is found, no spurious extras).
+        // The two terminal patterns and their reverse complements are distinct,
+        // leaving the 40-base insert as the only retained segment.
         let a5 = b"GGGGTTTTGGGGTTTTGGGG";
         let a3 = b"AAAAGGGGAAAAGGGGAAAA"; // A/G only (purine): NOT self-complementary, NOT revcomp(a5)
         let mut w = a5.to_vec();
@@ -1040,10 +975,8 @@ mod segment_tests {
 
     #[test]
     fn inferred_single_end_adapters_on_short_read_keep_insert() {
-        // Short read, overlapping end-zones (end_size >= n). Distinct 5' and 3'
-        // single-end adapters that do NOT cross-match. The insert must survive:
-        // no whole-read drop, no eaten middle. Guards the "downstream reused"
-        // assumption for inferred End::Five/End::Three adapters.
+        // Distinct end-specific adapters must preserve the insert when the end
+        // search regions overlap on a short read.
         let a5 = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
         let a3 = b"AAAAGGGGAAAAGGGGAAAA"; // 20bp, A/G only: not a5, not revcomp(a5)
         let mut w = a5.to_vec();

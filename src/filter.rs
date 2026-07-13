@@ -33,16 +33,12 @@ pub enum DropReason {
     Gc,
 }
 
-/// Cheapest-first, short-circuiting. `None` = passes; empty reads never pass
-/// (surfaced as `TooShort`, the same bucket a zero `min_length` would put them
-/// in). Same thresholds and check order as the old `passes` — this just names
-/// the reason instead of discarding it.
+/// Evaluate bounds cheapest-first and stop at the first rejection. `None`
+/// indicates that the segment passes; empty segments are `TooShort` even when
+/// `min_length` is zero.
 ///
-/// Called once per **trimmed segment**, post-trim (`workflow::fastq`/
-/// `workflow::bam` run this after `trim::apply`, not on the raw read before
-/// trimming) — so `seq`/`phred` here are a single segment's own bases, not
-/// necessarily the whole input read. Logic/thresholds are unchanged; only the
-/// call site (and what counts as "the read" being judged) moved.
+/// Called once for each segment produced by trimming, so `seq` and `phred`
+/// describe that segment rather than necessarily the complete input read.
 pub fn check(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> Option<DropReason> {
     let gc = (cfg.min_gc.is_some() || cfg.max_gc.is_some()).then(|| gc_fraction(seq));
     check_metrics(seq.len(), phred, gc, cfg)
