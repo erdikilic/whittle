@@ -10,6 +10,7 @@ pub mod record;
 pub mod trim;
 pub mod workflow;
 
+use std::borrow::Cow;
 use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 
 use config::AdapterInfer;
@@ -100,8 +101,19 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
                     }
                     n += r;
                 }
-                let fmt = io::detect_input(in_path, &probe[..n])?;
-                source = Box::new(std::io::Cursor::new(probe[..n].to_vec()).chain(source));
+                let mut replay = probe[..n].to_vec();
+                let fmt = if io::is_bgzf(&replay) {
+                    let block_size = usize::from(u16::from_le_bytes([replay[16], replay[17]])) + 1;
+                    if block_size < replay.len() {
+                        anyhow::bail!("invalid BGZF block size {block_size}");
+                    }
+                    replay.resize(block_size, 0);
+                    source.read_exact(&mut replay[n..])?;
+                    io::detect_bgzf_block(&replay)?
+                } else {
+                    io::detect_input(in_path, &replay)?
+                };
+                source = Box::new(std::io::Cursor::new(replay).chain(source));
                 fmt
             },
         },
@@ -155,8 +167,14 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let budget = config::thread_budget(
         cfg.threads,
         render_heavy_for(in_fmt, out_fmt, &cfg),
+        matches!(in_fmt, Format::FastqBgzf),
         encode_kind_for(out_fmt),
     );
+    configure_shared_bgzf_pool(
+        matches!(in_fmt, Format::FastqBgzf | Format::Bam),
+        matches!(out_fmt, Format::FastqBgzf | Format::Bam),
+        budget,
+    )?;
     let out_desc = output_desc(cfg.io.output.as_deref());
 
     if obs.shows_lines() {
@@ -231,10 +249,10 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             // re-opening stdin would drop the BGZF header. For a file, `source` is
             // the same handle positioned at the start.
             let (header, records) = io::bam::reader_from(source, budget.decode)?;
-            let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))? else {
+            let Some(records) = maybe_reduce_adapters(records, &mut cfg, bam_seq)? else {
                 return Ok(());
             };
-            // Provenance: append our @PG line to a cloned header before writing.
+            // Append the invocation's @PG provenance line before writing.
             let out_header = provenance_header(header);
             let mut sink = io::bam::writer(
                 cfg.io.output.as_deref(),
@@ -243,7 +261,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
                 cfg.compression_level,
             )?;
             cfg.render_workers = budget.render;
-            let stats = workflow::run_bam(&out_header, records, &mut sink, &cfg, &counters)?;
+            let stats = workflow::run_raw_bam(&out_header, records, &mut sink, &cfg, &counters)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded — an I/O
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
@@ -253,10 +271,10 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             obs.finish(&stats, &out_desc);
             return Ok(());
         },
-        (Format::Bam, Format::Fastq | Format::FastqGz) => {
+        (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
             // See the note in the (Bam, Bam) arm: read from the chained `source`.
             let (_header, records) = io::bam::reader_from(source, budget.decode)?;
-            let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| bam_seq(r))? else {
+            let Some(records) = maybe_reduce_adapters(records, &mut cfg, bam_seq)? else {
                 return Ok(());
             };
             let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
@@ -267,7 +285,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             obs.finish(&stats, &out_desc);
             return Ok(());
         },
-        (Format::Fastq | Format::FastqGz, Format::Bam) => {
+        (Format::Fastq | Format::FastqGz | Format::FastqBgzf, Format::Bam) => {
             anyhow::bail!("cross-format FASTQ->BAM conversion is not supported")
         },
         _ => {},
@@ -281,9 +299,15 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // must return before any output file is touched; building the writer
     // first would truncate a pre-existing `-o` file even though report-only
     // writes no records at all.
-    let gz_in = matches!(in_fmt, Format::FastqGz);
-    let records = io::fastq::reader_from(source, gz_in);
-    let Some(records) = maybe_reduce_adapters(records, &mut cfg, |r| r.seq.as_slice())? else {
+    let records = match in_fmt {
+        Format::Fastq => io::fastq::reader_from(source, false),
+        Format::FastqGz => io::fastq::reader_from(source, true),
+        Format::FastqBgzf => io::fastq::reader_from_bgzf(source, budget.decode)?,
+        Format::Bam => unreachable!("BAM dispatch returned above"),
+    };
+    let Some(records) =
+        maybe_reduce_adapters(records, &mut cfg, |r| Cow::Borrowed(r.seq.as_slice()))?
+    else {
         return Ok(());
     };
     let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
@@ -295,12 +319,11 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The noodles `RecordBuf` SEQ accessor: the base bytes (A/C/G/T/...), the same
-/// ones `workflow/bam.rs` slices via `rec.sequence().as_ref()`. Kept as a named
-/// `fn` (rather than an inline closure per call site) so it can be passed as
-/// `seq_of` to `maybe_reduce_adapters` from both BAM dispatch arms.
-fn bam_seq(rec: &noodles_sam::alignment::RecordBuf) -> &[u8] {
-    rec.sequence().as_ref()
+/// Decode the packed SEQ of a lazy raw BAM record only when adapter sampling
+/// needs it. Normal workflow records stay packed until a render worker converts
+/// them to `RecordBuf`.
+fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
+    Cow::Owned(rec.sequence().iter().collect())
 }
 
 /// A kept adapter's support below this is close enough to `infer::KEEP_SUPPORT`
@@ -362,17 +385,8 @@ fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampl
     }
 }
 
-/// `--adapter-infer-only`'s stdout contract: print each discovered adapter as
-/// a bare FASTA record -- header `>inferred_N support=X.XX [\u{2248} NAME
-/// (pct%)]` (the bracketed cross-name suffix omitted when there's no catalog/
-/// FASTA hit), then the sequence on its own line. CLI help promises
-/// "sequences + support + catalog names" for report-only, but pre-fix the
-/// sequence only ever appeared at `debug!` (see `log_discovered`), so plain
-/// `--adapter-infer-only` stdout was empty -- nothing to redirect into an
-/// adapter FASTA of your own. `N` matches `log_discovered`'s own 1-based
-/// numbering (both iterate `discovered` in the same post-sort order from
-/// `infer::discover`). Trim mode keeps the sequence at `debug!` only -- this
-/// is report-only's stdout output, not an additional log line.
+/// Print inferred adapters as FASTA with support and the best catalog match.
+/// Numbering follows the final discovery order used by the status log.
 fn print_discovered_fasta(discovered: &[crate::adapter::infer::InferredAdapter]) {
     for (i, d) in discovered.iter().enumerate() {
         let n = i + 1;
@@ -385,11 +399,7 @@ fn print_discovered_fasta(discovered: &[crate::adapter::infer::InferredAdapter])
     }
 }
 
-/// Pull up to `n` records off the front of `records` into a `Vec`, stopping
-/// early if the iterator is exhausted first. Shared by both buffering points
-/// in `maybe_reduce_adapters` below (the ab-initio inference sample and the
-/// Phase 1.5 presence-detection sample), which otherwise duplicate this loop
-/// verbatim.
+/// Buffer at most `n` records, stopping when the input is exhausted.
 fn buffer_prefix<R>(
     records: &mut impl Iterator<Item = anyhow::Result<R>>,
     n: usize,
@@ -405,59 +415,24 @@ fn buffer_prefix<R>(
     Ok(sample)
 }
 
-/// The buffer-then-decide seam shared by every FASTQ/BAM dispatch arm in
-/// `run`/`run_folder`. Two independent policies live here, selected by
-/// `cfg.adapter_infer`:
-///
-/// - `AdapterInfer::Off` (unchanged from before ab-initio inference existed):
-///   Phase 1.5 presence detection. When `cfg.adapter_sample > 0`, buffer up
-///   to that many records, detect which of the *configured* adapters are
-///   actually present, and reduce `cfg.adapters` to that set — falling back
-///   to the full configured set (with a WARN) if detection keeps zero (an
-///   empty result more likely means an unrepresentative sample than a truly
-///   adapter-free run).
-/// - `AdapterInfer::Trim` / `AdapterInfer::ReportOnly` (Phase 2, ab-initio):
-///   buffer up to `cfg.adapter_sample` records (always > 0 here — see
-///   `cli::parse`) and run `infer::discover` on them to build the working
-///   adapter set from scratch, ignoring whatever `cfg.adapters` held before
-///   (it's always an empty list under infer; see `cli::parse`). Too small a
-///   sample (< `detect::MIN_SAMPLE_FOR_DETECTION`) skips discovery entirely:
-///   under `Trim` there is no "full set" to fall back to here (unlike Off's
-///   presence detection), so it trims nothing and dispatch still runs; under
-///   `ReportOnly` there is nothing to report, so it warns and returns
-///   `Ok(None)` just like the post-discovery `ReportOnly` case below — its
-///   "never write or touch output" contract does not depend on discovery
-///   itself having run. A `ReportOnly` run that does complete discovery logs
-///   what it found and likewise returns `Ok(None)`.
-///
-/// Returns `Ok(None)` when the caller must stop immediately — no writer, no
-/// workflow dispatch, no output file (currently only `ReportOnly`, whether or
-/// not discovery ran). Otherwise `Ok(Some(buffered ++ rest))`, boxed (rather
-/// than `impl Iterator`, as before ab-initio inference existed) because the
-/// two policies above buffer/reduce differently but must still hand the same
-/// iterator type back to each of the six call sites. `seq_of` extracts a
-/// record's SEQ.
+/// Resolve adapter inference or presence sampling before workflow dispatch.
+/// Report-only mode returns `None` so callers do not create an output writer;
+/// trimming modes return the buffered prefix chained with the remaining input.
+/// `seq_of` exposes a record's sequence without constraining its storage type.
 fn maybe_reduce_adapters<R, I, F>(
     mut records: I,
     cfg: &mut Config,
-    // Explicit HRTB so the returned SEQ borrows the record arg (elision may not
-    // link them on its own).
+    // The returned sequence view borrows the record passed to `seq_of`.
     seq_of: F,
 ) -> anyhow::Result<Option<Box<dyn Iterator<Item = anyhow::Result<R>> + Send>>>
 where
-    // `+ Send` / `R: Send`: the FASTQ and BAM workflows' parallel paths require a
-    // `Send` record iterator. `+ 'static`: needed to box the returned iterator
-    // (every real caller already hands in an already-boxed, owning iterator).
-    // `seq_of` is only used inside this fn (not captured by the returned
-    // iterator), so it needs no `Send`/`'static` bound.
+    // Workflow iterators are boxed and may cross worker-thread boundaries.
     I: Iterator<Item = anyhow::Result<R>> + Send + 'static,
     R: Send + 'static,
-    F: for<'a> Fn(&'a R) -> &'a [u8],
+    F: for<'a> Fn(&'a R) -> Cow<'a, [u8]>,
 {
     if cfg.adapter_infer != AdapterInfer::Off {
-        // Always `Some` here: `cli::parse` never resolves `adapters` to `None`
-        // while `adapter_infer != Off` (an empty adapter list, not `None`, is
-        // how it represents "the trimming set is discovered later").
+        // Inference mode stores an empty configuration until discovery completes.
         let base = cfg
             .adapters
             .clone()
@@ -470,12 +445,7 @@ where
                 Box::new(sample.into_iter().map(anyhow::Ok).chain(records))
             };
         if s < crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION {
-            // Discovery never ran, so there is no discovered set to print --
-            // but `ReportOnly`'s contract ("never write or touch output") still
-            // applies even when discovery itself was skipped. Gate on it here,
-            // the same way the post-discovery `ReportOnly` check below does:
-            // warn, then hand back the "stop now, no dispatch" signal instead
-            // of falling through to `chain(sample, records)`.
+            // Report-only mode must not create output when the sample is too small.
             tracing::warn!(
                 "adapter inference: too few reads ({s}, need >= {}) to infer reliably; \
                  keeping reads untrimmed",
@@ -485,12 +455,13 @@ where
                 return Ok(None);
             }
             let mut reduced = base;
-            reduced.adapters = Vec::new();
+            reduced.replace_adapters(Vec::new());
             cfg.adapters = Some(reduced);
             return Ok(Some(chain(sample, records)));
         }
 
-        let seqs: Vec<&[u8]> = sample.iter().map(&seq_of).collect();
+        let seq_storage: Vec<Cow<'_, [u8]>> = sample.iter().map(&seq_of).collect();
+        let seqs: Vec<&[u8]> = seq_storage.iter().map(|s| s.as_ref()).collect();
         let discovered = crate::adapter::infer::discover(&seqs, &base);
         log_discovered(&discovered, s);
 
@@ -506,27 +477,17 @@ where
             );
         }
         let mut reduced = base;
-        reduced.adapters = discovered.into_iter().map(|d| d.adapter).collect();
+        reduced.replace_adapters(discovered.into_iter().map(|d| d.adapter).collect());
         cfg.adapters = Some(reduced);
         return Ok(Some(chain(sample, records)));
     }
 
-    // Pure no-op fast path: no adapters configured at all, or detection
-    // sampling is off (`adapter_sample == 0`) -- nothing below would ever
-    // buffer or reduce anything, so hand `records` straight back rather than
-    // paying for an empty `Vec` plus a `Map<Chain<..>>` wrapper around it.
-    // `Box` is still required (every return path of this fn shares the same
-    // `Box<dyn Iterator>` return type across all six call sites -- see the
-    // fn's doc comment), so this doesn't remove that one layer of dynamic
-    // dispatch, only the unnecessary extra allocation/combinator on top of
-    // it; removing the `Box` itself would need a signature change touching
-    // every caller, which isn't a trivial win for this cost.
+    // Avoid buffering when neither inference nor presence sampling is active.
     if cfg.adapters.is_none() || cfg.adapter_sample == 0 {
         return Ok(Some(Box::new(records)));
     }
 
-    // Phase 1.5 presence detection (unchanged from before ab-initio inference
-    // existed).
+    // Reduce configured adapters using the sampled prefix.
     let mut sample: Vec<R> = Vec::new();
     if let Some(ac) = cfg.adapters.clone()
         && cfg.adapter_sample > 0
@@ -541,7 +502,8 @@ where
             );
             ac.adapters.clone()
         } else {
-            let seqs: Vec<&[u8]> = sample.iter().map(&seq_of).collect();
+            let seq_storage: Vec<Cow<'_, [u8]>> = sample.iter().map(&seq_of).collect();
+            let seqs: Vec<&[u8]> = seq_storage.iter().map(|s| s.as_ref()).collect();
             let detected = crate::adapter::detect::present(
                 &seqs,
                 &ac.adapters,
@@ -549,6 +511,7 @@ where
                 ac.end_size,
                 ac.split,
                 crate::adapter::detect::presence_min(s),
+                cfg.threads,
             );
             if detected.is_empty() {
                 tracing::warn!(
@@ -577,7 +540,7 @@ where
             }
         };
         let mut reduced = ac;
-        reduced.adapters = kept;
+        reduced.replace_adapters(kept);
         cfg.adapters = Some(reduced);
     }
     Ok(Some(Box::new(
@@ -602,6 +565,7 @@ where
 enum FastqOut {
     Plain(BufWriter<Box<dyn Write + Send>>),
     Gz(ParCompress<'static, Gzip, Box<dyn Write + Send>>),
+    Bgzf(noodles_bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>),
 }
 
 impl Write for FastqOut {
@@ -609,12 +573,14 @@ impl Write for FastqOut {
         match self {
             FastqOut::Plain(w) => w.write(buf),
             FastqOut::Gz(w) => w.write(buf),
+            FastqOut::Bgzf(w) => w.write(buf),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             FastqOut::Plain(w) => w.flush(),
             FastqOut::Gz(w) => w.flush(),
+            FastqOut::Bgzf(w) => w.flush(),
         }
     }
 }
@@ -633,6 +599,10 @@ impl FastqOut {
                 w.finish()?;
                 Ok(())
             },
+            FastqOut::Bgzf(mut w) => {
+                w.finish()?;
+                Ok(())
+            },
         }
     }
 }
@@ -647,15 +617,25 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
         Some(p) => Box::new(std::fs::File::create(p)?),
         None => Box::new(std::io::stdout()),
     };
-    if matches!(out_fmt, io::Format::FastqGz) {
-        let w = ParCompressBuilder::<Gzip>::new()
-            .num_threads(gz_workers)
-            .unwrap()
-            .compression_level(Compression::new(cfg.compression_level as u32))
-            .from_writer(base);
-        Ok(FastqOut::Gz(w))
-    } else {
-        Ok(FastqOut::Plain(BufWriter::new(base)))
+    match out_fmt {
+        io::Format::FastqGz => {
+            let w = ParCompressBuilder::<Gzip>::new()
+                .num_threads(gz_workers)
+                .unwrap()
+                .compression_level(Compression::new(cfg.compression_level as u32))
+                .from_writer(base);
+            Ok(FastqOut::Gz(w))
+        },
+        io::Format::FastqBgzf => {
+            io::bam::configure_bgzf_pool(gz_workers)?;
+            let level = noodles_bgzf::io::writer::CompressionLevel::new(cfg.compression_level)
+                .ok_or_else(|| anyhow::anyhow!("invalid BGZF compression level"))?;
+            let w = noodles_bgzf::io::multithreaded_writer::Builder::default()
+                .set_compression_level(level)
+                .build_from_writer(base);
+            Ok(FastqOut::Bgzf(w))
+        },
+        io::Format::Fastq | io::Format::Bam => Ok(FastqOut::Plain(BufWriter::new(base))),
     }
 }
 
@@ -664,22 +644,17 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
 /// almost always a forgotten `-o`/redirect. Plain FASTQ text is always fine.
 /// Pure (no I/O) so it's trivial to unit-test without a real TTY.
 fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bool) -> bool {
-    output_is_stdout && stdout_is_tty && matches!(fmt, io::Format::Bam | io::Format::FastqGz)
+    output_is_stdout
+        && stdout_is_tty
+        && matches!(
+            fmt,
+            io::Format::Bam | io::Format::FastqGz | io::Format::FastqBgzf
+        )
 }
 
-/// Hard-error before any writer/output file is created if `out_fmt` would land
-/// binary/gzip bytes on an interactive stdout (see `binary_to_terminal`).
-/// Shared by `run`'s single-file path and `run_folder`.
-///
-/// `AdapterInfer::ReportOnly` is exempt: report-only never builds a
-/// writer for `out_fmt` at all -- it prints a small FASTA text summary to
-/// stdout (`print_discovered_fasta`) and returns before dispatch, from the
-/// `ReportOnly` early-exit in `maybe_reduce_adapters`, which runs AFTER this
-/// guard. Pre-fix, this guard ran first and could refuse e.g. `whittle -i
-/// reads.bam --adapter-infer-only` on a terminal ("would write BAM to
-/// terminal") even though that run writes no BAM at all. A non-report-only
-/// run reaching an actual binary write on a TTY is still refused exactly as
-/// before.
+/// Reject binary output to an interactive terminal before creating a writer.
+/// Report-only inference is exempt because it emits textual FASTA and exits
+/// before workflow dispatch.
 fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> {
     if cfg.adapter_infer == AdapterInfer::ReportOnly {
         return Ok(());
@@ -689,6 +664,7 @@ fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> 
         let ext = match out_fmt {
             io::Format::Bam => "bam",
             io::Format::FastqGz => "fastq.gz",
+            io::Format::FastqBgzf => "fastq.bgz",
             io::Format::Fastq => "fastq", // unreachable via binary_to_terminal, kept exhaustive
         };
         anyhow::bail!(
@@ -739,8 +715,19 @@ fn run_folder(
     let budget = config::thread_budget(
         cfg.threads,
         render_heavy_for(family_fmt, out_fmt, cfg),
+        paths
+            .iter()
+            .any(|p| io::from_extension(p) == Some(Format::FastqBgzf)),
         encode_kind_for(out_fmt),
     );
+    configure_shared_bgzf_pool(
+        matches!(family_fmt, Format::Bam)
+            || paths
+                .iter()
+                .any(|p| io::from_extension(p) == Some(Format::FastqBgzf)),
+        matches!(out_fmt, Format::FastqBgzf | Format::Bam),
+        budget,
+    )?;
     let out_desc = output_desc(cfg.io.output.as_deref());
 
     if obs.shows_lines() {
@@ -810,11 +797,11 @@ fn run_folder(
                 );
             }
             note_tags_ignored(cfg, family_fmt, out_fmt);
-            // Same ordering fix as `run`'s FASTQ arm: build the writer (a
-            // truncating `File::create`) only after `maybe_reduce_adapters`
-            // has had its chance to return `Ok(None)` for `ReportOnly`.
-            let records = io::dir::fastq_records(&paths);
-            let Some(records) = maybe_reduce_adapters(records, cfg, |r| r.seq.as_slice())? else {
+            // Resolve report-only mode before creating the output file.
+            let records = io::dir::fastq_records(&paths, budget.decode);
+            let Some(records) =
+                maybe_reduce_adapters(records, cfg, |r| Cow::Borrowed(r.seq.as_slice()))?
+            else {
                 return Ok(());
             };
             let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
@@ -832,7 +819,7 @@ fn run_folder(
                 // declare different read groups (relevant only for BAM output).
                 io::dir::warn_on_bam_header_mismatch(&paths);
                 let (header, records) = io::dir::bam_reader(&paths, budget.decode)?;
-                let Some(records) = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))? else {
+                let Some(records) = maybe_reduce_adapters(records, cfg, bam_seq)? else {
                     return Ok(());
                 };
                 let out_header = provenance_header(header);
@@ -843,15 +830,15 @@ fn run_folder(
                     cfg.compression_level,
                 )?;
                 cfg.render_workers = budget.render;
-                let stats = workflow::run_bam(&out_header, records, &mut sink, cfg, &counters)?;
+                let stats = workflow::run_raw_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
                 tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
                 obs.finish(&stats, &out_desc);
                 Ok(())
             },
-            Format::Fastq | Format::FastqGz => {
+            Format::Fastq | Format::FastqGz | Format::FastqBgzf => {
                 let (_header, records) = io::dir::bam_reader(&paths, budget.decode)?;
-                let Some(records) = maybe_reduce_adapters(records, cfg, |r| bam_seq(r))? else {
+                let Some(records) = maybe_reduce_adapters(records, cfg, bam_seq)? else {
                     return Ok(());
                 };
                 let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
@@ -876,8 +863,25 @@ fn encode_kind_for(out_fmt: io::Format) -> config::EncodeKind {
     match out_fmt {
         io::Format::Bam => config::EncodeKind::Bgzf,
         io::Format::FastqGz => config::EncodeKind::Gzip,
+        io::Format::FastqBgzf => config::EncodeKind::Bgzf,
         io::Format::Fastq => config::EncodeKind::None,
     }
+}
+
+/// Noodles decode and encode jobs share Rayon's one global registry. When both
+/// sides are BGZF, configure it before either reader or writer can lock in only
+/// its own smaller stage allocation.
+fn configure_shared_bgzf_pool(
+    bgzf_input: bool,
+    bgzf_output: bool,
+    budget: config::ThreadBudget,
+) -> anyhow::Result<()> {
+    let workers = usize::from(bgzf_input && budget.decode > 1) * budget.decode
+        + usize::from(bgzf_output && budget.encode > 1) * budget.encode;
+    if workers > 1 {
+        io::bam::configure_bgzf_pool(workers)?;
+    }
+    Ok(())
 }
 
 /// Whether the render stage has substantial per-record work. BAM input remains
@@ -926,6 +930,9 @@ fn output_banner_line(
         },
         io::Format::FastqGz => {
             line.push_str(&format!(" (gzip level {level}, {encode_workers} workers)"));
+        },
+        io::Format::FastqBgzf => {
+            line.push_str(&format!(" (bgzf level {level}, {encode_workers} workers)"));
         },
         io::Format::Fastq => {},
     }
@@ -1272,19 +1279,11 @@ mod tests {
         assert!(!binary_to_terminal(true, io::Format::FastqGz, false));
     }
 
-    /// Regression test for `d481c48`: a header with a dangling `@PG PP:` chain
-    /// (a `PP` value that names a program ID not present in the header) used
-    /// to panic inside `noodles_sam::header::Programs::add` — called via
-    /// `provenance_header` — because `Programs::leaves` indexes the program
-    /// map directly by the `PP` id without checking it exists first. Real
-    /// ONT/samtools headers hit this in the wild (see `d481c48`'s commit
-    /// message). `provenance_header` must detect the dangling reference via
-    /// `has_dangling_program_chain` and return the header unchanged instead
-    /// of calling `Programs::add`.
+    /// A dangling `@PG PP:` reference must leave the header unchanged because
+    /// Noodles requires every parent program ID to exist.
     #[test]
     fn provenance_header_does_not_panic_on_dangling_pp_chain() {
-        // "pg1" claims a previous program "ghost", but "ghost" is never
-        // added to the header — a genuinely dangling reference.
+        // `pg1` references a parent that is absent from the header.
         let dangling_program = Map::<Program>::builder()
             .insert(tag::PREVIOUS_PROGRAM_ID, "ghost")
             .build()
@@ -1294,16 +1293,8 @@ mod tests {
             .add_program("pg1", dangling_program)
             .build();
 
-        // Sanity-check that the header really is dangling (i.e. this test
-        // isn't accidentally exercising the clean path).
         assert!(has_dangling_program_chain(&header));
 
-        // Pre-fix, this call panicked inside `Programs::add` -> `leaves`
-        // -> `has_cycle`, which indexes the program map with the `PP` id
-        // and panics when that id isn't a key (`ghost` isn't present here).
-        // Post-fix, `provenance_header` must return without panicking, and
-        // since the chain is dangling it must skip adding the `whittle`
-        // `@PG` line entirely.
         let out_header = provenance_header(header);
 
         assert!(
@@ -1312,9 +1303,7 @@ mod tests {
         );
     }
 
-    /// Companion positive-path test: a plain header with no dangling `@PG`
-    /// chain must still get the `whittle` provenance record added, so the
-    /// dangling-chain guard doesn't accidentally suppress the common case.
+    /// A valid program chain receives the `whittle` provenance record.
     #[test]
     fn provenance_header_adds_whittle_program_on_clean_header() {
         let header = noodles_sam::Header::default();
@@ -1408,7 +1397,7 @@ mod tests {
 
     #[test]
     fn threads_banner_line_shows_requested_threads_not_the_stage_sum() {
-        let b = config::thread_budget(8, true, config::EncodeKind::Bgzf);
+        let b = config::thread_budget(8, true, false, config::EncodeKind::Bgzf);
         assert_eq!(
             threads_banner_line(8, b),
             format!(
@@ -1425,11 +1414,8 @@ mod tests {
 
     #[test]
     fn threads_banner_line_header_is_requested_even_when_stage_sum_differs() {
-        // Regression for the confusing pre-fix wording: `render_heavy=true` with
-        // `EncodeKind::None` sums to 9 (1 decode + 7 render + 1 encode) for a
-        // requested `-t 8` — the header must still read the requested 8, not
-        // that 9-thread stage sum.
-        let b = config::thread_budget(8, true, config::EncodeKind::None);
+        // The banner reports the requested limit, not the sum of stage fields.
+        let b = config::thread_budget(8, true, false, config::EncodeKind::None);
         assert_eq!(b.total(), 9);
         assert_eq!(
             threads_banner_line(8, b),
@@ -1443,7 +1429,7 @@ mod tests {
         // read/trim/write split would otherwise show e.g. "(read 1, trim 1,
         // write 1)" for what is actually a single-threaded run — collapse it
         // to a plain "sequential" label instead.
-        let b = config::thread_budget(1, true, config::EncodeKind::Bgzf);
+        let b = config::thread_budget(1, true, false, config::EncodeKind::Bgzf);
         assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");
     }
 
@@ -1629,6 +1615,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let line = adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off).unwrap();
         assert!(line.contains("1 sequences"));
@@ -1653,6 +1640,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: false,
+            candidate_index: std::sync::OnceLock::new(),
         };
         assert!(
             adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off)
@@ -1668,6 +1656,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         };
         let trim_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::Trim).unwrap();
         assert!(trim_line.ends_with("infer"), "{trim_line}");

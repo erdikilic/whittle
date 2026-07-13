@@ -3,10 +3,65 @@ mod fastq;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub use bam::{reconstruct_mods, reconstruct_record, run_bam, run_bam_to_fastq};
+pub use bam::{reconstruct_mods, reconstruct_record, run_bam, run_bam_to_fastq, run_raw_bam};
 pub use fastq::{run_fastq, run_fastq_seq};
 
 use crate::filter::{DropReason, FilterConfig};
+
+/// Keep parallel work units large enough to amortize scheduling/channel costs,
+/// but small enough to balance unusually long reads across workers.
+const BATCH_BASES: usize = 512 * 1024;
+const BATCH_RECORDS: usize = 32;
+const BAM_BATCH_BASES: usize = 256 * 1024;
+const BAM_BATCH_RECORDS: usize = 4;
+
+pub(crate) struct Batches<I, F> {
+    records: I,
+    weight: F,
+    target_weight: usize,
+    max_items: usize,
+}
+
+impl<I, F> Batches<I, F> {
+    pub(crate) fn new(records: I, weight: F) -> Self {
+        Self {
+            records,
+            weight,
+            target_weight: BATCH_BASES,
+            max_items: BATCH_RECORDS,
+        }
+    }
+
+    pub(crate) fn bam(records: I, weight: F) -> Self {
+        Self {
+            records,
+            weight,
+            target_weight: BAM_BATCH_BASES,
+            max_items: BAM_BATCH_RECORDS,
+        }
+    }
+}
+
+impl<I, F, T> Iterator for Batches<I, F>
+where
+    I: Iterator<Item = T>,
+    F: Fn(&T) -> usize,
+{
+    type Item = Vec<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut batch = Vec::with_capacity(self.max_items);
+        let mut bases = 0usize;
+        while batch.len() < self.max_items && bases < self.target_weight {
+            let Some(record) = self.records.next() else {
+                break;
+            };
+            bases = bases.saturating_add((self.weight)(&record));
+            batch.push(record);
+        }
+        (!batch.is_empty()).then_some(batch)
+    }
+}
 
 /// Live, thread-shared counters read by the progress ticker and finalized into `Stats`.
 #[derive(Default)]
@@ -116,18 +171,11 @@ impl Counters {
     }
 }
 
-/// Per-segment filter + counting + read-level accounting, shared by every
-/// workflow loop (FASTQ and uBAM, sequential and parallel, BAM→BAM and
-/// BAM→FASTQ) so `filter::check` and the read-level counter bumps live in
-/// exactly one place. `produced` is the segment interval list from
-/// `trim::apply`; `seq`/`qual` are the *whole* (untrimmed) read's own bases,
-/// sliced internally per segment. For each surviving segment, `render` is
-/// called with `(idx, total, start, end)` — the produced index/count and the
-/// segment's byte range into `seq`/`qual` — to write/reconstruct that segment;
-/// a `render` error propagates immediately via `?`, before any further
-/// segments are processed and before `reads_with_output`/
-/// `reads_trimmed_to_nothing`/`reads_all_filtered` are bumped for this read
-/// (mirroring the old inline loops, which aborted the same way).
+/// Filter produced segments and update segment- and read-level counters for all
+/// workflows. `seq` and `qual` contain the complete input read and `produced`
+/// contains the ranges to evaluate. For each surviving segment, `render`
+/// receives `(idx, total, start, end)`. A render error stops processing before
+/// the read-level outcome counter is updated.
 pub(crate) fn process_read_segments<Rn>(
     produced: &[(usize, usize)],
     seq: &[u8],
@@ -203,6 +251,20 @@ pub struct Stats {
 mod tests {
     use super::*;
 
+    #[test]
+    fn batches_stop_at_weight_or_record_limit() {
+        let by_weight: Vec<Vec<usize>> =
+            Batches::new(vec![200_000usize; 5].into_iter(), |n: &usize| *n).collect();
+        assert_eq!(by_weight.iter().map(Vec::len).collect::<Vec<_>>(), [3, 2]);
+
+        let bam: Vec<Vec<usize>> =
+            Batches::bam(vec![1usize; 17].into_iter(), |n: &usize| *n).collect();
+        assert_eq!(
+            bam.iter().map(Vec::len).collect::<Vec<_>>(),
+            [4, 4, 4, 4, 1]
+        );
+    }
+
     /// The three-way read-level invariant (`reads_with_output +
     /// reads_trimmed_to_nothing + reads_all_filtered == input_reads`) models
     /// three reads: (a) a read with 2 surviving segments (`reads_with_output`),
@@ -265,9 +327,7 @@ mod tests {
         assert_eq!(stats.segments_dropped_gc, 0);
     }
 
-    /// Direct unit test for the shared `process_read_segments` helper (Fix
-    /// #3): pins its three read-level outcomes and the exact `render`
-    /// arguments, independent of any particular workflow loop.
+    /// Cover all read-level outcomes and the corresponding render arguments.
     #[test]
     fn process_read_segments_dispatches_and_counts_all_three_outcomes() {
         let filter_cfg = FilterConfig {

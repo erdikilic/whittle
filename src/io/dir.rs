@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use noodles_sam::alignment::RecordBuf;
 use noodles_sam::{self as sam};
 
 use crate::io::{Format, from_extension};
@@ -34,8 +33,10 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
             continue;
         }
         let format = from_extension(&path);
-        if matches!(format, Some(Format::Fastq | Format::FastqGz | Format::Bam))
-            && output.is_some_and(|o| crate::same_path(&path, o))
+        if matches!(
+            format,
+            Some(Format::Fastq | Format::FastqGz | Format::FastqBgzf | Format::Bam)
+        ) && output.is_some_and(|o| crate::same_path(&path, o))
         {
             anyhow::bail!(
                 "output {} is a read file inside the input directory {}; refusing to \
@@ -47,7 +48,7 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
             );
         }
         match format {
-            Some(Format::Fastq | Format::FastqGz) => fastq.push(path),
+            Some(Format::Fastq | Format::FastqGz | Format::FastqBgzf) => fastq.push(path),
             Some(Format::Bam) => bam.push(path),
             None => {}, // ignore non-read files
         }
@@ -77,12 +78,21 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
 /// A file-open error surfaces as an `Err` item rather than aborting construction.
 pub fn fastq_records(
     paths: &[PathBuf],
+    bgzf_workers: usize,
 ) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
     let paths = paths.to_vec();
     Box::new(paths.into_iter().flat_map(
-        |p| -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
-            let gz = matches!(from_extension(&p), Some(Format::FastqGz));
-            match crate::io::fastq::reader(Some(&p), gz) {
+        move |p| -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
+            let reader = match from_extension(&p) {
+                Some(Format::FastqBgzf) => std::fs::File::open(&p)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|file| {
+                        crate::io::fastq::reader_from_bgzf(Box::new(file), bgzf_workers)
+                    }),
+                Some(Format::FastqGz) => crate::io::fastq::reader(Some(&p), true),
+                _ => crate::io::fastq::reader(Some(&p), false),
+            };
+            match reader {
                 Ok(reader) => reader,
                 Err(e) => Box::new(std::iter::once(Err(e))),
             }
@@ -90,15 +100,15 @@ pub fn fastq_records(
     ))
 }
 
-/// A boxed, owning iterator over decoded `RecordBuf`s (or per-record errors).
+/// A boxed, owning iterator over lazy raw BAM records (or per-record errors).
 /// Named to satisfy `clippy::type_complexity` on the `bam_reader` signature below.
 /// `Send` so it can feed `workflow::run_bam`'s parallel path.
-type BamRecordIter = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
+type BamRecordIter = crate::io::bam::RawRecordIter;
 
 /// The first file's header plus one chained record stream over all BAM files
 /// (each file's own header is read and discarded past the first; records
-/// stream under the first header — `samtools cat` semantics for homogeneous
-/// uBAM).
+/// stream as lazy raw records under the first header — `samtools cat` semantics
+/// for homogeneous uBAM).
 ///
 /// `workers` is the MT-bgzf decode worker count (same knob as the single-file
 /// `io::bam::reader`), passed through to every per-file reader. This is safe
@@ -154,13 +164,9 @@ fn first_rg_mismatch(paths: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-/// Warn (once) if the folder's BAM files don't all share the same `@RG` set.
-/// Folder merge writes only the first file's header (samtools-cat semantics), so
-/// records from later files that carry `RG` tags for read groups absent from that
-/// header would reference `@RG` lines missing from the output. Homogeneous
-/// single-run uBAM — the intended input — shares one header and stays silent.
-/// This is a header-only pre-pass (cheap for uBAM); a future "better method"
-/// would union the `@RG`/`@PG` records into the output header instead.
+/// Warn once when folder BAM inputs do not share the same `@RG` set. Folder
+/// merge writes the first file's header, so later records can otherwise refer
+/// to read groups absent from the output header. This check reads headers only.
 pub fn warn_on_bam_header_mismatch(paths: &[PathBuf]) {
     if let Some((first, offender)) = first_rg_mismatch(paths) {
         tracing::warn!(

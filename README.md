@@ -13,14 +13,14 @@ It rewrites `MM`/`ML` base-modification tags on every trim and split, so a trimm
 
 </div>
 
-whittle filters and trims long reads (ONT, PacBio) in FASTQ, gzipped FASTQ, and unaligned BAM. It does the usual length/quality/GC filtering and head/tail/quality/adapter trimming — and, on uBAM, it reconstructs the base-modification (`MM`/`ML`/`MN`), per-base kinetics, and ONT signal tags so every output read stays valid instead of silently decoding to nonsense.
+whittle filters and trims long reads (ONT, PacBio) in FASTQ, gzip/BGZF-compressed FASTQ, and unaligned BAM. It does the usual length/quality/GC filtering and head/tail/quality/adapter trimming — and, on uBAM, it reconstructs the base-modification (`MM`/`ML`/`MN`), per-base kinetics, and ONT signal tags so every output read stays valid instead of silently decoding to nonsense.
 
 ## Highlights
 
 - **Correct modification tags.** `MM`/`ML`/`MN` are rebuilt for every trimmed or split uBAM read, verified against an independent `htslib` decoder.
 - **Trim-aware tags.** Per-base kinetics (`ip`/`pw`/…) are sliced with the sequence; ONT signal tags (`mv`/`ts`/`ns`/…) are dropped, or rewritten dorado-style with `--update-moves`.
 - **Adapter trimming.** Terminal trimming and interior chimera splitting, from a built-in ONT catalog, your own FASTA, or ab-initio discovery.
-- **Formats.** FASTQ, gzipped FASTQ, and unaligned BAM, plus BAM→FASTQ conversion. Formats are auto-detected, including BAM piped over stdin.
+- **Formats.** FASTQ, gzip/BGZF-compressed FASTQ, and unaligned BAM, plus BAM→FASTQ conversion. Formats are auto-detected, including BGZF FASTQ or BAM piped over stdin.
 - **Fast, self-contained.** Multithreaded throughout with a workload-aware thread budget, and no external `htslib` needed to build or run.
 
 ## Install
@@ -63,9 +63,9 @@ whittle -i reads.ubam.bam -o trimmed.ubam.bam -H 10 -T 10 -l 1000 --qual-split 9
 
 ## Usage
 
-whittle reads from `-i`/`--input` (or stdin) and writes to `-o`/`--output` (or stdout). The format is taken from the file extension, sniffed from the first bytes of a stream, or forced with `--in-format`/`--out-format {fastq,fastq-gz,bam}`.
+whittle reads from `-i`/`--input` (or stdin) and writes to `-o`/`--output` (or stdout). The format is taken from the file extension, sniffed from the first bytes of a stream, or forced with `--in-format`/`--out-format {fastq,fastq-gz,fastq-bgz,bam}`.
 
-Output is plain FASTQ by default and is never auto-compressed — a `.gz` input does not imply gzipped output. Gzip output happens only when you ask for it, with an `-o` path ending in `.gz` or `--out-format fastq-gz`, and is written by a parallel encoder using `-t` threads.
+Output is plain FASTQ by default and is never auto-compressed — a `.gz` or `.bgz` input does not imply compressed output. Compressed output happens only when requested with a `.gz`/`.bgz` path or the corresponding format flag, and is written by a parallel encoder using `-t` threads. BGZF FASTQ input is also decompressed block-parallel; ordinary gzip remains a serial input format.
 
 ### How trimming works
 
@@ -80,12 +80,12 @@ When a read splits, each segment is filtered on its own and named `<read>_segmen
 
 ### Formats
 
-| input → | FASTQ | FASTQ.gz | BAM |
-|---|:---:|:---:|:---:|
-| FASTQ / FASTQ.gz | ✅ | ✅ | ❌ |
-| unaligned BAM | ✅ | ✅ | ✅ |
+| input → | FASTQ | FASTQ.gz | FASTQ.bgz | BAM |
+|---|:---:|:---:|:---:|:---:|
+| FASTQ / FASTQ.gz / FASTQ.bgz | ✅ | ✅ | ✅ | ❌ |
+| unaligned BAM | ✅ | ✅ | ✅ | ✅ |
 
-With no output extension or `--out-format`, output mirrors the input, except a `.gz` input defaults to plain FASTQ. FASTQ→BAM is not supported — there's no header to build a BAM record from. BAM piped over stdin is recognized by its BGZF block signature, so `samtools view -b … | whittle` needs no hint.
+With no output extension or `--out-format`, output mirrors the input, except compressed FASTQ input defaults to plain FASTQ. FASTQ→BAM is not supported — there's no header to build a BAM record from. BGZF streams are identified by their decompressed payload, so piped FASTQ.bgz and `samtools view -b … | whittle` need no hint.
 
 On BAM→FASTQ, aux tags are written into the FASTQ header tab-delimited (the `samtools fastq -T` convention). `--fastq-tags` chooses which: `all` (default), `none`, or a list like `MM,ML,RG`. `MM`/`ML`/`MN` are reconstructed for the trimmed segment, per-base tags are sliced, and the rest are copied verbatim.
 
@@ -103,7 +103,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --qual-trim 10
 |---|---|
 | `-i, --input <PATH>` | Input file or directory (omit for stdin) |
 | `-o, --output <PATH>` | Output file (omit for stdout) |
-| `--in-format`, `--out-format {fastq,fastq-gz,bam}` | Force a format instead of detecting it |
+| `--in-format`, `--out-format {fastq,fastq-gz,fastq-bgz,bam}` | Force a format instead of detecting it |
 | `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`) |
 | `-c, --compression-level <0-9>` | DEFLATE level for compressed output (default 6); ignored for plain FASTQ |
 | `-t, --threads <N>` | Worker threads (default: all detected CPUs, clamped to that max) |

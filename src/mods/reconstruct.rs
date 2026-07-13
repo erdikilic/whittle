@@ -2,61 +2,53 @@ use super::{MmGroup, Mods, counting_base};
 
 pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
     let mut out = Vec::new();
-    // Positions of each distinct counting base along SEQ, computed once and
-    // reused across groups that share it (e.g. `C+h` and `C+m` both count 'C',
-    // and a `+`/`-` pair on the same base share the same complement scan).
-    let mut positions_cache: Vec<(u8, Vec<usize>)> = Vec::new();
+    // MM deltas index occurrences of the canonical base, so reconstructing a
+    // window only needs its occurrence-index bounds. Cache these for groups
+    // sharing a counting base (e.g. C+h and C+m) without materializing every
+    // matching SEQ position.
+    let mut bounds_cache: Vec<(u8, usize, usize)> = Vec::new();
 
     for g in &mods.groups {
         let ncodes = g.codes.len().max(1);
         let cbase = counting_base(g.base, g.strand);
 
-        // All positions of the counting base along the whole SEQ (ascending).
-        // Index-based lookup (not a returned borrow) so the conditional insert
-        // doesn't fight the borrow checker.
-        let cache_idx = match positions_cache.iter().position(|(b, _)| *b == cbase) {
+        // Occurrence indexes in [before, window_end) are inside [start, end).
+        // Index-based lookup keeps the conditional insert borrow straightforward.
+        let cache_idx = match bounds_cache.iter().position(|(b, _, _)| *b == cbase) {
             Some(i) => i,
             None => {
-                let p: Vec<usize> = seq
+                let before = seq[..start]
                     .iter()
-                    .enumerate()
-                    .filter(|&(_, &b)| b.to_ascii_uppercase() == cbase)
-                    .map(|(i, _)| i)
-                    .collect();
-                positions_cache.push((cbase, p));
-                positions_cache.len() - 1
+                    .filter(|&&b| b.to_ascii_uppercase() == cbase)
+                    .count();
+                let in_window = seq[start..end]
+                    .iter()
+                    .filter(|&&b| b.to_ascii_uppercase() == cbase)
+                    .count();
+                bounds_cache.push((cbase, before, before + in_window));
+                bounds_cache.len() - 1
             },
         };
-        let positions = &positions_cache[cache_idx].1;
-
-        // First position at/after the window start, so an in-window position's
-        // renumbered index is `(its index in positions) - w0` — no separate
-        // window vector or per-position binary search.
-        let w0 = positions.partition_point(|&p| p < start);
+        let (_, before, window_end) = bounds_cache[cache_idx];
 
         // Walk the group's deltas to recover each modified absolute position and
         // its ML byte run, then keep the ones inside the window.
         let mut new_deltas = Vec::new();
         let mut new_ml = Vec::new();
         let mut prev_widx: isize = -1;
-        let mut cursor = 0usize; // index into `positions`
+        let mut cursor = 0usize; // occurrence index of the counting base
 
         for (k, &d) in g.deltas.iter().enumerate() {
             // Saturating so a corrupt (clamped) delta can't overflow the running
-            // cursor; it just lands past the end and breaks below.
+            // cursor; it simply remains outside the finite window bounds.
             cursor = cursor.saturating_add(d);
-            if cursor >= positions.len() {
-                break; // malformed / past end
-            }
-            let abs = positions[cursor];
-            cursor += 1;
+            let occurrence = cursor;
+            cursor = cursor.saturating_add(1);
 
-            if abs < start || abs >= end {
+            if occurrence < before || occurrence >= window_end {
                 continue;
             }
-            // `abs == positions[cursor - 1]`, so its in-window index is
-            // `(cursor - 1) - w0` (positions is strictly ascending).
-            let widx = (cursor - 1 - w0) as isize;
+            let widx = (occurrence - before) as isize;
             new_deltas.push((widx - prev_widx - 1) as usize);
             prev_widx = widx;
 
@@ -197,13 +189,7 @@ mod tests {
         assert_eq!(m.groups[0].ml, vec![1, 2, 3]);
     }
 
-    /// Property test: over many random sequences, modification patterns, and
-    /// windows, the reconstructed ML array must stay byte-aligned — its length
-    /// equals the number of surviving modified positions (single code), and the
-    /// kept bytes are EXACTLY those of the in-window positions, in order. It
-    /// independently re-derives the survivors (a simpler oracle) rather than
-    /// trusting `reconstruct`, so it catches the ML-misalignment class of bug
-    /// that would silently shift every downstream probability.
+    /// Random windows preserve the ML bytes associated with surviving positions.
     #[test]
     fn ml_stays_byte_aligned_over_random_windows() {
         // Deterministic LCG — reproducible, no external rng dependency.

@@ -1,15 +1,17 @@
-use std::io::Write;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use noodles_bam as bam;
 use noodles_sam::alignment::RecordBuf;
+use noodles_sam::alignment::record::cigar::{Op, op::Kind};
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 use rayon::prelude::*;
 
-use super::{Counters, Stats, process_read_segments};
+use super::{Batches, Counters, Stats, process_read_segments};
 use crate::config::{Config, FastqTags};
 use crate::io::fastq::{format_aux_field, format_mods_aux, write_segment, write_segment_tagged};
 use crate::{mods, trim};
@@ -48,6 +50,114 @@ const DROP_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"bi"];
 /// ship a stale timestamp/duration. A head/tail crop keeps the same read identity,
 /// so they stay valid there.
 const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
+
+/// Input accepted by the BAM workflows. Production readers yield lazy raw
+/// `bam::Record`s, so structured field/tag decoding happens on a render worker;
+/// tests and library callers can still provide an already-decoded `RecordBuf`.
+pub trait InputRecord: Send {
+    fn sequence_len(&self) -> usize;
+    fn decode(self) -> std::io::Result<RecordBuf>;
+}
+
+impl InputRecord for bam::Record {
+    fn sequence_len(&self) -> usize {
+        self.sequence().len()
+    }
+
+    fn decode(self) -> std::io::Result<RecordBuf> {
+        decode_raw_record(&self)
+    }
+}
+
+/// BAM-specific conversion that keeps decoding on the render worker without
+/// routing sequence, quality, and every aux value through the generic SAM trait
+/// iterators. The concrete Noodles views have bulk conversions for these large
+/// fields and materially reduce conversion overhead on long reads.
+fn decode_raw_record(src: &bam::Record) -> std::io::Result<RecordBuf> {
+    let mut dst = RecordBuf::default();
+    *dst.name_mut() = src.name().map(Into::into);
+    *dst.flags_mut() = src.flags();
+    *dst.reference_sequence_id_mut() = src.reference_sequence_id().transpose()?;
+    *dst.alignment_start_mut() = src.alignment_start().transpose()?;
+    *dst.mapping_quality_mut() = src.mapping_quality();
+
+    let cigar = dst.cigar_mut().as_mut();
+    cigar.clear();
+    for result in src.cigar().iter() {
+        cigar.push(result?);
+    }
+
+    *dst.mate_reference_sequence_id_mut() = src.mate_reference_sequence_id().transpose()?;
+    *dst.mate_alignment_start_mut() = src.mate_alignment_start().transpose()?;
+    *dst.template_length_mut() = src.template_length();
+    *dst.sequence_mut() = src.sequence().into();
+    *dst.quality_scores_mut() = src.quality_scores().into();
+    *dst.data_mut() = src.data().try_into()?;
+    resolve_long_cigar(&mut dst)?;
+    Ok(dst)
+}
+
+/// Expand BAM's `CG:B:I` overflow representation for records whose CIGAR does
+/// not fit in the 16-bit operation count. This mirrors the resolution performed
+/// by `noodles_bam::io::Reader::read_record_buf` after decoding a buffered
+/// record, which the lazy raw-record API intentionally leaves to its caller.
+fn resolve_long_cigar(record: &mut RecordBuf) -> io::Result<()> {
+    let is_overflow_placeholder = match record.cigar().as_ref() {
+        [op_0, op_1] => {
+            *op_0 == Op::new(Kind::SoftClip, record.sequence().len()) && op_1.kind() == Kind::Skip
+        },
+        _ => false,
+    };
+
+    if !is_overflow_placeholder {
+        return Ok(());
+    }
+
+    let Some((_, value)) = record.data_mut().remove(&Tag::CIGAR) else {
+        return Ok(());
+    };
+    let Value::Array(Array::UInt32(values)) = value else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid CG data field type",
+        ));
+    };
+
+    let cigar = record.cigar_mut().as_mut();
+    cigar.clear();
+    for n in values {
+        let kind = match n & 0x0f {
+            0 => Kind::Match,
+            1 => Kind::Insertion,
+            2 => Kind::Deletion,
+            3 => Kind::Skip,
+            4 => Kind::SoftClip,
+            5 => Kind::HardClip,
+            6 => Kind::Pad,
+            7 => Kind::SequenceMatch,
+            8 => Kind::SequenceMismatch,
+            actual => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid CG CIGAR operation kind: {actual}"),
+                ));
+            },
+        };
+        cigar.push(Op::new(kind, (n >> 4) as usize));
+    }
+
+    Ok(())
+}
+
+impl InputRecord for RecordBuf {
+    fn sequence_len(&self) -> usize {
+        self.sequence().as_ref().len()
+    }
+
+    fn decode(self) -> std::io::Result<RecordBuf> {
+        Ok(self)
+    }
+}
 
 fn array_len(a: &Array) -> usize {
     match a {
@@ -593,16 +703,16 @@ pub fn reconstruct_mods(
 
 /// Single-threaded uBAM workflow: refuse aligned reads, trim, filter each
 /// produced segment, reconstruct survivors.
-fn run_bam_seq(
+fn run_bam_seq<R: InputRecord>(
     header: &sam::Header,
-    records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
+    records: impl Iterator<Item = anyhow::Result<R>>,
     sink: &mut crate::io::bam::BamSink,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
     let mut malformed_tag_reads = 0u64;
     for rec in records {
-        let rec = rec?;
+        let rec = rec?.decode()?;
         crate::io::bam::ensure_unaligned(&rec)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
@@ -652,15 +762,16 @@ fn run_bam_seq(
     Ok(counters.snapshot(malformed_tag_reads))
 }
 
-/// Shared parallel driver: reader iterator -> rayon pool (render) -> bounded
-/// channel -> dedicated writer thread (write_one). Unordered. Mirrors
+/// Shared parallel driver: lazy raw reader iterator -> rayon pool (structured
+/// decode + render) -> bounded channel -> dedicated writer thread (write_one).
+/// Unordered. Mirrors
 /// `run_fastq`'s error seam (see `workflow/fastq.rs`): the first parse/render
 /// error and the first write error are each captured in a `Mutex<Option<_>>`
 /// slot; the writer task keeps draining `rx` after an error (never `break`) so
 /// producer threads blocked on the bounded channel's `tx.send` can never
 /// deadlock waiting for a writer that stopped consuming.
-fn run_bam_parallel<T, S, Render, WriteOne>(
-    records: impl Iterator<Item = anyhow::Result<RecordBuf>> + Send,
+fn run_bam_parallel<R, T, S, Render, WriteOne>(
+    records: impl Iterator<Item = anyhow::Result<R>> + Send,
     cfg: &Config,
     sink: &mut S,
     render: Render,
@@ -668,6 +779,7 @@ fn run_bam_parallel<T, S, Render, WriteOne>(
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
 where
+    R: InputRecord,
     T: Send,
     S: Send,
     // `Render` returns the surviving segments only: per-segment filter/counting
@@ -686,7 +798,8 @@ where
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(render_workers)
         .build()?;
-    let (tx, rx) = crossbeam_channel::bounded::<T>(render_workers * 4);
+    let queue_batches = (render_workers / 2).max(2);
+    let (tx, rx) = crossbeam_channel::bounded::<Vec<T>>(queue_batches);
     let malformed = AtomicU64::new(0);
     let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
     let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
@@ -700,60 +813,77 @@ where
         let write_err_ref = &write_err;
         s.spawn(move || {
             let mut errored = false;
-            for item in rx.iter() {
+            for batch in rx.iter() {
                 if errored {
                     continue; // keep draining so bounded-channel producers never block
                 }
-                if let Err(e) = write_one(sink, &item) {
-                    *write_err_ref.lock().unwrap() = Some(e);
-                    errored = true;
+                for item in batch {
+                    if let Err(e) = write_one(sink, &item) {
+                        *write_err_ref.lock().unwrap() = Some(e);
+                        errored = true;
+                        break;
+                    }
                 }
             }
         });
 
         pool.install(|| {
-            records.par_bridge().for_each(|rec| {
-                let rec = match rec {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let mut g = proc_err.lock().unwrap();
-                        if g.is_none() {
-                            *g = Some(e);
-                        }
-                        return;
-                    },
-                };
-                counters.input_reads.fetch_add(1, Ordering::Relaxed);
+            let batches = Batches::bam(records, |rec: &anyhow::Result<R>| {
+                rec.as_ref().map_or(0, InputRecord::sequence_len)
+            });
+            batches.par_bridge().for_each(|batch| {
+                let mut rendered = Vec::with_capacity(batch.len());
+                let mut input_reads = 0u64;
+                let mut input_bases = 0u64;
+                let mut malformed_reads = 0u64;
+                for rec in batch {
+                    let rec = match rec {
+                        Ok(r) => match r.decode() {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let mut g = proc_err.lock().unwrap();
+                                if g.is_none() {
+                                    *g = Some(e.into());
+                                }
+                                continue;
+                            },
+                        },
+                        Err(e) => {
+                            let mut g = proc_err.lock().unwrap();
+                            if g.is_none() {
+                                *g = Some(e);
+                            }
+                            continue;
+                        },
+                    };
+                    let seq_len = rec.sequence().as_ref().len();
+                    input_reads += 1;
+                    input_bases += seq_len as u64;
+                    malformed_reads += u64::from(has_malformed_perbase_tag(&rec, seq_len));
+                    match render(&rec, cfg) {
+                        Ok(items) => {
+                            // output_reads/output_bases and the read-level counters were
+                            // already bumped inside `render`, per segment, by the shared
+                            // `process_read_segments` helper.
+                            rendered.extend(items);
+                        },
+                        Err(e) => {
+                            let mut g = proc_err.lock().unwrap();
+                            if g.is_none() {
+                                *g = Some(e);
+                            }
+                        },
+                    }
+                }
+                counters
+                    .input_reads
+                    .fetch_add(input_reads, Ordering::Relaxed);
                 counters
                     .input_bases
-                    .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
-                if has_malformed_perbase_tag(&rec, rec.sequence().as_ref().len()) {
-                    malformed.fetch_add(1, Ordering::Relaxed);
-                }
-                match render(&rec, cfg) {
-                    Ok(items) => {
-                        // output_reads/output_bases and the read-level counters were
-                        // already bumped inside `render`, per segment, by the shared
-                        // `process_read_segments` helper.
-                        for it in items {
-                            let _ = tx.send(it);
-                        }
-                    },
-                    Err(e) => {
-                        // `input_reads`/`input_bases` were already bumped above with no
-                        // matching `reads_with_output`/`reads_trimmed_to_nothing`/
-                        // `reads_all_filtered` bump for this read — safe only because
-                        // capturing the error here means this whole function returns
-                        // `Err` below before `counters.snapshot()` ever runs, so its
-                        // read-level invariant assert never sees this read as
-                        // unaccounted for. A future refactor that let this error fall
-                        // through to a `snapshot()` call would need to bump one of the
-                        // three read-level counters here first.
-                        let mut g = proc_err.lock().unwrap();
-                        if g.is_none() {
-                            *g = Some(e);
-                        }
-                    },
+                    .fetch_add(input_bases, Ordering::Relaxed);
+                malformed.fetch_add(malformed_reads, Ordering::Relaxed);
+                if !rendered.is_empty() {
+                    let _ = tx.send(rendered);
                 }
             });
         });
@@ -769,15 +899,311 @@ where
     Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
 }
 
-/// Threads-aware uBAM workflow entry point: refuse aligned reads, trim, filter,
-/// reconstruct. Sequential for `cfg.threads <= 1`; otherwise renders each
-/// record on a rayon work pool and drains the resulting `RecordBuf`s through
-/// `run_bam_parallel`'s bounded channel onto a dedicated writer task. Output
+enum BamOutputRecord {
+    Raw(bam::Record),
+    Decoded(RecordBuf),
+}
+
+fn raw_array_len(value: &noodles_sam::alignment::record::data::field::Value<'_>) -> Option<usize> {
+    use noodles_sam::alignment::record::data::field::Value as RawValue;
+    use noodles_sam::alignment::record::data::field::value::Array as RawArray;
+
+    match value {
+        RawValue::Array(RawArray::Int8(v)) => Some(v.len()),
+        RawValue::Array(RawArray::UInt8(v)) => Some(v.len()),
+        RawValue::Array(RawArray::Int16(v)) => Some(v.len()),
+        RawValue::Array(RawArray::UInt16(v)) => Some(v.len()),
+        RawValue::Array(RawArray::Int32(v)) => Some(v.len()),
+        RawValue::Array(RawArray::UInt32(v)) => Some(v.len()),
+        RawValue::Array(RawArray::Float(v)) => Some(v.len()),
+        _ => None,
+    }
+}
+
+/// Inspect only the aux metadata that can change or affect advisories on an
+/// otherwise full-window record. Returns `(mods_already_consistent,
+/// malformed_perbase_tag)` without allocating owned tag values.
+fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(bool, bool)> {
+    use noodles_sam::alignment::record::data::field::Value as RawValue;
+
+    let seq_len = record.sequence().len();
+    let mut mm_is_string = false;
+    let mut mn = None;
+    let mut malformed_perbase = false;
+
+    for result in record.data().iter() {
+        let (tag, value) = result?;
+        if tag == Tag::BASE_MODIFICATIONS {
+            mm_is_string = matches!(value, RawValue::String(_));
+        } else if tag == Tag::BASE_MODIFICATION_SEQUENCE_LENGTH {
+            mn = match value {
+                RawValue::Int32(n) => Some(i64::from(n)),
+                _ => None,
+            };
+        }
+
+        let tag_bytes = <[u8; 2]>::from(tag);
+        if KNOWN_PERBASE_TAGS.contains(&tag_bytes)
+            && raw_array_len(&value).is_some_and(|len| len != seq_len)
+        {
+            malformed_perbase = true;
+        }
+    }
+
+    let mods_consistent = !mm_is_string || mn == i64::try_from(seq_len).ok();
+    Ok((mods_consistent, malformed_perbase))
+}
+
+fn ensure_raw_unaligned(record: &bam::Record) -> anyhow::Result<()> {
+    if record.flags().is_unmapped() {
+        return Ok(());
+    }
+    let name = record
+        .name()
+        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+        .unwrap_or_else(|| "<unnamed>".to_string());
+    anyhow::bail!("read {name} is aligned (mapped); whittle v1 supports unaligned BAM (uBAM) only")
+}
+
+fn raw_gc_fraction(record: &bam::Record) -> f64 {
+    let sequence = record.sequence();
+    if sequence.is_empty() {
+        return 0.0;
+    }
+    let gc = sequence
+        .iter()
+        .filter(|&b| matches!(b, b'G' | b'g' | b'C' | b'c'))
+        .count();
+    gc as f64 / sequence.len() as f64
+}
+
+fn process_raw_full_window(
+    record: bam::Record,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<(Option<BamOutputRecord>, bool)> {
+    let seq_len = record.sequence().len();
+    let qualities = record.quality_scores();
+    let qual = qualities.as_ref();
+    if qual.len() != seq_len {
+        let name = record
+            .name()
+            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+            .unwrap_or_else(|| "<unnamed>".to_string());
+        anyhow::bail!(
+            "read {name}: BAM record SEQ length {} != QUAL length {} \
+             (records without full per-base quality are not supported)",
+            seq_len,
+            qual.len()
+        );
+    }
+
+    let (mods_consistent, malformed_perbase) = raw_full_window_metadata(&record)?;
+    if seq_len == 0 {
+        counters
+            .reads_trimmed_to_nothing
+            .fetch_add(1, Ordering::Relaxed);
+        return Ok((None, malformed_perbase));
+    }
+
+    let gc = (cfg.filter.min_gc.is_some() || cfg.filter.max_gc.is_some())
+        .then(|| raw_gc_fraction(&record));
+    if let Some(reason) = crate::filter::check_metrics(seq_len, qual, gc, &cfg.filter) {
+        counters.record_segment_drop(reason);
+        counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
+        return Ok((None, malformed_perbase));
+    }
+
+    counters.output_reads.fetch_add(1, Ordering::Relaxed);
+    counters
+        .output_bases
+        .fetch_add(seq_len as u64, Ordering::Relaxed);
+    counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+
+    let output = if mods_consistent {
+        BamOutputRecord::Raw(record)
+    } else {
+        let decoded = decode_raw_record(&record)?;
+        BamOutputRecord::Decoded(reconstruct_record(
+            &decoded,
+            0,
+            seq_len,
+            1,
+            0,
+            cfg.update_moves,
+        ))
+    };
+    Ok((Some(output), malformed_perbase))
+}
+
+fn run_raw_bam_full_window_seq(
+    header: &sam::Header,
+    records: impl Iterator<Item = anyhow::Result<bam::Record>>,
+    sink: &mut crate::io::bam::BamSink,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<Stats> {
+    let mut malformed = 0;
+    for record in records {
+        let record = record?;
+        ensure_raw_unaligned(&record)?;
+        let seq_len = record.sequence().len();
+        counters.input_reads.fetch_add(1, Ordering::Relaxed);
+        counters
+            .input_bases
+            .fetch_add(seq_len as u64, Ordering::Relaxed);
+        let (output, is_malformed) = process_raw_full_window(record, cfg, counters)?;
+        malformed += u64::from(is_malformed);
+        match output {
+            Some(BamOutputRecord::Raw(record)) => sink.write_raw_record(header, &record)?,
+            Some(BamOutputRecord::Decoded(record)) => sink.write_record(header, &record)?,
+            None => {},
+        }
+    }
+    Ok(counters.snapshot(malformed))
+}
+
+fn run_raw_bam_full_window_parallel(
+    header: &sam::Header,
+    records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
+    sink: &mut crate::io::bam::BamSink,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<Stats> {
+    let render_workers = cfg.render_workers.max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(render_workers)
+        .build()?;
+    let (tx, rx) = crossbeam_channel::bounded::<Vec<BamOutputRecord>>((render_workers / 2).max(2));
+    let malformed = AtomicU64::new(0);
+    let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
+    let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut errored = false;
+            for batch in rx.iter() {
+                if errored {
+                    continue;
+                }
+                for output in batch {
+                    let result = match output {
+                        BamOutputRecord::Raw(record) => sink.write_raw_record(header, &record),
+                        BamOutputRecord::Decoded(record) => sink.write_record(header, &record),
+                    };
+                    if let Err(e) = result {
+                        *write_err.lock().unwrap() = Some(e);
+                        errored = true;
+                        break;
+                    }
+                }
+            }
+        });
+
+        pool.install(|| {
+            Batches::bam(records, |record: &anyhow::Result<bam::Record>| {
+                record.as_ref().map_or(0, |record| record.sequence().len())
+            })
+            .par_bridge()
+            .for_each(|batch| {
+                let mut output = Vec::with_capacity(batch.len());
+                let mut input_reads = 0u64;
+                let mut input_bases = 0u64;
+                let mut malformed_reads = 0u64;
+                for result in batch {
+                    let record = match result {
+                        Ok(record) => record,
+                        Err(e) => {
+                            let mut error = proc_err.lock().unwrap();
+                            if error.is_none() {
+                                *error = Some(e);
+                            }
+                            continue;
+                        },
+                    };
+                    input_reads += 1;
+                    input_bases += record.sequence().len() as u64;
+                    if let Err(e) = ensure_raw_unaligned(&record) {
+                        let mut error = proc_err.lock().unwrap();
+                        if error.is_none() {
+                            *error = Some(e);
+                        }
+                        continue;
+                    }
+                    match process_raw_full_window(record, cfg, counters) {
+                        Ok((Some(record), is_malformed)) => {
+                            output.push(record);
+                            malformed_reads += u64::from(is_malformed);
+                        },
+                        Ok((None, is_malformed)) => {
+                            malformed_reads += u64::from(is_malformed);
+                        },
+                        Err(e) => {
+                            let mut error = proc_err.lock().unwrap();
+                            if error.is_none() {
+                                *error = Some(e);
+                            }
+                        },
+                    }
+                }
+                counters
+                    .input_reads
+                    .fetch_add(input_reads, Ordering::Relaxed);
+                counters
+                    .input_bases
+                    .fetch_add(input_bases, Ordering::Relaxed);
+                malformed.fetch_add(malformed_reads, Ordering::Relaxed);
+                if !output.is_empty() {
+                    let _ = tx.send(output);
+                }
+            });
+        });
+        drop(tx);
+    });
+
+    if let Some(e) = proc_err.lock().unwrap().take() {
+        return Err(e);
+    }
+    if let Some(e) = write_err.lock().unwrap().take() {
+        return Err(e.into());
+    }
+    Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
+}
+
+/// Raw-record entry point used by production BAM readers. Full-window runs can
+/// filter and write unchanged records without building an owned `RecordBuf`;
+/// any operation that can alter sequence or tags uses the established path.
+pub fn run_raw_bam(
+    header: &sam::Header,
+    records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
+    sink: &mut crate::io::bam::BamSink,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<Stats> {
+    let full_window = cfg.trim.head == 0
+        && cfg.trim.tail == 0
+        && cfg.trim.quality.is_none()
+        && cfg.adapters.is_none();
+    if !full_window {
+        return run_bam(header, records, sink, cfg, counters);
+    }
+    if cfg.threads <= 1 {
+        run_raw_bam_full_window_seq(header, records, sink, cfg, counters)
+    } else {
+        run_raw_bam_full_window_parallel(header, records, sink, cfg, counters)
+    }
+}
+
+/// Threads-aware uBAM workflow entry point: decode, refuse aligned reads, trim,
+/// filter, reconstruct. Sequential for `cfg.threads <= 1`; otherwise converts
+/// lazy raw records and renders them on a Rayon work pool, then drains the
+/// resulting `RecordBuf`s through `run_bam_parallel`'s bounded channel onto a
+/// dedicated writer task. Output
 /// order is unordered for `threads > 1` (records land in arrival order, not
 /// input order) — the BAM format has no ordering requirement for uBAM.
-pub fn run_bam(
+pub fn run_bam<R: InputRecord>(
     header: &sam::Header,
-    records: impl Iterator<Item = anyhow::Result<RecordBuf>> + Send,
+    records: impl Iterator<Item = anyhow::Result<R>> + Send,
     sink: &mut crate::io::bam::BamSink,
     cfg: &Config,
     counters: &Arc<Counters>,
@@ -902,18 +1328,19 @@ fn build_fastq_tags(
 /// selected aux tags in the header (MM/ML/MN reconstructed; others verbatim).
 /// gz compression, when requested, is handled by the parallel `gzp` writer this
 /// drains into.
-fn run_bam_to_fastq_seq<W>(
-    records: impl Iterator<Item = anyhow::Result<RecordBuf>>,
+fn run_bam_to_fastq_seq<R, W>(
+    records: impl Iterator<Item = anyhow::Result<R>>,
     writer: &mut W,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
 where
+    R: InputRecord,
     W: Write,
 {
     let mut malformed_tag_reads = 0u64;
     for rec in records {
-        let rec = rec?;
+        let rec = rec?.decode()?;
         crate::io::bam::ensure_unaligned(&rec)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
@@ -961,16 +1388,16 @@ where
     Ok(counters.snapshot(malformed_tag_reads))
 }
 
-/// Threads-aware uBAM→FASTQ workflow entry point: refuse aligned reads, trim,
-/// filter, then write each surviving segment as FASTQ with the selected aux tags
-/// in the header (MM/ML/MN reconstructed; others verbatim). Sequential for
-/// `cfg.threads <= 1`; otherwise renders each record's FASTQ segments on a
-/// rayon work pool and drains the resulting byte buffers through
+/// Threads-aware uBAM→FASTQ workflow entry point: decode, refuse aligned reads,
+/// trim, filter, then write each surviving segment as FASTQ with the selected aux
+/// tags in the header (MM/ML/MN reconstructed; others verbatim). Sequential for
+/// `cfg.threads <= 1`; otherwise converts lazy raw records and renders each
+/// record's FASTQ segments on a Rayon work pool, draining the resulting buffers through
 /// `run_bam_parallel`'s bounded channel onto the writer, appended as-is.
 /// Output order is unordered for `threads > 1` (records land in arrival order,
 /// not input order).
-pub fn run_bam_to_fastq<W: Write + Send>(
-    records: impl Iterator<Item = anyhow::Result<RecordBuf>> + Send,
+pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
+    records: impl Iterator<Item = anyhow::Result<R>> + Send,
     writer: &mut W,
     cfg: &Config,
     counters: &Arc<Counters>,
@@ -1038,11 +1465,38 @@ pub fn run_bam_to_fastq<W: Write + Send>(
 mod tests {
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::Flags;
+    use noodles_sam::alignment::record::cigar::{Op, op::Kind};
     use noodles_sam::alignment::record::data::field::Tag;
     use noodles_sam::alignment::record_buf::data::field::Value;
     use noodles_sam::alignment::record_buf::data::field::value::Array;
 
     use super::*;
+
+    #[test]
+    fn resolves_long_cigar_overflow_from_cg_tag() {
+        let mut record = RecordBuf::default();
+        *record.sequence_mut() = b"ACGT".to_vec().into();
+        record
+            .cigar_mut()
+            .as_mut()
+            .extend([Op::new(Kind::SoftClip, 4), Op::new(Kind::Skip, 4)]);
+        record.data_mut().insert(
+            Tag::CIGAR,
+            Value::Array(Array::UInt32(vec![2 << 4, (1 << 4) | 1, (1 << 4) | 7])),
+        );
+
+        resolve_long_cigar(&mut record).unwrap();
+
+        assert_eq!(
+            record.cigar().as_ref(),
+            [
+                Op::new(Kind::Match, 2),
+                Op::new(Kind::Insertion, 1),
+                Op::new(Kind::SequenceMatch, 1),
+            ]
+        );
+        assert!(record.data().get(&Tag::CIGAR).is_none());
+    }
 
     fn ubam_with_mods(seq: &[u8], quals: Vec<u8>, mm: &[u8], ml: Vec<u8>) -> RecordBuf {
         let mut rec = RecordBuf::default();
@@ -1087,14 +1541,7 @@ mod tests {
         assert_eq!(mn, 2);
     }
 
-    /// Regression test for a QUAL-absent uBAM record: `quality_scores()`
-    /// decodes to empty while `sequence()` keeps its bases, so `seq.len() !=
-    /// qual.len()`. Pre-fix, `run_bam` fed this straight into `trim::apply`,
-    /// which slices `phred[start..end]` using `seq.len()`-derived bounds and
-    /// panics (via `debug_assert_eq!` in debug builds, or an out-of-bounds
-    /// slice panic in release) instead of returning an `Err`. Post-fix, the
-    /// length-mismatch guard in `run_bam` must bail with an `Err` before any
-    /// of that runs.
+    /// A BAM record with unequal SEQ and QUAL lengths returns an error.
     #[test]
     fn qual_seq_length_mismatch_errors_without_panicking() {
         use crate::config::IoConfig;
@@ -1160,15 +1607,7 @@ mod tests {
         );
     }
 
-    /// Regression test for the outer gate in `reconstruct_record`: a spec-invalid
-    /// `MM` tag (typed as anything other than `Value::String`, e.g. `Int32`) must
-    /// leave `MM`/`ML`/`MN` completely untouched. Pre-fix, the gate was a bare
-    /// `.is_some()` check, which let this record enter the mod-rebuild block;
-    /// `reconstruct_mods`'s `Some(Value::String(s)) => ... , _ => return None`
-    /// match then falls through to `None` for a non-string MM, and the `None`
-    /// branch in `reconstruct_record` REMOVES all three tags instead of leaving
-    /// them alone. The fix narrows the gate to `matches!(.., Some(Value::String(_)))`
-    /// so a spec-invalid MM never enters the rebuild block at all.
+    /// A non-string MM value is outside the supported schema and remains untouched.
     #[test]
     fn reconstruct_record_leaves_non_string_mm_untouched() {
         let mut src = RecordBuf::default();
@@ -1202,14 +1641,10 @@ mod tests {
 
     #[test]
     fn reconstruct_record_preserves_originally_empty_mm_group() {
-        // A record carrying an "assessed, none found" group (`C+m;`, zero
-        // positions) alongside a real one must keep BOTH through a trim.
-        // Pre-fix the empty group was silently dropped by reconstruct/serialize.
+        // An empty assessment group remains present alongside populated groups.
         // seq CACA: C at 0,2 ; A at 1,3. A+a modifies A-occ 0 (pos1). C+m empty.
         let src = ubam_with_mods(b"CACA", vec![30, 31, 32, 33], b"A+a,0;C+m;", vec![7]);
-        // Untrimmed whole read, but no MN tag, so full_window_mods_already_
-        // consistent is false and the record is still reconstructed (the exact
-        // shape from the bug report). The empty group must survive that pass.
+        // Missing MN requires reconstruction even for the complete sequence.
         let out = reconstruct_record(&src, 0, 4, 1, 0, false);
         let mm = match out.data().get(&Tag::BASE_MODIFICATIONS) {
             Some(Value::String(s)) => s.to_vec(),
@@ -1403,11 +1838,7 @@ mod tests {
         assert_eq!(out, b"@plain\nACGT\n+\nIIII\n");
     }
 
-    /// Regression test: a source uBAM carrying `MM` but NO `ML` (valid — ML is
-    /// optional per the SAM spec) must be rewritten as an MM-only record, NOT gain
-    /// an empty `ML:B:C`. Pre-fix, `reconstruct_record` inserted `Array::UInt8([])`
-    /// unconditionally, producing an MM that declares modified positions with zero
-    /// probabilities — a record samtools/modkit reject as invalid.
+    /// MM without optional ML remains MM-only after reconstruction.
     #[test]
     fn reconstruct_record_mm_without_ml_stays_mm_only() {
         let mut src = RecordBuf::default();
@@ -2002,8 +2433,7 @@ mod tests {
 
     #[test]
     fn update_moves_does_not_reslice_read_length_pa() {
-        // Regression (review F1): a pa array whose length happens to equal the read
-        // length must NOT be treated as a per-base array and sliced.
+        // `pa` uses signal coordinates and is not a per-base array.
         let mut src = RecordBuf::default();
         *src.flags_mut() = Flags::UNMAPPED;
         *src.name_mut() = Some(b"r1".into());
@@ -2186,12 +2616,7 @@ mod tests {
         );
     }
 
-    /// Mirrors `workflow::fastq`'s `parallel_surfaces_write_error_without_deadlock`,
-    /// but drives `run_bam_parallel` directly with a stub sink whose `write_one`
-    /// starts erroring after `limit` writes. Record count (3000) exceeds the
-    /// bounded channel capacity (`threads * 4` = 16), so a pre-fix build that
-    /// stops draining `rx` on the first write error would deadlock instead of
-    /// returning.
+    /// Writer errors remain observable after the bounded channel reaches capacity.
     #[test]
     fn run_bam_parallel_surfaces_write_error_without_deadlock() {
         use std::io;
@@ -2447,6 +2872,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 8, // adapter at [24,40) is interior (> 8 from both ends of 64 bp)
             split: true,
+            candidate_index: std::sync::OnceLock::new(),
         });
 
         let mut out = Vec::new();

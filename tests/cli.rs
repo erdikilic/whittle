@@ -270,10 +270,7 @@ fn failure_path_prints_a_single_failed_after_line() {
 
 #[test]
 fn banner_version_and_command_come_first_in_line_mode() {
-    // Regression: `whittle {version}` and `Command: ...` must be the very
-    // first lines emitted — even before the resolved-config banner — so a
-    // reader can always find them at the top regardless of what warnings (or
-    // an early hard error) follow.
+    // Version and command precede resolved configuration and diagnostics.
     let input = "@r1\nACGT\n+\nIIII\n";
     let assert = whittle().write_stdin(input).assert().success();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
@@ -288,9 +285,7 @@ fn banner_version_and_command_come_first_in_line_mode() {
 
 #[test]
 fn non_tty_stderr_has_no_ansi_escapes() {
-    // assert_cmd captures stderr to a pipe (never a TTY), so a normal run must
-    // carry zero ANSI escape bytes — coloring a redirected/non-interactive
-    // stream is exactly the bug this guards against.
+    // Captured stderr is non-interactive and must contain no ANSI escapes.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .write_stdin(input)

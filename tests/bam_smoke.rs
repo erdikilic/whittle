@@ -1,8 +1,5 @@
-// End-to-end regression test for the uBAM workflow: drives the compiled `whittle`
-// binary over a real on-disk BAM file (reader -> provenance_header -> run_bam ->
-// writer), rather than exercising `reconstruct_record` directly against synthetic
-// `RecordBuf`s the way `workflow::bam_tests` does. Catches wiring bugs that unit
-// tests can't (header handling, writer generics, CLI flag plumbing).
+// End-to-end uBAM coverage through the compiled binary, including header,
+// reader, workflow, writer, and CLI integration.
 use assert_cmd::Command;
 use noodles_bam as bam;
 use noodles_sam::alignment::RecordBuf;
@@ -136,6 +133,35 @@ fn bam_to_bam_end_to_end() {
         other => panic!("expected MN tag, got {other:?}"),
     };
     assert_eq!(mn, 6, "MN should equal the output segment length");
+}
+
+#[test]
+fn bam_raw_full_window_path_filters_without_rebuilding_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("raw_in.bam");
+    let out_path = dir.path().join("raw_out.bam");
+    write_fixture(&in_path);
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["--min-length", "9", "-t", "4", "-i"])
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .assert()
+        .success();
+
+    let mut reader = bam::io::Reader::new(std::fs::File::open(out_path).unwrap());
+    let header = reader.read_header().unwrap();
+    let records: Vec<_> = reader
+        .record_bufs(&header)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].name().unwrap().to_vec(), b"read1");
+    assert_eq!(records[0].sequence().as_ref(), b"ACGTACGTAC");
+    assert_eq!(records[0].quality_scores().as_ref(), &[40; 10]);
 }
 
 /// End-to-end: a PacBio-style uBAM with per-base kinetics (`ip`/`pw`, one value
@@ -279,12 +305,8 @@ fn bam_update_moves_slices_move_table() {
     assert_eq!(ts, 16, "ts must advance past the trimmed head signal");
 }
 
-/// Regression test for the BGZF/gzip magic collision: a real BAM is BGZF, which
-/// begins with gzip's `1f 8b` magic, so before the fix `detect_input` sniffed a
-/// BAM on stdin (no `--in-format`) as gzipped FASTQ and failed with a misleading
-/// "FASTQ parse error … found 'B'". A BAM piped on stdin must now be detected and
-/// converted, exercising both BGZF sniffing and `io::bam::reader_from` (which
-/// reads from the chained probe stream instead of re-opening stdin).
+/// A BGZF-framed BAM piped through stdin is detected as BAM rather than generic
+/// gzip and is converted through the chained probe stream.
 #[test]
 fn bam_on_stdin_without_in_format_is_detected() {
     let dir = tempfile::tempdir().unwrap();
@@ -292,8 +314,7 @@ fn bam_on_stdin_without_in_format_is_detected() {
     write_fixture(&in_path);
     let bam_bytes = std::fs::read(&in_path).unwrap();
 
-    // Sanity: the fixture really starts with the gzip magic (i.e. it would have
-    // tripped the old gz-first sniffer).
+    // BGZF uses the gzip magic prefix.
     assert_eq!(
         &bam_bytes[..2],
         &[0x1f, 0x8b],

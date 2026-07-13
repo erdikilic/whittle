@@ -40,6 +40,24 @@ pub fn reader_from(
     })
 }
 
+/// Build a FASTQ iterator over BGZF-compressed input. Unlike ordinary gzip,
+/// BGZF is independently framed and can inflate blocks on the shared Rayon
+/// codec pool while the parser consumes completed blocks in order.
+pub fn reader_from_bgzf(
+    inner: Box<dyn Read + Send>,
+    workers: usize,
+) -> anyhow::Result<Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send>> {
+    let inner: Box<dyn Read + Send> = if workers > 1 {
+        crate::io::bam::configure_bgzf_pool(workers)?;
+        Box::new(noodles_bgzf::io::MultithreadedReader::new(inner))
+    } else {
+        Box::new(noodles_bgzf::io::Reader::new(inner))
+    };
+    Ok(Box::new(RecordIter {
+        reader: Reader::new(inner),
+    }))
+}
+
 struct RecordIter<R: Read> {
     reader: Reader<R>,
 }
@@ -67,11 +85,8 @@ fn write_head<W: Write>(
 ) -> io::Result<()> {
     w.write_all(b"@")?;
     if total_segments > 1 {
-        // Suffix the read id (everything up to the first ASCII whitespace) and
-        // re-emit the original delimiter + remainder verbatim. This preserves both
-        // a space-separated description AND a tab-delimited tag list (`samtools
-        // fastq -T` style) — the old space-only split appended the suffix past the
-        // tab, mutating the first tag's value.
+        // Insert the suffix after the read ID while preserving the original
+        // delimiter, description, and tab-delimited tags.
         match name.iter().position(|&b| b == b' ' || b == b'\t') {
             Some(i) => {
                 w.write_all(&name[..i])?;
@@ -275,6 +290,23 @@ mod tests {
         assert_eq!(recs[0].seq, b"ACGT");
         assert_eq!(recs[0].qual, vec![40, 40, 40, 40]); // 'I' = 73 - 33
         assert_eq!(recs[1].qual, vec![0, 0]); // '!' = 33 - 33
+    }
+
+    #[test]
+    fn bgzf_reader_roundtrips_fastq() {
+        let fq = b"@r1\nACGT\n+\nIIII\n@r2 x\nTT\n+\n!!\n";
+        let mut writer = noodles_bgzf::io::Writer::new(Vec::new());
+        writer.write_all(fq).unwrap();
+        let compressed = writer.finish().unwrap();
+
+        let records: Vec<_> = reader_from_bgzf(Box::new(std::io::Cursor::new(compressed)), 1)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].name, b"r1");
+        assert_eq!(records[0].seq, b"ACGT");
+        assert_eq!(records[1].name, b"r2 x");
     }
 
     use noodles_sam::alignment::record_buf::data::field::Value;

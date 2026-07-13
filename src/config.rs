@@ -85,8 +85,8 @@ pub struct Config {
     /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
     /// `--adapter-preset ont` was given (adapter trimming off — no per-read cost).
     pub adapters: Option<crate::adapter::AdapterConfig>,
-    /// Whether ab-initio adapter inference runs, and whether it also trims
-    /// (`Off` by default — no behavior change from before this field existed).
+    /// Whether ab-initio adapter inference runs and whether inferred adapters
+    /// are also used for trimming.
     pub adapter_infer: AdapterInfer,
     pub threads: usize,
     pub fastq_tags: FastqTags,
@@ -149,25 +149,71 @@ pub enum EncodeKind {
     Gzip,
 }
 
-/// Split a `-t` total worker budget across decode/render/encode, given whether
-/// RENDER is heavy (BAM input → MM/ML reconstruction) vs light (FASTQ input →
-/// trim only), and the encode stage's kind. Empirically tuned (2026-07-03 sweep,
-/// mid_eqbase): decode never benefits (serial inflate keeps up → 1); the rest is
-/// split so the heavier stage gets more threads.
-pub fn thread_budget(total: usize, render_heavy: bool, encode: EncodeKind) -> ThreadBudget {
+/// Split a `-t` worker budget across decode, render, and encode. Parallel input
+/// receives multiple decode workers; otherwise decoding stays serial and the
+/// remaining workers are weighted toward the more expensive downstream stage.
+pub fn thread_budget(
+    total: usize,
+    render_heavy: bool,
+    parallel_decode: bool,
+    encode: EncodeKind,
+) -> ThreadBudget {
     let total = total.max(1);
+
+    if parallel_decode && total == 2 {
+        return ThreadBudget {
+            decode: 2,
+            render: 1,
+            encode: 1,
+        };
+    }
+
+    if parallel_decode && total >= 3 {
+        let (decode, render, encode_n) = match encode {
+            EncodeKind::None if render_heavy => {
+                let decode = (total / 3).max(2);
+                (decode, total - decode - 1, 1)
+            },
+            EncodeKind::None => {
+                let decode = (total * 2 / 3).max(2);
+                (decode, total - decode - 1, 1)
+            },
+            EncodeKind::Gzip | EncodeKind::Bgzf if render_heavy => {
+                let render = (total * 2 / 5).max(1);
+                let remaining = total - render;
+                let decode = (remaining / 3).max(1);
+                (decode, render, remaining - decode)
+            },
+            EncodeKind::Gzip | EncodeKind::Bgzf => {
+                let render = 1;
+                let remaining = total - render;
+                let decode = (remaining / 3).max(1);
+                (decode, render, remaining - decode)
+            },
+        };
+        return ThreadBudget {
+            decode,
+            render,
+            encode: encode_n,
+        };
+    }
+
     let rest = total.saturating_sub(1).max(2); // >= 2 so both stages can get >= 1
     let (render, encode_n) = match (render_heavy, encode) {
         // No compression pool → render gets everything (encode field unused).
         (_, EncodeKind::None) => (rest, 1),
-        // BAM in + bgzf out: give BGZF the larger half only at low thread
-        // counts so -t4 gets two encoder workers; above that, keep render
-        // slightly favored for MM/ML reconstruction.
+        // BAM in + bgzf out: split nearly evenly. Raw BAM field/tag conversion
+        // now runs in the render pool alongside MM/ML reconstruction, while the
+        // Noodles BGZF stage uses the other half for ordered block encoding.
         (true, EncodeKind::Bgzf) if rest <= 4 => (rest / 2, rest.div_ceil(2)),
-        (true, EncodeKind::Bgzf) => (rest.div_ceil(2), rest / 2),
-        // BAM in + gzip out: both heavy, encode slightly favored. R3E4.
+        (true, EncodeKind::Bgzf) if rest <= 8 => (rest.div_ceil(2), rest / 2),
+        (true, EncodeKind::Bgzf) => {
+            let render = rest.div_ceil(2).max(1);
+            (render, rest - render)
+        },
+        // BAM input with gzip output slightly favors encoding.
         (true, EncodeKind::Gzip) => (rest / 2, rest.div_ceil(2)),
-        // FASTQ in (light render) + any compression: encode dominates. R1E6.
+        // FASTQ rendering is light, so compressed output favors encoding.
         (false, _) => {
             let r = (rest / 6).max(1);
             (r, rest - r)
@@ -254,7 +300,7 @@ mod tests {
     fn thread_budget_split() {
         use EncodeKind::*;
         assert_eq!(
-            thread_budget(8, true, Bgzf),
+            thread_budget(8, true, false, Bgzf),
             ThreadBudget {
                 decode: 1,
                 render: 4,
@@ -262,7 +308,15 @@ mod tests {
             }
         );
         assert_eq!(
-            thread_budget(4, true, Bgzf),
+            thread_budget(16, true, false, Bgzf),
+            ThreadBudget {
+                decode: 1,
+                render: 8,
+                encode: 7
+            }
+        );
+        assert_eq!(
+            thread_budget(4, true, false, Bgzf),
             ThreadBudget {
                 decode: 1,
                 render: 1,
@@ -270,7 +324,7 @@ mod tests {
             }
         );
         assert_eq!(
-            thread_budget(8, true, Gzip),
+            thread_budget(8, true, false, Gzip),
             ThreadBudget {
                 decode: 1,
                 render: 3,
@@ -278,7 +332,7 @@ mod tests {
             }
         );
         assert_eq!(
-            thread_budget(8, false, Gzip),
+            thread_budget(8, false, false, Gzip),
             ThreadBudget {
                 decode: 1,
                 render: 1,
@@ -286,7 +340,7 @@ mod tests {
             }
         );
         assert_eq!(
-            thread_budget(8, true, None),
+            thread_budget(8, true, false, None),
             ThreadBudget {
                 decode: 1,
                 render: 7,
@@ -296,7 +350,7 @@ mod tests {
         for t in [1usize, 2, 3, 4, 16] {
             for rh in [true, false] {
                 for e in [None, Bgzf, Gzip] {
-                    let b = thread_budget(t, rh, e);
+                    let b = thread_budget(t, rh, false, e);
                     assert!(b.decode >= 1 && b.render >= 1 && b.encode >= 1);
                 }
             }
@@ -309,7 +363,7 @@ mod tests {
         for t in [1usize, 2, 8, 16] {
             for rh in [true, false] {
                 for e in [None, Bgzf, Gzip] {
-                    let b = thread_budget(t, rh, e);
+                    let b = thread_budget(t, rh, false, e);
                     assert_eq!(b.total(), b.decode + b.render + b.encode);
                 }
             }
@@ -331,5 +385,25 @@ mod tests {
         // MN alone does not turn on the mod block:
         let mn_only = FastqTags::parse("MN").unwrap();
         assert!(!mn_only.carries_mods());
+    }
+
+    #[test]
+    fn bgzf_fastq_plain_output_favors_parallel_decode() {
+        assert_eq!(
+            thread_budget(16, false, true, EncodeKind::None),
+            ThreadBudget {
+                decode: 10,
+                render: 5,
+                encode: 1,
+            }
+        );
+        assert_eq!(
+            thread_budget(2, false, true, EncodeKind::None),
+            ThreadBudget {
+                decode: 2,
+                render: 1,
+                encode: 1,
+            }
+        );
     }
 }

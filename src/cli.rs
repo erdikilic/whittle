@@ -111,6 +111,8 @@ struct Cli {
 enum FormatArg {
     Fastq,
     FastqGz,
+    #[value(name = "fastq-bgz", alias = "fastq-bgzf")]
+    FastqBgzf,
     Bam,
 }
 
@@ -119,6 +121,7 @@ impl From<FormatArg> for Format {
         match f {
             FormatArg::Fastq => Format::Fastq,
             FormatArg::FastqGz => Format::FastqGz,
+            FormatArg::FastqBgzf => Format::FastqBgzf,
             FormatArg::Bam => Format::Bam,
         }
     }
@@ -316,6 +319,7 @@ pub fn parse() -> anyhow::Result<Config> {
             error_rate: c.adapter_error_rate,
             end_size: c.adapter_end_size,
             split: !c.adapter_ends_only,
+            candidate_index: std::sync::OnceLock::new(),
         })
     };
 
@@ -513,10 +517,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    // A 6-10bp entry used to pass this reader's old ">= 6bp" gate but could
-    // never actually match in `adapter::adapter_segments` (which silently
-    // ignores anything shorter than `MIN_PATTERN_LEN` = 11bp) — silently
-    // never trimming. The gate here must match that 11bp floor exactly.
+    // FASTA loading and adapter search must enforce the same minimum length.
     #[test]
     fn read_adapter_fasta_skips_entries_below_min_pattern_len() {
         let dir = tempfile::tempdir().unwrap();

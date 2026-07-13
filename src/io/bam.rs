@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{self, Write};
-use std::num::NonZero;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use noodles_bam as bam;
 use noodles_bgzf as bgzf;
@@ -9,8 +9,46 @@ use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::io::Write as _; // write_header / write_alignment_record
 use noodles_sam::{self as sam};
 
-/// A boxed, owning iterator over decoded `RecordBuf`s (or per-record errors).
-type RecordBufIterBox = Box<dyn Iterator<Item = anyhow::Result<RecordBuf>> + Send>;
+/// A boxed, owning iterator over raw BAM records (or per-record errors). A
+/// `bam::Record` owns the validated BAM record bytes but decodes fields lazily;
+/// the workflow converts it to `RecordBuf` on a render worker instead of doing
+/// all structured decoding on the serial reader thread.
+pub type RawRecordIter = Box<dyn Iterator<Item = anyhow::Result<bam::Record>> + Send>;
+
+static BGZF_RAYON_WORKERS: OnceLock<usize> = OnceLock::new();
+
+/// Noodles 0.48 submits BGZF jobs to Rayon's global registry from internal I/O
+/// threads. Configure that registry once to the codec share of whittle's staged
+/// thread budget; render work continues to use its own bounded local pool.
+#[allow(deprecated)]
+pub(crate) fn configure_bgzf_pool(workers: usize) -> anyhow::Result<()> {
+    let workers = workers.max(1);
+    if let Some(&configured) = BGZF_RAYON_WORKERS.get() {
+        if configured != workers {
+            tracing::debug!(
+                "BGZF global Rayon pool is already configured for {configured} workers; requested {workers}"
+            );
+        }
+        return Ok(());
+    }
+
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .breadth_first()
+        .thread_name(|i| format!("whittle-bgzf-{i}"))
+        .build_global()
+    {
+        Ok(()) => {},
+        Err(e) => {
+            let configured = rayon::current_num_threads();
+            tracing::debug!(
+                "Using an existing {configured}-thread global Rayon pool for BGZF (requested {workers}): {e}"
+            );
+        },
+    }
+    let _ = BGZF_RAYON_WORKERS.set(rayon::current_num_threads());
+    Ok(())
+}
 
 /// Error (naming the read) if the record is aligned. uBAM only in v1.
 pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
@@ -25,11 +63,11 @@ pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
 }
 
 /// Open a BAM reader; MT-bgzf when `workers > 1`. Returns the header and a Send
-/// owning `RecordBuf` iterator.
+/// owning raw-record iterator.
 pub fn reader(
     input: Option<&Path>,
     workers: usize,
-) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
+) -> anyhow::Result<(sam::Header, RawRecordIter)> {
     let inner: Box<dyn io::Read + Send> = match input {
         Some(p) => Box::new(File::open(p)?),
         None => Box::new(io::stdin()),
@@ -45,46 +83,31 @@ pub fn reader(
 pub fn reader_from(
     inner: Box<dyn io::Read + Send>,
     workers: usize,
-) -> anyhow::Result<(sam::Header, RecordBufIterBox)> {
+) -> anyhow::Result<(sam::Header, RawRecordIter)> {
     if workers > 1 {
-        let mt =
-            bgzf::io::MultithreadedReader::with_worker_count(NonZero::new(workers).unwrap(), inner);
+        configure_bgzf_pool(workers)?;
+        let mt = bgzf::io::MultithreadedReader::new(inner);
         let mut r = bam::io::Reader::from(mt);
         let header = r.read_header()?;
-        let hc = header.clone();
-        Ok((
-            header,
-            Box::new(RecordBufIter {
-                reader: r,
-                header: hc,
-            }),
-        ))
+        Ok((header, Box::new(RawRecordIterImpl { reader: r })))
     } else {
         let mut r = bam::io::Reader::new(inner);
         let header = r.read_header()?;
-        let hc = header.clone();
-        Ok((
-            header,
-            Box::new(RecordBufIter {
-                reader: r,
-                header: hc,
-            }),
-        ))
+        Ok((header, Box::new(RawRecordIterImpl { reader: r })))
     }
 }
 
-struct RecordBufIter<R: io::Read> {
+struct RawRecordIterImpl<R: io::Read> {
     reader: bam::io::Reader<R>,
-    header: sam::Header,
 }
 
-impl<R: io::Read> Iterator for RecordBufIter<R> {
-    type Item = anyhow::Result<RecordBuf>;
+impl<R: io::Read> Iterator for RawRecordIterImpl<R> {
+    type Item = anyhow::Result<bam::Record>;
     fn next(&mut self) -> Option<Self::Item> {
-        let mut buf = RecordBuf::default();
-        match self.reader.read_record_buf(&self.header, &mut buf) {
+        let mut record = bam::Record::default();
+        match self.reader.read_record(&mut record) {
             Ok(0) => None,
-            Ok(_) => Some(Ok(buf)),
+            Ok(_) => Some(Ok(record)),
             Err(e) => Some(Err(e.into())),
         }
     }
@@ -112,9 +135,9 @@ pub fn writer(
         None => Box::new(io::stdout()),
     };
     if workers > 1 {
+        configure_bgzf_pool(workers)?;
         let mt = bgzf::io::multithreaded_writer::Builder::default()
             .set_compression_level(clevel)
-            .set_worker_count(NonZero::new(workers).unwrap())
             .build_from_writer(inner);
         let mut w = bam::io::Writer::from(mt);
         w.write_header(header)?;
@@ -137,6 +160,13 @@ impl BamSink {
         match self {
             BamSink::Single(w) => w.write_alignment_record(header, rec),
             BamSink::Multi(w) => w.write_alignment_record(header, rec),
+        }
+    }
+
+    pub fn write_raw_record(&mut self, header: &sam::Header, rec: &bam::Record) -> io::Result<()> {
+        match self {
+            BamSink::Single(w) => w.write_record(header, rec),
+            BamSink::Multi(w) => w.write_record(header, rec),
         }
     }
 

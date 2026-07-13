@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use rayon::prelude::*;
 
-use super::{Counters, Stats, process_read_segments};
+use super::{Batches, Counters, Stats, process_read_segments};
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
@@ -54,9 +54,8 @@ pub fn run_fastq_seq<W: Write>(
 /// caller runs inside a plain `for_each` with no `Result` propagation seam
 /// (see `run_fastq`), matching the pre-refactor `.unwrap()` on the same
 /// write.
-fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> Vec<u8> {
+fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut Vec<u8>) {
     let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
-    let mut buf = Vec::new();
     process_read_segments(
         &produced,
         &rec.seq,
@@ -65,7 +64,7 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> Vec<u8>
         counters,
         |idx, total, s, e| {
             write_segment(
-                &mut buf,
+                &mut *buf,
                 &rec.name,
                 &rec.seq[s..e],
                 &rec.qual[s..e],
@@ -76,7 +75,6 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters) -> Vec<u8>
         },
     )
     .expect("writing FASTQ segments into an in-memory Vec<u8> cannot fail");
-    buf
 }
 
 /// Threads-aware FASTQ workflow entry point. Sequential (and output-order
@@ -139,22 +137,39 @@ where
         });
 
         pool.install(|| {
-            records.par_bridge().for_each(|rec| {
-                let rec = match rec {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let mut g = parse_err.lock().unwrap();
-                        if g.is_none() {
-                            *g = Some(e);
-                        }
-                        return;
-                    },
-                };
-                counters.input_reads.fetch_add(1, Ordering::Relaxed);
+            let batches = Batches::new(records, |rec: &anyhow::Result<ReadRecord>| {
+                rec.as_ref().map_or(0, |r| r.seq.len())
+            });
+            batches.par_bridge().for_each(|batch| {
+                let estimated_bytes = batch
+                    .iter()
+                    .filter_map(|rec| rec.as_ref().ok())
+                    .map(|rec| rec.seq.len().saturating_mul(2) + rec.name.len() + 6)
+                    .sum();
+                let mut buf = Vec::with_capacity(estimated_bytes);
+                let mut input_reads = 0u64;
+                let mut input_bases = 0u64;
+                for rec in batch {
+                    let rec = match rec {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let mut g = parse_err.lock().unwrap();
+                            if g.is_none() {
+                                *g = Some(e);
+                            }
+                            continue;
+                        },
+                    };
+                    input_reads += 1;
+                    input_bases += rec.seq.len() as u64;
+                    render_record(&rec, cfg, counters, &mut buf);
+                }
+                counters
+                    .input_reads
+                    .fetch_add(input_reads, Ordering::Relaxed);
                 counters
                     .input_bases
-                    .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
-                let buf = render_record(&rec, cfg, counters);
+                    .fetch_add(input_bases, Ordering::Relaxed);
                 if !buf.is_empty() {
                     let _ = tx.send(buf);
                 }
@@ -382,14 +397,8 @@ mod tests {
 
     #[test]
     fn too_short_segment_bumps_segments_dropped_short_counter() {
-        // Reorder regression: `filter::check` now runs POST-trim, per produced
-        // segment (previously it ran pre-trim on the whole raw read). With no
-        // adapters/quality-op configured, `trim::apply` still returns the whole
-        // (untrimmed) read as its one produced segment, so the length filter
-        // rejects that segment rather than the raw read up front — same
-        // observable drop, but now counted at the segment level. Since exactly
-        // one segment was produced (not zero) and it was filtered, this is
-        // `reads_all_filtered`, not `reads_trimmed_to_nothing`.
+        // One produced segment rejected by length counts as all-filtered, not
+        // trimmed-to-nothing.
         let mut f = base_filter();
         f.min_length = 10;
         let cfg = Config {
@@ -434,11 +443,7 @@ mod tests {
 
     #[test]
     fn trimmed_to_nothing_bumps_reads_trimmed_to_nothing_counter() {
-        // Reorder regression: `trim::apply` producing zero segments (a head-crop
-        // of 10 exceeds the 4-base read length, so no window survives) never
-        // enters the per-segment loop at all, bumping the read-level
-        // `reads_trimmed_to_nothing` counter (distinct from `reads_all_filtered`,
-        // which requires at least one produced segment that was then filtered).
+        // A crop that removes the complete read produces no segments.
         let cfg = Config {
             io: crate::config::IoConfig {
                 input: None,
@@ -479,11 +484,7 @@ mod tests {
         assert_eq!(stats.segments_dropped_short, 0);
     }
 
-    /// A read's RAW mean quality is
-    /// dragged below `-q` only by a low-quality head flank; once that flank is
-    /// cropped away (crop runs before the filter in the new order), the
-    /// trimmed insert's own mean passes. Pre-fix (filter-before-trim), this
-    /// read would have been rejected on the raw mean; post-fix it SURVIVES.
+    /// Filtering uses the cropped sequence rather than the original read.
     #[test]
     fn quality_below_raw_mean_but_above_trimmed_insert_survives() {
         let mut f = base_filter();
@@ -514,15 +515,12 @@ mod tests {
             quiet: true,
             threads_clamped: None,
         };
-        // 4 low-quality bases (phred 2) then 6 high-quality bases (phred 40).
-        // Raw arithmetic mean = (2*4 + 40*6) / 10 = 24.8 < 30 (would fail the
-        // OLD pre-trim whole-read filter). After a head-crop of 4, the
-        // trimmed insert's mean is 40 >= 30 -> passes.
+        // Original mean: 24.8. Cropping four Q2 bases leaves six Q40 bases.
         let mut phred = vec![2u8; 4];
         phred.extend(std::iter::repeat_n(40u8, 6));
         assert!(
             filter::check(b"AAAAAAAAAA", &phred, &cfg.filter).is_some(),
-            "sanity: the RAW whole read must fail the filter on its own"
+            "the complete input read must fail the quality filter"
         );
         let recs = vec![Ok(rec("r1", b"AAAAAAAAAA", phred))];
         let mut out = Vec::new();
@@ -584,6 +582,7 @@ mod tests {
                 // and the read splits rather than being terminal-trimmed.
                 end_size: 1,
                 split: true,
+                candidate_index: std::sync::OnceLock::new(),
             }),
             adapter_infer: crate::config::AdapterInfer::Off,
             threads: 1,
@@ -785,8 +784,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
         };
-        // Far more records than the bounded channel capacity (threads*4), so a
-        // pre-fix build would deadlock instead of returning.
+        // Exceed the bounded channel capacity before the writer fails.
         let recs: Vec<ReadRecord> = (0..2000)
             .map(|i| rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10]))
             .collect();
