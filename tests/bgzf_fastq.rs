@@ -39,6 +39,14 @@ fn bgzf_fastq_path_and_stdin_are_detected() {
         .stdout(TRIMMED);
 }
 
+// The 28-byte BGZF EOF marker (an empty gzip block). samtools/bgzip require it
+// to treat a .bgz stream as complete; a writer that omits it makes `bgzip -t`
+// report truncation even when every data block is intact.
+const BGZF_EOF: &[u8] = &[
+    0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02, 0x00,
+    0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
 #[test]
 fn explicit_bgzf_output_roundtrips_and_finishes() {
     let dir = tempfile::tempdir().unwrap();
@@ -55,7 +63,13 @@ fn explicit_bgzf_output_roundtrips_and_finishes() {
         .assert()
         .success();
 
-    let mut reader = noodles_bgzf::io::Reader::new(std::fs::File::open(output).unwrap());
+    let raw = std::fs::read(&output).unwrap();
+    assert!(
+        raw.ends_with(BGZF_EOF),
+        "bgzf output must end with the EOF marker, else samtools/bgzip sees a truncated file"
+    );
+
+    let mut reader = noodles_bgzf::io::Reader::new(raw.as_slice());
     let mut decoded = Vec::new();
     reader.read_to_end(&mut decoded).unwrap();
     assert_eq!(decoded, TRIMMED);
