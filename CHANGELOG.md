@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-14
+
+### Added
+- Startup AVX2 capability check: on x86-64 builds compiled with AVX2 (the
+  default, via `target-cpu=x86-64-v3`), whittle now verifies at launch that the
+  running CPU supports AVX2 and exits with a clear message instead of crashing
+  with an illegal instruction on older CPUs.
+
+## [0.1.0] - 2026-07-14
+
 ### Added
 - Long-read (ONT / PacBio) trimming for FASTQ, gzipped FASTQ, and
   unaligned BAM: fixed head/tail crop, quality trimming (Mott, best-segment,
@@ -18,4 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Folder-merge mode, parallel processing with a workload-aware thread budget,
   and a progress/summary UI.
 
-[Unreleased]: https://github.com/erdikilic/whittle/commits/main
+[Unreleased]: https://github.com/erdikilic/whittle/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/erdikilic/whittle/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/erdikilic/whittle/releases/tag/v0.1.0
