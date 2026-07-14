@@ -1,8 +1,13 @@
-use sassy::Searcher;
-use sassy::profiles::Dna;
+use sassy::profiles::{Dna, Iupac};
+use sassy::{CachedRev, Searcher};
 
 /// Reusable DNA searcher (searches a pattern against both strands of the text).
 pub type DnaSearcher = Searcher<Dna>;
+
+/// Sassy only implements its pattern-batched v1 API for the IUPAC profile.
+/// For A/C/G/T adapter patterns and read windows this has the same matching
+/// semantics as `Dna`, while enabling SIMD lanes across patterns.
+pub type BatchedDnaSearcher = Searcher<Iupac>;
 
 /// One approximate match of a pattern in the text: half-open `[start, end)` into
 /// the text, with its edit `cost`. Strand is not exposed — a reverse-complement
@@ -24,6 +29,25 @@ pub fn new_searcher() -> DnaSearcher {
 /// strand-oriented and RC hits would inflate the per-window presence count.
 pub fn new_searcher_fwd() -> DnaSearcher {
     Searcher::<Dna>::new_fwd()
+}
+
+pub fn new_batched_searcher() -> BatchedDnaSearcher {
+    Searcher::<Iupac>::new_rc()
+}
+
+/// Search equal-length patterns together, packing them across SIMD lanes.
+/// This retains `search`'s reverse-text semantics while avoiding the repeated
+/// short-text setup of calling `search` once per pattern.
+pub fn pattern_hits(
+    searcher: &mut BatchedDnaSearcher,
+    patterns: &[Vec<u8>],
+    text: &[u8],
+    k: usize,
+) -> Vec<sassy::Match> {
+    // `search_patterns` processes SIMD-sized chunks internally. Without this
+    // wrapper Sassy rebuilds the reversed text once per chunk.
+    let cached_text = CachedRev::new(text, true);
+    searcher.search_patterns(patterns, &cached_text, k)
 }
 
 /// All matches of `pattern` in `text` with edit distance <= `k`, as text

@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use aho_corasick::AhoCorasick;
-use search::{DnaSearcher, hits, new_searcher};
+use search::{
+    BatchedDnaSearcher, DnaSearcher, hits, new_batched_searcher, new_searcher, pattern_hits,
+};
 
 thread_local! {
     /// One reverse-complement searcher per thread, reused across reads so
@@ -16,6 +18,10 @@ thread_local! {
     /// buffers) on every call. Per-thread, so the parallel workflows stay
     /// data-race-free without sharing.
     static RC_SEARCHER: RefCell<DnaSearcher> = RefCell::new(new_searcher());
+
+    /// Pattern-batched searcher. Sassy's `Dna` profile does not implement
+    /// `search_patterns`; on A/C/G/T input its IUPAC profile is equivalent.
+    static BATCH_SEARCHER: RefCell<BatchedDnaSearcher> = RefCell::new(new_batched_searcher());
 }
 
 /// Which read end a catalog sequence is expected at — this gates TERMINAL
@@ -66,35 +72,86 @@ pub(crate) struct CandidateIndex {
     seed_adapters: Vec<Vec<usize>>,
     adapter_lens: Vec<usize>,
     error_rate: f64,
+    terminal_batches: Vec<TerminalBatch>,
+    batched_adapters: Vec<bool>,
+}
+
+/// Equal-length adapters searched together through Sassy's pattern-parallel
+/// API. Sassy handles forward and reverse-complement matching for the batch.
+#[derive(Debug, Clone)]
+struct TerminalBatch {
+    adapter_indices: Vec<usize>,
+    patterns: Vec<Vec<u8>>,
+    len: usize,
+    k_end: usize,
 }
 
 impl CandidateIndex {
-    fn new(adapters: &[Adapter], error_rate: f64) -> Self {
-        let mut seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
-        for (adapter_idx, adapter) in adapters.iter().enumerate() {
-            let len = adapter.seq.len();
-            if len < MIN_PATTERN_LEN {
-                continue;
+    fn new(adapters: &[Adapter], error_rate: f64, include_interior: bool) -> Self {
+        let (matcher, seed_adapters) = if include_interior {
+            let mut seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+            for (adapter_idx, adapter) in adapters.iter().enumerate() {
+                let len = adapter.seq.len();
+                if len < MIN_PATTERN_LEN {
+                    continue;
+                }
+                let k_mid = (0.5 * error_rate * len as f64).floor() as usize;
+                add_partition_seeds(&mut seeds, adapter_idx, &adapter.seq, k_mid);
+                let rc = reverse_complement(&adapter.seq);
+                add_partition_seeds(&mut seeds, adapter_idx, &rc, k_mid);
             }
-            let k_mid = (0.5 * error_rate * len as f64).floor() as usize;
-            add_partition_seeds(&mut seeds, adapter_idx, &adapter.seq, k_mid);
-            let rc = reverse_complement(&adapter.seq);
-            add_partition_seeds(&mut seeds, adapter_idx, &rc, k_mid);
-        }
 
-        let patterns: Vec<Vec<u8>> = seeds.keys().cloned().collect();
-        let seed_adapters: Vec<Vec<usize>> = seeds.into_values().collect();
-        let matcher = (!patterns.is_empty()).then(|| {
-            AhoCorasick::builder()
-                .ascii_case_insensitive(true)
-                .build(&patterns)
-                .expect("adapter seeds are nonempty ASCII DNA patterns")
-        });
+            let patterns: Vec<Vec<u8>> = seeds.keys().cloned().collect();
+            let seed_adapters: Vec<Vec<usize>> = seeds.into_values().collect();
+            let matcher = (!patterns.is_empty()).then(|| {
+                AhoCorasick::builder()
+                    .ascii_case_insensitive(true)
+                    .build(&patterns)
+                    .expect("adapter seeds are nonempty ASCII DNA patterns")
+            });
+            (matcher, seed_adapters)
+        } else {
+            (None, Vec::new())
+        };
+
+        // Sassy can pack equal-length patterns across SIMD lanes. Keep
+        // singletons on the ordinary search path: batching them cannot use
+        // pattern-level parallelism and is slower for these terminal windows.
+        let mut by_len: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (adapter_idx, adapter) in adapters.iter().enumerate() {
+            if adapter.seq.len() >= MIN_PATTERN_LEN {
+                by_len
+                    .entry(adapter.seq.len())
+                    .or_default()
+                    .push(adapter_idx);
+            }
+        }
+        let mut terminal_batches = Vec::new();
+        let mut batched_adapters = vec![false; adapters.len()];
+        for (len, adapter_indices) in by_len {
+            if adapter_indices.len() >= 2 {
+                let batch_patterns: Vec<Vec<u8>> = adapter_indices
+                    .iter()
+                    .map(|&idx| adapters[idx].seq.clone())
+                    .collect();
+                for &adapter_idx in &adapter_indices {
+                    batched_adapters[adapter_idx] = true;
+                }
+                terminal_batches.push(TerminalBatch {
+                    adapter_indices,
+                    patterns: batch_patterns,
+                    len,
+                    k_end: (error_rate * len as f64).floor() as usize,
+                });
+            }
+        }
         Self {
             matcher,
             seed_adapters,
             adapter_lens: adapters.iter().map(|adapter| adapter.seq.len()).collect(),
             error_rate,
+            terminal_batches,
+            batched_adapters,
         }
     }
 
@@ -246,85 +303,138 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
     let mut lo = 0usize; // 5' keep-boundary (advances inward on terminal hits)
     let mut hi = n; // 3' keep-boundary (retreats inward on terminal hits)
     let mut interior: Vec<(usize, usize)> = Vec::new();
-    let interior_windows = cfg.split.then(|| {
-        cfg.candidate_index
-            .get_or_init(|| CandidateIndex::new(&cfg.adapters, cfg.error_rate))
-            .candidate_windows(window, cfg.adapters.len())
-    });
+    let search_index = cfg
+        .candidate_index
+        .get_or_init(|| CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.split));
+    let interior_windows = cfg
+        .split
+        .then(|| search_index.candidate_windows(window, cfg.adapters.len()));
+    // `search_patterns` is only available through Sassy's IUPAC profile. It is
+    // exactly equivalent to the existing DNA path on A/C/G/T text; preserve
+    // prior behavior when either terminal search region has another symbol.
+    // Only inspect the bounded terminal regions, not the potentially huge
+    // interior of a long read that no terminal search will touch.
+    let batch_span = search_index
+        .terminal_batches
+        .iter()
+        .map(|batch| end_size + batch.len + batch.k_end)
+        .max()
+        .unwrap_or(0)
+        .min(n);
+    let use_batches = window[..batch_span]
+        .iter()
+        .chain(&window[n - batch_span..])
+        .all(|b| matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'));
 
     RC_SEARCHER.with_borrow_mut(|searcher| {
+        // All adapters in a batch have the same length and edit budget, so the
+        // head/tail windows are shared. This collapses the ONT catalog's 96
+        // equal-length barcode searches into one SIMD pattern search per end.
+        if use_batches {
+            BATCH_SEARCHER.with_borrow_mut(|batch_searcher| {
+                for batch in &search_index.terminal_batches {
+                    let head_end = (end_size + batch.len + batch.k_end).min(n);
+                    for h in pattern_hits(
+                        batch_searcher,
+                        &batch.patterns,
+                        &window[..head_end],
+                        batch.k_end,
+                    ) {
+                        let ad = &cfg.adapters[batch.adapter_indices[h.pattern_idx]];
+                        let terminal = if cfg.split {
+                            classify_terminal(h.text_start, h.text_end, n, end_size, ad.end)
+                        } else {
+                            ends_only_terminal(h.text_start, h.text_end, n, end_size, ad.end)
+                        };
+                        match terminal {
+                            Terminal::Five => lo = lo.max(h.text_end),
+                            Terminal::Excise => interior.push((h.text_start, h.text_end)),
+                            Terminal::Three | Terminal::None => {},
+                        }
+                    }
+
+                    let tail_start = n.saturating_sub(end_size + batch.len + batch.k_end);
+                    for h in pattern_hits(
+                        batch_searcher,
+                        &batch.patterns,
+                        &window[tail_start..],
+                        batch.k_end,
+                    ) {
+                        let ad = &cfg.adapters[batch.adapter_indices[h.pattern_idx]];
+                        let (start, end) = (tail_start + h.text_start, tail_start + h.text_end);
+                        let terminal = if cfg.split {
+                            classify_terminal(start, end, n, end_size, ad.end)
+                        } else {
+                            ends_only_terminal(start, end, n, end_size, ad.end)
+                        };
+                        match terminal {
+                            Terminal::Three => hi = hi.min(start),
+                            Terminal::Excise => interior.push((start, end)),
+                            Terminal::Five | Terminal::None => {},
+                        }
+                    }
+                }
+            });
+        }
+
+        // Singleton length groups retain the original one-pattern search. On a
+        // non-ACGT window every adapter takes this path for exact compatibility.
         for (adapter_idx, ad) in cfg.adapters.iter().enumerate() {
             let len = ad.seq.len();
-            if len < MIN_PATTERN_LEN {
+            if len < MIN_PATTERN_LEN || (use_batches && search_index.batched_adapters[adapter_idx])
+            {
                 continue;
             }
             let k_end = (cfg.error_rate * len as f64).floor() as usize;
-            let k_mid = (0.5 * cfg.error_rate * len as f64).floor() as usize;
-            if cfg.split {
-                // Loose terminal matching only needs bounded end windows. Search
-                // enough extra text to include the longest k-edit alignment whose
-                // start/end is still inside an end zone.
-                let head_end = (end_size + len + k_end).min(n);
-                for h in hits(searcher, &ad.seq, &window[..head_end], k_end) {
+            let head_end = (end_size + len + k_end).min(n);
+            for h in hits(searcher, &ad.seq, &window[..head_end], k_end) {
+                if cfg.split {
                     match classify_terminal(h.start, h.end, n, end_size, ad.end) {
                         Terminal::Five => lo = lo.max(h.end),
                         Terminal::Excise => interior.push((h.start, h.end)),
                         Terminal::Three | Terminal::None => {},
                     }
+                } else if ends_only_terminal(h.start, h.end, n, end_size, ad.end) == Terminal::Five
+                {
+                    lo = lo.max(h.end);
                 }
-                let tail_start = n.saturating_sub(end_size + len + k_end);
-                for h in hits(searcher, &ad.seq, &window[tail_start..], k_end) {
-                    let (s, e) = (tail_start + h.start, tail_start + h.end);
+            }
+            let tail_start = n.saturating_sub(end_size + len + k_end);
+            for h in hits(searcher, &ad.seq, &window[tail_start..], k_end) {
+                let (s, e) = (tail_start + h.start, tail_start + h.end);
+                if cfg.split {
                     match classify_terminal(s, e, n, end_size, ad.end) {
                         Terminal::Three => hi = hi.min(s),
                         Terminal::Excise => interior.push((s, e)),
                         Terminal::Five | Terminal::None => {},
                     }
+                } else if ends_only_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
+                    hi = hi.min(s);
                 }
+            }
+        }
 
-                // Exact partition seeds identify every possible interior match.
-                // Interior hits are accepted only up to `k_mid`, so Sassy searches
-                // the candidate window at that limit rather than `k_end`: a match
-                // within `k_mid` edits is found identically at the narrower band,
-                // and the wider band would only surface hits this loop discards.
-                if let Some(candidate_windows) = &interior_windows {
-                    for &(candidate_start, candidate_end) in &candidate_windows[adapter_idx] {
-                        for h in hits(
-                            searcher,
-                            &ad.seq,
-                            &window[candidate_start..candidate_end],
-                            k_mid,
-                        ) {
-                            let start = candidate_start + h.start;
-                            let end = candidate_start + h.end;
-                            if classify_terminal(start, end, n, end_size, ad.end) == Terminal::None
-                            {
-                                interior.push((start, end));
-                            }
+        // Exact partition seeds identify every possible interior match.
+        // Interior hits are accepted only up to `k_mid`, so Sassy searches the
+        // candidate window at that limit rather than the looser end budget.
+        if let Some(candidate_windows) = &interior_windows {
+            for (adapter_idx, ad) in cfg.adapters.iter().enumerate() {
+                if ad.seq.len() < MIN_PATTERN_LEN {
+                    continue;
+                }
+                let k_mid = (0.5 * cfg.error_rate * ad.seq.len() as f64).floor() as usize;
+                for &(candidate_start, candidate_end) in &candidate_windows[adapter_idx] {
+                    for h in hits(
+                        searcher,
+                        &ad.seq,
+                        &window[candidate_start..candidate_end],
+                        k_mid,
+                    ) {
+                        let start = candidate_start + h.start;
+                        let end = candidate_start + h.end;
+                        if classify_terminal(start, end, n, end_size, ad.end) == Terminal::None {
+                            interior.push((start, end));
                         }
-                    }
-                }
-            } else {
-                // Ends-only: search only the two end-zones, never the interior.
-                // A terminal 5' hit has `h.start <= end_size` but its `h.end` can
-                // extend up to `end_size + len + k_end`: `sassy::search` allows up
-                // to `k_end` edits INCLUDING INSERTIONS, and an insertion
-                // lengthens the matched TEXT span beyond the pattern length. So
-                // the head zone must be `end_size + len + k_end` wide, or a
-                // terminal hit with indel errors near the boundary would be
-                // under-trimmed or missed entirely. Symmetric for the tail zone.
-                let head_end = (end_size + len + k_end).min(n);
-                for h in hits(searcher, &ad.seq, &window[..head_end], k_end) {
-                    // Zone starts at 0, so h's coords are already window coords.
-                    if ends_only_terminal(h.start, h.end, n, end_size, ad.end) == Terminal::Five {
-                        lo = lo.max(h.end);
-                    }
-                }
-                let tail_start = n.saturating_sub(end_size + len + k_end);
-                for h in hits(searcher, &ad.seq, &window[tail_start..], k_end) {
-                    let (s, e) = (tail_start + h.start, tail_start + h.end);
-                    if ends_only_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
-                        hi = hi.min(s);
                     }
                 }
             }
@@ -575,6 +685,22 @@ mod segment_tests {
     }
 
     #[test]
+    fn non_acgt_window_falls_back_to_scalar_search() {
+        let cfg = cfg(
+            vec![
+                ad("a", b"ACGTACGTACGT", End::Five),
+                ad("b", b"TTTTGGGGCCCC", End::Three),
+            ],
+            true,
+        );
+        let window = b"ACGTACGTACGTNNNNNNNNNNNNNNNNNNNNTTTTGGGGCCCC";
+        assert_eq!(
+            adapter_segments(window, &cfg),
+            reference_segments(window, &cfg)
+        );
+    }
+
+    #[test]
     fn partition_seeds_survive_random_indels_and_substitutions() {
         struct Lcg(u64);
         impl Lcg {
@@ -620,7 +746,7 @@ mod segment_tests {
                 seq: pattern,
                 end: End::Both,
             };
-            let index = CandidateIndex::new(&[adapter], 0.2);
+            let index = CandidateIndex::new(&[adapter], 0.2, true);
             let mut text: Vec<u8> = (0..17).map(|_| rng.base()).collect();
             text.extend_from_slice(&mutated);
             text.extend((0..19).map(|_| rng.base()));
