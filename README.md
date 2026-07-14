@@ -8,6 +8,7 @@ It rewrites the position-indexed tags on every trim and split (`MM`/`ML` modific
 
 [![CI](https://github.com/erdikilic/whittle/actions/workflows/ci.yml/badge.svg)](https://github.com/erdikilic/whittle/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21355499.svg)](https://doi.org/10.5281/zenodo.21355499)
 ![Rust](https://img.shields.io/badge/rust-2024%20edition-000000?logo=rust&logoColor=white)
 ![Long reads](https://img.shields.io/badge/long--reads-ONT%20%7C%20PacBio-1f6feb)
 
