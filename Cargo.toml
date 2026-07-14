@@ -1,6 +1,6 @@
 [package]
 name = "whittle"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
@@ -40,6 +40,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 jiff = "0.2"
 sassy = { version = "0.2", default-features = false }
+# Direct dep (also pulled transitively by sassy) so main() can call
+# ensure_simd() to fail with a clear message on CPUs lacking AVX2, rather
+# than executing an illegal AVX2 instruction and crashing (SIGILL).
+ensure_simd = "0.1"
 aho-corasick = "1"
 
 [dev-dependencies]

@@ -1,4 +1,10 @@
 fn main() {
+    // On x86-64 builds compiled with AVX2 (the default via the crate's
+    // target-cpu=x86-64-v3 config), verify the running CPU actually supports
+    // AVX2 before any SIMD code runs, exiting with a clear message instead of
+    // a SIGILL. Compiles to a no-op on non-AVX2 / aarch64 builds.
+    ensure_simd::ensure_simd();
+
     let cfg = match whittle::cli::parse() {
         Ok(c) => c,
         Err(e) => {
