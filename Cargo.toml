@@ -23,37 +23,37 @@ name = "whittle"
 path = "src/lib.rs"
 
 [dependencies]
-seq_io = "0.3.4"
-flate2 = { version = "1", features = ["zlib-ng"], default-features = false }
 clap = { version = "4", features = ["derive"] }
-rayon = "1"
-crossbeam-channel = "0.5"
 anyhow = "1"
 thiserror = "2"
+
+rayon = "1"
+crossbeam-channel = "0.5"
+
+seq_io = "0.3.4"
 noodles-bam = "0.91.0"
 noodles-sam = "0.86.0"
 noodles-bgzf = { version = "0.48.0", features = ["libdeflate"] }
-bstr = "1"
+
+flate2 = { version = "1", features = ["zlib-ng"], default-features = false }
 gzp = "2"
+
+bstr = "1"
+aho-corasick = "1"
+
+sassy = { version = "0.2", default-features = false }
+ensure_simd = "0.1"
+
 indicatif = "0.18"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
 jiff = "0.2"
-sassy = { version = "0.2", default-features = false }
-# Direct dep (also pulled transitively by sassy) so main() can call
-# ensure_simd() to fail with a clear message on CPUs lacking AVX2, rather
-# than executing an illegal AVX2 instruction and crashing (SIGILL).
-ensure_simd = "0.1"
-aho-corasick = "1"
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 
-# rust-htslib links the system HTSlib (a C library) and is used only by the
-# BAM MM/ML oracle test. Gate it to Unix so Windows builds/CI don't have to
-# provision libhts, which is impractical there.
 [target.'cfg(unix)'.dev-dependencies]
 rust-htslib = { version = "1.0", default-features = false, features = ["libdeflate"] }
 
@@ -62,10 +62,6 @@ lto = "fat"
 codegen-units = 1
 
 [lints.rust]
-# whittle contains no `unsafe` blocks; keep it that way. Clippy's default
-# groups (correctness/suspicious/style/complexity/perf) already run and pass
-# clean, so they're not re-declared here. `pedantic` is intentionally left off:
-# it flags ~200 subjective items that would fail CI's `-D warnings` gate.
 unsafe_code = "forbid"
 
 [package.metadata.docs.rs]
