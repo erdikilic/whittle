@@ -200,13 +200,30 @@ fn perbase_slice(value: &Value, orig_len: usize, start: usize, end: usize) -> Op
     }
 }
 
+/// The integer an aux value holds, whatever width it was stored at.
+///
+/// SAM integer tags are written at the smallest subtype that fits, so a tag is
+/// `C` below 256, `S` below 65536 and `I` above that. Matching on one subtype
+/// therefore fails on most real records.
+fn aux_integer(value: &Value) -> Option<i64> {
+    Some(match value {
+        Value::UInt8(n) => i64::from(*n),
+        Value::Int8(n) => i64::from(*n),
+        Value::UInt16(n) => i64::from(*n),
+        Value::Int16(n) => i64::from(*n),
+        Value::UInt32(n) => i64::from(*n),
+        Value::Int32(n) => i64::from(*n),
+        _ => return None,
+    })
+}
+
 fn full_window_mods_already_consistent(src: &RecordBuf, seq_len: usize) -> bool {
     let Some(Value::String(_)) = src.data().get(&Tag::BASE_MODIFICATIONS) else {
         return true;
     };
     match src.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
-        Some(Value::Int32(n)) => *n >= 0 && *n as usize == seq_len,
-        _ => false,
+        Some(v) => aux_integer(v) == i64::try_from(seq_len).ok(),
+        None => false,
     }
 }
 
@@ -927,7 +944,14 @@ fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(bool, bool
         if tag == Tag::BASE_MODIFICATIONS {
             mm_is_string = matches!(value, RawValue::String(_));
         } else if tag == Tag::BASE_MODIFICATION_SEQUENCE_LENGTH {
+            // Same subtype-width point as `aux_integer`, over the borrowed
+            // raw value: dorado writes `MN:S` for an ordinary-length read.
             mn = match value {
+                RawValue::UInt8(n) => Some(i64::from(n)),
+                RawValue::Int8(n) => Some(i64::from(n)),
+                RawValue::UInt16(n) => Some(i64::from(n)),
+                RawValue::Int16(n) => Some(i64::from(n)),
+                RawValue::UInt32(n) => Some(i64::from(n)),
                 RawValue::Int32(n) => Some(i64::from(n)),
                 _ => None,
             };
@@ -2936,5 +2960,66 @@ mod tests {
             s.contains("@r1_segment_2\tMM:Z:C+m,0;\tML:B:C,200\tMN:i:24"),
             "seg2 mods wrong: {s}"
         );
+    }
+    /// `MN` is written at the smallest integer subtype that fits, so dorado emits
+    /// `MN:S` for an ordinary-length read. Accepting only `Int32` made every real
+    /// mod-bearing record look inconsistent, forcing a full MM/ML rebuild even on
+    /// an untrimmed record and rewriting `MN` as the wider `i`.
+    #[test]
+    fn mn_is_recognized_at_every_integer_subtype() {
+        use noodles_sam::alignment::record_buf::data::field::Value;
+
+        for v in [
+            Value::UInt8(12),
+            Value::Int8(12),
+            Value::UInt16(12),
+            Value::Int16(12),
+            Value::UInt32(12),
+            Value::Int32(12),
+        ] {
+            let mut rec = RecordBuf::default();
+            *rec.sequence_mut() = b"ACGTACGTACGT".to_vec().into();
+            let d = rec.data_mut();
+            d.insert(
+                Tag::BASE_MODIFICATIONS,
+                Value::String(b"C+m,0;".to_vec().into()),
+            );
+            d.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, v.clone());
+            assert!(
+                full_window_mods_already_consistent(&rec, 12),
+                "MN stored as {v:?} should be recognized"
+            );
+        }
+    }
+
+    /// An untrimmed record takes the pass-through path, so its tags come out
+    /// exactly as they went in, including `MN`'s storage width.
+    #[test]
+    fn untrimmed_mod_record_passes_through_byte_for_byte() {
+        use noodles_sam::alignment::record_buf::data::field::Value;
+
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = noodles_sam::alignment::record::Flags::UNMAPPED;
+        *rec.name_mut() = Some(b"r1".into());
+        *rec.sequence_mut() = b"ACGTACGTACGT".to_vec().into();
+        *rec.quality_scores_mut() = vec![40u8; 12].into();
+        let d = rec.data_mut();
+        d.insert(
+            Tag::BASE_MODIFICATIONS,
+            Value::String(b"C+m,0,1;".to_vec().into()),
+        );
+        d.insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(vec![200, 201])),
+        );
+        d.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::UInt16(12));
+
+        let out = reconstruct_record(&rec, 0, 12, 1, 0, false);
+        assert_eq!(
+            out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH),
+            Some(&Value::UInt16(12)),
+            "MN must keep the subtype it arrived with"
+        );
+        assert_eq!(out, rec, "an untrimmed record is passed through unchanged");
     }
 }

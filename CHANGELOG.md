@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped binary is unchanged.
 
 ### Fixed
+- Every base-modification record missed the untrimmed fast path, because the
+  `MN` consistency check accepted only the `i` (Int32) subtype while SAM writes
+  integers at the smallest width that fits, so dorado emits `MN:S`. A filter-only
+  or pass-through BAM run therefore rebuilt `MM`/`ML` for every record and
+  rewrote `MN` at the wider subtype. Recognizing every integer width cuts about
+  27% of the CPU time from those runs and leaves `MN` at the width it arrived
+  with. Decoded tag values are unchanged.
 - Adapter trimming aborted the whole run with a panic, leaving a truncated
   output file, when any read contained an ambiguity code (`N`, `Y`, `R`, ...)
   near an end. Sassy's `Dna` profile panics during traceback on non-ACGT text,
