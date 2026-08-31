@@ -27,7 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo run --example gen-man`; `clap_mangen` is a dev-dependency, so the
   shipped binary is unchanged.
 
+### Changed
+- BAM to FASTQ no longer re-parses and re-serializes `MM`/`ML` for a record whose
+  window is not being trimmed. Over the full window the reconstruction is the
+  identity, so the source bytes are reused after an allocation-free `ML` length
+  check. About 29% less CPU on an untrimmed conversion, with byte-identical
+  output.
+
 ### Fixed
+- Every base-modification record missed the untrimmed fast path, because the
+  `MN` consistency check accepted only the `i` (Int32) subtype while SAM writes
+  integers at the smallest width that fits, so dorado emits `MN:S`. A filter-only
+  or pass-through BAM run therefore rebuilt `MM`/`ML` for every record and
+  rewrote `MN` at the wider subtype. Recognizing every integer width cuts about
+  27% of the CPU time from those runs and leaves `MN` at the width it arrived
+  with. Decoded tag values are unchanged.
 - Adapter trimming aborted the whole run with a panic, leaving a truncated
   output file, when any read contained an ambiguity code (`N`, `Y`, `R`, ...)
   near an end. Sassy's `Dna` profile panics during traceback on non-ACGT text,

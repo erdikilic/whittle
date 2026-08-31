@@ -1,5 +1,52 @@
 use super::{MmGroup, ModCode, Mods};
 
+/// The number of `ML` bytes a well-formed record carrying this `MM` string must
+/// have: one per modified position per mod code, summed over groups.
+///
+/// Counts without allocating, so a caller can check `ML` consistency on the hot
+/// path without building the parsed representation. Tokenization mirrors `parse`,
+/// including its tolerance of a malformed tail.
+pub fn expected_ml_len(mm: &[u8]) -> usize {
+    let mut total = 0usize;
+    for token in mm.split(|&b| b == b';') {
+        if token.len() < 2 {
+            continue;
+        }
+        let mut i = 2;
+        let mut codes = 0usize;
+        if i < token.len() && token[i].is_ascii_digit() {
+            while i < token.len() && token[i].is_ascii_digit() {
+                i += 1;
+            }
+            codes = 1; // a ChEBI id is one code
+        } else {
+            while i < token.len() && token[i].is_ascii_alphabetic() {
+                codes += 1;
+                i += 1;
+            }
+        }
+        if i < token.len() && (token[i] == b'.' || token[i] == b'?') {
+            i += 1;
+        }
+        let mut deltas = 0usize;
+        while i < token.len() && token[i] == b',' {
+            i += 1;
+            let mut saw = false;
+            while i < token.len() && token[i].is_ascii_digit() {
+                i += 1;
+                saw = true;
+            }
+            // An empty field (`,,`) contributes no delta but does not end the
+            // list, matching `parse`, which skips it and keeps reading.
+            if saw {
+                deltas += 1;
+            }
+        }
+        total += deltas * codes.max(1);
+    }
+    total
+}
+
 /// Parse a raw MM:Z string plus its ML:B,C array into groups. Malformed tails are
 /// tolerated (best-effort): parsing a group stops at the first unexpected byte.
 pub fn parse(mm: &[u8], ml: &[u8]) -> Mods {
@@ -144,5 +191,35 @@ mod tests {
         assert_eq!(m.groups.len(), 1);
         assert_eq!(m.groups[0].codes, vec![ModCode::Chebi(u32::MAX)]);
         assert_eq!(m.groups[0].deltas, vec![usize::MAX]);
+    }
+    /// The counting scan must agree with the parsed representation, since it is
+    /// what lets the full-window shortcut check ML consistency without parsing.
+    #[test]
+    fn expected_ml_len_matches_the_parsed_length() {
+        for mm in [
+            &b"C+m,0,1,2;"[..],
+            b"C+m,0,1;C+h,2;",
+            b"C+mh,0,1;",
+            b"A+a?,3;",
+            b"C+16061,0,1;",
+            b"C+m;",
+            b"C+m,0,1,2;A+a,0;N+n,4,1;",
+            b"",
+            b";",
+            b"C+m,0,,1;",
+        ] {
+            let parsed = super::parse(mm, &[]);
+            let want: usize = parsed
+                .groups
+                .iter()
+                .map(|g| g.deltas.len() * g.codes.len().max(1))
+                .sum();
+            assert_eq!(
+                super::expected_ml_len(mm),
+                want,
+                "counting scan disagreed for {}",
+                String::from_utf8_lossy(mm)
+            );
+        }
     }
 }
