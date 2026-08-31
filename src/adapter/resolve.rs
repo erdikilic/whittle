@@ -128,12 +128,31 @@ pub(crate) fn buffer_prefix<R>(
 /// Report-only mode returns `None` so callers do not create an output writer;
 /// trimming modes return the buffered prefix chained with the remaining input.
 /// `seq_of` exposes a record's sequence without constraining its storage type.
-pub(crate) fn maybe_reduce_adapters<R, I, F>(
+/// What resolution decided: the stream to process, with any sampled prefix
+/// chained back in front of it, and the adapter set to trim it against.
+pub(crate) struct Resolved<R> {
+    pub records: Box<dyn Iterator<Item = anyhow::Result<R>> + Send>,
+    /// The set actually trimmed against, after presence detection narrowed the
+    /// configured set or inference replaced it. `None` when trimming is off.
+    pub adapters: Option<super::AdapterConfig>,
+}
+
+/// Decide the adapter set for a run, reading a prefix of the stream when it has
+/// to, and return it with the stream intact.
+///
+/// `Ok(None)` means the run is over without writing records: that is
+/// `--adapter-infer report`, which prints the inferred FASTA and stops.
+///
+/// Takes `&Config` and returns the outcome rather than writing back into the
+/// config: the set is only final after reads have been seen, which is well after
+/// the banner has printed the configured one, and an in-place overwrite made
+/// those two silently different views of the same field.
+pub(crate) fn resolve<R, I, F>(
     mut records: I,
-    cfg: &mut Config,
+    cfg: &Config,
     // The returned sequence view borrows the record passed to `seq_of`.
     seq_of: F,
-) -> anyhow::Result<Option<Box<dyn Iterator<Item = anyhow::Result<R>> + Send>>>
+) -> anyhow::Result<Option<Resolved<R>>>
 where
     // Workflow iterators are boxed and may cross worker-thread boundaries.
     I: Iterator<Item = anyhow::Result<R>> + Send + 'static,
@@ -142,10 +161,15 @@ where
 {
     if cfg.adapter_infer != AdapterInfer::Off {
         // Inference mode stores an empty configuration until discovery completes.
-        let base = cfg
-            .adapters
-            .clone()
-            .expect("adapter_infer != Off implies cfg.adapters is Some (see cli::parse)");
+        // `cli::parse` always pairs inference with an (initially empty) adapter
+        // config, but `run` is public, so a library caller can hand over a
+        // mismatched pair. An error beats a panic at a public boundary.
+        let Some(base) = cfg.adapters.clone() else {
+            anyhow::bail!(
+                "adapter inference was requested without an adapter configuration; \
+                 this is a caller error, not a bad input file"
+            );
+        };
 
         let sample: Vec<R> = buffer_prefix(&mut records, cfg.adapter_sample)?;
         let s = sample.len();
@@ -165,8 +189,10 @@ where
             }
             let mut reduced = base;
             reduced.replace_adapters(Vec::new());
-            cfg.adapters = Some(reduced);
-            return Ok(Some(chain(sample, records)));
+            return Ok(Some(Resolved {
+                records: chain(sample, records),
+                adapters: Some(reduced),
+            }));
         }
 
         let seq_storage: Vec<Cow<'_, [u8]>> = sample.iter().map(&seq_of).collect();
@@ -202,20 +228,24 @@ where
         }
         let mut reduced = base;
         reduced.replace_adapters(discovered.into_iter().map(|d| d.adapter).collect());
-        cfg.adapters = Some(reduced);
-        return Ok(Some(chain(sample, records)));
+        return Ok(Some(Resolved {
+            records: chain(sample, records),
+            adapters: Some(reduced),
+        }));
     }
 
     // Avoid buffering when neither inference nor presence sampling is active.
     if cfg.adapters.is_none() || cfg.adapter_sample == 0 {
-        return Ok(Some(Box::new(records)));
+        return Ok(Some(Resolved {
+            records: Box::new(records),
+            adapters: cfg.adapters.clone(),
+        }));
     }
 
-    // Reduce configured adapters using the sampled prefix.
+    // Narrow the configured set to what the sampled prefix actually contains.
     let mut sample: Vec<R> = Vec::new();
-    if let Some(ac) = cfg.adapters.clone()
-        && cfg.adapter_sample > 0
-    {
+    let mut adapters = cfg.adapters.clone();
+    if let Some(ac) = cfg.adapters.clone() {
         sample = buffer_prefix(&mut records, cfg.adapter_sample)?;
         let s = sample.len();
         let full = ac.adapters.len();
@@ -265,9 +295,10 @@ where
         };
         let mut reduced = ac;
         reduced.replace_adapters(kept);
-        cfg.adapters = Some(reduced);
+        adapters = Some(reduced);
     }
-    Ok(Some(Box::new(
-        sample.into_iter().map(anyhow::Ok).chain(records),
-    )))
+    Ok(Some(Resolved {
+        records: Box::new(sample.into_iter().map(anyhow::Ok).chain(records)),
+        adapters,
+    }))
 }

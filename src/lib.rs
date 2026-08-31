@@ -193,11 +193,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             // re-opening stdin would drop the BGZF header. For a file, `source` is
             // the same handle positioned at the start.
             let (header, records) = io::bam::reader_from(source, budget.decode)?;
-            let Some(records) = adapter::resolve::maybe_reduce_adapters(
-                records,
-                &mut cfg,
-                adapter::resolve::bam_seq,
-            )?
+            let Some(records) = settle(records, &mut cfg, budget, adapter::resolve::bam_seq)?
             else {
                 return Ok(());
             };
@@ -209,7 +205,6 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
                 budget.encode,
                 cfg.compression_level,
             )?;
-            cfg.render_workers = budget.render;
             let stats = workflow::run_raw_bam(&out_header, records, &mut sink, &cfg, &counters)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded. An I/O
@@ -222,16 +217,11 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
             // See the note in the (Bam, Bam) arm: read from the chained `source`.
             let (_header, records) = io::bam::reader_from(source, budget.decode)?;
-            let Some(records) = adapter::resolve::maybe_reduce_adapters(
-                records,
-                &mut cfg,
-                adapter::resolve::bam_seq,
-            )?
+            let Some(records) = settle(records, &mut cfg, budget, adapter::resolve::bam_seq)?
             else {
                 return Ok(());
             };
             let mut writer = io::fastq::writer(&cfg, out_fmt, budget.encode)?;
-            cfg.render_workers = budget.render;
             let stats = workflow::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
             writer.finish()?;
             finish_run(obs, &stats, &out_desc, &cfg, t0)?;
@@ -246,7 +236,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     note_tags_ignored(&cfg, in_fmt, out_fmt);
 
     // Writer construction (a `File::create`, which eagerly truncates any
-    // existing `-o` target) happens AFTER `adapter::resolve::maybe_reduce_adapters`, not before,
+    // existing `-o` target) happens AFTER `settle`, not before,
     // matching the BAM arms above. An inference-report early exit (`Ok(None)`)
     // must return before any output file is touched; building the writer
     // first would truncate a pre-existing `-o` file even though report-only
@@ -257,18 +247,47 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         Format::FastqBgzf => io::fastq::reader_from_bgzf(source, budget.decode)?,
         Format::Bam => unreachable!("BAM dispatch returned above"),
     };
-    let Some(records) = adapter::resolve::maybe_reduce_adapters(records, &mut cfg, |r| {
+    let Some(records) = settle(records, &mut cfg, budget, |r| {
         Cow::Borrowed(r.seq.as_slice())
     })?
     else {
         return Ok(());
     };
     let mut writer = io::fastq::writer(&cfg, out_fmt, budget.encode)?;
-    cfg.render_workers = budget.render;
     let stats = workflow::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
     finish_run(obs, &stats, &out_desc, &cfg, t0)?;
     Ok(())
+}
+
+/// Settle the configuration for dispatch and hand back the record stream.
+///
+/// Two fields are only knowable here. The adapter set has to see reads, since
+/// presence detection samples a prefix and inference discovers from one, so it
+/// is not final until after the banner has printed the configured set. The
+/// render-pool size comes from the thread budget. Both were previously assigned
+/// by hand in each of the six dispatch arms, where a new arm could omit either
+/// and silently get an unnarrowed adapter set or the wrong pool size.
+///
+/// `Ok(None)` means the run is over without writing records: that is
+/// `--adapter-infer report`, which prints the inferred FASTA and stops.
+fn settle<R, I, F>(
+    records: I,
+    cfg: &mut Config,
+    budget: config::ThreadBudget,
+    seq_of: F,
+) -> anyhow::Result<Option<Box<dyn Iterator<Item = anyhow::Result<R>> + Send>>>
+where
+    I: Iterator<Item = anyhow::Result<R>> + Send + 'static,
+    R: Send + 'static,
+    F: for<'a> Fn(&'a R) -> std::borrow::Cow<'a, [u8]>,
+{
+    let Some(resolved) = adapter::resolve::resolve(records, cfg, seq_of)? else {
+        return Ok(None);
+    };
+    cfg.adapters = resolved.adapters;
+    cfg.render_workers = budget.render;
+    Ok(Some(resolved.records))
 }
 
 /// The resolved facts both entry points announce before processing starts.
@@ -505,14 +524,11 @@ fn run_folder(
             note_tags_ignored(cfg, family_fmt, out_fmt);
             // Resolve report-only mode before creating the output file.
             let records = io::dir::fastq_records(&paths, budget.decode);
-            let Some(records) = adapter::resolve::maybe_reduce_adapters(records, cfg, |r| {
-                Cow::Borrowed(r.seq.as_slice())
-            })?
+            let Some(records) = settle(records, cfg, budget, |r| Cow::Borrowed(r.seq.as_slice()))?
             else {
                 return Ok(());
             };
             let mut writer = io::fastq::writer(cfg, out_fmt, budget.encode)?;
-            cfg.render_workers = budget.render;
             let stats = workflow::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
             finish_run(obs, &stats, &out_desc, cfg, t0)?;
@@ -525,12 +541,7 @@ fn run_folder(
                 // declare different read groups (relevant only for BAM output).
                 io::dir::warn_on_bam_header_mismatch(&paths);
                 let (header, records) = io::dir::bam_reader(&paths, budget.decode)?;
-                let Some(records) = adapter::resolve::maybe_reduce_adapters(
-                    records,
-                    cfg,
-                    adapter::resolve::bam_seq,
-                )?
-                else {
+                let Some(records) = settle(records, cfg, budget, adapter::resolve::bam_seq)? else {
                     return Ok(());
                 };
                 let out_header = io::bam::provenance_header(header);
@@ -540,7 +551,6 @@ fn run_folder(
                     budget.encode,
                     cfg.compression_level,
                 )?;
-                cfg.render_workers = budget.render;
                 let stats = workflow::run_raw_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
                 finish_run(obs, &stats, &out_desc, cfg, t0)?;
@@ -548,16 +558,10 @@ fn run_folder(
             },
             Format::Fastq | Format::FastqGz | Format::FastqBgzf => {
                 let (_header, records) = io::dir::bam_reader(&paths, budget.decode)?;
-                let Some(records) = adapter::resolve::maybe_reduce_adapters(
-                    records,
-                    cfg,
-                    adapter::resolve::bam_seq,
-                )?
-                else {
+                let Some(records) = settle(records, cfg, budget, adapter::resolve::bam_seq)? else {
                     return Ok(());
                 };
                 let mut writer = io::fastq::writer(cfg, out_fmt, budget.encode)?;
-                cfg.render_workers = budget.render;
                 let stats = workflow::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
                 writer.finish()?;
                 finish_run(obs, &stats, &out_desc, cfg, t0)?;
@@ -619,6 +623,64 @@ mod tests {
             config::encode_kind_for(io::Format::Fastq),
             config::EncodeKind::None
         );
+    }
+
+    fn a_read() -> crate::record::ReadRecord {
+        crate::record::ReadRecord {
+            name: b"r1".to_vec(),
+            seq: b"ACGTACGTACGT".to_vec(),
+            qual: vec![40; 12],
+        }
+    }
+
+    /// `settle` is the one place both dispatch-time fields are written, so both
+    /// must actually be written. They were previously assigned by hand in each of
+    /// the six arms, and an arm that forgot `render_workers` would silently
+    /// oversubscribe the render pool (or run it single-threaded on the BAM
+    /// full-window path) with nothing to catch it.
+    #[test]
+    fn settle_sets_both_dispatch_fields() {
+        let mut cfg = base_config();
+        cfg.render_workers = 0;
+        cfg.adapters = None;
+        let budget = config::ThreadBudget {
+            decode: 1,
+            render: 5,
+            encode: 2,
+        };
+
+        let records = vec![Ok(a_read())].into_iter();
+        let got = settle(records, &mut cfg, budget, |r| {
+            Cow::Borrowed(r.seq.as_slice())
+        })
+        .expect("settle succeeds")
+        .expect("records are returned when not in report mode");
+
+        assert_eq!(
+            cfg.render_workers, 5,
+            "render pool size comes from the budget"
+        );
+        assert!(cfg.adapters.is_none(), "no adapters configured stays none");
+        assert_eq!(got.count(), 1, "the record stream is handed back intact");
+    }
+
+    /// With no adapter work to do, the stream must pass through untouched rather
+    /// than being buffered.
+    #[test]
+    fn settle_passes_records_through_when_adapters_are_off() {
+        let mut cfg = base_config();
+        let budget = config::ThreadBudget {
+            decode: 1,
+            render: 1,
+            encode: 1,
+        };
+        let records = (0..7).map(|_| Ok(a_read()));
+        let got = settle(records, &mut cfg, budget, |r| {
+            Cow::Borrowed(r.seq.as_slice())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(got.count(), 7);
     }
 
     fn base_config() -> Config {
