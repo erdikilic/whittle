@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{self, Write};
+use std::num::NonZero;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use noodles_bam as bam;
 use noodles_bgzf as bgzf;
@@ -15,39 +15,15 @@ use noodles_sam::{self as sam};
 /// all structured decoding on the serial reader thread.
 pub type RawRecordIter = Box<dyn Iterator<Item = anyhow::Result<bam::Record>> + Send>;
 
-static BGZF_RAYON_WORKERS: OnceLock<usize> = OnceLock::new();
-
-/// Noodles 0.48 submits BGZF jobs to Rayon's global registry from internal I/O
-/// threads. Configure that registry once to the codec share of whittle's staged
-/// thread budget; render work continues to use its own bounded local pool.
-#[allow(deprecated)]
-pub(crate) fn configure_bgzf_pool(workers: usize) -> anyhow::Result<()> {
-    let workers = workers.max(1);
-    if let Some(&configured) = BGZF_RAYON_WORKERS.get() {
-        if configured != workers {
-            tracing::debug!(
-                "BGZF global Rayon pool is already configured for {configured} workers; requested {workers}"
-            );
-        }
-        return Ok(());
-    }
-
-    match rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .breadth_first()
-        .thread_name(|i| format!("whittle-bgzf-{i}"))
-        .build_global()
-    {
-        Ok(()) => {},
-        Err(e) => {
-            let configured = rayon::current_num_threads();
-            tracing::debug!(
-                "Using an existing {configured}-thread global Rayon pool for BGZF (requested {workers}): {e}"
-            );
-        },
-    }
-    let _ = BGZF_RAYON_WORKERS.set(rayon::current_num_threads());
-    Ok(())
+/// Worker count for a noodles BGZF reader or writer.
+///
+/// noodles 0.51 builds a private Rayon pool per reader/writer from this count.
+/// Up to 0.48 the count was ignored and jobs went to Rayon's global registry,
+/// so a caller configured that registry instead; passing the count explicitly is
+/// what replaced it. Getting this wrong is silent: the type checks either way,
+/// the codec just runs single-threaded.
+fn workers_nonzero(workers: usize) -> NonZero<usize> {
+    NonZero::new(workers.max(1)).unwrap_or(NonZero::<usize>::MIN)
 }
 
 /// Error (naming the read) if the record is aligned. uBAM only in v1.
@@ -85,8 +61,7 @@ pub fn reader_from(
     workers: usize,
 ) -> anyhow::Result<(sam::Header, RawRecordIter)> {
     if workers > 1 {
-        configure_bgzf_pool(workers)?;
-        let mt = bgzf::io::MultithreadedReader::new(inner);
+        let mt = bgzf::io::MultithreadedReader::with_worker_count(workers_nonzero(workers), inner);
         let mut r = bam::io::Reader::from(mt);
         let header = r.read_header()?;
         Ok((header, Box::new(RawRecordIterImpl { reader: r })))
@@ -135,9 +110,9 @@ pub fn writer(
         None => Box::new(io::stdout()),
     };
     if workers > 1 {
-        configure_bgzf_pool(workers)?;
         let mt = bgzf::io::multithreaded_writer::Builder::default()
             .set_compression_level(clevel)
+            .set_worker_count(workers_nonzero(workers))
             .build_from_writer(inner);
         let mut w = bam::io::Writer::from(mt);
         w.write_header(header)?;
