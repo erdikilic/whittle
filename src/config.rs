@@ -188,6 +188,9 @@ pub struct Config {
     /// Diagnostics raised while parsing arguments, emitted by `run` once the log
     /// subscriber exists. See `Advisory`.
     pub advisories: Vec<Advisory>,
+    /// The `--adapter-fasta` path, kept so `run` can refuse to overwrite it.
+    /// The sequences themselves are already resolved into `adapters`.
+    pub adapter_fasta: Option<PathBuf>,
 }
 
 /// How a `-t` total worker budget splits across the workflow stages. The split

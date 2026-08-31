@@ -533,6 +533,7 @@ pub fn parse() -> anyhow::Result<Config> {
         threads_clamped,
         summary_json: c.summary_json,
         advisories,
+        adapter_fasta: c.adapter_fasta,
     })
 }
 
@@ -637,6 +638,7 @@ pub fn config_for_test_threads(
         threads_clamped: None,
         summary_json: None,
         advisories: Vec::new(),
+        adapter_fasta: None,
     }
 }
 

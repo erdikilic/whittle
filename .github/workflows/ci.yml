@@ -92,6 +92,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features --locked
 
+      # Release tarballs ship the committed man page rather than regenerating it,
+      # so a flag change that forgets `cargo run --example gen-man` has to fail
+      # here instead of shipping a stale page.
+      - name: Man page is current
+        run: |
+          cargo run --locked --example gen-man -- "$RUNNER_TEMP"
+          diff -u man/whittle.1 "$RUNNER_TEMP/man/whittle.1" \
+            || { echo "::error::man/whittle.1 is stale; run 'cargo run --example gen-man'"; exit 1; }
+
   # Verifies the crate still builds on its declared MSRV (Cargo.toml
   # `rust-version`). RUSTUP_TOOLCHAIN overrides the pinned rust-toolchain.toml.
   msrv:

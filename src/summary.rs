@@ -324,6 +324,7 @@ mod tests {
             threads_clamped: None,
             summary_json: None,
             advisories: Vec::new(),
+            adapter_fasta: None,
         }
     }
 
