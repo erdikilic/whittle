@@ -4,7 +4,7 @@
 //! peeling, boundary drop-trim, and presence-fraction confidence. Implemented
 //! from the paper (not translated from GPL source). Pure and format-neutral.
 
-use crate::adapter::search::{AdapterSearcher, hits, new_searcher};
+use crate::adapter::search::{AmbiguousSearcher, hits, new_ambiguous_searcher};
 use crate::adapter::{Adapter, AdapterConfig, End, MIN_PATTERN_LEN};
 
 /// k-mer length used for end-window counting and assembly graph nodes.
@@ -178,7 +178,7 @@ fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
 /// forward-only (see `new_searcher_fwd`) so reverse-complement occurrences do
 /// not inflate the count. Callers provide an already bounded window sample.
 fn two_error_freq(
-    searcher: &mut AdapterSearcher,
+    searcher: &mut AmbiguousSearcher,
     kmer: &[u8],
     windows: &[&[u8]],
     max_edits: usize,
@@ -390,7 +390,7 @@ fn same_adapter(a: &[u8], b: &[u8], error_rate: f64) -> bool {
         return short == long;
     }
     let k = (error_rate * short.len() as f64).floor() as usize;
-    let mut s = new_searcher();
+    let mut s = new_ambiguous_searcher();
     !hits(&mut s, short, long, k).is_empty()
 }
 
@@ -454,7 +454,7 @@ fn conservative_terminal_anchor(seq: &[u8], end: End) -> Vec<u8> {
 /// top 3, only >= 60%. Used to give an inferred adapter a human-readable name
 /// when it corresponds to a known catalog entry.
 fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f32)> {
-    let mut s = new_searcher();
+    let mut s = new_ambiguous_searcher();
     let mut named: Vec<(String, f32)> = Vec::new();
     for r in refs {
         let (short, long) = if seq.len() <= r.seq.len() {
@@ -889,7 +889,7 @@ mod tests {
         let top = &found[0];
         assert!(top.adapter.seq.len() >= MIN_PATTERN_LEN);
         // near-match to the planted adapter (fuzzy, since recovery is approximate)
-        let mut s = new_searcher();
+        let mut s = new_ambiguous_searcher();
         let k = (0.25 * adapter.len() as f64).ceil() as usize;
         assert!(
             !hits(&mut s, &top.adapter.seq, adapter, k).is_empty()
@@ -959,7 +959,7 @@ mod tests {
 
         // near-matches the planted adapter (fuzzy, since recovery is
         // approximate).
-        let mut s = new_searcher();
+        let mut s = new_ambiguous_searcher();
         let k = (0.25 * adapter.len() as f64).ceil() as usize;
         assert!(
             !hits(&mut s, &both.adapter.seq, adapter, k).is_empty()
@@ -1093,7 +1093,7 @@ mod tests {
              RECOUNT_WINDOWS must still be discovered, not hidden by a \
              first-N window cap (got {found:?})"
         );
-        let mut s = new_searcher();
+        let mut s = new_ambiguous_searcher();
         let k = (0.25 * adapter.len() as f64).ceil() as usize;
         assert!(
             found.iter().any(|d| {
@@ -1139,7 +1139,7 @@ mod tests {
             "lowercase reads must still be inferable (got {found:?})"
         );
         let top = &found[0];
-        let mut s = new_searcher();
+        let mut s = new_ambiguous_searcher();
         let k = (0.25 * adapter.len() as f64).ceil() as usize;
         assert!(
             !hits(&mut s, &top.adapter.seq, adapter, k).is_empty()

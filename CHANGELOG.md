@@ -12,7 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   primer now matches every variant its wobble positions cover, instead of being
   skipped as "non-ACGT". `U` folds to `T`; non-nucleotide characters are still
   skipped with a warning, and a pattern averaging two or more bases per position
-  is searched but flagged as near-wildcard.
+  is searched but flagged as near-wildcard. An ambiguity code in a *read* is
+  treated as a mismatch instead, so it costs error budget rather than matching
+  for free: a stray `N` in a real adapter still matches, a run of them is not
+  excised as one.
 - `--summary-json <PATH>`: writes a machine-readable JSON summary of the run,
   covering the resolved settings (`params`) and the read, base, and per-reason
   segment-drop counters. Written on every dispatch path, folder merges included,

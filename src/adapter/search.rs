@@ -1,20 +1,30 @@
-use sassy::CachedRev;
-use sassy::Searcher;
-use sassy::profiles::Iupac;
+use sassy::profiles::{Dna, Iupac};
+use sassy::{CachedRev, Searcher};
 
-/// Reusable adapter searcher (searches a pattern against both strands of the text).
+/// The fast searcher: sassy's DNA profile, for all-ACGT patterns against
+/// all-ACGT text.
 ///
-/// The IUPAC profile, not `Dna`, and this is load-bearing: sassy's `Dna` profile
-/// PANICS during traceback if the text holds any byte outside `ACGTacgt`, and
-/// real ONT reads contain `N`. IUPAC treats an ambiguity code as matching the
-/// bases it stands for, which is both the standard reading and the only one that
-/// does not abort the run. On pure A/C/G/T text the two profiles are equivalent,
-/// so this costs nothing on the common case. Sassy's pattern-batched API is
-/// IUPAC-only anyway, so this makes one profile serve both paths.
-pub type AdapterSearcher = Searcher<Iupac>;
+/// It PANICS during traceback on any other byte, in the pattern or the text, so
+/// every use must be gated on `is_plain_acgt` for both. That is why the two
+/// profiles are kept side by side instead of standardizing on IUPAC: on a
+/// narrowed adapter set, where most patterns are searched one at a time rather
+/// than batched across SIMD lanes, IUPAC costs several times more.
+pub type PlainSearcher = Searcher<Dna>;
 
-/// The same profile, used through the pattern-batched API.
+/// The general searcher: sassy's IUPAC profile, which handles ambiguity codes in
+/// the pattern (a degenerate primer) and in the text (an `N` in a read).
+pub type AmbiguousSearcher = Searcher<Iupac>;
+
+/// The batched, pattern-parallel searcher. Sassy implements `search_patterns`
+/// only for IUPAC, so the batched path is always ambiguity-safe.
 pub type BatchedAdapterSearcher = Searcher<Iupac>;
+
+/// Whether every byte is a plain uppercase-or-lowercase A/C/G/T, meaning
+/// `PlainSearcher` can be used without risking its traceback panic.
+pub fn is_plain_acgt(seq: &[u8]) -> bool {
+    seq.iter()
+        .all(|b| matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'))
+}
 
 /// How many of the four bases an IUPAC code stands for, or `None` if the byte is
 /// not a nucleotide code at all.
@@ -43,14 +53,19 @@ pub struct Hit {
 }
 
 /// A fresh searcher configured to also match the reverse-complement strand.
-pub fn new_searcher() -> AdapterSearcher {
+pub fn new_searcher() -> PlainSearcher {
+    Searcher::<Dna>::new_rc()
+}
+
+/// An ambiguity-tolerant searcher over both strands.
+pub fn new_ambiguous_searcher() -> AmbiguousSearcher {
     Searcher::<Iupac>::new_rc()
 }
 
 /// A fresh searcher that matches the FORWARD strand only (no reverse-complement).
 /// Used by inference's k-mer recount, where each read-end window is already
 /// strand-oriented and RC hits would inflate the per-window presence count.
-pub fn new_searcher_fwd() -> AdapterSearcher {
+pub fn new_searcher_fwd() -> AmbiguousSearcher {
     Searcher::<Iupac>::new_fwd()
 }
 
@@ -78,7 +93,12 @@ pub fn pattern_hits(
 /// `new_searcher` (RC-enabled) matches both strands, `new_searcher_fwd`
 /// matches the forward strand only. Reuses `searcher`'s internal buffers
 /// across calls.
-pub fn hits(searcher: &mut AdapterSearcher, pattern: &[u8], text: &[u8], k: usize) -> Vec<Hit> {
+pub fn hits<P: sassy::profiles::Profile>(
+    searcher: &mut Searcher<P>,
+    pattern: &[u8],
+    text: &[u8],
+    k: usize,
+) -> Vec<Hit> {
     searcher
         .search(pattern, text, k)
         .into_iter()

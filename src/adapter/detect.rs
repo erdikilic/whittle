@@ -1,4 +1,4 @@
-use super::search::{AdapterSearcher, hits, new_searcher};
+use super::search::{AmbiguousSearcher, hits, new_ambiguous_searcher};
 use super::{Adapter, MIN_PATTERN_LEN, Terminal, classify_terminal};
 use rayon::prelude::*;
 
@@ -16,7 +16,7 @@ pub fn presence_min(sample_size: usize) -> usize {
 /// when `split`, an interior hit (`cost <= k_mid`, split). Mirrors the
 /// per-adapter body of `adapter_segments` so "present" == "does something".
 fn adapter_present_in(
-    searcher: &mut AdapterSearcher,
+    searcher: &mut AmbiguousSearcher,
     window: &[u8],
     ad: &Adapter,
     error_rate: f64,
@@ -65,7 +65,7 @@ pub fn present(
         adapters
             .par_iter()
             .filter_map(|ad| {
-                let mut searcher = new_searcher();
+                let mut searcher = new_ambiguous_searcher();
                 let mut count = 0usize;
                 for &seq in sample {
                     if adapter_present_in(&mut searcher, seq, ad, error_rate, end_size, split) {
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn adapter_present_in_terminal_and_interior() {
-        let mut s = new_searcher();
+        let mut s = new_ambiguous_searcher();
         let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", End::Both);
         // terminal: adapter at read start.
         let mut term = a.seq.clone();
