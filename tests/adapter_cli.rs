@@ -1403,11 +1403,11 @@ fn qual_split_both_pieces_survive_at_lower_length_floor() {
     );
 }
 
-/// Real ONT reads contain `N`. Sassy's `Dna` profile panics during traceback on
-/// any non-ACGT byte in the text, and the searcher used to fall back to exactly
-/// that profile whenever it saw one, so a single ambiguity code near a read end
-/// aborted the run and left a truncated output file behind. Every searcher now
-/// uses the IUPAC profile, which is what tolerates ambiguity codes.
+/// Real ONT reads contain ambiguity codes, and sassy's `Dna` profile panics
+/// during traceback on any non-ACGT byte in the text. A read carrying one near an
+/// end must still be trimmed, and the run must complete: the searcher rewrites the
+/// code before searching, so no path reaches that profile with a byte it cannot
+/// represent.
 #[test]
 fn ambiguity_codes_in_reads_do_not_abort_adapter_trimming() {
     let dir = tempfile::tempdir().unwrap();
