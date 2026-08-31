@@ -204,7 +204,7 @@ where
                 end = e,
                 len = e - s,
                 reason = reason.label(),
-                "segment dropped"
+                "Segment dropped"
             );
             counters.record_segment_drop(reason);
             continue;
@@ -215,7 +215,7 @@ where
             start = s,
             end = e,
             len = e - s,
-            "segment kept"
+            "Segment kept"
         );
         render(idx, total, s, e)?;
         counters.output_reads.fetch_add(1, Ordering::Relaxed);
@@ -225,12 +225,12 @@ where
         survived += 1;
     }
     if produced.is_empty() {
-        tracing::trace!("read produced no segments");
+        tracing::trace!("Read produced no segments");
         counters
             .reads_trimmed_to_nothing
             .fetch_add(1, Ordering::Relaxed);
     } else if survived == 0 {
-        tracing::trace!(produced = total, "every segment filtered");
+        tracing::trace!(produced = total, "Every segment filtered");
         counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
     } else {
         counters.reads_with_output.fetch_add(1, Ordering::Relaxed);

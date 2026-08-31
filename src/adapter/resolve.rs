@@ -54,7 +54,7 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
         }
         if d.support < MARGINAL_SUPPORT {
             tracing::warn!(
-                "adapter '{}' support {:.2} is marginal (near the KEEP_SUPPORT floor); \
+                "Adapter '{}' support {:.2} is marginal (near the KEEP_SUPPORT floor); \
                  verify with --adapter-infer report",
                 d.adapter.name,
                 d.support
@@ -62,7 +62,7 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
         }
         if d.uncertain_bases() > 0 {
             tracing::warn!(
-                "adapter '{}' uses a conservative {} bp terminal anchor; {} bp of the \
+                "Adapter '{}' uses a conservative {} bp terminal anchor; {} bp of the \
                  {} bp recurrent consensus remain uncertain and will not be trimmed \
                  (--adapter-infer-policy aggressive opts into the full consensus)",
                 d.adapter.name,
@@ -176,7 +176,7 @@ where
         if s < detect::MIN_SAMPLE_FOR_DETECTION {
             // Report-only mode must not create output when the sample is too small.
             tracing::warn!(
-                "adapter inference: too few reads ({s}, need >= {}) to infer reliably; \
+                "Adapter inference: too few reads ({s}, need >= {}) to infer reliably; \
                  keeping reads untrimmed",
                 detect::MIN_SAMPLE_FOR_DETECTION
             );
@@ -218,7 +218,7 @@ where
 
         if discovered.is_empty() {
             tracing::warn!(
-                "adapter inference: no adapters inferred from the first {s} reads; keeping \
+                "Adapter inference: no adapters inferred from the first {s} reads; keeping \
                  reads untrimmed"
             );
         }

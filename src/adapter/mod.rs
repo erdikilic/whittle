@@ -305,7 +305,7 @@ fn trace_hit(name: &str, start: usize, end: usize, cost: i64, terminal: Terminal
             Terminal::Excise => "excise and split",
             Terminal::None => "no action",
         },
-        "adapter hit"
+        "Adapter hit"
     );
 }
 

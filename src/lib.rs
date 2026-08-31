@@ -130,7 +130,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         stage = "setup",
         format = in_fmt.label(),
         elapsed_ms = setup_start.elapsed().as_millis() as u64,
-        "input format detected"
+        "Input format detected"
     );
 
     // Resolved once here so the banner's Threads line and the dispatch arm below
@@ -188,7 +188,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         decode = budget.decode,
         render = budget.render,
         encode = budget.encode,
-        "processing started"
+        "Processing started"
     );
 
     // BAM dispatch happens before creating/truncating the output file, and so
@@ -421,7 +421,7 @@ fn finish_run(
         reads_out = stats.output_reads,
         bases_in = stats.input_bases,
         bases_out = stats.output_bases,
-        "processing finished"
+        "Processing finished"
     );
     let elapsed = obs.finish(stats, out_desc);
     if let Some(path) = cfg.summary_json.as_deref() {
@@ -545,7 +545,7 @@ fn run_folder(
         decode = budget.decode,
         render = budget.render,
         encode = budget.encode,
-        "processing started"
+        "Processing started"
     );
 
     match family {
