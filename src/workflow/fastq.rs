@@ -240,6 +240,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
         let mut out = Vec::new();
@@ -287,6 +288,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
         let mut out = Vec::new();
@@ -331,6 +333,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         // good(3) bad(1) good(3): I I I # I I I  -> two segments (0,3),(4,7)
         let phred: Vec<u8> = b"III#III".iter().map(|&b| b - 33).collect();
@@ -379,6 +382,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
@@ -424,6 +428,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
@@ -468,6 +473,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
@@ -515,6 +521,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         // Original mean: 24.8. Cropping four Q2 bases leaves six Q40 bases.
         let mut phred = vec![2u8; 4];
@@ -596,6 +603,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let recs = vec![Ok(rec("r1", &seq, phred))];
         let mut out = Vec::new();
@@ -657,6 +665,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let recs = vec![Ok(rec("empty", b"", vec![]))];
         let mut out = Vec::new();
@@ -702,6 +711,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         // Owned records (ReadRecord: Clone); wrap in Ok at iteration time so each run
         // gets a fresh Send iterator. anyhow::Error is not Clone, so a
@@ -788,6 +798,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         // Exceed the bounded channel capacity before the writer fails.
         let recs: Vec<ReadRecord> = (0..2000)
@@ -838,6 +849,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let good: Vec<anyhow::Result<ReadRecord>> = (0..5)
             .map(|i| anyhow::Ok(rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10])))

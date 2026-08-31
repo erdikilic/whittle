@@ -182,3 +182,140 @@ fn no_summary_file_without_the_flag() {
 
     assert!(!dir.path().join("summary.json").exists());
 }
+
+/// `--quiet` silences the human-readable summary but must not blank out the
+/// JSON's `elapsed_seconds`, which is the field a benchmarking pipeline reads.
+#[test]
+fn elapsed_seconds_survives_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let json = dir.path().join("summary.json");
+
+    whittle()
+        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .args(["-l", "5"])
+        .arg("--quiet")
+        .write_stdin(reads())
+        .assert()
+        .success();
+
+    let v = summary(dir.path());
+    assert!(
+        v["elapsed_seconds"].as_f64().is_some(),
+        "elapsed_seconds must be a number under --quiet, got {}",
+        v["elapsed_seconds"]
+    );
+}
+
+/// Report mode writes no records, so it cannot write a summary either. Exiting 0
+/// with neither file and no explanation would strand a pipeline waiting on one.
+#[test]
+fn report_mode_warns_that_summary_json_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+    let mut fq = String::new();
+    for i in 0..200 {
+        let body: String = (0..300)
+            .map(|j| b"ACGT"[((i * 7 + j * 13 + j * j) % 4) as usize] as char)
+            .collect();
+        let s = format!("CCTGTACTTCGTTCAGTTACGTATTGC{body}");
+        fq.push_str(&format!("@r{i}\n{s}\n+\n{}\n", "I".repeat(s.len())));
+    }
+    std::fs::write(&input, fq).unwrap();
+    let json = dir.path().join("summary.json");
+
+    whittle()
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .args(["--adapter-infer", "report"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("--summary-json is ignored"))
+        .stderr(predicate::str::contains("-o/--output is ignored"));
+
+    assert!(!json.exists(), "report mode writes no summary file");
+}
+
+/// Argument-parsing diagnostics are collected and emitted through tracing, so the
+/// level filter applies. Previously they were printed straight to stderr from
+/// `cli::parse`, which bypassed the filter entirely: an informational advisory
+/// showed up even under `--quiet`.
+#[test]
+fn parse_time_advisories_respect_the_level_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+    std::fs::write(&input, "@r1\nACGTACGTACGT\n+\nIIIIIIIIIIII\n").unwrap();
+    let out = dir.path().join("out.fastq");
+
+    // Conservative inference raises an INFO advisory, which --quiet must drop.
+    let args = [
+        "-i",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--adapter-preset",
+        "ont",
+        "--adapter-infer",
+        "trim",
+    ];
+
+    whittle()
+        .args(args)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "conservative adapter inference trims read ends only",
+        ));
+
+    whittle()
+        .args(args)
+        .arg("--quiet")
+        .assert()
+        .success()
+        // The INFO advisory is filtered out; the WARN one still belongs on stderr,
+        // since --quiet keeps warnings.
+        .stderr(
+            predicate::str::contains("conservative adapter inference")
+                .not()
+                .and(predicate::str::contains("--adapter-preset is ignored")),
+        );
+}
+
+/// Deferred advisories still carry the standard `[timestamp] [LEVEL]` prefix, and
+/// still land after the version and command lines that open every run.
+#[test]
+fn parse_time_advisories_are_formatted_and_ordered() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+    std::fs::write(&input, "@r1\nACGTACGTACGT\n+\nIIIIIIIIIIII\n").unwrap();
+
+    let out = whittle()
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .arg("--adapter-ends-only")
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&out);
+
+    let advisory = stderr
+        .lines()
+        .find(|l| l.contains("--adapter-ends-only has no effect"))
+        .expect("advisory present");
+    assert!(
+        advisory.contains("[WARN]") && advisory.starts_with('['),
+        "advisory must carry the standard prefix: {advisory}"
+    );
+
+    let version_at = stderr.find("whittle 0.").expect("version line present");
+    let advisory_at = stderr
+        .find("--adapter-ends-only has no effect")
+        .expect("advisory present");
+    assert!(
+        version_at < advisory_at,
+        "the version line must still open the run"
+    );
+}

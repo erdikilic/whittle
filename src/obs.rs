@@ -210,8 +210,14 @@ impl ProgressHandle {
     /// driven by a ticker thread that polls the shared counters every `TICK_INTERVAL`;
     /// `Mode::Line` → no bar, the ticker instead emits a periodic INFO line every
     /// `log_interval`. `total` (input byte count) is `None` until byte counting lands;
-    /// a `None` total renders a spinner rather than a bar. No-op in `Mode::Off`.
+    /// a `None` total renders a spinner rather than a bar. In `Mode::Off` only the
+    /// run clock is started; there is no bar and no ticker.
     pub fn start(&mut self, total: Option<u64>, counters: Arc<Counters>) {
+        // The timer runs in every mode, including `Off`: `--quiet` silences the
+        // human-readable summary but must not blank out `elapsed_seconds` in the
+        // `--summary-json` file, which a benchmarking pipeline reads.
+        let start = Instant::now();
+        self.start = Some(start);
         if matches!(self.mode, Mode::Off) {
             return;
         }
@@ -251,8 +257,6 @@ impl ProgressHandle {
         let bar_t = bar.clone();
         let mode = self.mode;
         let log_interval = self.log_interval;
-        let start = Instant::now();
-        self.start = Some(start);
         let handle = std::thread::spawn(move || {
             let mut last_log = start;
             while !stop_t.load(Ordering::Relaxed) {

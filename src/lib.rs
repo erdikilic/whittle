@@ -215,6 +215,15 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // `main` before `run` is even called) and the banner above are meant to be
     // the first things a reader sees; only then do clamp/mismatch/no-op
     // advisories follow, ahead of the live progress/summary.
+    // Parse-time diagnostics, held by `cli::parse` until this subscriber exists
+    // so `--quiet` can silence them and they carry the standard prefix.
+    for a in &cfg.advisories {
+        if a.warn {
+            tracing::warn!("{}", a.message);
+        } else {
+            tracing::info!("{}", a.message);
+        }
+    }
     if let Some((requested, ncpu)) = cfg.threads_clamped {
         tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
     }
@@ -485,6 +494,20 @@ where
         log_discovered(&discovered, s);
 
         if cfg.adapter_infer.is_report() {
+            // Report mode prints the inferred FASTA and writes no records, so
+            // there is nothing for `-o` to hold and no counters worth
+            // summarizing. Both flags are named explicitly: exiting 0 having
+            // silently created neither file strands a pipeline that expected one.
+            for (flag, given) in [
+                ("-o/--output", cfg.io.output.is_some()),
+                ("--summary-json", cfg.summary_json.is_some()),
+            ] {
+                if given {
+                    tracing::warn!(
+                        "{flag} is ignored under --adapter-infer report, which writes no records"
+                    );
+                }
+            }
             print_discovered_fasta(&discovered);
             return Ok(None);
         }
@@ -809,6 +832,16 @@ fn run_folder(
             operation_line(family_fmt, out_fmt),
             cfg.threads
         );
+    }
+
+    // Parse-time diagnostics, held by `cli::parse` until this subscriber exists
+    // so `--quiet` can silence them and they carry the standard prefix.
+    for a in &cfg.advisories {
+        if a.warn {
+            tracing::warn!("{}", a.message);
+        } else {
+            tracing::info!("{}", a.message);
+        }
     }
 
     // See the matching comment in `run`: the clamp warning fires after the
@@ -1499,6 +1532,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         }
     }
 

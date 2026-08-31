@@ -107,6 +107,36 @@ impl AdapterInfer {
     }
 }
 
+/// A parse-time diagnostic, held until the log subscriber exists.
+///
+/// `cli::parse` runs before `obs::init`, so anything it prints directly bypasses
+/// the level filter (surviving `--quiet`), carries no `[timestamp] [LEVEL]`
+/// prefix, and lands ahead of the version and command lines that are supposed to
+/// open every run. Collecting the messages instead lets `run` emit them through
+/// tracing alongside the other deferred advisories.
+#[derive(Debug, Clone)]
+pub struct Advisory {
+    /// True for a warning, false for informational.
+    pub warn: bool,
+    pub message: String,
+}
+
+impl Advisory {
+    pub fn warn(message: impl Into<String>) -> Self {
+        Advisory {
+            warn: true,
+            message: message.into(),
+        }
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Advisory {
+            warn: false,
+            message: message.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IoConfig {
     pub input: Option<PathBuf>,
@@ -155,6 +185,9 @@ pub struct Config {
     /// `None` to write none. Written regardless of `--quiet` and the log level,
     /// since a caller that asked for it is a pipeline that needs the file.
     pub summary_json: Option<PathBuf>,
+    /// Diagnostics raised while parsing arguments, emitted by `run` once the log
+    /// subscriber exists. See `Advisory`.
+    pub advisories: Vec<Advisory>,
 }
 
 /// How a `-t` total worker budget splits across the workflow stages. The split
