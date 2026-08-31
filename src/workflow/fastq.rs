@@ -47,13 +47,11 @@ pub fn run_fastq_seq<W: Write>(
     Ok(counters.snapshot(0))
 }
 
-/// Trim one record, then filter each produced segment via the shared
-/// `process_read_segments` helper, rendering the survivors into an owned
-/// FASTQ byte buffer. Writing into an in-memory `Vec<u8>` cannot fail, so the
-/// `.expect` below is an assertion, not real error handling. The parallel
-/// caller runs inside a plain `for_each` with no `Result` propagation seam
-/// (see `run_fastq`), matching the pre-refactor `.unwrap()` on the same
-/// write.
+/// Trim one record, filter each produced segment through `process_read_segments`,
+/// and render the survivors into an owned FASTQ buffer. Writing into an in-memory
+/// `Vec<u8>` cannot fail, so the `.expect` below is an assertion, not error
+/// handling: the parallel caller runs inside a plain `for_each` with no `Result`
+/// seam (see `run_fastq`).
 fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut Vec<u8>) {
     let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
     process_read_segments(
@@ -77,18 +75,14 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut 
     .expect("writing FASTQ segments into an in-memory Vec<u8> cannot fail");
 }
 
-/// Threads-aware FASTQ workflow entry point. Sequential (and output-order
-/// deterministic) when `cfg.threads <= 1`; otherwise renders each record on a
-/// rayon work pool and drains rendered buffers through a bounded channel on a
-/// dedicated writer task. Output order is unordered for `threads > 1` since
-/// buffers are written in arrival order, not input order.
+/// Threads-aware FASTQ workflow entry point. Sequential and output-order
+/// deterministic when `cfg.threads <= 1`; otherwise records render on a rayon
+/// pool and drain through a bounded channel to a writer task, in arrival order.
 ///
-/// Record-parse errors (`Err` items from `records`): both paths surface them
-/// as an `Err` from this function. The sequential path aborts immediately via
-/// `?`; the parallel path captures the first parse error in a shared slot and
-/// keeps draining so producer threads never block on the bounded channel,
-/// surfacing the error once the scope joins (matching the sequential path's
-/// fail behavior, just at end-of-run instead of mid-stream).
+/// Both paths surface record-parse errors as an `Err` from this function. The
+/// sequential path aborts at once; the parallel path stashes the first error and
+/// keeps draining, so producers never block on the bounded channel, then reports
+/// it when the scope joins.
 pub fn run_fastq<W, I>(
     records: I,
     writer: &mut W,
@@ -245,6 +239,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
         let mut out = Vec::new();
@@ -291,6 +286,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
         let mut out = Vec::new();
@@ -334,6 +330,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         // good(3) bad(1) good(3): I I I # I I I  -> two segments (0,3),(4,7)
         let phred: Vec<u8> = b"III#III".iter().map(|&b| b - 33).collect();
@@ -381,6 +378,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
@@ -425,6 +423,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
@@ -468,6 +467,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
@@ -514,6 +514,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         // Original mean: 24.8. Cropping four Q2 bases leaves six Q40 bases.
         let mut phred = vec![2u8; 4];
@@ -594,6 +595,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let recs = vec![Ok(rec("r1", &seq, phred))];
         let mut out = Vec::new();
@@ -654,6 +656,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let recs = vec![Ok(rec("empty", b"", vec![]))];
         let mut out = Vec::new();
@@ -698,6 +701,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         // Owned records (ReadRecord: Clone); wrap in Ok at iteration time so each run
         // gets a fresh Send iterator. anyhow::Error is not Clone, so a
@@ -783,6 +787,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         // Exceed the bounded channel capacity before the writer fails.
         let recs: Vec<ReadRecord> = (0..2000)
@@ -832,6 +837,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let good: Vec<anyhow::Result<ReadRecord>> = (0..5)
             .map(|i| anyhow::Ok(rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10])))

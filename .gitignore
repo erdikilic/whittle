@@ -2,6 +2,9 @@
 /target/
 **/target/
 
+# Release staging directory (see .github/workflows/release.yml)
+/dist/
+
 # OS / editor cruft
 .DS_Store
 *.swp

@@ -355,11 +355,10 @@ fn real_ubam_oracle_sweep() {
     }
 }
 
-/// Threaded (t=8) companion to `real_ubam_oracle_sweep`: same real-data sweep,
-/// same head=10/tail=10 crop, but driven through the parallel BAM dispatch.
-/// Reads are matched by name (the parallel path is unordered), so this is a
-/// real-world-scale spot-check that `-t 8` produces byte-valid, mod-correct
-/// output on genuine ONT/dorado data, not just the small synthetic fixtures.
+/// Threaded (t=8) companion to `real_ubam_oracle_sweep`: same real-data sweep and
+/// head=10/tail=10 crop, through the parallel BAM dispatch. Reads are matched by
+/// name, since that path is unordered. A real-scale check that `-t 8` produces
+/// byte-valid, mod-correct output on genuine ONT/dorado data.
 //   WHITTLE_UBAM=data/short_eqread/short_eqread.bam \
 //     cargo test --test bam_mods_oracle -- --ignored
 #[test]

@@ -14,14 +14,11 @@ fn main() {
     };
     let mut obs = whittle::obs::init(cfg.verbosity, cfg.quiet);
 
-    // `whittle {version}`/`Command: ...` must be the very first thing printed,
-    // even before the resolved-config banner and any clamp/mismatch/no-op
-    // warning `run` emits, and even before an early hard-error bail, so a
-    // reader can always find them at the top of a run's output. Line mode
-    // only: bar mode gets exactly its own one-line start (see `run`) so the
-    // live bar stays otherwise clean. `args_os` (not `args`, which panics on
-    // non-UTF-8 argv) feeds `command_line`, which lossily converts and
-    // shell-quotes each argument.
+    // `whittle {version}`/`Command: ...` must print before everything else: the
+    // banner, any clamp/mismatch/no-op warning, and even an early hard-error bail,
+    // so a reader always finds them at the top. Line mode only; bar mode gets its
+    // own one-line start instead. `args_os` (not `args`, which panics on non-UTF-8
+    // argv) feeds `command_line`.
     if obs.shows_lines() {
         tracing::info!("whittle {}", env!("CARGO_PKG_VERSION"));
         tracing::info!("{}", whittle::command_line(std::env::args_os()));

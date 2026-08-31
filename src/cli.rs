@@ -45,6 +45,10 @@ struct Cli {
     /// unset: 4 for gzip FASTQ output, 6 for BGZF (BAM and .bgz).
     #[arg(short = 'c', long, help_heading = "Setup")]
     compression_level: Option<u8>,
+    /// Write a machine-readable JSON run summary (counters plus the resolved
+    /// settings) to this path. Written even under --quiet.
+    #[arg(long, value_name = "PATH", help_heading = "Setup")]
+    summary_json: Option<PathBuf>,
 
     /// Increase logging detail: -v = debug, -vv = trace (maximum two). Overridden by WHITTLE_LOG.
     #[arg(short = 'v', long, action = clap::ArgAction::Count, help_heading = "Logging")]
@@ -143,6 +147,13 @@ struct Cli {
         help_heading = "Adapter trimming"
     )]
     adapter_infer_policy: Option<AdapterInferPolicyArg>,
+}
+
+/// The parsed clap `Command`, for generating shell completions and the man page
+/// (see `examples/gen-artifacts.rs`). Kept here so those artifacts are always
+/// rendered from the one CLI definition rather than a hand-maintained copy.
+pub fn command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,16 +410,11 @@ pub fn parse() -> anyhow::Result<Config> {
         if c.adapter_end_size == 0 {
             anyhow::bail!("--adapter-end-size must be >= 1");
         }
-        // Under infer, the trimming set is discovered later (discovery fills
-        // it in); any preset sequences gathered above are ignored here (the
-        // preset WARN above already told the user). A report-only FASTA is
-        // carried through as `fasta_adapters` instead of being dropped: it's
-        // never trimmed against under infer (discovery always replaces this
-        // field before any dispatch -- see `maybe_reduce_adapters`, and
-        // report-only exits before dispatch entirely), so reusing this field
-        // to ferry the FASTA refs to `infer::discover` for cross-naming is
-        // safe. Under `Trim`, a FASTA is rejected above, so this is always
-        // empty there.
+        // Under infer the trimming set is discovered later, so preset sequences
+        // gathered above are dropped here. A report-only FASTA rides along in
+        // `fasta_adapters` purely as naming refs for `infer::discover`: discovery
+        // replaces this field before any dispatch, and report-only exits first, so
+        // it is never trimmed against. Under `Trim` a FASTA is rejected above.
         let trim_adapters = if adapter_infer == AdapterInfer::Off {
             adapter_seqs
         } else {
@@ -520,6 +526,7 @@ pub fn parse() -> anyhow::Result<Config> {
         verbosity: c.verbose,
         quiet: c.quiet,
         threads_clamped,
+        summary_json: c.summary_json,
     })
 }
 
@@ -617,6 +624,7 @@ pub fn config_for_test_threads(
         verbosity: 0,
         quiet: true,
         threads_clamped: None,
+        summary_json: None,
     }
 }
 

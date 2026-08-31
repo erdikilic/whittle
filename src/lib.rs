@@ -7,6 +7,7 @@ pub mod mods;
 pub mod obs;
 pub mod qual;
 pub mod record;
+pub mod summary;
 pub mod trim;
 pub mod workflow;
 
@@ -69,13 +70,10 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // `obs.start`.
     let counters = std::sync::Arc::new(workflow::Counters::default());
 
-    // Open the input (file or stdin) up front so format detection can sniff
-    // its first bytes without losing them: any bytes consumed while sniffing
-    // get prepended back via a Cursor+chain before the FASTQ reader is built.
-    // Wrapped in `CountingReader` here, innermost, so it counts actual bytes
-    // pulled from the file/stdin. The sniff bytes are counted once when
-    // first read; re-serving them from the in-memory `Cursor` below does not
-    // double-count them.
+    // Open the input (file or stdin) up front so format detection can sniff its
+    // first bytes without losing them: anything consumed gets prepended back via a
+    // Cursor+chain before the FASTQ reader is built. `CountingReader` sits
+    // innermost, so sniff bytes are counted once and re-serving them is free.
     let raw: Box<dyn Read + Send> = match in_path {
         Some(p) => Box::new(std::fs::File::open(p)?),
         None => Box::new(std::io::stdin()),
@@ -120,13 +118,10 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     };
 
     // Advisory only: an explicit --in-format/--out-format always wins for
-    // actual detection (this never changes behavior), but it usually signals a
-    // mistake when it disagrees with the path's own extension, e.g.
-    // `--in-format bam` on a `.fastq` file, or `--out-format fastq` on an
-    // `out.fastq.gz` path (which would write a plain FASTQ into a .gz name).
-    // Extension-only check: skipped for stdin/stdout / no-extension. Both
-    // warnings fire later, after the banner (see the consolidated warnings
-    // block below); only the detection runs here.
+    // detection, but usually signals a mistake when it disagrees with the path's
+    // extension, e.g. `--out-format fastq` on an `out.fastq.gz` path. Skipped for
+    // stdin/stdout and paths without an extension. Only the detection runs here;
+    // both warnings fire after the banner, with the other advisories.
     let mismatch_warn = io::format_mismatch_warning("--in-format", cfg.io.in_format, in_path);
     let out_mismatch_warn =
         io::format_mismatch_warning("--out-format", cfg.io.out_format, cfg.io.output.as_deref());
@@ -161,13 +156,11 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         obs::human_dur(setup_start.elapsed())
     );
 
-    // Resolved once, here, so the banner's Threads line and the actual dispatch
-    // arm below agree on the same split. Recomputing per arm risked the banner
-    // showing one number and the workflow running another.
-    // BAM and bgzf-FASTQ inputs are BGZF containers whose decode can run on the
-    // multithreaded reader. Grant a parallel decode budget only when the render
-    // stage is light: adapter search (preset, FASTA, or inference) makes render
-    // the bottleneck, so those threads are better left to it.
+    // Resolved once here so the banner's Threads line and the dispatch arm below
+    // agree; recomputing per arm risked showing one number and running another.
+    // BAM and bgzf-FASTQ inputs are BGZF containers whose decode can go
+    // multithreaded, but grant that budget only when render is light: adapter
+    // search (preset, FASTA, or inference) makes render the bottleneck instead.
     let parallel_decode = matches!(in_fmt, Format::FastqBgzf | Format::Bam)
         && cfg.adapters.is_none()
         && cfg.adapter_infer == AdapterInfer::Off;
@@ -274,8 +267,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
             // truncated BAM with a success exit code.
             sink.finish()?;
-            tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
-            obs.finish(&stats, &out_desc);
+            finish_run(obs, &stats, &out_desc, &cfg, t0)?;
             return Ok(());
         },
         (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
@@ -288,8 +280,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             cfg.render_workers = budget.render;
             let stats = workflow::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
             writer.finish()?;
-            tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
-            obs.finish(&stats, &out_desc);
+            finish_run(obs, &stats, &out_desc, &cfg, t0)?;
             return Ok(());
         },
         (Format::Fastq | Format::FastqGz | Format::FastqBgzf, Format::Bam) => {
@@ -321,8 +312,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     cfg.render_workers = budget.render;
     let stats = workflow::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
-    tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
-    obs.finish(&stats, &out_desc);
+    finish_run(obs, &stats, &out_desc, &cfg, t0)?;
     Ok(())
 }
 
@@ -334,27 +324,18 @@ fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
 }
 
 /// A kept adapter's support below this is close enough to `infer::KEEP_SUPPORT`
-/// (0.30, a whole-consensus presence fraction, see its doc comment) that
-/// it's worth an explicit warning rather than trusting the plain info line:
-/// a genuinely marginal discovery (e.g. an adapter only present in a fraction
-/// of reads, such as a barcode-specific sequence) can still clear the keep
-/// floor while remaining far from a confident, near-all-reads presence, so a
-/// kept adapter this weak deserves scrutiny before trusting it, not silent
-/// trust. ~1.5x `KEEP_SUPPORT` gives headroom above the floor while staying
-/// well below a genuine, high-prevalence adapter's typical near-1.0 presence.
+/// (0.30) to warrant a warning rather than a plain info line: a barcode-specific
+/// sequence present in only a fraction of reads can clear the keep floor while
+/// staying far from a confident near-1.0 presence. ~1.5x the floor gives headroom
+/// without reaching a genuine high-prevalence adapter's typical support.
 const MARGINAL_SUPPORT: f64 = 0.45;
 
-/// Log each ab-initio discovery (`infer::discover` output) at
-/// `info!`: `inferred_N ≈ NAME (pct%) · support X.XX` when the discovered
-/// sequence cross-names against the built-in ONT catalog, else `inferred_N
-/// (no catalog match) · support X.XX`. `N` is the 1-based position in
-/// `discovered`'s own order (support desc, then sequence asc, see
-/// `infer::discover`), which now agrees with any `inferred_{N}` fallback in
-/// `InferredAdapter::adapter.name` (both derive from the same post-sort order).
-/// The raw sequence is logged separately at `debug!`, too noisy for the
-/// default INFO level, but useful with `-v` when checking a discovery by eye.
-/// Support below `MARGINAL_SUPPORT` additionally gets a `warn!`, since it's
-/// close enough to the `KEEP_SUPPORT` floor to warrant double-checking.
+/// Log each ab-initio discovery at `info!`: `inferred_N ≈ NAME (pct%) · support
+/// X.XX`, or `(no catalog match)` when the sequence cross-names against nothing
+/// in the ONT catalog. `N` is the 1-based position in `discovered`'s own order,
+/// which agrees with the `inferred_{N}` name fallback. The raw sequence goes to
+/// `debug!` instead, too noisy for INFO. Support below `MARGINAL_SUPPORT` also
+/// gets a `warn!`, being close enough to the `KEEP_SUPPORT` floor to re-check.
 fn log_discovered(discovered: &[crate::adapter::infer::InferredAdapter], n_sampled: usize) {
     tracing::info!(
         "Adapter inference: sampled {n_sampled} reads, discovered {} adapter{}",
@@ -586,20 +567,14 @@ where
     )))
 }
 
-/// FASTQ output writer: either a plain buffered writer, or a `gzp` parallel
-/// gzip writer (used only when the output format is explicitly `FastqGz`;
-/// see `io::resolve_output`, which no longer auto-compresses).
+/// FASTQ output writer: a plain buffered writer, or a `gzp` parallel gzip writer
+/// when the output format is explicitly `FastqGz`.
 ///
-/// `gzp`'s `ParCompress` REQUIRES an explicit `finish()` call to flush its
-/// final (possibly partial) compressed block plus the gzip footer/checksum:
-/// its `Write` impl only ever hands off *full* buffered chunks to the
-/// compressor threads, so the tail end only ever gets flushed by `finish()`,
-/// never by `flush()`. `ParCompress`'s own `Drop` impl does call `finish()` as
-/// a backstop if it's still live, but it `.unwrap()`s the result: any I/O
-/// error at that point becomes an uncatchable panic instead of a propagated
-/// `anyhow::Result::Err`. Calling `finish()` explicitly, as the single seam
-/// both callers below go through instead of `flush()` + `drop()`, keeps that
-/// failure mode as an ordinary `Err`.
+/// `gzp`'s `ParCompress` requires an explicit `finish()`: its `Write` impl hands
+/// only full chunks to the compressor threads, so the tail block and gzip footer
+/// are never flushed by `flush()`. Its `Drop` calls `finish()` as a backstop but
+/// `.unwrap()`s the result, turning an I/O error into a panic; calling it
+/// explicitly keeps that failure an ordinary `Err`.
 enum FastqOut {
     Plain(BufWriter<Box<dyn Write + Send>>),
     Gz(ParCompress<'static, Mgzip, Box<dyn Write + Send>>),
@@ -718,8 +693,33 @@ fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Close out a finished dispatch: log the phase duration, print the end-of-run
+/// summary, and write `--summary-json` when one was requested. The one seam every
+/// dispatch arm goes through, so a new arm cannot forget the summary file.
+fn finish_run(
+    obs: &mut obs::ProgressHandle,
+    stats: &workflow::Stats,
+    out_desc: &str,
+    cfg: &Config,
+    t0: std::time::Instant,
+) -> anyhow::Result<()> {
+    tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
+    let elapsed = obs.finish(stats, out_desc);
+    if let Some(path) = cfg.summary_json.as_deref() {
+        summary::Summary::new(
+            cfg,
+            stats,
+            command_line(std::env::args_os()),
+            out_desc.to_string(),
+            elapsed,
+        )
+        .write(path)?;
+    }
+    Ok(())
+}
+
 /// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
-/// then merge all its read files into a single trimmed output using the same
+/// then merge its read files into a single trimmed output through the same
 /// workflows as the single-file path.
 fn run_folder(
     dir: &std::path::Path,
@@ -728,14 +728,11 @@ fn run_folder(
 ) -> anyhow::Result<()> {
     use io::Format;
 
-    // Pass the output path so `classify` can hard-error if `-o` names a read file
-    // inside `-i <dir>`: it could be a real input or a stale prior output, and
-    // overwriting either while merging the rest is silent data loss. The merged
-    // output must live outside the input directory.
-    // --in-format has no effect here: a directory's family is decided per file
-    // by extension (see io::dir::classify), so a forced input format is inert.
-    // Warn rather than silently ignore it (the warning proper fires below, with
-    // the other advisories, after the banner).
+    // Pass the output path so `classify` can hard-error when `-o` names a read
+    // file inside `-i <dir>`: real input or stale prior output, overwriting either
+    // while merging the rest is silent data loss. `--in-format` is inert here,
+    // since a directory's family is decided per file by extension, so it gets a
+    // warning below rather than being silently ignored.
     let folder_in_format_ignored = cfg.io.in_format.is_some();
 
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
@@ -855,8 +852,7 @@ fn run_folder(
             cfg.render_workers = budget.render;
             let stats = workflow::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
-            tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
-            obs.finish(&stats, &out_desc);
+            finish_run(obs, &stats, &out_desc, cfg, t0)?;
             Ok(())
         },
         io::dir::Family::Bam => match out_fmt {
@@ -879,8 +875,7 @@ fn run_folder(
                 cfg.render_workers = budget.render;
                 let stats = workflow::run_raw_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
-                tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
-                obs.finish(&stats, &out_desc);
+                finish_run(obs, &stats, &out_desc, cfg, t0)?;
                 Ok(())
             },
             Format::Fastq | Format::FastqGz | Format::FastqBgzf => {
@@ -892,8 +887,7 @@ fn run_folder(
                 cfg.render_workers = budget.render;
                 let stats = workflow::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
                 writer.finish()?;
-                tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
-                obs.finish(&stats, &out_desc);
+                finish_run(obs, &stats, &out_desc, cfg, t0)?;
                 Ok(())
             },
         },
@@ -986,20 +980,14 @@ fn output_banner_line(
     line
 }
 
-/// The startup banner's `Threads: ...` line: the resolved `-t`/auto worker
-/// count (`threads`) as the header, with the per-stage split (mapping the
-/// `ThreadBudget`'s internal stage names (decode/render/encode) onto the
-/// workflow-stage vocabulary shown to the user: read/trim/write) in
-/// parentheses: `Threads: 8 (read 1, trim 4, write 3)`. Deliberately *not*
-/// `b.total()`: that per-stage sum can exceed `threads` (each stage is floored
-/// at >= 1 even when the overall total is 1, see `ThreadBudget::total`'s
-/// doc), which read as a confusing second, larger "total" next to the `-t`
-/// value the user actually asked for.
+/// The startup banner's `Threads: ...` line: the resolved worker count, then the
+/// per-stage split with `ThreadBudget`'s decode/render/encode renamed to the
+/// user-facing read/trim/write, as `Threads: 8 (read 1, trim 4, write 3)`.
 ///
-/// `threads <= 1` instead prints `Threads: 1 (sequential)`: `thread_budget`
-/// still floors `render`/`encode` at >= 1 each even at a total of 1, so the
-/// read/trim/write split would show e.g. `(read 1, trim 1, write 1)`, three
-/// threads' worth of detail for a run that is, in fact, single-threaded.
+/// Deliberately not `b.total()`, which floors each stage at >= 1 and so can
+/// exceed `-t`, reading as a confusing second, larger total. For the same reason
+/// `threads <= 1` prints `Threads: 1 (sequential)` instead of a three-thread
+/// split for a run that is single-threaded.
 fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> String {
     if threads <= 1 {
         return "Threads: 1 (sequential)".to_string();
@@ -1020,20 +1008,12 @@ fn qual_mode_label(mode: qual::QualMode) -> &'static str {
     }
 }
 
-/// The startup banner's `Filters: ...; trim: ...` line, built from the resolved
-/// `FilterConfig` + `TrimPlan`. Pure (no I/O), so it's unit-testable directly.
-/// Shows only *active* (non-default) clauses/ops: a fresh-defaults run (no
-/// filters, no trim) reads as `Filters: none; trim: none` rather than
-/// spelling out every no-op threshold (e.g. `mean quality >=0`).
-///
-/// Filters clause: `length >={min}` only if `min_length > 1`, plus ` <={max}`
-/// only if `max_length != usize::MAX`; `{qual_mode} quality >={min}` only if
-/// `min_qual > 0.0`, plus ` <={max}` only if `max_qual < 1000.0`; `GC
-/// {min}-{max}` only if either GC bound was set. `none` if nothing above fired.
-///
-/// Trim clause: `head {N}, tail {N}` only if either crop is non-zero, plus the
-/// configured quality op's own wording, joined with a comma; `none` if neither
-/// a crop nor a quality op is set.
+/// The startup banner's `Filters: ...; trim: ...` line. Pure, so it is
+/// unit-testable directly. Shows only active clauses, so a fresh-defaults run
+/// reads `Filters: none; trim: none` rather than spelling out every no-op
+/// threshold. A bound appears only when it differs from its default: length from
+/// `min_length > 1` / `max_length != usize::MAX`, quality from `min_qual > 0.0` /
+/// `max_qual < 1000.0`, GC from either bound being set.
 fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -> String {
     let mut filters = Vec::new();
 
@@ -1098,25 +1078,13 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
     format!("Filters: {filters_str}; trim: {trim_str}")
 }
 
-/// The startup banner's `Adapters: ...` line, shown only when adapter trimming
-/// is active. `None` when `cfg.adapters` is unset, so callers can skip the
-/// line entirely for an off run (same convention as the other banner-line
-/// helpers being pure/unit-testable). Reports the adapter count, `trim +
-/// split` vs `ends-only` mode (`AdapterConfig::split`), the end-match error
-/// rate, the end-zone size in bp, and (via `adapter_sample`, i.e.
-/// `cfg.adapter_sample`) whether presence detection will sample the input:
-/// `sample {N}` when active, `sample off` when `N == 0` disables detection.
+/// The startup banner's `Adapters: ...` line: adapter count, `trim + split` vs
+/// `ends-only`, error rate, end-zone size, and whether presence detection will
+/// sample. `None` when adapter trimming is off, so the caller skips the line.
 ///
-/// Under enabled inference, the count printed here is always
-/// `0` (discovery hasn't run yet; it replaces `cfg.adapters` only once the
-/// buffer-then-decide seam runs, after this banner prints), so an inference
-/// action/policy suffix is appended to make clear the set is about to be
-/// discovered, not that trimming is configured with zero adapters. This is
-/// forced to `0` explicitly (rather than read off `a.adapters.len()`) because
-/// under report mode with a `--adapter-fasta`, `a.adapters` may itself hold
-/// the user's FASTA entries (see `cli::parse`'s `trim_adapters`) -- carried
-/// through purely as extra naming refs for `infer::discover`, never as a
-/// trimming set, so they must not be counted here as if they were one.
+/// Under inference the count is forced to `0` rather than read off `a.adapters`:
+/// in report mode that field may hold the user's FASTA purely as naming refs for
+/// `infer::discover`, never as a trimming set.
 fn adapter_banner_line(
     adapters: Option<&crate::adapter::AdapterConfig>,
     adapter_sample: usize,
@@ -1175,12 +1143,10 @@ pub(crate) fn shell_quote(arg: &str) -> String {
 }
 
 /// The startup banner's `Command: ...` line: the real process argv, space-joined
-/// and each argument shell-quoted via `shell_quote` so the line can be copied
-/// back out and re-run verbatim. Takes `OsStr`-like items (the caller passes
-/// `std::env::args_os()`, NOT `args()`, since the latter panics on non-UTF-8 argv) and
-/// lossily converts each to `str` here, at the one seam that must never panic on
-/// a malformed argv. Generic over the argument iterator so it's unit-testable
-/// without touching the real process argv.
+/// and shell-quoted so it can be copied back out and re-run. Takes `OsStr`-like
+/// items (`args_os()`, not `args()`, which panics on non-UTF-8 argv) and converts
+/// lossily here, at the one seam that must never panic on a malformed argv.
+/// Generic over the iterator so it is unit-testable without the real argv.
 pub fn command_line<I, S>(args: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -1262,14 +1228,11 @@ fn provenance_header(mut header: noodles_sam::Header) -> noodles_sam::Header {
     use noodles_sam::header::record::value::map::Program;
     use noodles_sam::header::record::value::map::program::tag;
 
-    // `Programs::add` walks the existing `@PG` chain via `Programs::leaves`,
-    // which indexes the program map directly and panics if any program's `PP`
-    // (previous-program) field names an ID that isn't itself a program in the
-    // header. Real-world uBAMs can have exactly this: e.g. an ONT/dorado file
-    // put through `samtools sort`/`view`/`reset` observed with
-    // `@PG ID:samtools PP:basecaller` where no `ID:basecaller` record survived
-    // into the header. Since the `@PG` line is cosmetic, skip adding it rather
-    // than let a merely-untidy header crash the whole run.
+    // `Programs::add` walks the `@PG` chain via `Programs::leaves`, which indexes
+    // the program map directly and panics when a `PP` names an ID no longer in the
+    // header. Real uBAMs hit this: a dorado file through `samtools reset` can keep
+    // `@PG ID:samtools PP:basecaller` with no `ID:basecaller` record. The `@PG`
+    // line is cosmetic, so skip it rather than crash on an untidy header.
     if has_dangling_program_chain(&header) {
         return header;
     }
@@ -1535,6 +1498,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         }
     }
 

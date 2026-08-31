@@ -22,11 +22,12 @@ whittle filters and trims long reads (ONT, PacBio) in FASTQ, gzip/BGZF-compresse
 - **Trim-aware tags.** Per-base kinetics (`ip`/`pw`/…) are sliced along with the sequence. ONT signal tags (`mv`/`ts`/`ns`/…) are dropped, or rewritten dorado-style with `--update-moves`.
 - **Adapter trimming.** Terminal trimming plus interior chimera splitting, driven by a built-in ONT catalog, your own FASTA, or ab-initio discovery.
 - **Formats.** FASTQ, gzip/BGZF-compressed FASTQ, and unaligned BAM, plus BAM→FASTQ conversion. Formats are auto-detected, including BGZF FASTQ or BAM piped over stdin.
+- **Pipeline-friendly.** `--summary-json` writes the run's counters and resolved settings as JSON, even under `--quiet`.
 - **Fast and self-contained.** Multithreaded throughout, with a thread budget that adapts to the workload, and no external `htslib` to build or run.
 
 ## Install
 
-**Prebuilt binaries.** Download one for your platform from the [Releases](https://github.com/erdikilic/whittle/releases) page and put it on your `PATH`. Builds cover Linux and macOS, x86-64 and arm64, glibc and static musl.
+**Prebuilt binaries.** Download one for your platform from the [Releases](https://github.com/erdikilic/whittle/releases) page and put it on your `PATH`. Builds cover Linux and macOS, x86-64 and arm64, glibc and static musl. Each tarball also carries the man page, which lives in [`man/`](man) here.
 
 **From source.**
 

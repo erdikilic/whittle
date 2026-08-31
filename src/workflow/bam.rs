@@ -268,14 +268,11 @@ fn parent_read_id(src: &RecordBuf) -> Vec<u8> {
 }
 
 /// Trim-aware handling of the poly-A tags (`pa` signal boundaries, `pt` tail
-/// length). `pa` holds absolute original-signal positions (`>= 0`; `-1`/`-2` are
-/// dorado's not-found/not-enabled sentinels, left as-is). `[kept_start, kept_end)`
-/// is the original-signal window the kept bases span. If every real `pa` position
-/// falls inside that window the tail survived, so: on a split, shift `pa` into the
-/// subread's own signal frame (its `ts` is 0) and keep `pt`; on a crop, keep both
-/// unchanged (identity + POD5 signal are unchanged, so the absolute positions stay
-/// valid). If any real position falls outside (the tail was partly or fully trimmed), or
-/// there's no poly-A array, drop `pa`/`pt`.
+/// length). `pa` holds absolute original-signal positions; `-1`/`-2` are dorado's
+/// not-found/not-enabled sentinels and are left as-is. When every real position
+/// falls inside `[kept_start, kept_end)` the tail survived: a split shifts `pa`
+/// into the subread's own signal frame, a crop keeps both unchanged. Otherwise,
+/// or with no poly-A array, drop `pa`/`pt`.
 fn polya_updates(
     src: &RecordBuf,
     kept_start: i64,
@@ -338,14 +335,12 @@ fn polya_updates(
 
 /// Trim-aware rewrite of the ONT signal tags for output window `[start, end)`.
 /// Returns `(tag, Some(value))` to set or `(tag, None)` to remove; empty when the
-/// read isn't trimmed. With `update_moves` off (or when the move table is
-/// missing/malformed), all five signal tags are removed. With it on, the move
-/// table is sliced by block range `moves[block_first .. block_second]`
+/// read isn't trimmed. With `update_moves` off, or a missing/malformed move
+/// table, all five tags are removed. With it on, `mv` is sliced by block range
 /// (stride-aligned, following dorado `splitter::subread`) and:
-///   - crop (`total == 1`, name kept): `mv` sliced, `ts += block_first*stride`,
-///     `ns` unchanged (still matches the by-name POD5 signal length).
-///   - split (`total > 1`, renamed): dorado subread encoding: `mv` sliced,
-///     `ts = 0`, `ns = span*stride`, `sp = parent offset`, `pi = parent id`.
+///   - crop (`total == 1`, name kept): `ts += block_first*stride`, `ns` unchanged.
+///   - split (`total > 1`, renamed): `ts = 0`, `ns = span*stride`,
+///     `sp = parent offset`, `pi = parent id`.
 fn signal_tag_updates(
     src: &RecordBuf,
     seq_len: usize,
@@ -657,13 +652,11 @@ fn reconstruct_record_with_bases(
     out
 }
 
-/// Slice MM/ML to the window `[start, end)` and re-serialize. Returns `None`
-/// when the source has no `MM` tag, or when no modified position survives the
-/// window (caller drops MM/ML/MN in that case). The inner `Option<Vec<u8>>` is
-/// the sliced ML, or `None` when the source carried `MM` but no valid `ML`. ML
-/// is optional per the SAM spec, so an MM-only or malformed-ML record must not
-/// gain a bogus empty/truncated ML. Shared by the BAM→BAM and BAM→FASTQ paths so
-/// they cannot drift.
+/// Slice MM/ML to the window `[start, end)` and re-serialize. `None` when the
+/// source has no `MM`, or when no modified position survives (the caller then
+/// drops MM/ML/MN). The inner `Option<Vec<u8>>` is the sliced ML, `None` when the
+/// source had `MM` but no valid `ML`: ML is optional per the SAM spec, so such a
+/// record must not gain a bogus one. Shared by BAM→BAM and BAM→FASTQ.
 pub fn reconstruct_mods(
     src: &RecordBuf,
     seq: &[u8],
@@ -762,14 +755,11 @@ fn run_bam_seq<R: InputRecord>(
     Ok(counters.snapshot(malformed_tag_reads))
 }
 
-/// Shared parallel driver: lazy raw reader iterator -> rayon pool (structured
-/// decode + render) -> bounded channel -> dedicated writer thread (write_one).
-/// Unordered. Mirrors
-/// `run_fastq`'s error seam (see `workflow/fastq.rs`): the first parse/render
-/// error and the first write error are each captured in a `Mutex<Option<_>>`
-/// slot; the writer task keeps draining `rx` after an error (never `break`) so
-/// producer threads blocked on the bounded channel's `tx.send` can never
-/// deadlock waiting for a writer that stopped consuming.
+/// Shared parallel driver: lazy raw reader -> rayon pool (decode + render) ->
+/// bounded channel -> writer thread. Unordered. Mirrors `run_fastq`'s error seam:
+/// the first render error and the first write error each land in a
+/// `Mutex<Option<_>>`, and the writer keeps draining `rx` after an error so
+/// producers blocked on `tx.send` can never deadlock.
 fn run_bam_parallel<R, T, S, Render, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
     cfg: &Config,
@@ -1194,13 +1184,11 @@ pub fn run_raw_bam(
     }
 }
 
-/// Threads-aware uBAM workflow entry point: decode, refuse aligned reads, trim,
-/// filter, reconstruct. Sequential for `cfg.threads <= 1`; otherwise converts
-/// lazy raw records and renders them on a Rayon work pool, then drains the
-/// resulting `RecordBuf`s through `run_bam_parallel`'s bounded channel onto a
-/// dedicated writer task. Output
-/// order is unordered for `threads > 1` (records land in arrival order, not
-/// input order); the BAM format has no ordering requirement for uBAM.
+/// Threads-aware uBAM entry point: decode, refuse aligned reads, trim, filter,
+/// reconstruct. Sequential for `cfg.threads <= 1`; otherwise renders on a rayon
+/// pool and drains the `RecordBuf`s through `run_bam_parallel`'s bounded channel
+/// to a writer task. Output is in arrival order, not input order, which uBAM
+/// permits since the format has no ordering requirement.
 pub fn run_bam<R: InputRecord>(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
@@ -1388,14 +1376,11 @@ where
     Ok(counters.snapshot(malformed_tag_reads))
 }
 
-/// Threads-aware uBAM→FASTQ workflow entry point: decode, refuse aligned reads,
-/// trim, filter, then write each surviving segment as FASTQ with the selected aux
-/// tags in the header (MM/ML/MN reconstructed; others verbatim). Sequential for
-/// `cfg.threads <= 1`; otherwise converts lazy raw records and renders each
-/// record's FASTQ segments on a Rayon work pool, draining the resulting buffers through
-/// `run_bam_parallel`'s bounded channel onto the writer, appended as-is.
-/// Output order is unordered for `threads > 1` (records land in arrival order,
-/// not input order).
+/// Threads-aware uBAM→FASTQ entry point: decode, refuse aligned reads, trim,
+/// filter, then write each surviving segment as FASTQ with the selected aux tags
+/// in the header (MM/ML/MN reconstructed, others verbatim). Sequential for
+/// `cfg.threads <= 1`; otherwise renders on a rayon pool and drains through
+/// `run_bam_parallel`'s bounded channel, in arrival order rather than input order.
 pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
     writer: &mut W,
@@ -1592,6 +1577,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
 
         let result = run_bam(
@@ -1715,6 +1701,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         }
     }
 
@@ -2555,6 +2542,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         // 300 reads with mods so reconstruction runs on every one.
         let recs: Vec<RecordBuf> = (0..300)
@@ -2663,6 +2651,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let recs: Vec<anyhow::Result<RecordBuf>> = (0..3000)
             .map(|_| anyhow::Ok(RecordBuf::default()))
@@ -2738,6 +2727,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
             (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -2799,6 +2789,7 @@ mod tests {
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
+            summary_json: None,
         };
         let recs: Vec<RecordBuf> = (0..300)
             .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))

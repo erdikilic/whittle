@@ -972,30 +972,19 @@ fn infer_is_deterministic() {
 
 // --- marginal-support warning ------------------------------------------
 
-/// Fraction of reads that carry `PLANTED_ADAPTER` at all; the rest are pure
-/// background (no adapter anywhere in the read), modeling a low-prevalence
-/// / barcode-specific adapter rather than a per-read match-quality problem.
-/// Support is now a whole-consensus PRESENCE fraction (see
-/// `infer::assemble`'s doc comment), so a per-read *error rate* no longer
-/// drags a genuine adapter's support down (a real, closely-matching
-/// reconstruction now recovers at support ~1.0, see
-/// `discover_recovers_planted_adapter_under_error`) -- what still lands an
-/// adapter in the marginal band is being present in only a *minority* of
-/// reads. 0.38 * 500 = 190 planted reads out of 500 puts support at ~0.38,
-/// inside `[KEEP_SUPPORT, MARGINAL_SUPPORT)` = `[0.30, 0.45)` with headroom
-/// on both sides.
+/// Fraction of reads carrying `PLANTED_ADAPTER`; the rest are pure background,
+/// modeling a low-prevalence (barcode-specific) adapter rather than a per-read
+/// match-quality problem. Support is a whole-consensus presence fraction, so only
+/// minority prevalence lands an adapter in the marginal band: 190 planted reads
+/// out of 500 puts support at ~0.38, inside `[0.30, 0.45)` with headroom either
+/// side.
 const PLANTED_ADAPTER_PREVALENCE: f64 = 0.38;
 
-/// Fixture for the marginal-support warning: `PLANTED_ADAPTER_PREVALENCE` of
-/// `n` reads get an EXACT copy of `PLANTED_ADAPTER` (no injected
-/// substitution error -- error-tolerant recovery is already covered by
-/// `discover_recovers_planted_adapter_under_error`, this fixture targets
-/// marginal *prevalence* instead) followed by a splitmix64 tail; the
-/// remaining reads are pure splitmix64 background of the same total length,
-/// carrying no adapter at all (same non-periodic bit-mix pattern used
-/// throughout this file and in `src/adapter/infer.rs`'s own `discover_*`
-/// unit tests, so it can't itself register as a spurious low-complexity
-/// signal).
+/// Fixture for the marginal-support warning: `PLANTED_ADAPTER_PREVALENCE` of `n`
+/// reads get an exact `PLANTED_ADAPTER` copy followed by a splitmix64 tail, the
+/// rest pure splitmix64 background of the same length. Exact copies on purpose:
+/// error tolerance is covered elsewhere, this targets prevalence. The
+/// non-periodic background cannot itself register as low-complexity signal.
 fn write_adapted_fastq_marginal(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
     // NOTE: deliberately not named "*marginal*" -- the path is itself echoed
     // into the `[INFO] Input: ...` / `Command: ...` log lines, which would
@@ -1248,17 +1237,12 @@ fn produced_index_naming_end_to_end() {
     );
 }
 
-/// Accounting/summary end-to-end: a mix of clean reads, a chimera with one
-/// sub-`-l` half, an all-adapter read (fully consumed by terminal trimming, so
-/// `trim::apply` produces zero segments), an empty read, and a read whose sole
-/// produced segment is itself too short. Exercises the three-way read-level
-/// counter split through the real binary's rendered summary
-/// (`obs.rs`'s `Summary:`/`Trimmed to nothing:`/`All segments filtered:`/
-/// `Segments dropped:` lines), not just the `Counters`/`Stats` unit tests in
-/// `src/workflow/mod.rs`. In particular it distinguishes the all-adapter/empty
-/// reads (`reads_trimmed_to_nothing`, no segments produced at all) from the
-/// short-only read (`reads_all_filtered`, one segment produced, then
-/// filtered).
+/// Accounting end-to-end: clean reads, a chimera with one sub-`-l` half, an
+/// all-adapter read, an empty read, and a read whose only segment is too short.
+/// Exercises the three-way read-level split through the real binary's rendered
+/// summary lines, not just the `Counters`/`Stats` unit tests. In particular it
+/// separates `reads_trimmed_to_nothing` (no segments produced) from
+/// `reads_all_filtered` (one produced, then filtered).
 #[test]
 fn accounting_summary_end_to_end() {
     let adapter = "GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only

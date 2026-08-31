@@ -291,15 +291,12 @@ mod tests {
         assert_eq!(m.groups[0].ml, vec![5]);
     }
 
-    /// Property test extending `ml_stays_byte_aligned_over_random_windows` to
-    /// MULTI-code groups (`ncodes ∈ {1, 2}`, e.g. `C+m` and `C+mh`). ML is
-    /// position-major (`ncodes` bytes per modified position) and after slicing
-    /// to a window the surviving ML must stay position-major and byte-exact: its
-    /// length equals `surviving_positions * ncodes`, and the bytes equal exactly
-    /// the in-window positions' `ncodes`-byte runs in order. This is the
-    /// misalignment class that would silently corrupt every downstream
-    /// probability for multi-mod reads, which the single-code property test
-    /// above cannot reach.
+    /// `ml_stays_byte_aligned_over_random_windows` extended to MULTI-code groups
+    /// (`ncodes ∈ {1, 2}`, e.g. `C+m` and `C+mh`). ML is position-major, so after
+    /// slicing its length must equal `surviving_positions * ncodes` and its bytes
+    /// must be the in-window positions' `ncodes`-byte runs in order. The
+    /// single-code test above cannot reach this misalignment class, which would
+    /// silently corrupt every downstream probability on multi-mod reads.
     #[test]
     fn ml_stays_byte_aligned_multicode_over_random_windows() {
         struct Lcg(u64);

@@ -22,6 +22,19 @@ Some tests are `#[ignore]`d because they need a real uBAM. Point them at one:
 WHITTLE_UBAM=/path/to/real.ubam cargo test --test bam_mods_oracle -- --ignored
 ```
 
+## Generated artifacts
+
+`man/whittle.1` is rendered from the live clap definition, so regenerate and
+commit it after changing any flag or its help text:
+
+```bash
+cargo run --example gen-man
+```
+
+`clap_mangen` is a dev-dependency and the generator is an example, so neither
+reaches the shipped binary. The release workflow re-renders the page per build,
+which is what stamps the correct version into it.
+
 ## Commit messages
 
 Commit subjects follow [Conventional Commits](https://www.conventionalcommits.org/),

@@ -192,19 +192,15 @@ fn two_error_freq(
     present
 }
 
-/// Reconstructs a consensus adapter sequence from weighted k-mer nodes via a
-/// cycle-safe bidirectional greedy walk: seed at the single heaviest node,
-/// then greedily extend forward (heaviest unvisited successor) and backward
-/// (heaviest unvisited predecessor), marking each node visited so no node is
-/// used twice. A length-bounded DP would traverse cycles repeatedly (weights
-/// are positive, so revisiting a cycle only adds weight) and emit a long
-/// repetitive consensus; the visited set makes this cycle-safe *and*
-/// cycle-*correct* by construction (a simple path, not a loop). Bidirectional
-/// extension is required because the heaviest seed k-mer usually sits in the
-/// middle of the adapter -- forward-only would recover only the suffix.
-/// Returns `(consensus bytes, per-position weight profile, total node-weight)`,
-/// or `None` if `nodes` is empty. `lmax` caps the total emitted length; the
-/// consensus is always at least one k-mer even if `lmax < k`.
+/// Reconstructs a consensus adapter from weighted k-mer nodes by a cycle-safe
+/// bidirectional greedy walk: seed at the heaviest node, then extend both ways
+/// through the heaviest unvisited neighbor. The visited set is what keeps this a
+/// simple path; a length-bounded DP would re-traverse positive-weight cycles into
+/// a long repetitive consensus. Bidirectional because the heaviest seed usually
+/// sits mid-adapter, so forward-only would recover just the suffix.
+///
+/// Returns `(consensus, per-position weights, total weight)`, or `None` when
+/// `nodes` is empty. `lmax` caps length, but at least one k-mer is always kept.
 fn bounded_heaviest_path(
     nodes: &[(u64, u32)],
     k: usize,
@@ -532,14 +528,11 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
         if trimmed.len() < MIN_PATTERN_LEN {
             continue;
         }
-        // Whole-consensus presence: what fraction of the same recount
-        // sample actually contains this trimmed consensus (within an error
-        // budget scaled to its own length), reusing the same forward
-        // searcher and the same per-window presence counter
-        // (`two_error_freq`) already used to reweight individual k-mers
-        // above. Unlike a per-position profile statistic, this can't be
-        // dragged down by an internal low-weight pocket inside an otherwise-
-        // correct reconstruction.
+        // Whole-consensus presence: what fraction of the recount sample contains
+        // this trimmed consensus within a length-scaled error budget, reusing the
+        // same searcher and per-window counter (`two_error_freq`) that reweighted
+        // individual k-mers above. Unlike a per-position statistic, an internal
+        // low-weight pocket cannot drag down an otherwise-correct reconstruction.
         let k_cons = (base.error_rate * trimmed.len() as f64).floor() as usize;
         let present = two_error_freq(&mut fwd, &trimmed, &recount, k_cons);
         let support = present as f64 / n_recount as f64;
@@ -548,14 +541,11 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
     out
 }
 
-/// Full ab-initio discovery workflow: per-end `assemble`, fold shared 5'/3'
-/// discoveries into `End::Both` via `merge_both_ends`, drop anything too
-/// short or too weakly supported, then name each survivor against the
-/// built-in ONT catalog UNION `base.adapters` -- extra naming refs, e.g. the
-/// user's `--adapter-fasta` entries under inference report mode (see
-/// `cli::parse`'s `trim_adapters`; empty under `Trim`, which rejects a FASTA
-/// outright, and under a report run with no FASTA). Deterministic
-/// order: support desc, then sequence asc.
+/// Full ab-initio discovery: per-end `assemble`, fold shared 5'/3' discoveries
+/// into `End::Both` via `merge_both_ends`, drop anything too short or too weakly
+/// supported, then name each survivor against the ONT catalog plus
+/// `base.adapters` (extra naming refs, e.g. a `--adapter-fasta` under report
+/// mode). Deterministic order: support desc, then sequence asc.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
     discover_with_policy(sample, base, false)
 }
@@ -865,13 +855,10 @@ mod tests {
         let mut owned: Vec<Vec<u8>> = Vec::new();
         for i in 0..500usize {
             let mut read = adapter.to_vec();
-            // deterministic genomic tail. A naive `(i*7 + j*13) % 4` formula
-            // (as `i*31 + j*17` in the clean-reads test below) is linear in
-            // `j` mod 4 and collapses to a phase-rotated ACGT tandem repeat:
-            // a spurious signal present in 100% of reads that outweighs and
-            // crowds out the real, noisy planted adapter. Use the same
-            // splitmix64-style mix as the clean-reads test for a genuinely
-            // non-periodic deterministic tail.
+            // deterministic genomic tail. A naive `(i*7 + j*13) % 4` formula is
+            // linear in `j` mod 4 and collapses to a phase-rotated ACGT tandem
+            // repeat: a spurious signal in 100% of reads that crowds out the real
+            // planted adapter. Use the splitmix64-style mix instead.
             let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
             for _ in 0..120usize {
                 state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
