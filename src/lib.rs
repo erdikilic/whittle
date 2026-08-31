@@ -125,20 +125,6 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // always means the user forgot `-o`/a redirect.
     guard_stdout_binary(&cfg, out_fmt)?;
 
-    // Advisory only: no trimming, a pass-through filter, and no format
-    // conversion means the run just re-emits (almost) the same reads it read,
-    // usually not what was intended. Skipped for a conversion-only run
-    // (in_fmt != out_fmt), which is legitimate on its own. Warning deferred to
-    // the consolidated block below, same as `mismatch_warn` above.
-    let no_trim = cfg.trim.head == 0 && cfg.trim.tail == 0 && cfg.trim.quality.is_none();
-    let pass_through_filter = cfg.filter.min_length <= 1
-        && cfg.filter.max_length == usize::MAX
-        && cfg.filter.min_qual <= 0.0
-        && cfg.filter.max_qual >= 1000.0
-        && cfg.filter.min_gc.is_none()
-        && cfg.filter.max_gc.is_none();
-    let no_op_warn = no_trim && pass_through_filter && cfg.adapters.is_none() && in_fmt == out_fmt;
-
     tracing::debug!(
         "Detected {} input in {}",
         in_fmt.label(),
@@ -161,69 +147,31 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     );
     let out_desc = banner::output_desc(cfg.io.output.as_deref());
 
-    if obs.shows_lines() {
-        tracing::info!("{}", banner::operation_line(in_fmt, out_fmt));
-        match (in_path, total) {
-            (Some(p), Some(size)) => {
-                tracing::info!("Input: {} ({})", p.display(), obs::human_bytes(size));
+    let mut warnings: Vec<String> = Vec::new();
+    warnings.extend(mismatch_warn);
+    warnings.extend(out_mismatch_warn);
+    if is_no_op(&cfg, in_fmt, out_fmt) {
+        warnings.push(NO_OP_WARNING.to_string());
+    }
+    announce(
+        &cfg,
+        obs,
+        counters.clone(),
+        &Startup {
+            input_line: match (in_path, total) {
+                (Some(p), Some(size)) => {
+                    format!("Input: {} ({})", p.display(), obs::human_bytes(size))
+                },
+                (Some(p), None) => format!("Input: {}", p.display()),
+                (None, _) => "Input: <stdin>".to_string(),
             },
-            (Some(p), None) => tracing::info!("Input: {}", p.display()),
-            (None, _) => tracing::info!("Input: <stdin>"),
-        }
-        tracing::info!(
-            "{}",
-            banner::output_banner_line(
-                cfg.io.output.as_deref(),
-                out_fmt,
-                cfg.compression_level,
-                budget.encode
-            )
-        );
-        tracing::info!("{}", banner::threads_banner_line(cfg.threads, budget));
-        tracing::info!("{}", banner::filters_and_trim_line(&cfg.filter, &cfg.trim));
-        if let Some(line) = banner::adapter_banner_line(
-            cfg.adapters.as_ref(),
-            cfg.adapter_sample,
-            cfg.adapter_infer,
-        ) {
-            tracing::info!("{line}");
-        }
-    } else if obs.is_bar() {
-        tracing::info!(
-            "{} ({} threads)",
-            banner::operation_line(in_fmt, out_fmt),
-            cfg.threads
-        );
-    }
-
-    // Warnings fire after the resolved-config banner (not before it, and not
-    // interleaved with it): `whittle {version}`/`Command: ...` (printed by
-    // `main` before `run` is even called) and the banner above are meant to be
-    // the first things a reader sees; only then do clamp/mismatch/no-op
-    // advisories follow, ahead of the live progress/summary.
-    // Parse-time diagnostics, held by `cli::parse` until this subscriber exists
-    // so `--quiet` can silence them and they carry the standard prefix.
-    for a in &cfg.advisories {
-        if a.warn {
-            tracing::warn!("{}", a.message);
-        } else {
-            tracing::info!("{}", a.message);
-        }
-    }
-    if let Some((requested, ncpu)) = cfg.threads_clamped {
-        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
-    }
-    if let Some(msg) = mismatch_warn {
-        tracing::warn!("{msg}");
-    }
-    if let Some(msg) = out_mismatch_warn {
-        tracing::warn!("{msg}");
-    }
-    if no_op_warn {
-        tracing::warn!("No trimming or filtering options set; output will mostly mirror the input");
-    }
-
-    obs.start(total, counters.clone());
+            total,
+            in_fmt,
+            out_fmt,
+            budget,
+            warnings,
+        },
+    );
 
     // Coarse wall-clock timer for the processing phase (dispatch below); each
     // arm logs elapsed time from this point just before its own `obs.finish`.
@@ -321,6 +269,103 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     finish_run(obs, &stats, &out_desc, &cfg, t0)?;
     Ok(())
 }
+
+/// The resolved facts both entry points announce before processing starts.
+struct Startup {
+    /// The `Input:` line body: a path and size, `<stdin>`, or a folder's file
+    /// count and total size.
+    input_line: String,
+    /// Input bytes, when known. Drives a determinate bar; `None` gives a spinner.
+    total: Option<u64>,
+    in_fmt: io::Format,
+    out_fmt: io::Format,
+    budget: config::ThreadBudget,
+    /// Advisories specific to this entry point, logged after the shared ones.
+    warnings: Vec<String>,
+}
+
+/// Print the startup banner and the deferred advisories.
+///
+/// The order is the output contract: `whittle {version}` and `Command:` (from
+/// `main`), then the resolved config, then every advisory, then live progress. A
+/// reader can always find what ran at the top, and nothing interleaves with the
+/// bar. Both entry points go through here, so an advisory added to one cannot
+/// silently skip the other, which is how the folder path came to be missing two.
+///
+/// Starting progress is the last step, and belongs here rather than at the call
+/// sites: it is what makes "nothing interleaves with the bar" a property of this
+/// function instead of a convention two callers have to remember.
+fn announce(
+    cfg: &Config,
+    obs: &mut obs::ProgressHandle,
+    counters: std::sync::Arc<workflow::Counters>,
+    s: &Startup,
+) {
+    if obs.shows_lines() {
+        tracing::info!("{}", banner::operation_line(s.in_fmt, s.out_fmt));
+        tracing::info!("{}", s.input_line);
+        tracing::info!(
+            "{}",
+            banner::output_banner_line(
+                cfg.io.output.as_deref(),
+                s.out_fmt,
+                cfg.compression_level,
+                s.budget.encode
+            )
+        );
+        tracing::info!("{}", banner::threads_banner_line(cfg.threads, s.budget));
+        tracing::info!("{}", banner::filters_and_trim_line(&cfg.filter, &cfg.trim));
+        if let Some(line) = banner::adapter_banner_line(
+            cfg.adapters.as_ref(),
+            cfg.adapter_sample,
+            cfg.adapter_infer,
+        ) {
+            tracing::info!("{line}");
+        }
+    } else if obs.is_bar() {
+        // Bar mode gets exactly one line so the live bar stays clean.
+        tracing::info!(
+            "{} ({} threads)",
+            banner::operation_line(s.in_fmt, s.out_fmt),
+            cfg.threads
+        );
+    }
+
+    // Parse-time diagnostics, held by `cli::parse` until the subscriber exists so
+    // `--quiet` can silence them and they carry the standard prefix.
+    for a in &cfg.advisories {
+        if a.warn {
+            tracing::warn!("{}", a.message);
+        } else {
+            tracing::info!("{}", a.message);
+        }
+    }
+    if let Some((requested, ncpu)) = cfg.threads_clamped {
+        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
+    }
+    for w in &s.warnings {
+        tracing::warn!("{w}");
+    }
+
+    obs.start(s.total, counters);
+}
+
+/// True when the run neither trims, filters, nor converts, so it just re-emits
+/// (almost) what it read. Legitimate for a conversion-only run, which is why the
+/// format comparison is part of the test.
+fn is_no_op(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) -> bool {
+    let no_trim = cfg.trim.head == 0 && cfg.trim.tail == 0 && cfg.trim.quality.is_none();
+    let pass_through_filter = cfg.filter.min_length <= 1
+        && cfg.filter.max_length == usize::MAX
+        && cfg.filter.min_qual <= 0.0
+        && cfg.filter.max_qual >= 1000.0
+        && cfg.filter.min_gc.is_none()
+        && cfg.filter.max_gc.is_none();
+    no_trim && pass_through_filter && cfg.adapters.is_none() && in_fmt == out_fmt
+}
+
+const NO_OP_WARNING: &str =
+    "No trimming or filtering options set; output will mostly mirror the input";
 
 /// True iff writing `fmt`'s bytes to stdout would dump binary (BAM) or gzip
 /// (FASTQ.gz) data into an interactive terminal: never useful output, and
@@ -526,70 +571,50 @@ fn run_folder(
         encode_kind_for(out_fmt),
     );
     let out_desc = banner::output_desc(cfg.io.output.as_deref());
-
-    if obs.shows_lines() {
-        tracing::info!("{}", banner::operation_line(family_fmt, out_fmt));
-        let total_bytes: u64 = paths
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
-        tracing::info!(
-            "Input: {} {} files, {}",
-            paths.len(),
-            family_fmt.label(),
-            obs::human_bytes(total_bytes)
-        );
-        tracing::info!(
-            "{}",
-            banner::output_banner_line(
-                cfg.io.output.as_deref(),
-                out_fmt,
-                cfg.compression_level,
-                budget.encode
-            )
-        );
-        tracing::info!("{}", banner::threads_banner_line(cfg.threads, budget));
-        tracing::info!("{}", banner::filters_and_trim_line(&cfg.filter, &cfg.trim));
-        if let Some(line) = banner::adapter_banner_line(
-            cfg.adapters.as_ref(),
-            cfg.adapter_sample,
-            cfg.adapter_infer,
-        ) {
-            tracing::info!("{line}");
-        }
-    } else if obs.is_bar() {
-        tracing::info!(
-            "{} ({} threads)",
-            banner::operation_line(family_fmt, out_fmt),
-            cfg.threads
-        );
-    }
-
-    // Parse-time diagnostics, held by `cli::parse` until this subscriber exists
-    // so `--quiet` can silence them and they carry the standard prefix.
-    for a in &cfg.advisories {
-        if a.warn {
-            tracing::warn!("{}", a.message);
-        } else {
-            tracing::info!("{}", a.message);
-        }
-    }
-
-    // See the matching comment in `run`: the clamp warning fires after the
-    // banner, not before it.
-    if let Some((requested, ncpu)) = cfg.threads_clamped {
-        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
-    }
-    if folder_in_format_ignored {
-        tracing::warn!(
-            "--in-format is ignored for a directory input; folder files are classified \
-             by extension per file"
-        );
-    }
-
     let counters = std::sync::Arc::new(workflow::Counters::default());
-    obs.start(None, counters.clone());
+
+    // Summed unconditionally, not just when the banner prints: it also drives a
+    // determinate progress bar, which folder mode previously never got.
+    let total_bytes: u64 = paths
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
+
+    let mut warnings: Vec<String> = Vec::new();
+    if folder_in_format_ignored {
+        warnings.push(
+            "--in-format is ignored for a directory input; folder files are classified by \
+             extension per file"
+                .to_string(),
+        );
+    }
+    warnings.extend(io::format_mismatch_warning(
+        "--out-format",
+        cfg.io.out_format,
+        cfg.io.output.as_deref(),
+    ));
+    if is_no_op(cfg, family_fmt, out_fmt) {
+        warnings.push(NO_OP_WARNING.to_string());
+    }
+    announce(
+        cfg,
+        obs,
+        counters.clone(),
+        &Startup {
+            input_line: format!(
+                "Input: {} {} files, {}",
+                paths.len(),
+                family_fmt.label(),
+                obs::human_bytes(total_bytes)
+            ),
+            total: Some(total_bytes),
+            in_fmt: family_fmt,
+            out_fmt,
+            budget,
+            warnings,
+        },
+    );
 
     let t0 = std::time::Instant::now();
     tracing::debug!(
