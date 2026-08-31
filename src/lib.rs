@@ -15,13 +15,10 @@ pub mod workflow;
 pub use banner::command_line;
 
 use std::borrow::Cow;
-use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
+use std::io::{BufReader, IsTerminal, Read};
 
 use config::AdapterInfer;
 pub use config::Config;
-use gzp::deflate::Mgzip;
-use gzp::par::compress::{ParCompress, ParCompressBuilder};
-use gzp::{Compression, ZWriter};
 
 /// Top-level entry point. Dispatches on the input: a directory triggers
 /// folder-merge (all read files in it merged into one output); otherwise a
@@ -274,7 +271,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             let Some(records) = maybe_reduce_adapters(records, &mut cfg, bam_seq)? else {
                 return Ok(());
             };
-            let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
+            let mut writer = io::fastq::writer(&cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
             let stats = workflow::run_bam_to_fastq(records, &mut writer, &cfg, &counters)?;
             writer.finish()?;
@@ -306,7 +303,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     else {
         return Ok(());
     };
-    let mut writer = fastq_writer(&cfg, out_fmt, budget.encode)?;
+    let mut writer = io::fastq::writer(&cfg, out_fmt, budget.encode)?;
     cfg.render_workers = budget.render;
     let stats = workflow::run_fastq(records, &mut writer, &cfg, &counters)?;
     writer.finish()?;
@@ -577,98 +574,6 @@ where
     Ok(Some(Box::new(
         sample.into_iter().map(anyhow::Ok).chain(records),
     )))
-}
-
-/// FASTQ output writer: a plain buffered writer, or a `gzp` parallel gzip writer
-/// when the output format is explicitly `FastqGz`.
-///
-/// `gzp`'s `ParCompress` requires an explicit `finish()`: its `Write` impl hands
-/// only full chunks to the compressor threads, so the tail block and gzip footer
-/// are never flushed by `flush()`. Its `Drop` calls `finish()` as a backstop but
-/// `.unwrap()`s the result, turning an I/O error into a panic; calling it
-/// explicitly keeps that failure an ordinary `Err`.
-enum FastqOut {
-    Plain(BufWriter<Box<dyn Write + Send>>),
-    Gz(ParCompress<'static, Mgzip, Box<dyn Write + Send>>),
-    Bgzf(noodles_bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>),
-}
-
-impl Write for FastqOut {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            FastqOut::Plain(w) => w.write(buf),
-            FastqOut::Gz(w) => w.write(buf),
-            FastqOut::Bgzf(w) => w.write(buf),
-        }
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            FastqOut::Plain(w) => w.flush(),
-            FastqOut::Gz(w) => w.flush(),
-            FastqOut::Bgzf(w) => w.flush(),
-        }
-    }
-}
-
-impl FastqOut {
-    /// Finalize: for gz, flush the final block + gzip footer via gzp's
-    /// `ZWriter::finish` (required, see the type's docs above); for plain,
-    /// flush the `BufWriter`. Must be called before returning success.
-    fn finish(self) -> anyhow::Result<()> {
-        match self {
-            FastqOut::Plain(mut w) => {
-                w.flush()?;
-                Ok(())
-            },
-            FastqOut::Gz(mut w) => {
-                w.finish()?;
-                Ok(())
-            },
-            FastqOut::Bgzf(mut w) => {
-                w.finish()?;
-                Ok(())
-            },
-        }
-    }
-}
-
-/// Build the FASTQ output writer: a file or stdout, wrapped in a parallel gzip
-/// encoder (`gzp`, using `gz_workers` worker threads, the caller's
-/// workload-aware ENCODE share of the `-t` budget) when the output format is
-/// `FastqGz`, else a plain buffered writer. `gz_workers` is only read on the
-/// `FastqGz` branch, so plain-output callers may pass any value.
-fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow::Result<FastqOut> {
-    let base: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
-        Some(p) => Box::new(std::fs::File::create(p)?),
-        None => Box::new(std::io::stdout()),
-    };
-    match out_fmt {
-        io::Format::FastqGz => {
-            // gzp's `Mgzip` (libdeflate-backed blocked gzip) rather than `Gzip`
-            // (flate2/zlib-ng). libdeflater is already linked, and the output is
-            // a valid multi-member gzip stream that `MultiGzDecoder` and standard
-            // gzip tools decode.
-            let w = ParCompressBuilder::<Mgzip>::new()
-                .num_threads(gz_workers)
-                .unwrap()
-                .compression_level(Compression::new(cfg.compression_level as u32))
-                .from_writer(base);
-            Ok(FastqOut::Gz(w))
-        },
-        io::Format::FastqBgzf => {
-            let level = noodles_bgzf::io::writer::CompressionLevel::new(cfg.compression_level)
-                .ok_or_else(|| anyhow::anyhow!("invalid BGZF compression level"))?;
-            let w = noodles_bgzf::io::multithreaded_writer::Builder::default()
-                .set_compression_level(level)
-                .set_worker_count(
-                    std::num::NonZero::new(gz_workers.max(1))
-                        .unwrap_or(std::num::NonZero::<usize>::MIN),
-                )
-                .build_from_writer(base);
-            Ok(FastqOut::Bgzf(w))
-        },
-        io::Format::Fastq | io::Format::Bam => Ok(FastqOut::Plain(BufWriter::new(base))),
-    }
 }
 
 /// True iff writing `fmt`'s bytes to stdout would dump binary (BAM) or gzip
@@ -962,7 +867,7 @@ fn run_folder(
             else {
                 return Ok(());
             };
-            let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
+            let mut writer = io::fastq::writer(cfg, out_fmt, budget.encode)?;
             cfg.render_workers = budget.render;
             let stats = workflow::run_fastq(records, &mut writer, cfg, &counters)?;
             writer.finish()?;
@@ -997,7 +902,7 @@ fn run_folder(
                 let Some(records) = maybe_reduce_adapters(records, cfg, bam_seq)? else {
                     return Ok(());
                 };
-                let mut writer = fastq_writer(cfg, out_fmt, budget.encode)?;
+                let mut writer = io::fastq::writer(cfg, out_fmt, budget.encode)?;
                 cfg.render_workers = budget.render;
                 let stats = workflow::run_bam_to_fastq(records, &mut writer, cfg, &counters)?;
                 writer.finish()?;
