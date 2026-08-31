@@ -319,3 +319,77 @@ fn parse_time_advisories_are_formatted_and_ordered() {
         "the version line must still open the run"
     );
 }
+
+/// Presence detection narrows the preset, so the set the run trims against is not
+/// the set the startup banner printed. The summary reports both, since a reader
+/// otherwise cannot tell which figure they are looking at.
+#[test]
+fn summary_reports_configured_and_resolved_adapter_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+
+    // 300 reads all carrying one known ONT adapter, so detection keeps a handful
+    // of the catalog's 124 sequences and drops the rest.
+    let adapter = "CCTGTACTTCGTTCAGTTACGTATTGC";
+    let mut fq = String::new();
+    for i in 0..300 {
+        let body: String = (0..400)
+            .map(|j| b"ACGT"[((i * 31 + j * 17 + j * j * 3) % 4) as usize] as char)
+            .collect();
+        let s = format!("{adapter}{body}");
+        fq.push_str(&format!("@r{i}\n{s}\n+\n{}\n", "I".repeat(s.len())));
+    }
+    std::fs::write(&input, fq).unwrap();
+    let json = dir.path().join("summary.json");
+
+    whittle()
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .args(["--adapter-preset", "ont"])
+        .args(["--adapter-sample", "200"])
+        .assert()
+        .success();
+
+    let a = summary(dir.path())["params"]["adapters"].clone();
+    let configured = a["configured"].as_u64().expect("configured is a number");
+    let count = a["count"].as_u64().expect("count is a number");
+
+    assert_eq!(configured, 124, "the full ONT catalog was configured");
+    assert!(
+        count < configured,
+        "detection should narrow the set: configured {configured}, resolved {count}"
+    );
+    assert!(count > 0, "the planted adapter must be detected");
+}
+
+/// Under inference nothing is configured; the set is discovered. Reporting
+/// `configured: 0` beside a non-zero `count` is what makes that legible.
+#[test]
+fn inference_reports_zero_configured_adapters() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+    let adapter = "CCTGTACTTCGTTCAGTTACGTATTGC";
+    let mut fq = String::new();
+    for i in 0..300 {
+        let body: String = (0..400)
+            .map(|j| b"ACGT"[((i * 31 + j * 17 + j * j * 3) % 4) as usize] as char)
+            .collect();
+        let s = format!("{adapter}{body}");
+        fq.push_str(&format!("@r{i}\n{s}\n+\n{}\n", "I".repeat(s.len())));
+    }
+    std::fs::write(&input, fq).unwrap();
+    let json = dir.path().join("summary.json");
+
+    whittle()
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .args(["--adapter-infer", "trim"])
+        .assert()
+        .success();
+
+    let a = summary(dir.path())["params"]["adapters"].clone();
+    assert_eq!(a["configured"], 0, "inference configures nothing up front");
+    assert_eq!(a["infer"], "trim");
+}

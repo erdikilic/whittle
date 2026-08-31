@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `--quiet` without the standard prefix and ahead of the version line.
 
 ### Changed
+- `--summary-json` reports both adapter counts: `params.adapters.configured` is
+  the set asked for, `params.adapters.count` the set actually trimmed against
+  after presence detection or inference. The startup banner prints the former,
+  so the two figures no longer look like a contradiction.
 - Release tarballs now contain a versioned directory holding the binary, `man/`,
   and the README, CHANGELOG, and LICENSE, instead of a bare `whittle`
   executable.

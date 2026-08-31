@@ -191,6 +191,12 @@ pub struct Config {
     /// The `--adapter-fasta` path, kept so `run` can refuse to overwrite it.
     /// The sequences themselves are already resolved into `adapters`.
     pub adapter_fasta: Option<PathBuf>,
+    /// How many adapters were configured before presence detection narrowed the
+    /// set or inference replaced it, so the run summary can report both figures.
+    /// Recorded by `settle`, the only thing that changes `adapters`. `None` when
+    /// adapter trimming is off, and `0` under inference, where the set is
+    /// discovered rather than configured.
+    pub adapters_configured: Option<usize>,
 }
 
 /// How a `-t` total worker budget splits across the workflow stages. The split

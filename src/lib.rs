@@ -285,6 +285,9 @@ where
     let Some(resolved) = adapter::resolve::resolve(records, cfg, seq_of)? else {
         return Ok(None);
     };
+    // Captured before the overwrite: the banner already printed this figure, and
+    // the summary reports it alongside what resolution settled on.
+    cfg.adapters_configured = cfg.adapters.as_ref().map(|a| a.adapters.len());
     cfg.adapters = resolved.adapters;
     cfg.render_workers = budget.render;
     Ok(Some(resolved.records))
@@ -707,6 +710,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            adapters_configured: None,
         }
     }
 
