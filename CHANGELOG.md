@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Adapter and primer sequences may use the full IUPAC alphabet. A degenerate
+  primer now matches every variant its wobble positions cover, instead of being
+  skipped as "non-ACGT". `U` folds to `T`; non-nucleotide characters are still
+  skipped with a warning, and a pattern averaging two or more bases per position
+  is searched but flagged as near-wildcard.
 - `--summary-json <PATH>`: writes a machine-readable JSON summary of the run,
   covering the resolved settings (`params`) and the read, base, and per-reason
   segment-drop counters. Written on every dispatch path, folder merges included,

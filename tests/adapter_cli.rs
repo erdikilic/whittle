@@ -1422,7 +1422,7 @@ fn ambiguity_codes_in_reads_do_not_abort_adapter_trimming() {
         let mut a = adapter.to_vec();
         a[3] = code;
         let body: String = (0..300)
-            .map(|j| b"ACGT"[((i * 31 + j * 17 + j * j * 3) % 4) as usize] as char)
+            .map(|j| b"ACGT"[(i * 31 + j * 17 + j * j * 3) % 4] as char)
             .collect();
         let s = format!("{}{body}", String::from_utf8(a).unwrap());
         fq.push_str(&format!("@r{i}\n{s}\n+\n{}\n", "I".repeat(s.len())));
@@ -1442,5 +1442,69 @@ fn ambiguity_codes_in_reads_do_not_abort_adapter_trimming() {
     assert!(
         !out.contains("CCTGTACTTCGTTCAGTTACG"),
         "the adapter should still be trimmed despite the ambiguity code"
+    );
+}
+
+/// A degenerate primer is the reason the IUPAC alphabet exists: a wobble position
+/// stands for the bases it covers, and reads carrying either variant must trim.
+/// Ambiguous adapter entries used to be skipped with a warning.
+#[test]
+fn degenerate_primer_trims_every_variant_it_covers() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+    let fasta = dir.path().join("primer.fasta");
+    let output = dir.path().join("out.fastq");
+
+    // Y = C or T at position 8; R = A or G at position 15.
+    std::fs::write(&fasta, ">degenerate\nACGTACGTYCGTACGRACGT\n").unwrap();
+
+    // One read per concrete variant the pattern covers, plus a read whose base at
+    // the wobble position is outside it (A at the Y slot) as a negative control.
+    let variants = [
+        ("yc_ra", "ACGTACGTCCGTACGAACGT"),
+        ("yt_rg", "ACGTACGTTCGTACGGACGT"),
+        ("yc_rg", "ACGTACGTCCGTACGGACGT"),
+        ("miss", "ACGTACGTACGTACGAACGT"),
+    ];
+    let mut fq = String::new();
+    for (i, (name, prefix)) in variants.iter().enumerate() {
+        let body: String = (0..300)
+            .map(|j| b"ACGT"[(i * 31 + j * 17 + j * j * 3) % 4] as char)
+            .collect();
+        let s = format!("{prefix}{body}");
+        fq.push_str(&format!("@{name}\n{s}\n+\n{}\n", "I".repeat(s.len())));
+    }
+    std::fs::write(&input, fq).unwrap();
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", output.to_str().unwrap()])
+        .args(["-a", fasta.to_str().unwrap()])
+        .args(["--adapter-error-rate", "0.0"])
+        .assert()
+        .success();
+
+    let out = std::fs::read_to_string(&output).unwrap();
+    let seqs: std::collections::HashMap<&str, &str> = out
+        .lines()
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|c| (c[0].trim_start_matches('@'), c[1]))
+        .collect();
+
+    for (name, prefix) in &variants[..3] {
+        let got = seqs.get(name).unwrap_or_else(|| panic!("{name} missing"));
+        assert!(
+            !got.starts_with(&prefix[..12]),
+            "{name}: the degenerate primer should have been trimmed, got {}",
+            &got[..20.min(got.len())]
+        );
+    }
+    // Exact matching only, so a base outside the wobble set is not a hit.
+    assert!(
+        seqs["miss"].starts_with("ACGTACGTACGT"),
+        "a base outside the ambiguity set must not trim"
     );
 }

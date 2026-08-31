@@ -16,6 +16,22 @@ pub type AdapterSearcher = Searcher<Iupac>;
 /// The same profile, used through the pattern-batched API.
 pub type BatchedAdapterSearcher = Searcher<Iupac>;
 
+/// How many of the four bases an IUPAC code stands for, or `None` if the byte is
+/// not a nucleotide code at all.
+///
+/// `U` is deliberately absent: callers fold it to `T` before it reaches here,
+/// because sassy would otherwise treat `U` as a fifth base that matches nothing
+/// in a DNA read.
+pub fn iupac_degeneracy(code: u8) -> Option<u8> {
+    Some(match code.to_ascii_uppercase() {
+        b'A' | b'C' | b'G' | b'T' => 1,
+        b'R' | b'Y' | b'S' | b'W' | b'K' | b'M' => 2,
+        b'B' | b'D' | b'H' | b'V' => 3,
+        b'N' => 4,
+        _ => return None,
+    })
+}
+
 /// One approximate match of a pattern in the text: half-open `[start, end)` into
 /// the text, with its edit `cost`. Strand is not exposed. A reverse-complement
 /// hit still occupies the same text span, which is all the trimmer needs.
