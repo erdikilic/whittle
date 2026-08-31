@@ -475,7 +475,7 @@ pub fn parse() -> anyhow::Result<Config> {
     // Presence detection is preset-only: a user-supplied --adapter-fasta is a
     // curated set that should all be searched, and sampling could wrongly drop a
     // rare custom adapter. So detection is disabled whenever a FASTA is provided
-    // and we're not inferring (under infer, --adapter-sample means the
+    // and inference is off (under infer, --adapter-sample means the
     // inference buffer, not presence detection, so it's left alone).
     let adapter_sample = if adapter_infer == AdapterInfer::Off && c.adapter_fasta.is_some() {
         if adapter_sample > 0 {

@@ -77,8 +77,8 @@ pub fn reader(
 
 /// Like `reader`, but over an already-open stream rather than a path/stdin. Used
 /// by the single-file dispatch so a stdin BAM whose first bytes were consumed for
-/// format sniffing (and chained back into `inner`) is read from the true start —
-/// re-opening `io::stdin()` would drop those already-consumed bytes. MT-bgzf when
+/// format sniffing (and chained back into `inner`) is read from the true start.
+/// Re-opening `io::stdin()` would drop those already-consumed bytes. MT-bgzf when
 /// `workers > 1`.
 pub fn reader_from(
     inner: Box<dyn io::Read + Send>,
@@ -171,7 +171,7 @@ impl BamSink {
     }
 
     /// Flush + finalize (bgzf EOF block). Single: `try_finish`; Multi:
-    /// `into_inner().finish()` (its `Drop` swallows errors — must be explicit).
+    /// `into_inner().finish()` (its `Drop` swallows errors, so this must be explicit).
     pub fn finish(self) -> anyhow::Result<()> {
         match self {
             BamSink::Single(mut w) => {

@@ -50,7 +50,7 @@ pub fn run_fastq_seq<W: Write>(
 /// Trim one record, then filter each produced segment via the shared
 /// `process_read_segments` helper, rendering the survivors into an owned
 /// FASTQ byte buffer. Writing into an in-memory `Vec<u8>` cannot fail, so the
-/// `.expect` below is an assertion, not real error handling — the parallel
+/// `.expect` below is an assertion, not real error handling. The parallel
 /// caller runs inside a plain `for_each` with no `Result` propagation seam
 /// (see `run_fastq`), matching the pre-refactor `.unwrap()` on the same
 /// write.
@@ -118,7 +118,7 @@ where
 
     // Writer on a plain scoped OS thread; render on the budget-sized LOCAL rayon
     // pool via `pool.install` so the nested `par_bridge` uses THAT pool (not
-    // rayon's global num_cpus pool) — this is what makes `-t` bound the render
+    // rayon's global num_cpus pool), which is what makes `-t` bound the render
     // threads. The writer keeps draining on a write error (never `break`) so
     // bounded-channel producers can't deadlock.
     std::thread::scope(|s| {
@@ -543,7 +543,7 @@ mod tests {
     /// into a long insert (survives length filtering) and a short insert
     /// (rejected `TooShort`). The survivor keeps its PRODUCED index: it
     /// is named `_segment_1` (not renamed to look unsplit), even
-    /// though its sibling `_segment_2` never made it to output — a lone
+    /// though its sibling `_segment_2` never made it to output. A lone
     /// suffix with a gap correctly signals "this read was split".
     #[test]
     fn split_produces_long_survivor_and_short_segment_drop() {
@@ -700,8 +700,8 @@ mod tests {
             threads_clamped: None,
         };
         // Owned records (ReadRecord: Clone); wrap in Ok at iteration time so each run
-        // gets a fresh Send iterator. anyhow::Error is not Clone, so we can't clone a
-        // Vec<Result<..>> — clone the Vec<ReadRecord> and re-wrap instead.
+        // gets a fresh Send iterator. anyhow::Error is not Clone, so a
+        // Vec<Result<..>> cannot be cloned; clone the Vec<ReadRecord> and re-wrap instead.
         let recs: Vec<ReadRecord> = (0..500)
             .map(|i| rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10]))
             .collect();

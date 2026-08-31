@@ -58,7 +58,7 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
         }
 
         // Keep a group that has surviving positions, OR one that was already
-        // empty in the source (`g.deltas.is_empty()` — a valid "assessed, none
+        // empty in the source (`g.deltas.is_empty()`, a valid "assessed, none
         // found" record, often carrying a `?`/`.` status). A group that HAD
         // positions but lost every one to the window is genuinely dropped.
         if !new_deltas.is_empty() || g.deltas.is_empty() {
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn preserves_originally_empty_group() {
-        // An MM group with zero positions (e.g. `C+m?;` — "assessed, none
+        // An MM group with zero positions (e.g. `C+m?;`, "assessed, none
         // found") is valid SAM and must survive windowing, distinct from
         // a group whose positions all fell OUTSIDE the window (dropped).
         let seq = b"ACAC"; // A at 0,2 ; C at 1,3
@@ -192,7 +192,7 @@ mod tests {
     /// Random windows preserve the ML bytes associated with surviving positions.
     #[test]
     fn ml_stays_byte_aligned_over_random_windows() {
-        // Deterministic LCG — reproducible, no external rng dependency.
+        // Deterministic LCG: reproducible, no external rng dependency.
         struct Lcg(u64);
         impl Lcg {
             fn next_u64(&mut self) -> u64 {
@@ -293,7 +293,7 @@ mod tests {
 
     /// Property test extending `ml_stays_byte_aligned_over_random_windows` to
     /// MULTI-code groups (`ncodes ∈ {1, 2}`, e.g. `C+m` and `C+mh`). ML is
-    /// position-major — `ncodes` bytes per modified position — and after slicing
+    /// position-major (`ncodes` bytes per modified position) and after slicing
     /// to a window the surviving ML must stay position-major and byte-exact: its
     /// length equals `surviving_positions * ncodes`, and the bytes equal exactly
     /// the in-window positions' `ncodes`-byte runs in order. This is the

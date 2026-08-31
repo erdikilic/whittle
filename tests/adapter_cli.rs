@@ -973,7 +973,7 @@ fn infer_is_deterministic() {
 // --- marginal-support warning ------------------------------------------
 
 /// Fraction of reads that carry `PLANTED_ADAPTER` at all; the rest are pure
-/// background (no adapter anywhere in the read), modelling a low-prevalence
+/// background (no adapter anywhere in the read), modeling a low-prevalence
 /// / barcode-specific adapter rather than a per-read match-quality problem.
 /// Support is now a whole-consensus PRESENCE fraction (see
 /// `infer::assemble`'s doc comment), so a per-read *error rate* no longer
@@ -1256,8 +1256,8 @@ fn produced_index_naming_end_to_end() {
 /// (`obs.rs`'s `Summary:`/`Trimmed to nothing:`/`All segments filtered:`/
 /// `Segments dropped:` lines), not just the `Counters`/`Stats` unit tests in
 /// `src/workflow/mod.rs`. In particular it distinguishes the all-adapter/empty
-/// reads (`reads_trimmed_to_nothing` — no segments produced at all) from the
-/// short-only read (`reads_all_filtered` — one segment produced, then
+/// reads (`reads_trimmed_to_nothing`, no segments produced at all) from the
+/// short-only read (`reads_all_filtered`, one segment produced, then
 /// filtered).
 #[test]
 fn accounting_summary_end_to_end() {

@@ -24,7 +24,7 @@ thread_local! {
     static BATCH_SEARCHER: RefCell<BatchedDnaSearcher> = RefCell::new(new_batched_searcher());
 }
 
-/// Which read end a catalog sequence is expected at — this gates TERMINAL
+/// Which read end a catalog sequence is expected at. This gates TERMINAL
 /// trimming only: `Five` trims at the 5' end, `Three` at the 3' end, `Both` at
 /// either. Interior chimera-splitting (when enabled) considers any adapter that
 /// matches in the read interior regardless of this tag, since a front/rear
@@ -227,7 +227,7 @@ fn reverse_complement(seq: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// Sequences shorter than this are never searched standalone — a <11 bp pattern
+/// Sequences shorter than this are never searched standalone: a <11 bp pattern
 /// matches almost anywhere under any error budget. The 7 bp catalog flanks are
 /// construction anchors, not standalone patterns.
 pub const MIN_PATTERN_LEN: usize = 11;
@@ -248,11 +248,11 @@ enum Terminal {
 /// A hit eligible for BOTH ends means the read is short enough that the two
 /// end-zones overlap (`n <= 2*end_size`), so the adapter sits within `end_size`
 /// of each end. Trimming toward the nearer end here would delete the whole
-/// outboard arm — which, for a central chimera-junction adapter, is real
+/// outboard arm, which for a central chimera-junction adapter is real
 /// insert. Instead classify it as `Excise`: cut out just the adapter and keep
 /// both flanks. For a genuinely terminal adapter (abutting an end) the outboard
 /// flank is empty, so excising is identical to trimming that end; only a central
-/// adapter — which cannot be a terminal leader — is actually split.
+/// adapter (which cannot be a terminal leader) is actually split.
 fn classify_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: End) -> Terminal {
     let near5 = start <= end_size && matches!(tag, End::Five | End::Both);
     let near3 = end >= n.saturating_sub(end_size) && matches!(tag, End::Three | End::Both);
@@ -286,8 +286,8 @@ fn ends_only_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: 
 ///   - interior hits (stricter `k_mid`) excise and split.
 ///
 /// When `cfg.split` is false (`--adapter-ends-only`), only the two end-zones
-/// are searched at all — the interior is never scanned, since no hit found
-/// there could ever be actioned.
+/// are searched at all. The interior is never scanned, since no hit found
+/// there could ever be acted on.
 ///
 /// Returns `[start,end)` spans in `window` coordinates.
 pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
@@ -780,7 +780,7 @@ mod segment_tests {
         // With the default end_size=150, both end-zones overlap for any read
         // <= 2*end_size (300bp). A chimera-junction adapter sitting within
         // end_size of BOTH ends must SPLIT the read (keep both inserts), not be
-        // treated as a terminal adapter — which discarded the entire outboard
+        // treated as a terminal adapter, which discarded the entire outboard
         // arm (up to ~end_size bases of real insert).
         let adapter = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only (no A/C to collide)
         let mut w = vec![b'A'; 115]; // insert1
@@ -909,7 +909,7 @@ mod segment_tests {
     #[test]
     fn overlapping_interior_cuts_merge() {
         // Two DIFFERENT interior adapters whose hits overlap by 6 bp: `a` matches
-        // [24,40), `b` matches [34,50) — constructed so their shared 6 bp region
+        // [24,40), `b` matches [34,50), constructed so their shared 6 bp region
         // ("TGTGTG", the tail of `a` / head of `b`) is literally the same window
         // bytes, giving both an exact (cost 0) hit. The overlap must merge into one
         // excision, leaving exactly 2 segments (not 3).

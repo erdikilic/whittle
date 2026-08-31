@@ -31,7 +31,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let setup_start = std::time::Instant::now();
 
     // Scoped so the borrow of `cfg.io.input` ends before `run_folder` needs
-    // `&mut cfg` — the directory path itself is cloned out first.
+    // `&mut cfg`. The directory path itself is cloned out first.
     if let Some(dir) = cfg
         .io
         .input
@@ -50,7 +50,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     {
         anyhow::bail!(
             "input and output are the same file ({}); whittle streams the input and \
-             would truncate it before reading — write to a different path",
+             would truncate it before reading; write to a different path",
             outp.display()
         );
     }
@@ -73,7 +73,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // its first bytes without losing them: any bytes consumed while sniffing
     // get prepended back via a Cursor+chain before the FASTQ reader is built.
     // Wrapped in `CountingReader` here, innermost, so it counts actual bytes
-    // pulled from the file/stdin — the sniff bytes are counted once when
+    // pulled from the file/stdin. The sniff bytes are counted once when
     // first read; re-serving them from the in-memory `Cursor` below does not
     // double-count them.
     let raw: Box<dyn Read + Send> = match in_path {
@@ -121,12 +121,12 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
 
     // Advisory only: an explicit --in-format/--out-format always wins for
     // actual detection (this never changes behavior), but it usually signals a
-    // mistake when it disagrees with the path's own extension — e.g.
+    // mistake when it disagrees with the path's own extension, e.g.
     // `--in-format bam` on a `.fastq` file, or `--out-format fastq` on an
     // `out.fastq.gz` path (which would write a plain FASTQ into a .gz name).
     // Extension-only check: skipped for stdin/stdout / no-extension. Both
     // warnings fire later, after the banner (see the consolidated warnings
-    // block below) — only the detection runs here.
+    // block below); only the detection runs here.
     let mismatch_warn = io::format_mismatch_warning("--in-format", cfg.io.in_format, in_path);
     let out_mismatch_warn =
         io::format_mismatch_warning("--out-format", cfg.io.out_format, cfg.io.output.as_deref());
@@ -142,7 +142,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     guard_stdout_binary(&cfg, out_fmt)?;
 
     // Advisory only: no trimming, a pass-through filter, and no format
-    // conversion means the run just re-emits (almost) the same reads it read —
+    // conversion means the run just re-emits (almost) the same reads it read,
     // usually not what was intended. Skipped for a conversion-only run
     // (in_fmt != out_fmt), which is legitimate on its own. Warning deferred to
     // the consolidated block below, same as `mismatch_warn` above.
@@ -162,7 +162,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     );
 
     // Resolved once, here, so the banner's Threads line and the actual dispatch
-    // arm below agree on the same split — recomputing per arm risked the banner
+    // arm below agree on the same split. Recomputing per arm risked the banner
     // showing one number and the workflow running another.
     // BAM and bgzf-FASTQ inputs are BGZF containers whose decode can run on the
     // multithreaded reader. Grant a parallel decode budget only when the render
@@ -218,7 +218,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     }
 
     // Warnings fire after the resolved-config banner (not before it, and not
-    // interleaved with it) — `whittle {version}`/`Command: ...` (printed by
+    // interleaved with it): `whittle {version}`/`Command: ...` (printed by
     // `main` before `run` is even called) and the banner above are meant to be
     // the first things a reader sees; only then do clamp/mismatch/no-op
     // advisories follow, ahead of the live progress/summary.
@@ -270,7 +270,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
             cfg.render_workers = budget.render;
             let stats = workflow::run_raw_bam(&out_header, records, &mut sink, &cfg, &counters)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
-            // on `Drop`, whose `try_finish` error is silently discarded — an I/O
+            // on `Drop`, whose `try_finish` error is silently discarded. An I/O
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
             // truncated BAM with a success exit code.
             sink.finish()?;
@@ -301,8 +301,8 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     note_tags_ignored(&cfg, in_fmt, out_fmt);
 
     // Writer construction (a `File::create`, which eagerly truncates any
-    // existing `-o` target) happens AFTER `maybe_reduce_adapters`, not before
-    // — matching the BAM arms above. An inference-report early exit (`Ok(None)`)
+    // existing `-o` target) happens AFTER `maybe_reduce_adapters`, not before,
+    // matching the BAM arms above. An inference-report early exit (`Ok(None)`)
     // must return before any output file is touched; building the writer
     // first would truncate a pre-existing `-o` file even though report-only
     // writes no records at all.
@@ -334,7 +334,7 @@ fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
 }
 
 /// A kept adapter's support below this is close enough to `infer::KEEP_SUPPORT`
-/// (0.30, a whole-consensus presence fraction — see its doc comment) that
+/// (0.30, a whole-consensus presence fraction, see its doc comment) that
 /// it's worth an explicit warning rather than trusting the plain info line:
 /// a genuinely marginal discovery (e.g. an adapter only present in a fraction
 /// of reads, such as a barcode-specific sequence) can still clear the keep
@@ -348,10 +348,10 @@ const MARGINAL_SUPPORT: f64 = 0.45;
 /// `info!`: `inferred_N ≈ NAME (pct%) · support X.XX` when the discovered
 /// sequence cross-names against the built-in ONT catalog, else `inferred_N
 /// (no catalog match) · support X.XX`. `N` is the 1-based position in
-/// `discovered`'s own order (support desc, then sequence asc — see
+/// `discovered`'s own order (support desc, then sequence asc, see
 /// `infer::discover`), which now agrees with any `inferred_{N}` fallback in
 /// `InferredAdapter::adapter.name` (both derive from the same post-sort order).
-/// The raw sequence is logged separately at `debug!` — too noisy for the
+/// The raw sequence is logged separately at `debug!`, too noisy for the
 /// default INFO level, but useful with `-v` when checking a discovery by eye.
 /// Support below `MARGINAL_SUPPORT` additionally gets a `warn!`, since it's
 /// close enough to the `KEEP_SUPPORT` floor to warrant double-checking.
@@ -554,7 +554,7 @@ where
             if detected.is_empty() {
                 tracing::warn!(
                     "Adapter presence: no adapters detected in the first {s} sampled reads; using all {full} \
-                     (the sampled prefix may be unrepresentative — pass --adapter-sample 0 to always use the full set)"
+                     (the sampled prefix may be unrepresentative; pass --adapter-sample 0 to always use the full set)"
                 );
                 ac.adapters.clone()
             } else {
@@ -587,7 +587,7 @@ where
 }
 
 /// FASTQ output writer: either a plain buffered writer, or a `gzp` parallel
-/// gzip writer (used only when the output format is explicitly `FastqGz` —
+/// gzip writer (used only when the output format is explicitly `FastqGz`;
 /// see `io::resolve_output`, which no longer auto-compresses).
 ///
 /// `gzp`'s `ParCompress` REQUIRES an explicit `finish()` call to flush its
@@ -595,7 +595,7 @@ where
 /// its `Write` impl only ever hands off *full* buffered chunks to the
 /// compressor threads, so the tail end only ever gets flushed by `finish()`,
 /// never by `flush()`. `ParCompress`'s own `Drop` impl does call `finish()` as
-/// a backstop if it's still live, but it `.unwrap()`s the result — any I/O
+/// a backstop if it's still live, but it `.unwrap()`s the result: any I/O
 /// error at that point becomes an uncatchable panic instead of a propagated
 /// `anyhow::Result::Err`. Calling `finish()` explicitly, as the single seam
 /// both callers below go through instead of `flush()` + `drop()`, keeps that
@@ -625,7 +625,7 @@ impl Write for FastqOut {
 
 impl FastqOut {
     /// Finalize: for gz, flush the final block + gzip footer via gzp's
-    /// `ZWriter::finish` (required — see the type's docs above); for plain,
+    /// `ZWriter::finish` (required, see the type's docs above); for plain,
     /// flush the `BufWriter`. Must be called before returning success.
     fn finish(self) -> anyhow::Result<()> {
         match self {
@@ -646,7 +646,7 @@ impl FastqOut {
 }
 
 /// Build the FASTQ output writer: a file or stdout, wrapped in a parallel gzip
-/// encoder (`gzp`, using `gz_workers` worker threads — the caller's
+/// encoder (`gzp`, using `gz_workers` worker threads, the caller's
 /// workload-aware ENCODE share of the `-t` budget) when the output format is
 /// `FastqGz`, else a plain buffered writer. `gz_workers` is only read on the
 /// `FastqGz` branch, so plain-output callers may pass any value.
@@ -682,7 +682,7 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
 }
 
 /// True iff writing `fmt`'s bytes to stdout would dump binary (BAM) or gzip
-/// (FASTQ.gz) data into an interactive terminal — never useful output, and
+/// (FASTQ.gz) data into an interactive terminal: never useful output, and
 /// almost always a forgotten `-o`/redirect. Plain FASTQ text is always fine.
 /// Pure (no I/O) so it's trivial to unit-test without a real TTY.
 fn binary_to_terminal(output_is_stdout: bool, fmt: io::Format, stdout_is_tty: bool) -> bool {
@@ -710,7 +710,7 @@ fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> 
             io::Format::Fastq => "fastq", // unreachable via binary_to_terminal, kept exhaustive
         };
         anyhow::bail!(
-            "refusing to write {} to a terminal — redirect to a file/pipe (e.g. `> out.{ext}`) \
+            "refusing to write {} to a terminal; redirect to a file/pipe (e.g. `> out.{ext}`) \
              or pass -o",
             out_fmt.label()
         );
@@ -729,7 +729,7 @@ fn run_folder(
     use io::Format;
 
     // Pass the output path so `classify` can hard-error if `-o` names a read file
-    // inside `-i <dir>` — it could be a real input or a stale prior output, and
+    // inside `-i <dir>`: it could be a real input or a stale prior output, and
     // overwriting either while merging the rest is silent data loss. The merged
     // output must live outside the input directory.
     // --in-format has no effect here: a directory's family is decided per file
@@ -900,7 +900,7 @@ fn run_folder(
     }
 }
 
-/// The output compression stage's weight for a given output format — `Bgzf` for
+/// The output compression stage's weight for a given output format: `Bgzf` for
 /// BAM (always bgzf-compressed), `Gzip` for `FASTQ.gz`, `None` for plain FASTQ.
 /// Paired with `render_heavy` (`in_fmt == Format::Bam`, or the folder-mode
 /// equivalent), this is everything `config::thread_budget` needs; both call sites
@@ -935,7 +935,7 @@ fn configure_shared_bgzf_pool(
 /// render-heavy even for a full-window output because the current parallel path
 /// still clones owned `RecordBuf`s before handing them to the writer. FASTQ
 /// input is normally trim-only (light), but adapter matching or ab-initio
-/// inference runs an approximate search per read, which is heavy too — so it
+/// inference runs an approximate search per read, which is heavy too, so it
 /// gets a render-pool share rather than being starved as pure compression.
 fn render_heavy_for(in_fmt: io::Format, _out_fmt: io::Format, cfg: &Config) -> bool {
     matches!(in_fmt, io::Format::Bam)
@@ -945,8 +945,8 @@ fn render_heavy_for(in_fmt: io::Format, _out_fmt: io::Format, cfg: &Config) -> b
 
 /// The startup banner's operation line (LINE mode's item 3 / BAR mode's own
 /// one-liner build on the same wording): `Trimming FASTQ` when input and output
-/// share a `Format::family` — including a `FASTQ` -> `FASTQ.gz` run, which is a
-/// compression change, not a format conversion — else `Converting {in_label} to
+/// share a `Format::family` (including a `FASTQ` -> `FASTQ.gz` run, which is a
+/// compression change, not a format conversion), else `Converting {in_label} to
 /// {out_label}` (e.g. `Converting BAM to FASTQ`) for a genuine cross-family
 /// conversion.
 fn operation_line(in_fmt: io::Format, out_fmt: io::Format) -> String {
@@ -988,17 +988,17 @@ fn output_banner_line(
 
 /// The startup banner's `Threads: ...` line: the resolved `-t`/auto worker
 /// count (`threads`) as the header, with the per-stage split (mapping the
-/// `ThreadBudget`'s internal stage names — decode/render/encode — onto the
+/// `ThreadBudget`'s internal stage names (decode/render/encode) onto the
 /// workflow-stage vocabulary shown to the user: read/trim/write) in
 /// parentheses: `Threads: 8 (read 1, trim 4, write 3)`. Deliberately *not*
 /// `b.total()`: that per-stage sum can exceed `threads` (each stage is floored
-/// at >= 1 even when the overall total is 1 — see `ThreadBudget::total`'s
+/// at >= 1 even when the overall total is 1, see `ThreadBudget::total`'s
 /// doc), which read as a confusing second, larger "total" next to the `-t`
 /// value the user actually asked for.
 ///
 /// `threads <= 1` instead prints `Threads: 1 (sequential)`: `thread_budget`
 /// still floors `render`/`encode` at >= 1 each even at a total of 1, so the
-/// read/trim/write split would show e.g. `(read 1, trim 1, write 1)` — three
+/// read/trim/write split would show e.g. `(read 1, trim 1, write 1)`, three
 /// threads' worth of detail for a run that is, in fact, single-threaded.
 fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> String {
     if threads <= 1 {
@@ -1022,7 +1022,7 @@ fn qual_mode_label(mode: qual::QualMode) -> &'static str {
 
 /// The startup banner's `Filters: ...; trim: ...` line, built from the resolved
 /// `FilterConfig` + `TrimPlan`. Pure (no I/O), so it's unit-testable directly.
-/// Shows only *active* (non-default) clauses/ops — a fresh-defaults run (no
+/// Shows only *active* (non-default) clauses/ops: a fresh-defaults run (no
 /// filters, no trim) reads as `Filters: none; trim: none` rather than
 /// spelling out every no-op threshold (e.g. `mean quality >=0`).
 ///
@@ -1099,16 +1099,16 @@ fn filters_and_trim_line(filter: &filter::FilterConfig, trim: &trim::TrimPlan) -
 }
 
 /// The startup banner's `Adapters: ...` line, shown only when adapter trimming
-/// is active — `None` when `cfg.adapters` is unset, so callers can skip the
+/// is active. `None` when `cfg.adapters` is unset, so callers can skip the
 /// line entirely for an off run (same convention as the other banner-line
 /// helpers being pure/unit-testable). Reports the adapter count, `trim +
 /// split` vs `ends-only` mode (`AdapterConfig::split`), the end-match error
 /// rate, the end-zone size in bp, and (via `adapter_sample`, i.e.
-/// `cfg.adapter_sample`) whether presence detection will sample the input —
+/// `cfg.adapter_sample`) whether presence detection will sample the input:
 /// `sample {N}` when active, `sample off` when `N == 0` disables detection.
 ///
 /// Under enabled inference, the count printed here is always
-/// `0` (discovery hasn't run yet — it replaces `cfg.adapters` only once the
+/// `0` (discovery hasn't run yet; it replaces `cfg.adapters` only once the
 /// buffer-then-decide seam runs, after this banner prints), so an inference
 /// action/policy suffix is appended to make clear the set is about to be
 /// discovered, not that trimming is configured with zero adapters. This is
@@ -1177,7 +1177,7 @@ pub(crate) fn shell_quote(arg: &str) -> String {
 /// The startup banner's `Command: ...` line: the real process argv, space-joined
 /// and each argument shell-quoted via `shell_quote` so the line can be copied
 /// back out and re-run verbatim. Takes `OsStr`-like items (the caller passes
-/// `std::env::args_os()`, NOT `args()` — the latter panics on non-UTF-8 argv) and
+/// `std::env::args_os()`, NOT `args()`, since the latter panics on non-UTF-8 argv) and
 /// lossily converts each to `str` here, at the one seam that must never panic on
 /// a malformed argv. Generic over the argument iterator so it's unit-testable
 /// without touching the real process argv.
@@ -1195,7 +1195,7 @@ where
 }
 
 /// The output path (or `<stdout>`) shown in both the startup banner's `Output:`
-/// line and the end-of-run `Completed`/closer line — the two bookend on the same
+/// line and the end-of-run `Completed`/closer line; the two bookend on the same
 /// text so a reader can match them up at a glance.
 fn output_desc(output: Option<&std::path::Path>) -> String {
     match output {
@@ -1208,9 +1208,9 @@ fn output_desc(output: Option<&std::path::Path>) -> String {
 /// and `./`-style aliasing are caught; the output usually does not exist yet, so
 /// it falls back to canonicalizing the parent directory and re-joining the file
 /// name. Conservative: any resolution failure yields `false` (don't block a run
-/// on a path we can't resolve).
+/// on a path that cannot be resolved).
 pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
-    // When both paths already exist, an inode+device match is definitive — and it
+    // When both paths already exist, an inode+device match is definitive, and it
     // also catches hard links to one inode, which path canonicalization misses.
     #[cfg(unix)]
     {
@@ -1255,7 +1255,7 @@ fn note_tags_ignored(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) {
 
 /// Append an `@PG` provenance record (`ID:whittle`, program name + version) to a
 /// cloned header before writing. Best-effort: `Programs::add` can fail (e.g. on a
-/// duplicate ID), in which case the header is written unchanged — the `@PG` line
+/// duplicate ID), in which case the header is written unchanged. The `@PG` line
 /// is cosmetic and must never block record output.
 fn provenance_header(mut header: noodles_sam::Header) -> noodles_sam::Header {
     use noodles_sam::header::record::value::Map;
@@ -1488,7 +1488,7 @@ mod tests {
     fn threads_banner_line_sequential_for_one_or_fewer() {
         // `-t 1` (or `-t 0`, which `resolve_threads` floors to 1): the
         // read/trim/write split would otherwise show e.g. "(read 1, trim 1,
-        // write 1)" for what is actually a single-threaded run — collapse it
+        // write 1)" for what is actually a single-threaded run; collapse it
         // to a plain "sequential" label instead.
         let b = config::thread_budget(1, true, false, config::EncodeKind::Bgzf);
         assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");

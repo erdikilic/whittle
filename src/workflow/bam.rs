@@ -26,7 +26,7 @@ const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] = [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri"
 
 /// ONT signal-mapping tags: the `mv` move table plus the `ts`/`ns` sample counts
 /// and the `sp`/`pi` split linkage. On a trimmed read these are either rewritten
-/// (`--update-moves`) or dropped (default) — never left stale. Handled by
+/// (`--update-moves`) or dropped (default), never left stale. Handled by
 /// `signal_tag_updates`, not the per-base pass.
 const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 
@@ -34,7 +34,7 @@ const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 /// stored in original-signal coordinates) and `pt` (tail length in bases). Under
 /// `--update-moves` they are kept/shifted when the poly-A tail survives the trim
 /// and dropped when it's cut; without it (or a malformed move table) they are
-/// dropped, since we can't relate signal to sequence.
+/// dropped, since signal cannot be related to sequence.
 const POLYA_TAGS: [[u8; 2]; 2] = [*b"pa", *b"pt"];
 
 /// `bi` (barcode info) embeds front/rear SEQUENCE positions that shift under a
@@ -46,7 +46,7 @@ const DROP_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"bi"];
 /// Tags dropped only when a read is SPLIT (not on a plain crop): `st` (read start
 /// time) and `du` (duration) describe the whole parent read, but a split subread
 /// starts later in the signal and spans less of it. Dorado recomputes both from
-/// the sample rate, which isn't carried in the BAM, so we drop them rather than
+/// the sample rate, which isn't carried in the BAM, so they are dropped rather than
 /// ship a stale timestamp/duration. A head/tail crop keeps the same read identity,
 /// so they stay valid there.
 const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
@@ -186,7 +186,7 @@ fn slice_array(a: &Array, start: usize, end: usize) -> Array {
     }
 }
 
-/// A per-base `B` array (any array whose length equals the read length — this
+/// A per-base `B` array (any array whose length equals the read length; this
 /// covers the known kinetics tags and any custom per-base tag) sliced to the
 /// window `[start, end)`; `None` to leave the tag unchanged. Callers must already
 /// have excluded MM/ML/MN and the signal tags. A known kinetics tag whose length
@@ -274,7 +274,7 @@ fn parent_read_id(src: &RecordBuf) -> Vec<u8> {
 /// falls inside that window the tail survived, so: on a split, shift `pa` into the
 /// subread's own signal frame (its `ts` is 0) and keep `pt`; on a crop, keep both
 /// unchanged (identity + POD5 signal are unchanged, so the absolute positions stay
-/// valid). If any real position falls outside — the tail was (partly) trimmed — or
+/// valid). If any real position falls outside (the tail was partly or fully trimmed), or
 /// there's no poly-A array, drop `pa`/`pt`.
 fn polya_updates(
     src: &RecordBuf,
@@ -338,13 +338,13 @@ fn polya_updates(
 
 /// Trim-aware rewrite of the ONT signal tags for output window `[start, end)`.
 /// Returns `(tag, Some(value))` to set or `(tag, None)` to remove; empty when the
-/// read isn't trimmed. With `update_moves` off — or when the move table is
-/// missing/malformed — all five signal tags are removed. With it on, the move
+/// read isn't trimmed. With `update_moves` off (or when the move table is
+/// missing/malformed), all five signal tags are removed. With it on, the move
 /// table is sliced by block range `moves[block_first .. block_second]`
 /// (stride-aligned, following dorado `splitter::subread`) and:
 ///   - crop (`total == 1`, name kept): `mv` sliced, `ts += block_first*stride`,
 ///     `ns` unchanged (still matches the by-name POD5 signal length).
-///   - split (`total > 1`, renamed): dorado subread encoding — `mv` sliced,
+///   - split (`total > 1`, renamed): dorado subread encoding: `mv` sliced,
 ///     `ts = 0`, `ns = span*stride`, `sp = parent offset`, `pi = parent id`.
 fn signal_tag_updates(
     src: &RecordBuf,
@@ -377,7 +377,7 @@ fn signal_tag_updates(
         return drop_all();
     };
     // The move index of the `start`-th and `end`-th base (each `1` in `moves`
-    // is one emitted base), and the total base count — found in a single pass,
+    // is one emitted base), and the total base count, found in a single pass,
     // without materializing the whole positions list.
     let mut ones_seen = 0usize;
     let mut block_first = None;
@@ -476,7 +476,7 @@ fn signal_tag_updates(
 }
 
 /// True if the record carries a *known* per-base kinetics tag whose array length
-/// disagrees with the sequence length — i.e. a malformed/unexpected per-base tag
+/// disagrees with the sequence length, i.e. a malformed/unexpected per-base tag
 /// that cannot be safely sliced. Used only to emit a run-level advisory.
 pub fn has_malformed_perbase_tag(rec: &RecordBuf, seq_len: usize) -> bool {
     rec.data().iter().any(|(tag, value)| {
@@ -603,12 +603,12 @@ fn reconstruct_record_with_bases(
     }
 
     if start != 0 || end != orig_len {
-        // Drop position/signal tags we can't reconstruct (poly-A / barcode coords).
+        // Drop position/signal tags that cannot be reconstructed (poly-A / barcode coords).
         for t in DROP_ON_TRIM_TAGS {
             out.data_mut().remove(&Tag::new(t[0], t[1]));
         }
-        // Refresh qs (mean read qscore) from the trimmed quality — dorado
-        // recomputes it per (sub)read — but only when the source carried one.
+        // Refresh qs (mean read qscore) from the trimmed quality, as dorado
+        // recomputes it per (sub)read, but only when the source carried one.
         if src.data().get(&Tag::new(b'q', b's')).is_some() {
             let qs = crate::qual::mean_prob_q(&qual[start..end]) as f32;
             out.data_mut()
@@ -660,7 +660,7 @@ fn reconstruct_record_with_bases(
 /// Slice MM/ML to the window `[start, end)` and re-serialize. Returns `None`
 /// when the source has no `MM` tag, or when no modified position survives the
 /// window (caller drops MM/ML/MN in that case). The inner `Option<Vec<u8>>` is
-/// the sliced ML, or `None` when the source carried `MM` but no valid `ML` — ML
+/// the sliced ML, or `None` when the source carried `MM` but no valid `ML`. ML
 /// is optional per the SAM spec, so an MM-only or malformed-ML record must not
 /// gain a bogus empty/truncated ML. Shared by the BAM→BAM and BAM→FASTQ paths so
 /// they cannot drift.
@@ -674,10 +674,10 @@ pub fn reconstruct_mods(
         Some(Value::String(s)) => AsRef::<[u8]>::as_ref(s),
         _ => return None,
     };
-    // Whether the source actually carried an ML array. If it didn't, we must not
+    // Whether the source actually carried an ML array. If it didn't, the output must not
     // emit one: declaring N modified positions with zero probabilities is an
     // invalid record that samtools/modkit reject. Borrow the bytes rather than
-    // cloning — `parse` copies only what it keeps into owned groups.
+    // cloning; `parse` copies only what it keeps into owned groups.
     let ml_opt: Option<&[u8]> = match src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
         Some(Value::Array(Array::UInt8(v))) => Some(v.as_slice()),
         _ => None,
@@ -806,7 +806,7 @@ where
 
     // Writer on a plain scoped OS thread; render on the budget-sized LOCAL rayon
     // pool via `pool.install` so the nested `par_bridge` uses THAT pool (not
-    // rayon's global num_cpus pool) — this is what makes `-t` bound the render
+    // rayon's global num_cpus pool), which is what makes `-t` bound the render
     // threads. The writer keeps draining on a write error (never `break`) so
     // bounded-channel producers can't deadlock.
     std::thread::scope(|s| {
@@ -1200,7 +1200,7 @@ pub fn run_raw_bam(
 /// resulting `RecordBuf`s through `run_bam_parallel`'s bounded channel onto a
 /// dedicated writer task. Output
 /// order is unordered for `threads > 1` (records land in arrival order, not
-/// input order) — the BAM format has no ordering requirement for uBAM.
+/// input order); the BAM format has no ordering requirement for uBAM.
 pub fn run_bam<R: InputRecord>(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
@@ -1283,7 +1283,7 @@ fn build_fastq_tags(
             continue; // handled by the reconstructed block below
         }
         // On trim, drop the ONT signal tags (a sliced move table is impractical in
-        // a FASTQ header, and signal-aware callers consume BAM — `--update-moves`
+        // a FASTQ header, and signal-aware callers consume BAM, and `--update-moves`
         // is BAM→BAM only) plus the poly-A and barcode-coordinate tags.
         if trimmed
             && (SIGNAL_TAGS.contains(&t)
@@ -1860,7 +1860,7 @@ mod tests {
             other => panic!("expected MM retained, got {other:?}"),
         };
         assert_eq!(mm, b"C+m,0,1;");
-        // ML must be ABSENT — never an empty array.
+        // ML must be ABSENT, never an empty array.
         assert!(
             out.data()
                 .get(&Tag::BASE_MODIFICATION_PROBABILITIES)

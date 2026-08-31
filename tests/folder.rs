@@ -122,7 +122,7 @@ fn folder_output_matching_a_real_input_is_rejected_and_preserves_it() {
 #[test]
 fn folder_rerun_with_output_inside_dir_hard_errors() {
     // When `-o` lands inside `-i <dir>`, a rerun (the output now a read file in the
-    // folder — indistinguishable from a real input) must hard-error, not overwrite.
+    // folder, indistinguishable from a real input) must hard-error, not overwrite.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.fastq"), "@r1\nACGTACGT\n+\nIIIIIIII\n").unwrap();
     let out = dir.path().join("merged.fastq");

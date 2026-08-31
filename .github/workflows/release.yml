@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    # Bare version tags, e.g. 0.1.0 or 0.1.0-rc1 — no "v" prefix.
+    # Bare version tags, e.g. 0.1.0 or 0.1.0-rc1, with no "v" prefix.
     tags: ["[0-9]+.[0-9]+.[0-9]+", "[0-9]+.[0-9]+.[0-9]+-*"]
   workflow_dispatch: # manual runs build + checksum every target without publishing
 

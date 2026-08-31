@@ -74,7 +74,7 @@ pub struct Counters {
     pub input_bases: AtomicU64,
     /// Sum of surviving segment lengths (bases) actually written to output.
     pub output_bases: AtomicU64,
-    /// Input reads that produced at least one surviving output segment —
+    /// Input reads that produced at least one surviving output segment,
     /// bumped once per input read (not once per segment, unlike
     /// `output_reads`, which a `--qual-split` read can bump several times).
     /// Exists so `snapshot`'s `debug_assert_eq!` can check that every input
@@ -95,7 +95,7 @@ pub struct Counters {
     /// Segment-level drop counters: one bump per **segment** (not read) that
     /// `filter::check` rejects, by reason, post-trim. A single input read can
     /// contribute to more than one of these (e.g. a `--qual-split` read whose
-    /// several pieces are each judged independently) — these are NOT part of
+    /// several pieces are each judged independently). These are NOT part of
     /// the read-level invariant.
     pub segments_dropped_short: AtomicU64,
     pub segments_dropped_long: AtomicU64,
@@ -136,10 +136,10 @@ impl Counters {
         // Every input read is exactly one of: produced at least one
         // surviving output segment (`reads_with_output`, regardless of how
         // many segments it split into), produced no segments at all
-        // (`reads_trimmed_to_nothing` — an empty read, a fully-consumed
+        // (`reads_trimmed_to_nothing`: an empty read, a fully-consumed
         // adapter read, or an over-crop), or produced at least one segment
         // but had every one of them rejected by `filter::check`
-        // (`reads_all_filtered`) — never more than one of the three, never
+        // (`reads_all_filtered`). Never more than one of the three, never
         // none. Segment-level drops are intentionally excluded: a read can
         // shed several segments and still survive, so per-segment counts
         // don't belong in a read-level invariant. A future workflow path
@@ -221,12 +221,12 @@ pub struct Stats {
     pub input_bases: u64,
     /// Sum of surviving segment lengths (bases) actually written to output.
     pub output_bases: u64,
-    /// Reads carrying a known per-base kinetics tag (ip/pw/…) whose array length
-    /// did not match the sequence length — malformed and left untouched. Surfaced
+    /// Reads carrying a known per-base kinetics tag (ip/pw/...) whose array length
+    /// did not match the sequence length: malformed and left untouched. Surfaced
     /// as a run-level advisory; not an error.
     pub malformed_tag_reads: u64,
     /// Read-level: input reads that produced zero segments at all (empty
-    /// read, fully consumed by adapter trimming, or an over-crop) —
+    /// read, fully consumed by adapter trimming, or an over-crop).
     /// `trim::apply` returned no intervals, so the per-segment filter loop
     /// never ran.
     pub reads_trimmed_to_nothing: u64,
@@ -269,9 +269,9 @@ mod tests {
     /// reads_trimmed_to_nothing + reads_all_filtered == input_reads`) models
     /// three reads: (a) a read with 2 surviving segments (`reads_with_output`),
     /// (b) a read with 0 survivors whose 2 produced segments were both
-    /// `TooShort` (`reads_all_filtered` — segments were produced, none
+    /// `TooShort` (`reads_all_filtered`: segments were produced, none
     /// survived), and (c) an empty read with no segments produced at all
-    /// (`reads_trimmed_to_nothing` — distinct from (b): the per-segment
+    /// (`reads_trimmed_to_nothing`, distinct from (b): the per-segment
     /// filter loop never even ran). Segment level: `output_reads` bumped
     /// twice (the 2 survivors of read a); 2 short drops (both from read b).
     #[test]

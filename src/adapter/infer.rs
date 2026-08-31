@@ -418,9 +418,9 @@ fn merge_both_ends(
         {
             three_used[j] = true;
             // Conservative inference keeps the 5' representation so its
-            // prefix remains the physical-end-facing side when we extract a
+            // prefix remains the physical-end-facing side when extracting a
             // terminal anchor below. Aggressive inference preserves the old
-            // full-consensus behaviour and keeps the longer reconstruction.
+            // full-consensus behavior and keeps the longer reconstruction.
             let kept = if aggressive && three[j].len() > f.len() {
                 three[j].clone()
             } else {
