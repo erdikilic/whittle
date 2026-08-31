@@ -1,4 +1,4 @@
-use super::{MmGroup, Mods, counting_base};
+use super::{MmGroup, Mods, counting_base, counts};
 
 pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
     let mut out = Vec::new();
@@ -10,20 +10,17 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
 
     for g in &mods.groups {
         let ncodes = g.codes.len().max(1);
-        let cbase = counting_base(g.base, g.strand);
+        let cbase = counting_base(g.base);
 
         // Occurrence indexes in [before, window_end) are inside [start, end).
         // Index-based lookup keeps the conditional insert borrow straightforward.
         let cache_idx = match bounds_cache.iter().position(|(b, _, _)| *b == cbase) {
             Some(i) => i,
             None => {
-                let before = seq[..start]
-                    .iter()
-                    .filter(|&&b| b.to_ascii_uppercase() == cbase)
-                    .count();
+                let before = seq[..start].iter().filter(|&&b| counts(b, cbase)).count();
                 let in_window = seq[start..end]
                     .iter()
-                    .filter(|&&b| b.to_ascii_uppercase() == cbase)
+                    .filter(|&&b| counts(b, cbase))
                     .count();
                 bounds_cache.push((cbase, before, before + in_window));
                 bounds_cache.len() - 1
@@ -134,14 +131,38 @@ mod tests {
         assert_eq!(m.groups[0].deltas, vec![0, 0]);
     }
 
+    /// Pinned against htslib, which counts the literal fundamental base on both
+    /// strands. This previously counted the complement, which silently moved
+    /// every reverse-strand call onto a different base.
     #[test]
-    fn minus_strand_counts_complement() {
-        // G-m: counting base = complement(G) = C. seq C at 1,3. "G-m,0,0" -> modified at C occ 0,1 => pos1,3.
-        let seq = b"ACAC";
-        let m = recon(b"G-m,0,0;", &[7, 8], seq, 2, 4); // window keeps pos3 only
+    fn minus_strand_counts_the_literal_base() {
+        // seq G at 1,3. `G-m,0,0` marks G-occurrences 0 and 1, i.e. abs 1 and 3.
+        let seq = b"AGAG";
+        let m = recon(b"G-m,0,0;", &[7, 8], seq, 2, 4); // window [2,4) keeps abs 3 only
         assert_eq!(m.groups[0].deltas, vec![0]);
         assert_eq!(m.groups[0].ml, vec![8]);
         assert_eq!((m.groups[0].base, m.groups[0].strand), (b'G', b'-'));
+    }
+
+    /// BAM SEQ stores `T`, never `U`, so an RNA group must count `T`.
+    #[test]
+    fn uracil_group_counts_thymine_positions() {
+        let m = recon(b"U+m,0,0;", &[7, 8], b"ATAT", 2, 4);
+        assert_eq!(m.groups[0].deltas, vec![0]);
+        assert_eq!(m.groups[0].ml, vec![8]);
+    }
+
+    /// `N` in MM means "any base", so its skip-counts index every position.
+    #[test]
+    fn n_group_counts_every_base() {
+        let m = recon(b"N+n,2,1;", &[7, 8], b"ACGTACGT", 0, 8);
+        assert_eq!(m.groups[0].deltas, vec![2, 1]);
+        assert_eq!(m.groups[0].ml, vec![7, 8]);
+
+        // Window [3,8) drops abs 2 and keeps abs 4, now at window index 1.
+        let m = recon(b"N+n,2,1;", &[7, 8], b"ACGTACGT", 3, 8);
+        assert_eq!(m.groups[0].deltas, vec![1]);
+        assert_eq!(m.groups[0].ml, vec![8]);
     }
 
     #[test]
