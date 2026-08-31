@@ -1,6 +1,8 @@
 //! Observability: leveled logging (tracing) and progress reporting (indicatif).
 
 use tracing::level_filters::LevelFilter;
+
+use crate::config::ProgressMode;
 use tracing_subscriber::fmt::FormattedFields;
 
 /// Map the CLI verbosity/quiet flags to a tracing level. `WHITTLE_LOG`, when set, is
@@ -178,6 +180,9 @@ impl<'a> MakeWriter<'a> for MpWriter {
 pub(crate) enum Mode {
     /// `--quiet`: warnings/errors only. No bar, no progress line, no summary.
     Off,
+    /// `--progress none`: the full banner, warnings and summary, but nothing
+    /// reporting progress while the run is in flight.
+    Silent,
     /// Default level on a real terminal: a one-line start banner, an animated
     /// bar/spinner, warnings/errors (suspended above it), and the final summary.
     /// No periodic log lines, no debug.
@@ -225,7 +230,7 @@ impl ProgressHandle {
     /// warnings/errors, and the final summary. False in both `Mode::Bar` and
     /// `Mode::Off`.
     pub fn shows_lines(&self) -> bool {
-        matches!(self.mode, Mode::Line)
+        matches!(self.mode, Mode::Line | Mode::Silent)
     }
 
     /// True iff this run is in bar mode (the animated bar/spinner, default level on
@@ -248,7 +253,7 @@ impl ProgressHandle {
         // `--summary-json` file, which a benchmarking pipeline reads.
         let start = Instant::now();
         self.start = Some(start);
-        if matches!(self.mode, Mode::Off) {
+        if matches!(self.mode, Mode::Off | Mode::Silent) {
             return;
         }
         debug_assert!(
@@ -261,11 +266,14 @@ impl ProgressHandle {
                     let pb = self.multi.add(ProgressBar::new(t));
                     pb.set_style(
                         ProgressStyle::with_template(
-                            "{elapsed_precise} [{bar:20}] {percent}% {msg} ETA {eta_precise}",
+                            "{elapsed_precise} [{bar:20}] {percent:>3}% {msg} ETA {eta_precise}",
                         )
                         .unwrap()
                         .progress_chars("=>-"),
                     );
+                    // Seeded so the first frame carries the same fields as every
+                    // later one; the ticker replaces it on its first pass.
+                    pb.set_message(bar_message(0, 0, 0, Duration::ZERO));
                     pb
                 },
                 None => {
@@ -292,6 +300,7 @@ impl ProgressHandle {
             while !stop_t.load(Ordering::Relaxed) {
                 std::thread::sleep(TICK_INTERVAL);
                 let ir = counters.input_reads.load(Ordering::Relaxed);
+                let or = counters.output_reads.load(Ordering::Relaxed);
                 let by = counters.bytes_read.load(Ordering::Relaxed);
                 match mode {
                     Mode::Bar => {
@@ -299,7 +308,7 @@ impl ProgressHandle {
                             if total.is_some() {
                                 pb.set_position(by);
                             }
-                            pb.set_message(bar_message(ir, by, start.elapsed()));
+                            pb.set_message(bar_message(ir, or, by, start.elapsed()));
                         }
                     },
                     Mode::Line => {
@@ -308,7 +317,9 @@ impl ProgressHandle {
                             last_log = Instant::now();
                         }
                     },
-                    Mode::Off => break,
+                    // Neither spawns this thread, so reaching here means the
+                    // mode changed underneath it; stopping is the safe response.
+                    Mode::Off | Mode::Silent => break,
                 }
             }
         });
@@ -408,13 +419,32 @@ impl Drop for ProgressHandle {
 /// unit-testable without mutating real process env (`WHITTLE_LOG`), which would
 /// race across parallel test threads. The real entry point, `init`, is a thin
 /// wrapper reading the actual TTY/env state.
-fn select_mode(quiet: bool, tty: bool, verbosity: u8, whittle_log_set: bool) -> Mode {
+fn select_mode(
+    quiet: bool,
+    tty: bool,
+    verbosity: u8,
+    whittle_log_set: bool,
+    progress: ProgressMode,
+) -> Mode {
+    // `--quiet` silences everything, including the summary, so it outranks any
+    // progress preference.
     if quiet {
-        Mode::Off
-    } else if tty && verbosity == 0 && !whittle_log_set {
-        Mode::Bar
-    } else {
-        Mode::Line
+        return Mode::Off;
+    }
+    match progress {
+        ProgressMode::None => Mode::Silent,
+        ProgressMode::Bar => Mode::Bar,
+        ProgressMode::Plain => Mode::Line,
+        // A bar needs a terminal to redraw on. Debug output and a live bar cannot
+        // share one, so verbosity and a `WHITTLE_LOG` filter both fall back to
+        // periodic lines.
+        ProgressMode::Auto => {
+            if tty && verbosity == 0 && !whittle_log_set {
+                Mode::Bar
+            } else {
+                Mode::Line
+            }
+        },
     }
 }
 
@@ -427,7 +457,7 @@ fn select_mode(quiet: bool, tty: bool, verbosity: u8, whittle_log_set: bool) -> 
 /// Mode is never both bar and line log: `quiet` gives `Off`, a default-verbosity
 /// TTY with no `WHITTLE_LOG` gives `Bar`, everything else gives `Line`.
 /// `WHITTLE_LOG` forces `Line` so its debug lines cannot interleave with a bar.
-pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
+pub fn init(verbosity: u8, quiet: bool, progress: ProgressMode) -> ProgressHandle {
     let whittle_log = std::env::var("WHITTLE_LOG").ok().filter(|s| !s.is_empty());
     let filter = if quiet {
         EnvFilter::new(level_from(verbosity, true).to_string())
@@ -439,7 +469,7 @@ pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
     };
     let multi = MultiProgress::new();
     let tty = io::stderr().is_terminal();
-    let mode = select_mode(quiet, tty, verbosity, whittle_log.is_some());
+    let mode = select_mode(quiet, tty, verbosity, whittle_log.is_some(), progress);
     tracing_subscriber::registry()
         .with(filter)
         .with(
@@ -667,8 +697,17 @@ fn fmt_hms(d: Duration) -> String {
 /// count with no invented "of <total>", because only total bytes are known up
 /// front, never total reads. `bytes == 0` (folder-merge mode, where byte counting
 /// isn't wired up) drops the MB/s field rather than render a misleading rate.
-fn bar_message(input_reads: u64, bytes: u64, elapsed: Duration) -> String {
-    let mut s = format!("{} reads", human_count(input_reads));
+fn bar_message(input_reads: u64, output_reads: u64, bytes: u64, elapsed: Duration) -> String {
+    // Reads consumed and segments emitted, so a filter discarding everything shows
+    // up while the run is going rather than only in the summary. Labelled "out"
+    // rather than "kept" because a split read emits several segments, so the
+    // second figure can legitimately exceed the first. The two counters are also
+    // sampled a moment apart, so the pair drifts until the run settles.
+    let mut s = format!(
+        "{} reads, {} out",
+        human_count(input_reads),
+        human_count(output_reads)
+    );
     if bytes > 0 {
         let secs = elapsed.as_secs_f64().max(1e-3);
         let mbps = (bytes as f64 / 1_000_000.0) / secs;
@@ -795,26 +834,95 @@ mod tests {
         assert_eq!(level_from(3, true), LevelFilter::WARN);
     }
 
+    /// `--progress` is independent of the log level, so a pipeline can keep the
+    /// run summary without a progress line every interval, and a terminal user can
+    /// keep the summary without an animated bar.
+    #[test]
+    fn progress_mode_overrides_the_terminal_default() {
+        // A terminal would otherwise get a bar.
+        assert_eq!(
+            select_mode(false, true, 0, false, ProgressMode::None),
+            Mode::Silent
+        );
+        assert_eq!(
+            select_mode(false, true, 0, false, ProgressMode::Plain),
+            Mode::Line
+        );
+        // Redirected output would otherwise get periodic lines.
+        assert_eq!(
+            select_mode(false, false, 0, false, ProgressMode::Bar),
+            Mode::Bar
+        );
+        assert_eq!(
+            select_mode(false, false, 0, false, ProgressMode::None),
+            Mode::Silent
+        );
+    }
+
+    /// `--quiet` drops the summary as well, so it outranks any progress choice.
+    #[test]
+    fn quiet_outranks_every_progress_mode() {
+        for p in [
+            ProgressMode::Auto,
+            ProgressMode::Bar,
+            ProgressMode::Plain,
+            ProgressMode::None,
+        ] {
+            assert_eq!(select_mode(true, true, 0, false, p), Mode::Off);
+        }
+    }
+
+    /// Silent keeps the multi-line banner and the summary; only the in-flight
+    /// progress reporting is gone.
+    #[test]
+    fn silent_still_shows_the_banner() {
+        let h = ProgressHandle {
+            mode: Mode::Silent,
+            multi: MultiProgress::new(),
+            bar: None,
+            ticker: None,
+            start: None,
+            log_interval: Duration::from_secs(30),
+        };
+        assert!(h.shows_lines());
+        assert!(!h.is_bar());
+    }
+
     #[test]
     fn select_mode_quiet_always_off() {
         // quiet wins regardless of tty/verbosity/WHITTLE_LOG.
-        assert_eq!(select_mode(true, true, 0, false), Mode::Off);
-        assert_eq!(select_mode(true, false, 2, true), Mode::Off);
+        assert_eq!(
+            select_mode(true, true, 0, false, ProgressMode::Auto),
+            Mode::Off
+        );
+        assert_eq!(
+            select_mode(true, false, 2, true, ProgressMode::Auto),
+            Mode::Off
+        );
     }
 
     #[test]
     fn select_mode_default_tty_is_bar() {
-        assert_eq!(select_mode(false, true, 0, false), Mode::Bar);
+        assert_eq!(
+            select_mode(false, true, 0, false, ProgressMode::Auto),
+            Mode::Bar
+        );
     }
 
     #[test]
     fn select_mode_non_tty_is_always_line() {
-        assert_eq!(select_mode(false, false, 0, false), Mode::Line);
+        assert_eq!(
+            select_mode(false, false, 0, false, ProgressMode::Auto),
+            Mode::Line
+        );
     }
 
     #[test]
     fn select_mode_verbose_tty_is_line() {
-        assert_eq!(select_mode(false, true, 1, false), Mode::Line);
+        assert_eq!(
+            select_mode(false, true, 1, false, ProgressMode::Auto),
+            Mode::Line
+        );
     }
 
     #[test]
@@ -823,7 +931,10 @@ mod tests {
         // verbosity on a TTY (otherwise its debug/trace lines would interleave
         // with a live bar instead of the level filter alone controlling
         // verbosity).
-        assert_eq!(select_mode(false, true, 0, true), Mode::Line);
+        assert_eq!(
+            select_mode(false, true, 0, true, ProgressMode::Auto),
+            Mode::Line
+        );
     }
 
     #[test]
@@ -1076,15 +1187,15 @@ mod tests {
     }
 
     #[test]
-    fn bar_message_without_bytes_is_just_the_read_count() {
-        let s = bar_message(145_000, 0, Duration::from_secs(60));
-        assert_eq!(s, "145k reads");
+    fn bar_message_without_bytes_omits_the_rate() {
+        let s = bar_message(145_000, 140_000, 0, Duration::from_secs(60));
+        assert_eq!(s, "145k reads, 140k out");
     }
 
     #[test]
     fn bar_message_with_bytes_adds_rate_but_never_a_total() {
-        let s = bar_message(145_000, 50_000_000, Duration::from_secs(60));
-        assert!(s.starts_with("145k reads"));
+        let s = bar_message(145_000, 145_000, 50_000_000, Duration::from_secs(60));
+        assert!(s.starts_with("145k reads, 145k out"));
         assert!(s.contains("MB/s"));
         assert!(
             !s.contains(" of "),

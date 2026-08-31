@@ -1689,6 +1689,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
 
@@ -1816,6 +1817,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         }
     }
@@ -2660,6 +2662,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         // 300 reads with mods so reconstruction runs on every one.
@@ -2772,6 +2775,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let recs: Vec<anyhow::Result<RecordBuf>> = (0..3000)
@@ -2851,6 +2855,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
@@ -2916,6 +2921,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let recs: Vec<RecordBuf> = (0..300)
