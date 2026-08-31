@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::config::{
-    AdapterInfer, AdapterInferAction, AdapterInferPolicy, Config, FastqTags, IoConfig,
+    AdapterInfer, AdapterInferAction, AdapterInferPolicy, Config, FastqTags, IoConfig, ProgressMode,
 };
 use crate::filter::FilterConfig;
 use crate::io::Format;
@@ -56,6 +56,11 @@ struct Cli {
     /// Silence progress and info output; warnings and errors still print.
     #[arg(long, conflicts_with = "verbose", help_heading = "Logging")]
     quiet: bool,
+    /// How to report progress, independently of the log level: a bar on a
+    /// terminal and periodic lines otherwise (auto), always one or the other,
+    /// or none at all while keeping the banner and summary.
+    #[arg(long, value_enum, default_value_t = ProgressArg::Auto, help_heading = "Logging")]
+    progress: ProgressArg,
 
     /// Minimum post-trim segment length.
     #[arg(short = 'l', long, default_value_t = 1, help_heading = "Filtering")]
@@ -154,6 +159,29 @@ struct Cli {
 /// rendered from the one CLI definition rather than a hand-maintained copy.
 pub fn command() -> clap::Command {
     <Cli as clap::CommandFactory>::command()
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum ProgressArg {
+    /// A bar on a terminal, periodic lines otherwise.
+    Auto,
+    /// Always the animated bar.
+    Bar,
+    /// Always periodic lines, never a bar.
+    Plain,
+    /// No progress reporting; the banner and summary still print.
+    None,
+}
+
+impl From<ProgressArg> for ProgressMode {
+    fn from(value: ProgressArg) -> Self {
+        match value {
+            ProgressArg::Auto => ProgressMode::Auto,
+            ProgressArg::Bar => ProgressMode::Bar,
+            ProgressArg::Plain => ProgressMode::Plain,
+            ProgressArg::None => ProgressMode::None,
+        }
+    }
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,6 +561,7 @@ pub fn parse() -> anyhow::Result<Config> {
         threads_clamped,
         summary_json: c.summary_json,
         advisories,
+        progress: c.progress.into(),
         adapter_fasta: c.adapter_fasta,
         adapters_configured: None,
     })
@@ -670,6 +699,7 @@ pub fn config_for_test_threads(
         summary_json: None,
         advisories: Vec::new(),
         adapter_fasta: None,
+        progress: crate::config::ProgressMode::Auto,
         adapters_configured: None,
     }
 }

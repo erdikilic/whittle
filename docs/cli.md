@@ -75,6 +75,7 @@ tell a real input from a stale prior output, and merging over either loses data.
 | `--adapter-infer [trim\|report]` | Discover adapters de novo; omitted value defaults to `trim` |
 | `--adapter-infer-policy {conservative,aggressive}` | Trust policy for inferred adapters (default `conservative`) |
 | `-v`, `-vv` | Stage detail, then per-read decisions; higher counts are rejected |
+| `--progress {auto,bar,plain,none}` | How to report progress, independently of the log level (default `auto`) |
 | `--quiet` | Silence progress and the summary; warnings and errors still print |
 
 `--qual-trim`, `--qual-best-segment`, and `--qual-split` are three strategies for
@@ -161,6 +162,21 @@ group of lines per read, so redirect it or filter it.
 `WHITTLE_LOG=whittle::adapter=trace` to see adapter decisions without the
 per-segment lines, and `--quiet` still wins over it.
 
-All logging goes to stderr, so stdout carries only read data. Progress shows as a
-live bar when stderr is a terminal, or as periodic lines (about every 30s, or 10s
-under `-v`) when it's redirected to a file or pipe.
+All logging goes to stderr, so stdout carries only read data. By default progress
+shows as a live bar when stderr is a terminal, and as periodic lines (about every
+30s, or 10s under `-v`) when it is redirected to a file or a pipe. The bar is
+never written to a non-terminal, so a redirected log holds no escape sequences or
+carriage returns.
+
+`--progress` chooses that independently of the log level:
+
+| value | behavior |
+|---|---|
+| `auto` | A bar on a terminal, periodic lines otherwise. The default. |
+| `bar` | Always the animated bar, even when redirected. |
+| `plain` | Always periodic lines, never a bar. |
+| `none` | No progress reporting. The banner, warnings and summary still print. |
+
+`--progress none` is the one to reach for in a pipeline that wants the run
+summary in its log without a progress line every interval. `--quiet` is stronger:
+it drops the summary too, and outranks any `--progress` value.

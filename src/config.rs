@@ -137,6 +137,25 @@ impl Advisory {
     }
 }
 
+/// How progress is reported, chosen independently of the log level.
+///
+/// `--quiet` silences everything and still wins over this. The point of the
+/// separation is that a pipeline may want the run summary without a progress line
+/// every thirty seconds in its log, and a terminal user may want the summary
+/// without an animated bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProgressMode {
+    /// A bar on a terminal, periodic lines otherwise.
+    #[default]
+    Auto,
+    /// Always the animated bar, even when output is redirected.
+    Bar,
+    /// Always periodic lines, never a bar.
+    Plain,
+    /// No progress reporting. The banner, warnings and summary still print.
+    None,
+}
+
 #[derive(Debug, Clone)]
 pub struct IoConfig {
     pub input: Option<PathBuf>,
@@ -188,6 +207,8 @@ pub struct Config {
     /// Diagnostics raised while parsing arguments, emitted by `run` once the log
     /// subscriber exists. See `Advisory`.
     pub advisories: Vec<Advisory>,
+    /// How progress is reported. See `ProgressMode`.
+    pub progress: ProgressMode,
     /// The `--adapter-fasta` path, kept so `run` can refuse to overwrite it.
     /// The sequences themselves are already resolved into `adapters`.
     pub adapter_fasta: Option<PathBuf>,
@@ -254,12 +275,18 @@ pub fn thread_budget(
 
     if parallel_decode && total >= 3 {
         let (decode, render, encode_n) = match encode {
+            // The `min` matters at `total == 3`, where the `max(2)` floor would
+            // otherwise take both remaining workers and leave render with none.
+            // One worker is reserved for the writer thread and one for render, so
+            // decode can claim at most `total - 2`. Parallel decode gives way to
+            // render here rather than the other way round, because a render pool
+            // of zero is not a slower configuration, it is a broken one.
             EncodeKind::None if render_heavy => {
-                let decode = (total / 3).max(2);
+                let decode = (total / 3).max(2).min(total - 2);
                 (decode, total - decode - 1, 1)
             },
             EncodeKind::None => {
-                let decode = (total * 2 / 3).max(2);
+                let decode = (total * 2 / 3).max(2).min(total - 2);
                 (decode, total - decode - 1, 1)
             },
             EncodeKind::Gzip | EncodeKind::Bgzf if render_heavy => {
@@ -276,9 +303,9 @@ pub fn thread_budget(
             },
         };
         return ThreadBudget {
-            decode,
-            render,
-            encode: encode_n,
+            decode: decode.max(1),
+            render: render.max(1),
+            encode: encode_n.max(1),
         };
     }
 
@@ -375,6 +402,55 @@ pub(crate) fn render_heavy_for(
 
 #[cfg(test)]
 mod tests {
+
+    /// Every stage must get at least one worker at every thread count, for every
+    /// combination of inputs. A stage of zero is not a slower configuration, it is
+    /// a broken one: the consumer falls back to its own default, so the banner
+    /// reports a split the pipeline is not using.
+    #[test]
+    fn every_stage_gets_at_least_one_worker() {
+        for total in 0..=64usize {
+            for render_heavy in [false, true] {
+                for parallel_decode in [false, true] {
+                    for encode in [EncodeKind::None, EncodeKind::Gzip, EncodeKind::Bgzf] {
+                        let b = thread_budget(total, render_heavy, parallel_decode, encode);
+                        assert!(
+                            b.decode >= 1 && b.render >= 1 && b.encode >= 1,
+                            "total={total} render_heavy={render_heavy} \
+                             parallel_decode={parallel_decode} encode={encode:?} gave {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// With a real compression pool, the three stages must not claim more workers
+    /// than were asked for.
+    ///
+    /// `EncodeKind::None` is excluded on purpose: plain FASTQ output has no encode
+    /// pool, so its encode field counts the single writer thread rather than a
+    /// share of the budget, and the sum can legitimately read one high. That is
+    /// the case `ThreadBudget::total` documents.
+    #[test]
+    fn split_stays_within_the_requested_budget() {
+        for total in 3..=64usize {
+            for render_heavy in [false, true] {
+                for parallel_decode in [false, true] {
+                    for encode in [EncodeKind::Gzip, EncodeKind::Bgzf] {
+                        let b = thread_budget(total, render_heavy, parallel_decode, encode);
+                        assert!(
+                            b.total() <= total,
+                            "total={total} render_heavy={render_heavy} \
+                             parallel_decode={parallel_decode} encode={encode:?} gave {b:?} \
+                             summing to {}",
+                            b.total()
+                        );
+                    }
+                }
+            }
+        }
+    }
     use super::*;
 
     #[test]

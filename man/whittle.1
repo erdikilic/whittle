@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Tag\-aware long\-read trimmer
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-in\-format\fR] [\fB\-\-out\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-qual\fR] [\fB\-Q\fR|\fB\-\-max\-qual\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-qual\-mode\fR] [\fB\-H\fR|\fB\-\-head\-crop\fR] [\fB\-T\fR|\fB\-\-tail\-crop\fR] [\fB\-\-qual\-trim\fR] [\fB\-\-qual\-best\-segment\fR] [\fB\-\-qual\-split\fR] [\fB\-\-qual\-split\-window\fR] [\fB\-\-update\-moves\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-size\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\fR] [\fB\-\-adapter\-infer\fR] [\fB\-\-adapter\-infer\-policy\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-in\-format\fR] [\fB\-\-out\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-qual\fR] [\fB\-Q\fR|\fB\-\-max\-qual\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-qual\-mode\fR] [\fB\-H\fR|\fB\-\-head\-crop\fR] [\fB\-T\fR|\fB\-\-tail\-crop\fR] [\fB\-\-qual\-trim\fR] [\fB\-\-qual\-best\-segment\fR] [\fB\-\-qual\-split\fR] [\fB\-\-qual\-split\-window\fR] [\fB\-\-update\-moves\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-size\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\fR] [\fB\-\-adapter\-infer\fR] [\fB\-\-adapter\-infer\-policy\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Tag\-aware long\-read trimmer
 .SH OPTIONS
@@ -74,6 +74,23 @@ Increase logging detail: \-v = debug, \-vv = trace (maximum two). Overridden by 
 .TP
 \fB\-\-quiet\fR
 Silence progress and info output; warnings and errors still print
+.TP
+\fB\-\-progress\fR \fI<PROGRESS>\fR [default: auto]
+How to report progress, independently of the log level: a bar on a terminal and periodic lines otherwise (auto), always one or the other, or none at all while keeping the banner and summary
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto: A bar on a terminal, periodic lines otherwise
+.IP \(bu 2
+bar: Always the animated bar
+.IP \(bu 2
+plain: Always periodic lines, never a bar
+.IP \(bu 2
+none: No progress reporting; the banner and summary still print
+.RE
 .SH FILTERING
 .TP
 \fB\-l\fR, \fB\-\-min\-length\fR \fI<MIN_LENGTH>\fR [default: 1]

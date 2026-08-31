@@ -246,6 +246,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
@@ -296,6 +297,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
@@ -343,6 +345,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         // good(3) bad(1) good(3): I I I # I I I  -> two segments (0,3),(4,7)
@@ -394,6 +397,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
@@ -442,6 +446,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
@@ -489,6 +494,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40; 4]))];
@@ -539,6 +545,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         // Original mean: 24.8. Cropping four Q2 bases leaves six Q40 bases.
@@ -623,6 +630,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let recs = vec![Ok(rec("r1", &seq, phred))];
@@ -687,6 +695,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let recs = vec![Ok(rec("empty", b"", vec![]))];
@@ -735,6 +744,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         // Owned records (ReadRecord: Clone); wrap in Ok at iteration time so each run
@@ -824,6 +834,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         // Exceed the bounded channel capacity before the writer fails.
@@ -877,6 +888,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         };
         let good: Vec<anyhow::Result<ReadRecord>> = (0..5)

@@ -332,6 +332,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
         }
     }

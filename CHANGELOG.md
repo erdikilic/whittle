@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--progress {auto,bar,plain,none}` selects how progress is reported,
+  independently of the log level. `--progress none` keeps the banner and the run
+  summary while reporting nothing in flight, which a pipeline log wants;
+  `--quiet` still drops the summary as well and outranks it.
 - Adapter and primer sequences may use the full IUPAC alphabet. A degenerate
   primer now matches every variant its wobble positions cover, instead of being
   skipped as "non-ACGT". `U` folds to `T`; non-nucleotide characters are still
@@ -42,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output.
 
 ### Fixed
+- `thread_budget` allocated zero render workers at exactly `-t 3` with parallel
+  decode and uncompressed output, so the banner reported `trim 0` and the
+  workflow silently fell back to its own default. Every other thread count is
+  unchanged; a property test now checks that no stage is ever allocated zero.
 - Every base-modification record missed the untrimmed fast path, because the
   `MN` consistency check accepted only the `i` (Int32) subtype while SAM writes
   integers at the smallest width that fits, so dorado emits `MN:S`. A filter-only

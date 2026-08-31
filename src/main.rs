@@ -12,7 +12,7 @@ fn main() {
             std::process::exit(2);
         },
     };
-    let mut obs = whittle::obs::init(cfg.verbosity, cfg.quiet);
+    let mut obs = whittle::obs::init(cfg.verbosity, cfg.quiet, cfg.progress);
 
     // `whittle {version}`/`Command: ...` must print before everything else: the
     // banner, any clamp/mismatch/no-op warning, and even an early hard-error bail,
