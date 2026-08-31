@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped binary is unchanged.
 
 ### Changed
+- The progress bar shows the output count beside the input count, so a filter
+  discarding everything is visible while the run is going rather than only in
+  the summary. The percentage is right-aligned so the bar no longer shifts
+  sideways as it passes 9% and 99%, and the first frame carries the same fields
+  as every later one. Still ASCII, so it renders the same over SSH, `screen` and
+  a non-UTF-8 console.
 - `-vv` now reports the per-read decisions it always claimed to: which adapter
   matched where and at what cost, what that made whittle do, and why each segment
   was kept or dropped, each line attributed to the read that produced it. There

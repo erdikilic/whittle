@@ -266,11 +266,14 @@ impl ProgressHandle {
                     let pb = self.multi.add(ProgressBar::new(t));
                     pb.set_style(
                         ProgressStyle::with_template(
-                            "{elapsed_precise} [{bar:20}] {percent}% {msg} ETA {eta_precise}",
+                            "{elapsed_precise} [{bar:20}] {percent:>3}% {msg} ETA {eta_precise}",
                         )
                         .unwrap()
                         .progress_chars("=>-"),
                     );
+                    // Seeded so the first frame carries the same fields as every
+                    // later one; the ticker replaces it on its first pass.
+                    pb.set_message(bar_message(0, 0, 0, Duration::ZERO));
                     pb
                 },
                 None => {
@@ -297,6 +300,7 @@ impl ProgressHandle {
             while !stop_t.load(Ordering::Relaxed) {
                 std::thread::sleep(TICK_INTERVAL);
                 let ir = counters.input_reads.load(Ordering::Relaxed);
+                let or = counters.output_reads.load(Ordering::Relaxed);
                 let by = counters.bytes_read.load(Ordering::Relaxed);
                 match mode {
                     Mode::Bar => {
@@ -304,7 +308,7 @@ impl ProgressHandle {
                             if total.is_some() {
                                 pb.set_position(by);
                             }
-                            pb.set_message(bar_message(ir, by, start.elapsed()));
+                            pb.set_message(bar_message(ir, or, by, start.elapsed()));
                         }
                     },
                     Mode::Line => {
@@ -693,8 +697,17 @@ fn fmt_hms(d: Duration) -> String {
 /// count with no invented "of <total>", because only total bytes are known up
 /// front, never total reads. `bytes == 0` (folder-merge mode, where byte counting
 /// isn't wired up) drops the MB/s field rather than render a misleading rate.
-fn bar_message(input_reads: u64, bytes: u64, elapsed: Duration) -> String {
-    let mut s = format!("{} reads", human_count(input_reads));
+fn bar_message(input_reads: u64, output_reads: u64, bytes: u64, elapsed: Duration) -> String {
+    // Reads consumed and segments emitted, so a filter discarding everything shows
+    // up while the run is going rather than only in the summary. Labelled "out"
+    // rather than "kept" because a split read emits several segments, so the
+    // second figure can legitimately exceed the first. The two counters are also
+    // sampled a moment apart, so the pair drifts until the run settles.
+    let mut s = format!(
+        "{} reads, {} out",
+        human_count(input_reads),
+        human_count(output_reads)
+    );
     if bytes > 0 {
         let secs = elapsed.as_secs_f64().max(1e-3);
         let mbps = (bytes as f64 / 1_000_000.0) / secs;
@@ -1174,15 +1187,15 @@ mod tests {
     }
 
     #[test]
-    fn bar_message_without_bytes_is_just_the_read_count() {
-        let s = bar_message(145_000, 0, Duration::from_secs(60));
-        assert_eq!(s, "145k reads");
+    fn bar_message_without_bytes_omits_the_rate() {
+        let s = bar_message(145_000, 140_000, 0, Duration::from_secs(60));
+        assert_eq!(s, "145k reads, 140k out");
     }
 
     #[test]
     fn bar_message_with_bytes_adds_rate_but_never_a_total() {
-        let s = bar_message(145_000, 50_000_000, Duration::from_secs(60));
-        assert!(s.starts_with("145k reads"));
+        let s = bar_message(145_000, 145_000, 50_000_000, Duration::from_secs(60));
+        assert!(s.starts_with("145k reads, 145k out"));
         assert!(s.contains("MB/s"));
         assert!(
             !s.contains(" of "),
