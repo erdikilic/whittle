@@ -694,6 +694,49 @@ pub fn reconstruct_mods(
     };
     let ml_present = ml_opt.is_some();
     let ml_raw: &[u8] = ml_opt.unwrap_or(&[]);
+
+    // Over the full window the reconstruction is the identity, so the source
+    // bytes are already the answer and the parse, slice and re-serialize can be
+    // skipped. This is the dominant cost of a BAM to FASTQ run that does not
+    // trim. The `ML` length is still checked, by counting rather than parsing, so
+    // a record whose `ML` disagrees with its `MM` is handled exactly as before.
+    if !mm_raw.is_empty()
+        && start == 0
+        && end == seq.len()
+        && full_window_mods_already_consistent(src, seq.len())
+    {
+        let ml_valid = !ml_present || mods::parse::expected_ml_len(mm_raw) == ml_raw.len();
+        let fast = (
+            mm_raw.to_vec(),
+            (ml_present && ml_valid).then(|| ml_raw.to_vec()),
+        );
+        debug_assert_eq!(
+            Some(&fast),
+            reconstruct_mods_windowed(src, seq, start, end).as_ref(),
+            "the full-window shortcut must agree with the general path"
+        );
+        return Some(fast);
+    }
+    reconstruct_mods_windowed(src, seq, start, end)
+}
+
+/// The general MM/ML slice, used for any window the shortcut above does not cover.
+fn reconstruct_mods_windowed(
+    src: &RecordBuf,
+    seq: &[u8],
+    start: usize,
+    end: usize,
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let mm_raw: &[u8] = match src.data().get(&Tag::BASE_MODIFICATIONS) {
+        Some(Value::String(s)) => AsRef::<[u8]>::as_ref(s),
+        _ => return None,
+    };
+    let ml_opt: Option<&[u8]> = match src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
+        Some(Value::Array(Array::UInt8(v))) => Some(v.as_slice()),
+        _ => None,
+    };
+    let ml_present = ml_opt.is_some();
+    let ml_raw: &[u8] = ml_opt.unwrap_or(&[]);
     let parsed = mods::parse(mm_raw, ml_raw);
     let ml_valid = !ml_present
         || parsed
