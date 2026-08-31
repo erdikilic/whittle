@@ -789,10 +789,9 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
 /// Fixture covering the three MM shapes the `+`/ACGT fixtures above never reach:
 /// a `-` strand group, an RNA `U+` group, and an `N+` group.
 ///
-/// These are exactly the cases where whittle previously disagreed with htslib.
-/// `G-m` was counted against `C` (the complement), `U+m` matched nothing because
-/// BAM SEQ stores `T`, and `N+n` counted only literal `N` characters instead of
-/// every base.
+/// Each is a case where the counting base is not simply the literal MM byte:
+/// `G-m` must count `G` rather than its complement, `U+m` must count `T` because
+/// BAM SEQ has no `U`, and `N+n` must count every base rather than literal `N`.
 fn write_fixture_strands(path: &Path) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());

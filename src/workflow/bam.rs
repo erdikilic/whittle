@@ -836,7 +836,7 @@ where
     // `Render` returns the surviving segments only: per-segment filter/counting
     // (output_reads/output_bases and the read-level counters) is the shared
     // `process_read_segments` helper's job, called from inside `render` itself,
-    // so this driver no longer needs to re-derive or re-bump anything from the
+    // so this driver does not re-derive or re-bump anything from the
     // returned `Vec<T>`.
     Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
     WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,

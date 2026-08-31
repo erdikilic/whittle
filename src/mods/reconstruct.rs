@@ -317,7 +317,7 @@ mod tests {
     /// slicing its length must equal `surviving_positions * ncodes` and its bytes
     /// must be the in-window positions' `ncodes`-byte runs in order. The
     /// single-code test above cannot reach this misalignment class, which would
-    /// silently corrupt every downstream probability on multi-mod reads.
+    /// misattribute every downstream probability on a multi-mod read.
     #[test]
     fn ml_stays_byte_aligned_multicode_over_random_windows() {
         struct Lcg(u64);

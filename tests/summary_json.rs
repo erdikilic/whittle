@@ -240,10 +240,10 @@ fn report_mode_warns_that_summary_json_is_ignored() {
     assert!(!json.exists(), "report mode writes no summary file");
 }
 
-/// Argument-parsing diagnostics are collected and emitted through tracing, so the
-/// level filter applies. Previously they were printed straight to stderr from
-/// `cli::parse`, which bypassed the filter entirely: an informational advisory
-/// showed up even under `--quiet`.
+/// Argument-parsing diagnostics are emitted through tracing, so the level filter
+/// applies to them: `--quiet` drops an informational advisory and keeps a
+/// warning. Printing them directly from `cli::parse` would bypass the filter,
+/// since that runs before the subscriber exists.
 #[test]
 fn parse_time_advisories_respect_the_level_filter() {
     let dir = tempfile::tempdir().unwrap();
