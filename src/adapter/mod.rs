@@ -2,6 +2,7 @@ pub mod detect;
 pub mod infer;
 mod ont_catalog;
 pub mod preset;
+pub mod resolve;
 pub mod search;
 
 use std::cell::RefCell;
