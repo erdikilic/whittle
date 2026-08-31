@@ -31,9 +31,9 @@ rayon = "1"
 crossbeam-channel = "0.5"
 
 seq_io = "0.3.4"
-noodles-bam = "0.91.0"
-noodles-sam = "0.86.0"
-noodles-bgzf = { version = "0.48.0", features = ["libdeflate"] }
+noodles-bam = "0.95.0"
+noodles-sam = "0.90.0"
+noodles-bgzf = { version = "0.51.0", features = ["libdeflate"] }
 
 flate2 = { version = "1", features = ["zlib-ng"], default-features = false }
 gzp = "2"
