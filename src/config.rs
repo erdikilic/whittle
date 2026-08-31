@@ -336,6 +336,37 @@ mod resolve_threads_tests {
     }
 }
 
+/// The output compression stage's weight for a given output format: `Bgzf` for
+/// BAM (always bgzf-compressed), `Gzip` for `FASTQ.gz`, `None` for plain FASTQ.
+/// Paired with `render_heavy` (`in_fmt == Format::Bam`, or the folder-mode
+/// equivalent), this is everything `config::thread_budget` needs; both call sites
+/// (`run`, `run_folder`) resolve their budget from this exactly once, before the
+/// startup banner, and reuse it for the actual workflow dispatch below.
+pub fn encode_kind_for(out_fmt: crate::io::Format) -> EncodeKind {
+    match out_fmt {
+        crate::io::Format::Bam => EncodeKind::Bgzf,
+        crate::io::Format::FastqGz => EncodeKind::Gzip,
+        crate::io::Format::FastqBgzf => EncodeKind::Bgzf,
+        crate::io::Format::Fastq => EncodeKind::None,
+    }
+}
+
+/// Whether the render stage has substantial per-record work. BAM input remains
+/// render-heavy even for a full-window output because the current parallel path
+/// still clones owned `RecordBuf`s before handing them to the writer. FASTQ
+/// input is normally trim-only (light), but adapter matching or ab-initio
+/// inference runs an approximate search per read, which is heavy too, so it
+/// gets a render-pool share rather than being starved as pure compression.
+pub fn render_heavy_for(
+    in_fmt: crate::io::Format,
+    _out_fmt: crate::io::Format,
+    cfg: &Config,
+) -> bool {
+    matches!(in_fmt, crate::io::Format::Bam)
+        || cfg.adapters.is_some()
+        || cfg.adapter_infer != AdapterInfer::Off
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

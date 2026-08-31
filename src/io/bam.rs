@@ -161,8 +161,162 @@ impl BamSink {
     }
 }
 
+/// Append an `@PG` provenance record (`ID:whittle`, program name + version) to a
+/// cloned header before writing. Best-effort: `Programs::add` can fail (e.g. on a
+/// duplicate ID), in which case the header is written unchanged. The `@PG` line
+/// is cosmetic and must never block record output.
+pub(crate) fn provenance_header(mut header: sam::Header) -> sam::Header {
+    use sam::header::record::value::Map;
+    use sam::header::record::value::map::Program;
+    use sam::header::record::value::map::program::tag;
+
+    // `Programs::add` walks the `@PG` chain via `Programs::leaves`, which indexes
+    // the program map directly and panics when a `PP` names an ID no longer in the
+    // header. Real uBAMs hit this: a dorado file through `samtools reset` can keep
+    // `@PG ID:samtools PP:basecaller` with no `ID:basecaller` record. The `@PG`
+    // line is cosmetic, so skip it rather than crash on an untidy header.
+    if has_dangling_program_chain(&header) {
+        return header;
+    }
+
+    let program = Map::<Program>::builder()
+        .insert(tag::NAME, "whittle")
+        .insert(tag::VERSION, env!("CARGO_PKG_VERSION"))
+        .build();
+
+    if let Ok(program) = program {
+        let _ = header.programs_mut().add("whittle", program);
+    }
+
+    header
+}
+
+/// True if the header's `@PG` chain is one `Programs::add` cannot walk safely.
+///
+/// `Programs::add` calls `Programs::leaves`, which indexes the program map
+/// directly and panics when a `PP` names an absent ID, and which only terminates
+/// a cycle that returns to the node it started from. A rho-shaped chain
+/// (`pgA -> pgB -> pgC -> pgB`) has every ID present and never revisits `pgA`, so
+/// it loops forever. Both shapes are rejected here by walking each chain with a
+/// visited set.
+fn has_dangling_program_chain(header: &sam::Header) -> bool {
+    use std::collections::HashSet;
+
+    use sam::header::record::value::map::program::tag;
+
+    let programs = header.programs().as_ref();
+    programs.keys().any(|start| {
+        let mut seen: HashSet<&[u8]> = HashSet::new();
+        let mut id: &[u8] = start.as_ref();
+        loop {
+            if !seen.insert(id) {
+                return true; // revisited a node: cyclic
+            }
+            let Some(program) = programs.get(id) else {
+                return true; // PP names an ID that is not a program: dangling
+            };
+            match program.other_fields().get(&tag::PREVIOUS_PROGRAM_ID) {
+                Some(previous) => id = previous.as_ref(),
+                None => return false, // reached the root of this chain
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use noodles_sam::header::record::value::Map;
+    use noodles_sam::header::record::value::map::Program;
+    use noodles_sam::header::record::value::map::program::tag;
+
+    /// A dangling `@PG PP:` reference must leave the header unchanged because
+    /// Noodles requires every parent program ID to exist.
+    #[test]
+    fn provenance_header_does_not_panic_on_dangling_pp_chain() {
+        // `pg1` references a parent that is absent from the header.
+        let dangling_program = Map::<Program>::builder()
+            .insert(tag::PREVIOUS_PROGRAM_ID, "ghost")
+            .build()
+            .expect("valid PP field");
+
+        let header = sam::Header::builder()
+            .add_program("pg1", dangling_program)
+            .build();
+
+        assert!(has_dangling_program_chain(&header));
+
+        let out_header = provenance_header(header);
+
+        assert!(
+            !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
+            "expected no whittle @PG line to be added when the existing chain is dangling"
+        );
+    }
+
+    /// A rho-shaped chain (`pgA -> pgB -> pgC -> pgB`) has no absent ID, so the
+    /// old dangling-only check passed it through to `Programs::add`, whose
+    /// `leaves()` walk only terminates on a cycle that returns to its start node.
+    /// Walking from `pgA` never revisits `pgA`, so it looped forever at 100% CPU.
+    #[test]
+    fn provenance_header_rejects_a_cycle_that_excludes_the_entry_node() {
+        fn with_pp(previous: &str) -> Map<Program> {
+            Map::<Program>::builder()
+                .insert(tag::PREVIOUS_PROGRAM_ID, previous)
+                .build()
+                .expect("valid PP field")
+        }
+
+        let header = sam::Header::builder()
+            .add_program("pgA", with_pp("pgB"))
+            .add_program("pgB", with_pp("pgC"))
+            .add_program("pgC", with_pp("pgB"))
+            .build();
+
+        assert!(
+            has_dangling_program_chain(&header),
+            "a rho-shaped chain must be rejected before `Programs::add` sees it"
+        );
+
+        // Reaching this line at all is the assertion: the old code hung here.
+        let out_header = provenance_header(header);
+        assert!(
+            !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
+            "no @PG line should be added when the existing chain cannot be walked"
+        );
+    }
+
+    /// A self-referential record (`pgA -> pgA`) is the degenerate cycle.
+    #[test]
+    fn provenance_header_rejects_a_self_referential_program() {
+        let header = sam::Header::builder()
+            .add_program(
+                "pgA",
+                Map::<Program>::builder()
+                    .insert(tag::PREVIOUS_PROGRAM_ID, "pgA")
+                    .build()
+                    .expect("valid PP field"),
+            )
+            .build();
+        assert!(has_dangling_program_chain(&header));
+    }
+
+    /// A valid program chain receives the `whittle` provenance record.
+    #[test]
+    fn provenance_header_adds_whittle_program_on_clean_header() {
+        let header = sam::Header::default();
+        assert!(!has_dangling_program_chain(&header));
+
+        let out_header = provenance_header(header);
+
+        assert!(
+            out_header
+                .programs()
+                .roots()
+                .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"whittle"),
+            "expected an @PG record with ID whittle in the output header, got {:?}",
+            out_header.programs()
+        );
+    }
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::Flags;
 
