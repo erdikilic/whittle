@@ -1,55 +1,38 @@
+use super::ont_catalog::{CATALOG, Entry};
 use super::{Adapter, End};
 
-/// The built-in ONT catalog, embedded at compile time (lives next to this file).
-const CATALOG_TSV: &str = include_str!("ont_catalog.tsv");
-
-/// Parse the catalog TSV: skip blank and `#` lines, take columns
-/// `id, category, end, sequence, ...`. Column 3 (`end`) is `5`/`3`/`both`.
-/// Identical sequences are deduplicated (first name kept); if a duplicate
-/// sequence appears with a different end tag, the kept entry is upgraded to
-/// `End::Both` so it stays searchable at both ends. Non-ACGT rows are
-/// skipped defensively.
-pub fn parse_catalog(text: &str) -> Vec<Adapter> {
-    let mut out: Vec<Adapter> = Vec::new();
-    let mut idx: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 4 {
-            continue;
-        }
-        let name = cols[0].to_string();
-        let end = match cols[2] {
-            "5" => End::Five,
-            "3" => End::Three,
-            _ => End::Both,
-        };
-        let seq = cols[3].as_bytes().to_vec();
-        if seq.is_empty() || !seq.iter().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
-            continue;
-        }
-        match idx.get(&seq) {
+/// Build the searchable adapter set from catalog entries.
+///
+/// Identical sequences collapse to one entry, keeping the first name. When a
+/// duplicate carries a different end tag the survivor is upgraded to
+/// `End::Both`, so a sequence that legitimately appears at either end (a primer
+/// that is also a barcode flank, say) stays searchable at both.
+fn build(entries: &[Entry]) -> Vec<Adapter> {
+    let mut out: Vec<Adapter> = Vec::with_capacity(entries.len());
+    let mut idx: std::collections::HashMap<&[u8], usize> = std::collections::HashMap::new();
+    for &(name, end, seq) in entries {
+        match idx.get(seq) {
             Some(&i) => {
-                // Same sequence, different expected end -> searchable at both.
                 if out[i].end != end {
                     out[i].end = End::Both;
                 }
             },
             None => {
-                idx.insert(seq.clone(), out.len());
-                out.push(Adapter { name, seq, end });
+                idx.insert(seq, out.len());
+                out.push(Adapter {
+                    name: name.to_string(),
+                    seq: seq.to_vec(),
+                    end,
+                });
             },
         }
     }
     out
 }
 
-/// The parsed built-in ONT catalog.
+/// The built-in ONT catalog, deduplicated and ready to search.
 pub fn preset_ont() -> Vec<Adapter> {
-    parse_catalog(CATALOG_TSV)
+    build(CATALOG)
 }
 
 #[cfg(test)]
@@ -57,25 +40,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_rows_skips_comments_and_dedups() {
-        let tsv = "# header comment\n\
-                   id\tcategory\tend\tsequence\tkits\tsource\n\
-                   A\tligation-adapter\t5\tACGTACGTACGT\tk\ts\n\
-                   B\tflank\t3\tTTTTGGGGCCCC\tk\ts\n\
-                   Dup\tbarcode\t3\tACGTACGTACGT\tk\ts\n";
-        // The literal "id...sequence..." header row has a non-ACGT seq column
-        // ("sequence") so it is dropped by the ACGT filter; the comment is skipped;
-        // "Dup" duplicates A's sequence with a different end (3'), so A's kept
-        // entry is upgraded to Both instead of the duplicate being dropped as-is.
-        let v = parse_catalog(tsv);
+    fn duplicate_sequences_collapse_and_merge_ends() {
+        let entries: &[Entry] = &[
+            ("A", End::Five, b"ACGTACGTACGT"),
+            ("B", End::Three, b"TTTTGGGGCCCC"),
+            ("Dup", End::Three, b"ACGTACGTACGT"),
+        ];
+        let v = build(entries);
         assert_eq!(v.len(), 2, "duplicate sequence collapsed");
-        assert_eq!(v[0].name, "A");
+        assert_eq!(v[0].name, "A", "first name kept");
         assert_eq!(
             v[0].end,
             End::Both,
             "5' + 3' of the same sequence merges to Both"
         );
-        assert_eq!(v[1].end, End::Three);
+        assert_eq!(v[1].end, End::Three, "unique entry keeps its own end");
+    }
+
+    /// The search engine only handles uppercase ACGT, and a zero-length pattern
+    /// would match everywhere. The old TSV filtered both out at parse time; as
+    /// literals they cannot be filtered, so this guards future catalog edits.
+    #[test]
+    fn entries_are_uppercase_acgt() {
+        for &(name, _, seq) in CATALOG {
+            assert!(!seq.is_empty(), "{name} has an empty sequence");
+            assert!(
+                seq.iter().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')),
+                "{name} has a non-ACGT base: {}",
+                String::from_utf8_lossy(seq)
+            );
+        }
+    }
+
+    #[test]
+    fn entry_names_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for &(name, _, _) in CATALOG {
+            assert!(seen.insert(name), "duplicate catalog name {name}");
+        }
     }
 
     #[test]
@@ -95,9 +97,10 @@ mod tests {
 
     #[test]
     fn preset_has_the_expected_shape() {
+        assert_eq!(CATALOG.len(), 125, "catalog entries before dedup");
         let v = preset_ont();
-        // 96 barcodes + adapters/primers/flanks, minus the one exact-duplicate
-        // sequence (PCR1_front == LWB flank). Expect 124 after dedup.
+        // 96 barcodes plus adapters/primers/flanks, minus the one exact-duplicate
+        // sequence (PCR1_front == LWB_rear1). Expect 124 after dedup.
         assert_eq!(v.len(), 124, "catalog entry count after dedup");
         assert!(v.iter().any(|a| a.name == "LSK114_front"));
         assert_eq!(v.iter().filter(|a| a.name.starts_with("BC")).count(), 96);
