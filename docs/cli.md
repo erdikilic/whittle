@@ -103,7 +103,8 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
   "input": "reads.bam",
   "output": "trimmed.fastq.gz",
   "elapsed_seconds": 12.34,
-  "params": { "threads": 8, "min_length": 500, "qual_mode": "mean", "quality_op": null, "adapters": null },
+  "params": { "threads": 8, "min_length": 500, "qual_mode": "mean", "quality_op": null,
+              "adapters": { "configured": 124, "count": 4, "sample": 500, "infer": "off" } },
   "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 30 },
   "bases": { "input": 10000000, "output": 9500000 },
   "segments_dropped": { "too_short": 12, "too_long": 0, "low_quality": 5, "high_quality": 0, "gc_out_of_range": 0 },
@@ -114,6 +115,13 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
 `reads.output` counts output segments, not input reads, so under `--qual-split` it
 can legitimately exceed `reads.input`. The three read-level buckets
 (`with_output`, `trimmed_to_nothing`, `all_filtered`) do partition `reads.input`.
+
+Under `params.adapters`, `configured` is the set asked for (the preset and/or
+FASTA) and `count` is the set actually trimmed against, after presence detection
+narrowed it or inference replaced it. They are equal when neither ran, and the
+startup banner prints `configured`, since that is all that is known before reads
+have been sampled. Under `--adapter-infer` nothing is configured up front, so
+`configured` is `0`.
 
 `schema_version` is bumped only when an existing field changes meaning or
 disappears. New fields can appear without a bump, so parse leniently.

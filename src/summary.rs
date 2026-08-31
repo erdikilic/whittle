@@ -75,10 +75,14 @@ struct QualityOpParams {
 
 #[derive(Debug, Serialize)]
 struct AdapterParams {
-    /// Adapters actually trimmed against, after presence detection has narrowed
-    /// the preset or inference has replaced it. This is deliberately the
-    /// resolved set, so it can differ from the startup banner's count, which is
-    /// printed before either step runs.
+    /// Adapters configured before resolution: the preset and/or FASTA asked for.
+    /// This is the figure the startup banner prints, since it is all that is
+    /// known before reads have been sampled. `0` under inference, where the set
+    /// is discovered rather than configured.
+    configured: usize,
+    /// Adapters actually trimmed against, after presence detection narrowed the
+    /// configured set or inference replaced it. Equal to `configured` when
+    /// neither ran.
     count: usize,
     error_rate: f64,
     end_size: usize,
@@ -245,6 +249,9 @@ impl Params {
                     .join(","),
             },
             adapters: cfg.adapters.as_ref().map(|ac| AdapterParams {
+                // Falls back to the resolved count for a caller that drove the
+                // workflow directly and never went through `settle`.
+                configured: cfg.adapters_configured.unwrap_or(ac.adapters.len()),
                 count: ac.adapters.len(),
                 error_rate: ac.error_rate,
                 end_size: ac.end_size,
@@ -325,6 +332,7 @@ mod tests {
             summary_json: None,
             advisories: Vec::new(),
             adapter_fasta: None,
+            adapters_configured: None,
         }
     }
 
@@ -410,8 +418,13 @@ mod tests {
             candidate_index: std::sync::OnceLock::new(),
         });
         c.adapter_sample = 5_000;
+        c.adapters_configured = Some(124);
         let s = Summary::new(&c, &stats(), String::new(), String::new(), None);
         let v = value(&s);
+        // Both figures are reported: detection narrowed 124 down to 0 here, and a
+        // reader can see that rather than guessing which number they are looking at.
+        assert_eq!(v["params"]["adapters"]["configured"], 124);
+        assert_eq!(v["params"]["adapters"]["count"], 0);
         assert_eq!(v["params"]["adapters"]["error_rate"], 0.2);
         assert_eq!(v["params"]["adapters"]["end_size"], 150);
         assert_eq!(v["params"]["adapters"]["split"], true);
