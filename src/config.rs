@@ -151,6 +151,10 @@ pub struct Config {
     pub quiet: bool,
     /// `Some((requested, ncpu))` when `-t` was clamped down; drives a warning in `run`.
     pub threads_clamped: Option<(usize, usize)>,
+    /// Where to write the machine-readable run summary (`--summary-json`), or
+    /// `None` to write none. Written regardless of `--quiet` and the log level,
+    /// since a caller that asked for it is a pipeline that needs the file.
+    pub summary_json: Option<PathBuf>,
 }
 
 /// How a `-t` total worker budget splits across the workflow stages. The split

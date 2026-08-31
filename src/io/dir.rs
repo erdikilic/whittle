@@ -12,15 +12,13 @@ pub enum Family {
     Bam,
 }
 
-/// Classify a directory's immediate children into a single read-file family and
-/// a sorted path list. Non-read files and subdirectories are ignored.
-/// Errors if the folder mixes FASTQ and BAM, or contains no read files.
+/// Classify a directory's immediate children into a single read-file family and a
+/// sorted path list. Non-read files and subdirectories are ignored. Errors if the
+/// folder mixes FASTQ and BAM, or holds no read files.
 ///
-/// If `output` names a read file *inside* the directory, this is a hard error: a
-/// real input is indistinguishable from a stale prior output, and either way merging
-/// the rest and overwriting it silently loses data (this covers both `-o` pointing at
-/// a genuine input file and a rerun re-ingesting its own output). The merged
-/// output must be written to a path outside the input directory.
+/// An `output` naming a read file inside the directory is a hard error: a real
+/// input is indistinguishable from a stale prior output, and merging over either
+/// silently loses data.
 pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Vec<PathBuf>)> {
     let mut fastq = Vec::new();
     let mut bam = Vec::new();
@@ -105,23 +103,15 @@ pub fn fastq_records(
 /// `Send` so it can feed `workflow::run_bam`'s parallel path.
 type BamRecordIter = crate::io::bam::RawRecordIter;
 
-/// The first file's header plus one chained record stream over all BAM files
-/// (each file's own header is read and discarded past the first; records
-/// stream as lazy raw records under the first header, `samtools cat` semantics
-/// for homogeneous uBAM).
+/// The first file's header plus one chained record stream over every BAM file,
+/// `samtools cat` semantics for homogeneous uBAM: headers past the first are
+/// read and discarded, records stream lazily under the first header. `Err` on
+/// empty `paths`; each file is opened exactly once.
 ///
-/// `workers` is the MT-bgzf decode worker count (same knob as the single-file
-/// `io::bam::reader`), passed through to every per-file reader. This is safe
-/// from oversubscription despite chaining N files: the first file's reader is
-/// opened eagerly right here, but each `rest` file's reader is opened lazily,
-/// one at a time, only once `flat_map` actually reaches it, and `Iterator`'s
-/// `Chain`/`FlatMap` drop the exhausted inner iterator before advancing to the
-/// next, closing its MT reader (and joining its worker threads) first. So at
-/// most one file's `workers` bgzf threads are ever live at once, never N×.
-///
-/// Returns an `Err` if `paths` is empty rather than panicking. Each file is
-/// opened exactly once: the first file's record iterator (obtained alongside
-/// its header) is reused via `chain` rather than reopening that file.
+/// `workers` is the MT-bgzf decode worker count, passed to every per-file
+/// reader. Chaining N files does not oversubscribe: `Chain`/`FlatMap` open each
+/// reader lazily and drop the exhausted one first, so only one file's `workers`
+/// threads are ever live.
 pub fn bam_reader(
     paths: &[PathBuf],
     workers: usize,

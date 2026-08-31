@@ -68,14 +68,11 @@ fn resolve_log_interval(verbosity: u8) -> Duration {
     )
 }
 
-/// Custom event formatter: `[YYYY-MM-DD HH:MM:SS] [LEVEL] Message`, with a
-/// bracketed local wall-clock timestamp (via `jiff`) AND a bracketed level.
-/// The stock formatter's ` INFO`-padded, unbracketed level is what this
-/// replaces. `Level`'s `Display` yields `INFO`/`WARN`/`DEBUG`/`TRACE`/`ERROR`,
-/// so the level renders as `[INFO]` etc. `color` (set once in `init` from
-/// whether stderr is a TTY) gates ANSI coloring of the `[LEVEL]` token only;
-/// the timestamp and message always stay plain; when `false`, output carries
-/// zero escape bytes, which matters for redirected/non-TTY runs.
+/// Custom event formatter: `[YYYY-MM-DD HH:MM:SS] [LEVEL] Message`, replacing the
+/// stock formatter's ` INFO`-padded, unbracketed level. The timestamp is local
+/// wall clock via `jiff`. `color` (set once in `init` from whether stderr is a
+/// TTY) gates ANSI coloring of the `[LEVEL]` token only, so a non-TTY run carries
+/// zero escape bytes.
 struct WhittleFormat {
     color: bool,
 }
@@ -300,24 +297,18 @@ impl ProgressHandle {
         }
     }
 
-    /// Stop the ticker and clear the bar, then print the end-of-run summary through
-    /// tracing (subject to the level filter). The ticker is joined and the bar cleared
-    /// *before* logging so no stale bar/spinner frame is left behind the summary line.
-    /// `output` is the output path (or `<stdout>`) shown in the closing `Completed`
-    /// line, the end-of-run counterpart to the startup banner's `Output:` line.
-    /// `Completed` is always the last thing logged (after the malformed-tag note, if
-    /// any) so it closes out the run symmetrically with the banner that opened it.
-    /// Omitted when `elapsed` is unknown (a library caller using
-    /// `ProgressHandle::disabled()`, which never calls `start()`).
-    pub fn finish(&mut self, stats: &Stats, output: &str) {
-        // Snapshot elapsed *before* `stop_ticker()`, not after: `stop_ticker` blocks
-        // on `handle.join()`, and the ticker thread only wakes from its
-        // `TICK_INTERVAL` (250ms) sleep to notice the stop flag, so measuring
-        // afterward could add up to a full tick's worth of pure join-wait onto a
-        // genuinely fast run, reporting e.g. "250ms" for a run that actually took
-        // single-digit milliseconds. Capturing here first makes the reported
-        // duration true wall-clock processing time, not processing time plus
-        // ticker-shutdown latency.
+    /// Stop the ticker, clear the bar, then log the end-of-run summary. Clearing
+    /// happens first so no stale bar frame is left behind the summary. `output` is
+    /// the path (or `<stdout>`) shown in the closing `Completed` line, which is
+    /// always logged last and is omitted when `elapsed` is unknown.
+    ///
+    /// Returns the elapsed it reported, so a caller writing its own summary
+    /// (`summary::Summary`) quotes the same number.
+    pub fn finish(&mut self, stats: &Stats, output: &str) -> Option<Duration> {
+        // Snapshot elapsed before `stop_ticker()`: that call joins the ticker
+        // thread, which only wakes from its 250ms sleep to notice the stop flag, so
+        // measuring afterward would charge up to a full tick of join-wait to a fast
+        // run, reporting "250ms" for single-digit milliseconds of work.
         let elapsed = self.start.take().map(|start| start.elapsed());
         self.stop_ticker();
 
@@ -363,16 +354,16 @@ impl ProgressHandle {
         if let Some(d) = elapsed {
             tracing::info!("{}", completed_line(d, output));
         }
+
+        elapsed
     }
 }
 
-/// RAII backstop for early `?`/`bail!` returns from `run`/`run_folder` after
-/// `start()` but before `finish()`: without this, the ticker thread and (in
-/// `Mode::Bar`) the steady-tick spinner keep running after an error propagates, and
-/// the spinner can overwrite the fatal error message `main` prints. Stops and
-/// joins the ticker and clears the bar, with no summary logging, since an error
-/// path has no `Stats` to summarize. A no-op after an explicit `finish()`
-/// (both fields are already `None`).
+/// RAII backstop for an early `?`/`bail!` between `start()` and `finish()`:
+/// without it the ticker thread and the bar-mode spinner keep running past the
+/// error and can overwrite the fatal message `main` prints. Stops the ticker and
+/// clears the bar, with no summary, since an error path has no `Stats`. A no-op
+/// after an explicit `finish()`.
 impl Drop for ProgressHandle {
     fn drop(&mut self) {
         self.stop_ticker();
@@ -393,18 +384,15 @@ fn select_mode(quiet: bool, tty: bool, verbosity: u8, whittle_log_set: bool) -> 
     }
 }
 
-/// Install the global subscriber and return the progress handle. Call once, in the binary.
+/// Install the global subscriber and return the progress handle. Call once, in
+/// the binary.
 ///
-/// Precedence: `--quiet` always wins (WARN, regardless of `WHITTLE_LOG`); otherwise a
-/// non-empty `WHITTLE_LOG` overrides `-v`/`-vv`; otherwise the level is derived from
-/// `verbosity`.
+/// Level precedence: `--quiet` always wins (WARN); otherwise a non-empty
+/// `WHITTLE_LOG` overrides `-v`/`-vv`; otherwise the level follows `verbosity`.
 ///
-/// Mode selection (never both bar and line log in the same run):
-/// `quiet -> Off`; `!quiet && tty && verbosity==0 && WHITTLE_LOG unset/empty -> Bar`;
-/// otherwise (`-v`/`-vv` on a TTY, a non-empty `WHITTLE_LOG`, or any non-TTY run)
-/// `-> Line`. A non-empty `WHITTLE_LOG` forces line mode even on a TTY at the
-/// default verbosity; otherwise its debug/trace lines would interleave with a
-/// live bar instead of the level filter alone controlling verbosity.
+/// Mode is never both bar and line log: `quiet` gives `Off`, a default-verbosity
+/// TTY with no `WHITTLE_LOG` gives `Bar`, everything else gives `Line`.
+/// `WHITTLE_LOG` forces `Line` so its debug lines cannot interleave with a bar.
 pub fn init(verbosity: u8, quiet: bool) -> ProgressHandle {
     let whittle_log = std::env::var("WHITTLE_LOG").ok().filter(|s| !s.is_empty());
     let filter = if quiet {
@@ -491,11 +479,9 @@ fn commas(n: u64) -> String {
 }
 
 /// The end-of-run summary line: `Summary: 1 input reads, 3 output reads in 2.00s`.
-/// Deliberately split-safe (no "kept X%" figure) because `--qual-split` can
-/// turn one input read into several output segments, so `output_reads` can
-/// legitimately exceed `input_reads` (a naive percentage would then read
-/// "300%"). `elapsed` is `None` when the caller never started a timer (e.g. a
-/// library caller using `ProgressHandle::disabled()`), in which case the
+/// Deliberately split-safe (no "kept X%" figure), since `--qual-split` can turn
+/// one input read into several segments and a naive percentage would read "300%".
+/// `elapsed` is `None` when the caller never started a timer, in which case the
 /// trailing "in <dur>" clause is omitted.
 fn summary_line(stats: &Stats, elapsed: Option<Duration>) -> String {
     let mut msg = format!(
@@ -542,14 +528,11 @@ fn bases_line(stats: &Stats) -> Option<String> {
     ))
 }
 
-/// The end-of-run read-level "no segments at all" line, shown right after
-/// `Bases:`: `Trimmed to nothing: 1,234 input reads produced no segments at
-/// all`. Covers the reads for which `trim::apply` returned no intervals to
-/// even run the per-segment filter over: an empty read, a read fully
-/// consumed by adapter trimming, or an over-crop. Distinct from
-/// `all_filtered_line`, which covers reads that DID produce segments but had
-/// every one of them filtered. `None` when no input read was trimmed to
-/// nothing.
+/// The end-of-run read-level line: `Trimmed to nothing: 1,234 input reads produced
+/// no segments at all`. Covers reads for which `trim::apply` returned no
+/// intervals: empty, fully consumed by adapter trimming, or over-cropped. Distinct
+/// from `all_filtered_line`, which covers reads that did produce segments. `None`
+/// when no read was trimmed to nothing.
 fn trimmed_to_nothing_line(stats: &Stats) -> Option<String> {
     if stats.reads_trimmed_to_nothing == 0 {
         return None;
@@ -576,14 +559,11 @@ fn all_filtered_line(stats: &Stats) -> Option<String> {
     ))
 }
 
-/// The end-of-run segment-level "why segments were dropped" line, shown right
-/// after `no_output_line`: `Segments dropped: 3,200 (2,100 too short, 1,100
-/// low quality)`. Only the non-zero reasons appear, in this fixed order: too
-/// short, too long, low quality, high quality, GC out of range. Counts
-/// *segments* (post-trim, per `filter::check`), not reads: a single split
-/// read can contribute to more than one of these while still surviving
-/// overall. `None` when nothing was dropped, so a clean run gets no extra
-/// line.
+/// The end-of-run drop-reason line: `Segments dropped: 3,200 (2,100 too short,
+/// 1,100 low quality)`. Only non-zero reasons appear, in a fixed order: too short,
+/// too long, low quality, high quality, GC out of range. Counts segments, not
+/// reads, since a split read can contribute several and still survive. `None` when
+/// nothing was dropped.
 fn segments_dropped_line(stats: &Stats) -> Option<String> {
     let total = stats.segments_dropped_short
         + stats.segments_dropped_long
@@ -663,13 +643,11 @@ fn fmt_hms(d: Duration) -> String {
     format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
 }
 
-/// Bar-mode message (the bar/spinner itself already draws elapsed, `%`, and ETA off
-/// its own template, per `ProgressStyle` in `start()`, so this covers only the data
-/// fields): `145k reads, 53 MB/s`. Shows just the processed read count, with no invented
-/// "of <total>" clause, since only total *bytes* are known up front, never total
-/// *reads*; the byte-based `%`/ETA (drawn by the bar template) convey real progress.
-/// `bytes == 0` (e.g. folder-merge mode where byte counting isn't wired up) drops the
-/// MB/s field rather than render a misleading rate.
+/// Bar-mode message: `145k reads, 53 MB/s`. Covers only the data fields, since the
+/// bar template already draws elapsed, `%`, and ETA. Shows the processed read
+/// count with no invented "of <total>", because only total bytes are known up
+/// front, never total reads. `bytes == 0` (folder-merge mode, where byte counting
+/// isn't wired up) drops the MB/s field rather than render a misleading rate.
 fn bar_message(input_reads: u64, bytes: u64, elapsed: Duration) -> String {
     let mut s = format!("{} reads", human_count(input_reads));
     if bytes > 0 {

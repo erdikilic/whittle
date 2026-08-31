@@ -49,6 +49,13 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --target "$TARGET"
 
+      # Rendered from the live CLI definition, on the HOST toolchain: the
+      # generator never has to run on the cross-compiled target, and the version
+      # string baked into the man page always matches the binary shipped beside
+      # it. Debug profile on purpose, since the output is text either way.
+      - name: Generate man page
+        run: cargo run --locked --example gen-man -- dist
+
       - name: Package
         id: pkg
         env:
@@ -56,7 +63,11 @@ jobs:
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           name="whittle-${version}-${TARGET}"
-          tar -C "target/${TARGET}/release" -czf "${name}.tar.gz" whittle
+          mkdir -p "dist/${name}"
+          cp "target/${TARGET}/release/whittle" "dist/${name}/"
+          cp -R dist/man "dist/${name}/"
+          cp README.md CHANGELOG.md LICENSE "dist/${name}/"
+          tar -C dist -czf "${name}.tar.gz" "${name}"
           shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 

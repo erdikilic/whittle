@@ -245,14 +245,11 @@ enum Terminal {
 
 /// Classify a hit at window coords `[start, end)` in a length-`n` window.
 ///
-/// A hit eligible for BOTH ends means the read is short enough that the two
-/// end-zones overlap (`n <= 2*end_size`), so the adapter sits within `end_size`
-/// of each end. Trimming toward the nearer end here would delete the whole
-/// outboard arm, which for a central chimera-junction adapter is real
-/// insert. Instead classify it as `Excise`: cut out just the adapter and keep
-/// both flanks. For a genuinely terminal adapter (abutting an end) the outboard
-/// flank is empty, so excising is identical to trimming that end; only a central
-/// adapter (which cannot be a terminal leader) is actually split.
+/// A hit eligible for BOTH ends means the end-zones overlap (`n <= 2*end_size`),
+/// so trimming toward the nearer end would delete the whole outboard arm, which
+/// for a central chimera junction is real insert. Those become `Excise`: cut out
+/// the adapter, keep both flanks. A genuinely terminal adapter has an empty
+/// outboard flank, so excising it is identical to trimming that end.
 fn classify_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: End) -> Terminal {
     let near5 = start <= end_size && matches!(tag, End::Five | End::Both);
     let near3 = end >= n.saturating_sub(end_size) && matches!(tag, End::Three | End::Both);
@@ -285,9 +282,8 @@ fn ends_only_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: 
 ///   - terminal hits within `end_size` of an end trim that end inward;
 ///   - interior hits (stricter `k_mid`) excise and split.
 ///
-/// When `cfg.split` is false (`--adapter-ends-only`), only the two end-zones
-/// are searched at all. The interior is never scanned, since no hit found
-/// there could ever be acted on.
+/// Under `--adapter-ends-only` (`cfg.split` false) only the two end-zones are
+/// searched, since no interior hit could be acted on.
 ///
 /// Returns `[start,end)` spans in `window` coordinates.
 pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
@@ -849,14 +845,11 @@ mod segment_tests {
 
     #[test]
     fn ends_only_trims_adapter_straddling_end_size() {
-        // A terminal 5' adapter whose match STARTS within end_size but ENDS
-        // beyond it: end_size=4, a 12bp adapter starting at position 2, so
-        // it spans [2,14) crossing the end_size=4 boundary. If the ends-only
-        // head zone were naively sized as `window[..end_size]` (4 bytes),
-        // this adapter (needing ~12 bytes of text) could never be found, and
-        // the read would come back untrimmed. With the correct
-        // `end_size + len` zone sizing, the head zone is `window[..16]`,
-        // which fully contains the match.
+        // A terminal 5' adapter that STARTS inside end_size but ENDS beyond it:
+        // end_size=4, a 12 bp adapter at position 2 spans [2,14). A naive
+        // `window[..end_size]` head zone (4 bytes) could never contain a 12-byte
+        // match, leaving the read untrimmed. The correct `end_size + len` sizing
+        // gives `window[..16]`, which does.
         let adapter = b"ACGTACGTACGT"; // 12 bp
         let mut w = b"AA".to_vec(); // 2 bp prefix -> adapter starts at position 2
         w.extend_from_slice(adapter); // adapter occupies [2, 14)

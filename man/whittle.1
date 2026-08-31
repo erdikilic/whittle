@@ -1,0 +1,191 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH whittle 1  "whittle 0.1.1" 
+.SH NAME
+whittle \- Tag\-aware long\-read trimmer
+.SH SYNOPSIS
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-in\-format\fR] [\fB\-\-out\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-qual\fR] [\fB\-Q\fR|\fB\-\-max\-qual\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-qual\-mode\fR] [\fB\-H\fR|\fB\-\-head\-crop\fR] [\fB\-T\fR|\fB\-\-tail\-crop\fR] [\fB\-\-qual\-trim\fR] [\fB\-\-qual\-best\-segment\fR] [\fB\-\-qual\-split\fR] [\fB\-\-qual\-split\-window\fR] [\fB\-\-update\-moves\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-size\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\fR] [\fB\-\-adapter\-infer\fR] [\fB\-\-adapter\-infer\-policy\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Tag\-aware long\-read trimmer
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH SETUP
+.TP
+\fB\-\-version\fR
+Print version information and exit
+.TP
+\fB\-i\fR, \fB\-\-input\fR \fI<INPUT>\fR
+Input FASTQ\-family file, unaligned BAM, or directory. Reads stdin when omitted
+.TP
+\fB\-o\fR, \fB\-\-output\fR \fI<OUTPUT>\fR
+Output file. Writes stdout when omitted; the path extension selects its format
+.TP
+\fB\-\-in\-format\fR \fI<IN_FORMAT>\fR
+Force the input format instead of detecting it from the path or stream
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+fastq
+.IP \(bu 2
+fastq\-gz
+.IP \(bu 2
+fastq\-bgz
+.IP \(bu 2
+bam
+.RE
+.TP
+\fB\-\-out\-format\fR \fI<OUT_FORMAT>\fR
+Force the output format instead of selecting it from the output path
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+fastq
+.IP \(bu 2
+fastq\-gz
+.IP \(bu 2
+fastq\-bgz
+.IP \(bu 2
+bam
+.RE
+.TP
+\fB\-t\fR, \fB\-\-threads\fR \fI<THREADS>\fR
+Worker threads (default: all detected CPUs; values above the CPU count are clamped)
+.TP
+\fB\-\-fastq\-tags\fR \fI<FASTQ_TAGS>\fR [default: all]
+BAM auxiliary tags copied into BAM\-to\-FASTQ headers: all, none, or a list such as MM,ML,RG
+.TP
+\fB\-c\fR, \fB\-\-compression\-level\fR \fI<COMPRESSION_LEVEL>\fR
+DEFLATE compression level for compressed output (bgzf for BAM, gzip for FASTQ.gz). Lower = faster/larger. Ignored for plain FASTQ. Default when unset: 4 for gzip FASTQ output, 6 for BGZF (BAM and .bgz)
+.TP
+\fB\-\-summary\-json\fR \fI<PATH>\fR
+Write a machine\-readable JSON run summary (counters plus the resolved settings) to this path. Written even under \-\-quiet
+.SH LOGGING
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase logging detail: \-v = debug, \-vv = trace (maximum two). Overridden by WHITTLE_LOG
+.TP
+\fB\-\-quiet\fR
+Silence progress and info output; warnings and errors still print
+.SH FILTERING
+.TP
+\fB\-l\fR, \fB\-\-min\-length\fR \fI<MIN_LENGTH>\fR [default: 1]
+Minimum post\-trim segment length
+.TP
+\fB\-L\fR, \fB\-\-max\-length\fR \fI<MAX_LENGTH>\fR
+Maximum post\-trim segment length
+.TP
+\fB\-q\fR, \fB\-\-min\-qual\fR \fI<MIN_QUAL>\fR [default: 0]
+Minimum post\-trim read quality under \-\-qual\-mode
+.TP
+\fB\-Q\fR, \fB\-\-max\-qual\fR \fI<MAX_QUAL>\fR [default: 1000]
+Maximum post\-trim read quality under \-\-qual\-mode
+.TP
+\fB\-g\fR, \fB\-\-min\-gc\fR \fI<MIN_GC>\fR
+Minimum post\-trim GC fraction (0\-1)
+.TP
+\fB\-G\fR, \fB\-\-max\-gc\fR \fI<MAX_GC>\fR
+Maximum post\-trim GC fraction (0\-1)
+.TP
+\fB\-m\fR, \fB\-\-qual\-mode\fR \fI<QUAL_MODE>\fR [default: mean]
+Read\-quality summary used by the quality filters
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+mean: Average error probabilities, then convert the result back to Phred Q
+.IP \(bu 2
+arithmetic: Take the arithmetic mean of the per\-base Phred scores
+.IP \(bu 2
+median: Take the median per\-base Phred score
+.RE
+.SH TRIMMING
+.TP
+\fB\-H\fR, \fB\-\-head\-crop\fR \fI<HEAD_CROP>\fR [default: 0]
+Remove this many bases from the 5\*(Aq end before other trimming
+.TP
+\fB\-T\fR, \fB\-\-tail\-crop\fR \fI<TAIL_CROP>\fR [default: 0]
+Remove this many bases from the 3\*(Aq end before other trimming
+.TP
+\fB\-\-qual\-trim\fR \fI<QUAL_TRIM>\fR
+Trim low\-quality bases from both ends until each boundary reaches Q
+.TP
+\fB\-\-qual\-best\-segment\fR \fI<QUAL_BEST_SEGMENT>\fR
+Keep the longest contiguous segment whose bases are all at least Q
+.TP
+\fB\-\-qual\-split\fR \fI<QUAL_SPLIT>\fR
+Split at low\-quality runs below Q and keep the surviving segments
+.TP
+\fB\-\-qual\-split\-window\fR \fI<QUAL_SPLIT_WINDOW>\fR [default: 1]
+Tolerate low\-quality runs shorter than this many bases when splitting
+.TP
+\fB\-\-update\-moves\fR
+Keep ONT signal tags consistent through trimming (slice `mv`, update `ts`/`ns`/`sp`/`pi`) for signal\-aware tools (Remora, Clair3 v2), instead of dropping them. BAM→BAM only
+.SH "ADAPTER TRIMMING"
+.TP
+\fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<ADAPTER_FASTA>\fR
+Adapter FASTA (each sequence >= the 11\-bp minimum match length). Enables adapter trimming
+.TP
+\fB\-\-adapter\-preset\fR \fI<ADAPTER_PRESET>\fR [default: none]
+Built\-in ONT adapter catalog. Enables adapter trimming
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+none: Do not load a built\-in adapter catalog
+.IP \(bu 2
+ont: Load the built\-in Oxford Nanopore adapter and barcode catalog
+.RE
+.TP
+\fB\-\-adapter\-error\-rate\fR \fI<ADAPTER_ERROR_RATE>\fR [default: 0.2]
+End\-match tolerance (fraction of adapter length). Interior splits use half
+.TP
+\fB\-\-adapter\-end\-size\fR \fI<ADAPTER_END_SIZE>\fR [default: 150]
+Bases at each read end searched for a terminal adapter
+.TP
+\fB\-\-adapter\-ends\-only\fR
+Trim adapters at read ends only; never split on interior adapters
+.TP
+\fB\-\-adapter\-sample\fR \fI<ADAPTER_SAMPLE>\fR
+Reads sampled for preset detection or ab\-initio inference. Defaults to 0 for preset detection and 40000 for inference; inference requires >=100
+.TP
+\fB\-\-adapter\-infer\fR [\fI<ADAPTER_INFER>\fR]
+Discover adapters de novo. With no value, defaults to trim; report prints inferred FASTA and exits without writing read output
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+trim: Trim reads with the inferred sequences
+.IP \(bu 2
+report: Print inferred FASTA to stdout and do not write read output
+.RE
+.TP
+\fB\-\-adapter\-infer\-policy\fR \fI<ADAPTER_INFER_POLICY>\fR
+Trust policy for inferred consensuses (default: conservative). Aggressive uses the complete consensus and permits splitting unless ends\-only is set
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+conservative: Use a short end\-facing anchor and disable inferred interior splitting
+.IP \(bu 2
+aggressive: Use the complete recurrent consensus and allow interior splitting
+.RE
+.SH VERSION
+v0.1.1
+.SH AUTHORS
+Erdi Kilic <erdican266@gmail.com>

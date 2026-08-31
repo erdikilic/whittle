@@ -133,20 +133,11 @@ impl Counters {
         let segments_dropped_high_qual = self.segments_dropped_high_qual.load(Ordering::Relaxed);
         let segments_dropped_gc = self.segments_dropped_gc.load(Ordering::Relaxed);
 
-        // Every input read is exactly one of: produced at least one
-        // surviving output segment (`reads_with_output`, regardless of how
-        // many segments it split into), produced no segments at all
-        // (`reads_trimmed_to_nothing`: an empty read, a fully-consumed
-        // adapter read, or an over-crop), or produced at least one segment
-        // but had every one of them rejected by `filter::check`
-        // (`reads_all_filtered`). Never more than one of the three, never
-        // none. Segment-level drops are intentionally excluded: a read can
-        // shed several segments and still survive, so per-segment counts
-        // don't belong in a read-level invariant. A future workflow path
-        // that adds a `continue`/early return without bumping exactly one of
-        // the three read-level counters would silently under/over-count the
-        // summary; this catches that in debug builds instead of shipping a
-        // quietly-wrong report.
+        // Every input read lands in exactly one of the three read-level buckets: it
+        // produced surviving segments, produced none at all, or produced some and
+        // lost them all to `filter::check`. Segment-level drops are excluded, since a
+        // read can shed segments and still survive. Catches a future early return
+        // that forgets to bump one of the three.
         debug_assert_eq!(
             reads_with_output + reads_trimmed_to_nothing + reads_all_filtered,
             input_reads,
@@ -266,14 +257,10 @@ mod tests {
     }
 
     /// The three-way read-level invariant (`reads_with_output +
-    /// reads_trimmed_to_nothing + reads_all_filtered == input_reads`) models
-    /// three reads: (a) a read with 2 surviving segments (`reads_with_output`),
-    /// (b) a read with 0 survivors whose 2 produced segments were both
-    /// `TooShort` (`reads_all_filtered`: segments were produced, none
-    /// survived), and (c) an empty read with no segments produced at all
-    /// (`reads_trimmed_to_nothing`, distinct from (b): the per-segment
-    /// filter loop never even ran). Segment level: `output_reads` bumped
-    /// twice (the 2 survivors of read a); 2 short drops (both from read b).
+    /// reads_trimmed_to_nothing + reads_all_filtered == input_reads`) over three
+    /// reads: (a) 2 surviving segments, (b) 2 produced segments both `TooShort`,
+    /// and (c) an empty read producing none. (c) differs from (b) in that its
+    /// per-segment filter loop never runs.
     #[test]
     fn three_way_read_counters_hold_the_invariant() {
         let counters = Counters::default();

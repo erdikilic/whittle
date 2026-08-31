@@ -52,6 +52,7 @@ tell a real input from a stale prior output, and merging over either loses data.
 | `--in-format`, `--out-format {fastq,fastq-gz,fastq-bgz,bam}` | Force a format instead of detecting it |
 | `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`) |
 | `-c, --compression-level <0-9>` | DEFLATE level for compressed output (default 6); ignored for plain FASTQ |
+| `--summary-json <PATH>` | Write a machine-readable run summary to PATH (see below) |
 | `-t, --threads <N>` | Worker threads (default: all detected CPUs, clamped to that max) |
 | `-l, --min-length <N>` | Minimum length to keep, per output segment (default 1) |
 | `-L, --max-length <N>` | Maximum length to keep |
@@ -79,6 +80,52 @@ tell a real input from a stale prior output, and merging over either loses data.
 `--qual-trim`, `--qual-best-segment`, and `--qual-split` are three strategies for
 the same step, so pass at most one. `-H`/`-T` are independent and compose with
 whichever you pick.
+
+## Machine-readable summary
+
+`--summary-json <PATH>` writes one JSON object describing the run: the resolved
+settings under `params`, and the counters under `reads`, `bases`, and
+`segments_dropped`. It is written on every dispatch path, including folder merges,
+and regardless of `--quiet` or the log level, so a workflow manager always gets
+the file it asked for. A write failure fails the run rather than leaving a stale
+file from a previous invocation in place.
+
+```bash
+whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
+```
+
+```json
+{
+  "schema_version": 1,
+  "tool": "whittle",
+  "version": "0.1.1",
+  "command": "whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json",
+  "input": "reads.bam",
+  "output": "trimmed.fastq.gz",
+  "elapsed_seconds": 12.34,
+  "params": { "threads": 8, "min_length": 500, "qual_mode": "mean", "quality_op": null, "adapters": null },
+  "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 30 },
+  "bases": { "input": 10000000, "output": 9500000 },
+  "segments_dropped": { "too_short": 12, "too_long": 0, "low_quality": 5, "high_quality": 0, "gc_out_of_range": 0 },
+  "warnings": { "malformed_tag_reads": 0 }
+}
+```
+
+`reads.output` counts output segments, not input reads, so under `--qual-split` it
+can legitimately exceed `reads.input`. The three read-level buckets
+(`with_output`, `trimmed_to_nothing`, `all_filtered`) do partition `reads.input`.
+
+`schema_version` is bumped only when an existing field changes meaning or
+disappears. New fields can appear without a bump, so parse leniently.
+
+## Man page
+
+Release tarballs ship `man/whittle.1` alongside the binary, and the same file is
+checked into the repository, so you can install it without building:
+
+```bash
+install -Dm644 man/whittle.1 /usr/share/man/man1/whittle.1
+```
 
 ## Logging and progress
 
