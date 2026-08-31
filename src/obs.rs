@@ -1,6 +1,7 @@
 //! Observability: leveled logging (tracing) and progress reporting (indicatif).
 
 use tracing::level_filters::LevelFilter;
+use tracing_subscriber::fmt::FormattedFields;
 
 /// Map the CLI verbosity/quiet flags to a tracing level. `WHITTLE_LOG`, when set, is
 /// applied separately (in `init`) and overrides this, unless `quiet` is set, in which
@@ -110,6 +111,35 @@ where
             jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S"),
             format_level(event.metadata().level(), self.color)
         )?;
+
+        // Enclosing span names, outermost first, so a line from deep in the
+        // pipeline says which stage produced it. Nothing is printed for an event
+        // outside every span, which is where the banner and summary lines sit.
+        if let Some(scope) = ctx.event_scope() {
+            let mut spans = scope.from_root().peekable();
+            if spans.peek().is_some() {
+                w.write_char('[')?;
+                let mut first = true;
+                for span in spans {
+                    if !first {
+                        w.write_char(':')?;
+                    }
+                    write!(w, "{}", span.name())?;
+                    // A span's own fields identify which instance produced the
+                    // line, which is the point of the span: `read{name=...}`
+                    // rather than a bare `read`.
+                    let ext = span.extensions();
+                    if let Some(fields) = ext.get::<FormattedFields<N>>()
+                        && !fields.is_empty()
+                    {
+                        write!(w, "{{{fields}}}")?;
+                    }
+                    first = false;
+                }
+                w.write_str("] ")?;
+            }
+        }
+
         ctx.field_format().format_fields(w.by_ref(), event)?;
         writeln!(w)
     }
@@ -569,42 +599,27 @@ fn all_filtered_line(stats: &Stats) -> Option<String> {
 /// reads, since a split read can contribute several and still survive. `None` when
 /// nothing was dropped.
 fn segments_dropped_line(stats: &Stats) -> Option<String> {
-    let total = stats.segments_dropped_short
-        + stats.segments_dropped_long
-        + stats.segments_dropped_low_qual
-        + stats.segments_dropped_high_qual
-        + stats.segments_dropped_gc;
+    use crate::filter::DropReason;
+
+    // Fixed order, and the wording comes from `DropReason::label` so this line
+    // and the per-segment trace event cannot describe the same rejection
+    // differently.
+    let by_reason = [
+        (DropReason::TooShort, stats.segments_dropped_short),
+        (DropReason::TooLong, stats.segments_dropped_long),
+        (DropReason::LowQuality, stats.segments_dropped_low_qual),
+        (DropReason::HighQuality, stats.segments_dropped_high_qual),
+        (DropReason::Gc, stats.segments_dropped_gc),
+    ];
+    let total: u64 = by_reason.iter().map(|(_, n)| n).sum();
     if total == 0 {
         return None;
     }
-    let mut parts = Vec::new();
-    if stats.segments_dropped_short > 0 {
-        parts.push(format!(
-            "{} too short",
-            commas(stats.segments_dropped_short)
-        ));
-    }
-    if stats.segments_dropped_long > 0 {
-        parts.push(format!("{} too long", commas(stats.segments_dropped_long)));
-    }
-    if stats.segments_dropped_low_qual > 0 {
-        parts.push(format!(
-            "{} low quality",
-            commas(stats.segments_dropped_low_qual)
-        ));
-    }
-    if stats.segments_dropped_high_qual > 0 {
-        parts.push(format!(
-            "{} high quality",
-            commas(stats.segments_dropped_high_qual)
-        ));
-    }
-    if stats.segments_dropped_gc > 0 {
-        parts.push(format!(
-            "{} GC out of range",
-            commas(stats.segments_dropped_gc)
-        ));
-    }
+    let parts: Vec<String> = by_reason
+        .iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(reason, n)| format!("{} {}", commas(*n), reason.label()))
+        .collect();
     Some(format!(
         "Segments dropped: {} ({})",
         commas(total),

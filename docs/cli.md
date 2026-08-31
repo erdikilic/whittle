@@ -74,7 +74,7 @@ tell a real input from a stale prior output, and merging over either loses data.
 | `--adapter-sample <N>` | Reads sampled for preset detection or inference (defaults `0` and `40000`, respectively) |
 | `--adapter-infer [trim\|report]` | Discover adapters de novo; omitted value defaults to `trim` |
 | `--adapter-infer-policy {conservative,aggressive}` | Trust policy for inferred adapters (default `conservative`) |
-| `-v`, `-vv` | Increase log detail (debug, trace); higher counts are rejected |
+| `-v`, `-vv` | Stage detail, then per-read decisions; higher counts are rejected |
 | `--quiet` | Silence progress and the summary; warnings and errors still print |
 
 `--qual-trim`, `--qual-best-segment`, and `--qual-split` are three strategies for
@@ -137,9 +137,29 @@ install -Dm644 man/whittle.1 /usr/share/man/man1/whittle.1
 
 ## Logging and progress
 
-Set the log level with `-v`/`-vv` (debug/trace) or `--quiet` (warnings and errors
-only). `WHITTLE_LOG` overrides it with a `RUST_LOG`-style filter, for example
-`WHITTLE_LOG=whittle::workflow=trace`, and `--quiet` still wins over it.
+Set the log level with `-v`/`-vv` or `--quiet` (warnings and errors only).
+
+`-v` adds the resolved stage detail: the detected input format and how long
+detection took, the thread budget actually handed to each stage, and the read and
+base counts when processing finishes. Every field is emitted as structured data
+rather than prose, so a filter or a log collector can read it.
+
+`-vv` adds the per-read decisions, each attributed to the read that produced it:
+
+```text
+[TRACE] [read{name=read_adapter}] adapter hit adapter="LSK109_front" start=0 end=28 cost=3 action="trim 5'"
+[TRACE] [read{name=read_adapter}] read produced no segments
+[TRACE] [read{name=read_short}] segment dropped segment=1 of=1 start=0 end=30 len=30 reason="too short"
+```
+
+That is how to answer why a particular read was cut where it was, or why it is
+missing from the output: which adapter matched, over what span, how far off an
+exact match it was, and what that made whittle do. It is verbose by design, one
+group of lines per read, so redirect it or filter it.
+
+`WHITTLE_LOG` overrides the level with a `RUST_LOG`-style filter, for example
+`WHITTLE_LOG=whittle::adapter=trace` to see adapter decisions without the
+per-segment lines, and `--quiet` still wins over it.
 
 All logging goes to stderr, so stdout carries only read data. Progress shows as a
 live bar when stderr is a terminal, or as periodic lines (about every 30s, or 10s

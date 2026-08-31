@@ -68,3 +68,16 @@ git merge --no-ff feature-branch -m "perf: integrate throughput improvements"
 - Comments explain why, not what. A comment that restates the line below it should
   be deleted.
 - Third person, not first: "the caller drops the tag", not "we drop the tag".
+
+## Log messages
+
+- Start the message with a capital letter, at every level. The message is prose;
+  the structured fields after it are data.
+- Never restate the level in the text. The formatter already prints `[WARN]`, so
+  a message beginning "warning:" says it twice.
+- Put values in fields rather than in the sentence, so they can be filtered and
+  parsed: `tracing::debug!(reads = n, "Processing finished")`, not
+  `tracing::debug!("Processing finished, {n} reads")`.
+- Field values are data and stay lowercase: `action="trim 5'"`, `reason="too short"`.
+- Reuse one wording for one concept. A rejection reason comes from
+  `DropReason::label` so the summary line and the trace event cannot disagree.

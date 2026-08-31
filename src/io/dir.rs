@@ -183,7 +183,7 @@ fn first_rg_mismatch(paths: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
 pub fn warn_on_bam_header_mismatch(paths: &[PathBuf]) {
     if let Some((first, offender)) = first_rg_mismatch(paths) {
         tracing::warn!(
-            "warning: the folder's BAM files have different @RG sets ({} vs {}); \
+            "The folder's BAM files have different @RG sets ({} vs {}); \
              only the first file's header is written, so records from other files \
              may reference read groups missing from the merged output header",
             first.display(),

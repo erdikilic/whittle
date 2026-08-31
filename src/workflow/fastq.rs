@@ -24,6 +24,8 @@ pub fn run_fastq_seq<W: Write>(
         counters
             .input_bases
             .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
+        let _read = super::read_span(&rec.name);
+        let _read = _read.enter();
         let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
         process_read_segments(
             &produced,
@@ -53,6 +55,8 @@ pub fn run_fastq_seq<W: Write>(
 /// handling: the parallel caller runs inside a plain `for_each` with no `Result`
 /// seam (see `run_fastq`).
 fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut Vec<u8>) {
+    let _read = super::read_span(&rec.name);
+    let _read = _read.enter();
     let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
     process_read_segments(
         &produced,
