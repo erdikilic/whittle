@@ -23,7 +23,7 @@ pub fn gc_fraction(seq: &[u8]) -> f64 {
 }
 
 /// Why `check` dropped a segment. Both GC bounds (too low / too high) collapse
-/// into `Gc` — the summary reports "GC out of range", not which side.
+/// into `Gc`: the summary reports "GC out of range", not which side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropReason {
     TooShort,

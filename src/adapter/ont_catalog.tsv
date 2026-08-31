@@ -1,4 +1,4 @@
-# whittle ONT adapter/primer/barcode catalog — our own, assembled from primary sources (2026-07-06)
+# whittle ONT adapter/primer/barcode catalog, assembled from primary sources (2026-07-06)
 # Columns: id <TAB> category <TAB> end <TAB> sequence <TAB> kits <TAB> source
 #   end: 5 = front/read-start, 3 = rear/read-end, both = search at either end
 #        (every sequence is also searched reverse-complemented, so opposite-strand reads are covered)

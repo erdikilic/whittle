@@ -16,9 +16,9 @@ pub enum Family {
 /// a sorted path list. Non-read files and subdirectories are ignored.
 /// Errors if the folder mixes FASTQ and BAM, or contains no read files.
 ///
-/// If `output` names a read file *inside* the directory, this is a hard error: we
-/// can't tell a real input from a stale prior output, and either way merging the
-/// rest and overwriting it silently loses data (this covers both `-o` pointing at
+/// If `output` names a read file *inside* the directory, this is a hard error: a
+/// real input is indistinguishable from a stale prior output, and either way merging
+/// the rest and overwriting it silently loses data (this covers both `-o` pointing at
 /// a genuine input file and a rerun re-ingesting its own output). The merged
 /// output must be written to a path outside the input directory.
 pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Vec<PathBuf>)> {
@@ -40,7 +40,7 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
         {
             anyhow::bail!(
                 "output {} is a read file inside the input directory {}; refusing to \
-                 overwrite it (it may be one of the inputs) — write the merged output \
+                 overwrite it (it may be one of the inputs); write the merged output \
                  to a path outside {}",
                 path.display(),
                 dir.display(),
@@ -107,14 +107,14 @@ type BamRecordIter = crate::io::bam::RawRecordIter;
 
 /// The first file's header plus one chained record stream over all BAM files
 /// (each file's own header is read and discarded past the first; records
-/// stream as lazy raw records under the first header — `samtools cat` semantics
+/// stream as lazy raw records under the first header, `samtools cat` semantics
 /// for homogeneous uBAM).
 ///
 /// `workers` is the MT-bgzf decode worker count (same knob as the single-file
 /// `io::bam::reader`), passed through to every per-file reader. This is safe
 /// from oversubscription despite chaining N files: the first file's reader is
 /// opened eagerly right here, but each `rest` file's reader is opened lazily,
-/// one at a time, only once `flat_map` actually reaches it — and `Iterator`'s
+/// one at a time, only once `flat_map` actually reaches it, and `Iterator`'s
 /// `Chain`/`FlatMap` drop the exhausted inner iterator before advancing to the
 /// next, closing its MT reader (and joining its worker threads) first. So at
 /// most one file's `workers` bgzf threads are ever live at once, never N×.
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn errors_when_output_is_a_read_file_inside_the_dir() {
         // `-o` pointing at a read file inside the input dir (a real input, or a
-        // stale prior output — indistinguishable) must hard-error, not silently
+        // stale prior output, indistinguishable) must hard-error, not silently
         // exclude+overwrite it.
         let d = tempfile::tempdir().unwrap();
         touch(d.path(), "a.fastq");

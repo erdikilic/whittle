@@ -147,7 +147,7 @@ fn nan_quality_bound_errors() {
 #[cfg(unix)]
 fn hard_linked_input_output_is_rejected_and_preserves_input() {
     // Two hard links to one inode canonicalize to distinct paths, so only the
-    // inode+device check catches this — otherwise File::create truncates the input.
+    // inode+device check catches this. Otherwise File::create truncates the input.
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.fastq");
     let output = dir.path().join("out.fastq");
@@ -255,7 +255,7 @@ fn whittle_log_overrides_verbosity_when_not_quiet() {
 #[test]
 fn line_mode_banner_and_closer_appear_in_order() {
     // assert_cmd captures stderr to a pipe (non-tty), so this always runs in
-    // line mode regardless of verbosity — the full startup banner plus the
+    // line mode regardless of verbosity. The full startup banner plus the
     // Completed closer should appear, in order.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle().write_stdin(input).assert().success().stderr(
@@ -321,7 +321,7 @@ fn non_tty_stderr_has_no_ansi_escapes() {
 #[test]
 fn all_dropped_run_warns() {
     // Every read fails an unreachable min-qual bound: nothing survives, but
-    // the run itself still succeeds — the all-dropped guardrail WARN must
+    // the run itself still succeeds. The all-dropped guardrail WARN must
     // fire so this doesn't silently look like a clean empty-output run.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()

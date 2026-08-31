@@ -58,7 +58,7 @@ pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
 }
 
 /// Split into high-quality segments separated by runs of >= `window` low-quality
-/// bases. Emits every high-quality run, regardless of length — the caller's
+/// bases. Emits every high-quality run, regardless of length. The caller's
 /// length filter (`-l`) owns dropping short pieces, post-trim.
 pub fn split_low_quality(phred: &[u8], cutoff: u8, window: usize) -> Vec<(usize, usize)> {
     let window = window.max(1);
@@ -101,7 +101,7 @@ pub fn split_low_quality(phred: &[u8], cutoff: u8, window: usize) -> Vec<(usize,
 mod tests {
     use super::*;
 
-    // (seq, ascii_qual) — shared test vectors for the trim-strategy tests below.
+    // (seq, ascii_qual): shared test vectors for the trim-strategy tests below.
     fn reads() -> [(Vec<u8>, Vec<u8>); 6] {
         let raw = [
             (
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn split_expected_segments() {
         // (cutoff, expected) with window=1. Every high-quality run is emitted,
-        // including short ones — length filtering is the caller's job now.
+        // including short ones. Length filtering is the caller's job now.
         let cases: [(u8, Segments); 6] = [
             (20, vec![(4, 5), (6, 9), (10, 16), (17, 18), (19, 20)]),
             (7, vec![(0, 2), (4, 15), (17, 20)]),

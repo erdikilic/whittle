@@ -281,7 +281,7 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
 }
 
 /// The reconstructed MM/ML/MN block as SAM aux text (no leading TAB):
-/// `MM:Z:<mm>\tML:B:C,<ml…>\tMN:i:<mn>`. `ml` is `None` for an MM-only source
+/// `MM:Z:<mm>\tML:B:C,<ml...>\tMN:i:<mn>`. `ml` is `None` for an MM-only source
 /// record (ML is optional per the SAM spec), in which case the `ML:B:C` field is
 /// omitted entirely rather than emitted empty.
 pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
@@ -329,7 +329,7 @@ mod tests {
     fn split_segment_preserves_tab_delimited_tags() {
         // A `samtools fastq -T`-style header carries SAM tags after a TAB. The
         // `_segment_N` suffix must land right after the read id, keeping the TAB
-        // and the tag value intact — not append past the tag (which would mutate
+        // and the tag value intact, not append past the tag (which would mutate
         // both the id and the RG value).
         let mut out = Vec::new();
         write_segment(&mut out, b"r1\tRG:Z:grp", b"AC", &[40, 40], 2, 0).unwrap();

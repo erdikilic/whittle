@@ -12,7 +12,7 @@ pub fn presence_min(sample_size: usize) -> usize {
     (sample_size / 500).max(3)
 }
 
-/// Whether `ad` would actually act on `window` — a terminal hit (trimmed) or,
+/// Whether `ad` would actually act on `window`: a terminal hit (trimmed) or,
 /// when `split`, an interior hit (`cost <= k_mid`, split). Mirrors the
 /// per-adapter body of `adapter_segments` so "present" == "does something".
 fn adapter_present_in(

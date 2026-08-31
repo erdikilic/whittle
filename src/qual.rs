@@ -15,7 +15,7 @@ pub fn phred_to_prob(q: u8) -> f64 {
     PHRED_LUT[q as usize]
 }
 
-/// Error-probability mean quality: the ONT-standard "read Q" — the mean per-base
+/// Error-probability mean quality: the ONT-standard "read Q", the mean per-base
 /// error probability converted back to a Phred score.
 pub fn mean_prob_q(phred: &[u8]) -> f64 {
     if phred.is_empty() {

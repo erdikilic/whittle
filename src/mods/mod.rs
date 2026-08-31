@@ -42,7 +42,7 @@ pub fn complement(base: u8) -> u8 {
 
 /// The SEQ base whose occurrences the MM skip-counts index: the fundamental base
 /// for `+`, its complement for `-` (the mods sit on the opposite strand). Slicing
-/// only needs to count the SAME base the encoder counted — the htslib oracle
+/// only needs to count the SAME base the encoder counted. The htslib oracle
 /// confirms this matches real data.
 pub fn counting_base(base: u8, strand: u8) -> u8 {
     if strand == b'-' {

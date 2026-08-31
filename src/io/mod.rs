@@ -38,10 +38,10 @@ impl Format {
     }
 }
 
-/// Extension-based detection. Recognises `.fastq`/`.fq`, the `.gz` variants, and `.bam`.
+/// Extension-based detection. Recognizes `.fastq`/`.fq`, the `.gz` variants, and `.bam`.
 pub fn from_extension(path: &Path) -> Option<Format> {
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-    // Any trailing `.gz` is gzipped FASTQ — the only gz format this tool handles —
+    // Any trailing `.gz` is gzipped FASTQ (the only gz format this tool handles),
     // so a bare `out.gz` counts as fastq-gz, not just `.fastq.gz`/`.fq.gz`.
     if name.ends_with(".bgz") || name.ends_with(".bgzf") {
         Some(Format::FastqBgzf)
@@ -70,7 +70,7 @@ pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format>
         Ok(Format::FastqGz)
     } else if sniff.starts_with(b"BAM\x01") {
         // A naked (non-BGZF) BAM stream: the reader always wraps input in a
-        // bgzf decoder, so this could never actually be read — fail with a
+        // bgzf decoder, so this could never actually be read, so fail with a
         // precise message instead of surfacing an opaque bgzf framing error.
         anyhow::bail!(
             "input looks like an uncompressed (non-BGZF) BAM stream; a BGZF-compressed BAM \
@@ -84,7 +84,7 @@ pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format>
 }
 
 /// Advisory text when an explicit `--in-format`/`--out-format` (`forced`)
-/// disagrees with what `path`'s extension suggests — e.g. `--out-format fastq`
+/// disagrees with what `path`'s extension suggests, e.g. `--out-format fastq`
 /// on an `out.fastq.gz` path. `None` when there's no forced format, the path
 /// has no recognized extension, it's stdin/stdout (`path` is `None`), or the
 /// two agree. `flag` names the CLI flag for the message.
@@ -134,7 +134,7 @@ pub(crate) fn detect_bgzf_block(block: &[u8]) -> anyhow::Result<Format> {
     }
 }
 
-/// Output format from the path extension, else mirror the input format — with
+/// Output format from the path extension, else mirror the input format, with
 /// one exception: never auto-compress. A `.gz` (`FastqGz`) input with no output
 /// extension defaults to plain `Fastq`, so gzip output only ever happens when the
 /// caller explicitly asks (`-o *.gz` / `--out-format fastq-gz`).
@@ -305,8 +305,8 @@ mod tests {
 
     #[test]
     fn output_never_auto_compresses_gz_input() {
-        // A .gz input with no output path/format defaults to PLAIN fastq —
-        // auto-compressing on stdout would be silent and surprising.
+        // A .gz input with no output path/format defaults to PLAIN fastq.
+        // Auto-compressing on stdout would be silent and surprising.
         assert_eq!(resolve_output(None, Format::FastqGz), Format::Fastq);
         // gz output is still available when explicitly requested via a `.gz`
         // output path extension.

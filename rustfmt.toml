@@ -1,7 +1,7 @@
 # Formatting configuration for `whittle`.
 #
 # The unstable options in the "nightly" sections require the nightly toolchain:
-# `cargo +nightly fmt`. Stable `cargo fmt` still runs and passes `--check` — it
+# `cargo +nightly fmt`. Stable `cargo fmt` still runs and passes `--check`; it
 # simply ignores those options and leaves the affected code as written.
 #
 # Comment- and string-reflowing options (wrap_comments, format_strings,

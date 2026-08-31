@@ -98,8 +98,8 @@ fn trimmed_output_mods_match_oracle() {
     );
 }
 
-/// Multi-mod fixture: one read carrying THREE mod groups — `C+m`, `C+h`, `A+a`
-/// (the real dorado shape) — with the C at abs 3 modified by BOTH `m` and `h`,
+/// Multi-mod fixture: one read carrying THREE mod groups (`C+m`, `C+h`, `A+a`,
+/// the real dorado shape), with the C at abs 3 modified by BOTH `m` and `h`,
 /// to exercise multiple groups, multiple fundamental bases, AND a same-position
 /// double mod all reconstructed through a head+tail crop.
 fn write_fixture_multimod(path: &Path) {
@@ -267,12 +267,12 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
 // Optional real-data sweep enabled by `WHITTLE_UBAM`.
 
 /// One decoded base-modification call: (0-based read pos, canonical base,
-/// modified base, strand, qual) — the same tuple shape `hts_mods` above
+/// modified base, strand, qual), the same tuple shape `hts_mods` above
 /// produces, just keyed per read instead of flattened across a whole file.
 type ModCall = (usize, char, char, i32, i32);
 
 /// Decode every read in a BAM/uBAM, keyed by read name, into its (SEQ length,
-/// mod calls) — the same `basemods_iter()` decode as `hts_mods`, but split
+/// mod calls), the same `basemods_iter()` decode as `hts_mods`, but split
 /// per read so a multi-read real file can be compared read-by-read instead of
 /// as one flattened bag.
 fn hts_mods_by_read(path: &Path) -> HashMap<String, (usize, Vec<ModCall>)> {
@@ -419,7 +419,7 @@ const INFER_MM_ML_MOD_MIN_ABS: usize = 70;
 /// Same splitmix64 bit-mixer as `tests/adapter_cli.rs`'s `splitmix_tail`:
 /// deterministic, per-read, non-periodic ACGT background so the discoverer
 /// never mistakes the (otherwise-identical-looking) tail region itself for a
-/// second conserved "adapter" — see that file's comment for why a naive
+/// second conserved "adapter". See that file's comment for why a naive
 /// periodic generator breaks discovery tests like this one.
 fn splitmix_tail_infer(i: usize, len: usize) -> Vec<u8> {
     let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);

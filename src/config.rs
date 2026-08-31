@@ -11,7 +11,7 @@ use crate::trim::TrimPlan;
 pub enum FastqTags {
     /// Carry every aux tag from the source record.
     All,
-    /// Carry no tags — emit plain FASTQ.
+    /// Carry no tags, emitting plain FASTQ.
     None,
     /// Carry only the listed 2-character SAM tags.
     Only(BTreeSet<[u8; 2]>),
@@ -121,7 +121,7 @@ pub struct Config {
     pub filter: FilterConfig,
     pub trim: TrimPlan,
     /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
-    /// `--adapter-preset ont` was given (adapter trimming off — no per-read cost).
+    /// `--adapter-preset ont` was given (adapter trimming off, no per-read cost).
     pub adapters: Option<crate::adapter::AdapterConfig>,
     /// Whether ab-initio adapter inference runs and whether inferred adapters
     /// are also used for trimming.
@@ -144,7 +144,7 @@ pub struct Config {
     pub compression_level: u8,
     /// When true, keep ONT signal tags consistent through trimming instead of
     /// dropping them: slice the `mv` move table and update `ts`/`ns`/`sp`/`pi`
-    /// (BAM→BAM only — see `workflow::bam`). Default false drops `mv`/`ts`/`ns`/
+    /// (BAM→BAM only, see `workflow::bam`). Default false drops `mv`/`ts`/`ns`/
     /// `sp`/`pi` on any trimmed read.
     pub update_moves: bool,
     pub verbosity: u8,
@@ -167,7 +167,7 @@ pub struct ThreadBudget {
 }
 
 impl ThreadBudget {
-    /// Sum across all three stages — the resolved total worker count shown in
+    /// Sum across all three stages: the resolved total worker count shown in
     /// the startup banner's `Threads: {total} total (...)` line. May exceed the
     /// requested `-t` value at very low counts, since `thread_budget` floors
     /// `render`/`encode` at >= 1 each even when the overall total is 1.
@@ -181,9 +181,9 @@ impl ThreadBudget {
 pub enum EncodeKind {
     /// No compression pool (plain FASTQ out).
     None,
-    /// bgzf (BAM out) — libdeflate, medium cost.
+    /// bgzf (BAM out): libdeflate, medium cost.
     Bgzf,
-    /// gzip via gzp (FASTQ.gz out) — heavier.
+    /// gzip via gzp (FASTQ.gz out): heavier.
     Gzip,
 }
 

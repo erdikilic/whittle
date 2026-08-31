@@ -166,7 +166,7 @@ fn bam_raw_full_window_path_filters_without_rebuilding_records() {
 
 /// End-to-end: a PacBio-style uBAM with per-base kinetics (`ip`/`pw`, one value
 /// per base) must have those arrays sliced in lockstep with the sequence when the
-/// read is trimmed — otherwise the output record is invalid (array length != SEQ
+/// read is trimmed. Otherwise the output record is invalid (array length != SEQ
 /// length) and breaks kinetics/methylation callers.
 #[test]
 fn bam_to_bam_slices_pacbio_kinetics() {

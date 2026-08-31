@@ -10,7 +10,7 @@ pub type DnaSearcher = Searcher<Dna>;
 pub type BatchedDnaSearcher = Searcher<Iupac>;
 
 /// One approximate match of a pattern in the text: half-open `[start, end)` into
-/// the text, with its edit `cost`. Strand is not exposed — a reverse-complement
+/// the text, with its edit `cost`. Strand is not exposed. A reverse-complement
 /// hit still occupies the same text span, which is all the trimmer needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
@@ -77,7 +77,7 @@ mod tests {
     // NOTE: `new_rc()` returns TWO same-span hits for a reverse-complement-
     // palindromic pattern (Fwd + Rc). Count-based tests must use a NON-palindromic
     // pattern (revcomp absent from the text) to get exactly one hit. `adapter_segments`
-    // is unaffected — it dedups terminal hits via max/min and merges interior ones.
+    // is unaffected: it dedups terminal hits via max/min and merges interior ones.
     #[test]
     fn exact_forward_match() {
         let mut s = new_searcher();

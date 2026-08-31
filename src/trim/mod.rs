@@ -20,7 +20,7 @@ pub struct TrimPlan {
 /// (when configured), then the chosen quality op within each adapter segment,
 /// offsetting intervals back to original coordinates. Emits crop->adapter->quality
 /// segments only, including short ones; the caller filters (length/quality/GC)
-/// per segment — `apply` never applies a length filter itself.
+/// per segment. `apply` never applies a length filter itself.
 pub fn apply(
     seq: &[u8],
     phred: &[u8],
@@ -40,7 +40,7 @@ pub fn apply(
     }
 
     // Quality op within one `[s, e)` segment, results offset back to original
-    // coordinates and appended to `out`. No length filter here — the caller
+    // coordinates and appended to `out`. No length filter here. The caller
     // filters each returned segment (length/quality/GC).
     let quality_in = |s: usize, e: usize, out: &mut Vec<(usize, usize)>| {
         let wp = &phred[s..e];
