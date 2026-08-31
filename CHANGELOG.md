@@ -20,6 +20,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped binary is unchanged.
 
 ### Fixed
+- Adapter trimming aborted the whole run with a panic, leaving a truncated
+  output file, when any read contained an ambiguity code (`N`, `Y`, `R`, ...)
+  near an end. Sassy's `Dna` profile panics during traceback on non-ACGT text,
+  and the searcher fell back to exactly that profile whenever it detected one.
+  Every searcher now uses the IUPAC profile, which is what tolerates ambiguity
+  codes. Output on pure-ACGT input is byte-identical; adapter trimming is about
+  19% slower.
+- uBAM records flagged reverse-complemented (`0x4|0x10`) are refused rather than
+  trimmed: htslib decodes their `MM` right to left with complemented bases and
+  their stored `SEQ` is reverse-complemented, so trimming cropped the wrong ends
+  and relocated every call.
+- Records carrying the legacy lowercase `Mm`/`Ml` tags (old guppy, megalodon)
+  are refused rather than copied through untouched onto a trimmed sequence.
+  htslib still reads that spelling, so the calls decoded fine elsewhere while
+  pointing at the wrong bases.
+- `--summary-json` could destroy the run's own output when reads went to a
+  redirected stdout (`whittle --summary-json out.fastq > out.fastq`): the
+  collision guard only covered the `-o` form.
+- Folder mode's progress bar was pinned at 0%, because nothing on that path
+  counted input bytes. Folder readers now wrap their files the way the
+  single-file path does.
+- A mistyped `--summary-json` path now fails during setup instead of after the
+  reads are written, and `-o /dev/null --summary-json /dev/null` is no longer
+  refused as a self-overwrite.
 - Folder mode (`-i <dir>`) was missing two advisories the single-file path
   emits: the `--out-format` extension mismatch and the no-trimming no-op
   warning. It also rendered a bare spinner instead of a progress bar with a

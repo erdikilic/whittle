@@ -1402,3 +1402,45 @@ fn qual_split_both_pieces_survive_at_lower_length_floor() {
         "AAAAAA [5,11) still survives: {stdout}"
     );
 }
+
+/// Real ONT reads contain `N`. Sassy's `Dna` profile panics during traceback on
+/// any non-ACGT byte in the text, and the searcher used to fall back to exactly
+/// that profile whenever it saw one, so a single ambiguity code near a read end
+/// aborted the run and left a truncated output file behind. Every searcher now
+/// uses the IUPAC profile, which is what tolerates ambiguity codes.
+#[test]
+fn ambiguity_codes_in_reads_do_not_abort_adapter_trimming() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("n.fastq");
+    let output = dir.path().join("out.fastq");
+
+    // The ONT kit-14 ligation adapter with one ambiguity code inside it, at the
+    // 5' end where terminal search looks, then a random insert.
+    let adapter = b"CCTGTACTTCGTTCAGTTACGTATTGC";
+    let mut fq = String::new();
+    for (i, code) in [b'N', b'Y', b'R', b'H'].into_iter().enumerate() {
+        let mut a = adapter.to_vec();
+        a[3] = code;
+        let body: String = (0..300)
+            .map(|j| b"ACGT"[((i * 31 + j * 17 + j * j * 3) % 4) as usize] as char)
+            .collect();
+        let s = format!("{}{body}", String::from_utf8(a).unwrap());
+        fq.push_str(&format!("@r{i}\n{s}\n+\n{}\n", "I".repeat(s.len())));
+    }
+    std::fs::write(&input, fq).unwrap();
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", output.to_str().unwrap()])
+        .args(["--adapter-preset", "ont"])
+        .assert()
+        .success();
+
+    let out = std::fs::read_to_string(&output).unwrap();
+    assert_eq!(out.lines().count(), 16, "all four reads must survive");
+    assert!(
+        !out.contains("CCTGTACTTCGTTCAGTTACG"),
+        "the adapter should still be trimmed despite the ambiguity code"
+    );
+}

@@ -2,6 +2,7 @@
 //! created so a rejected run leaves nothing behind.
 
 use std::io::IsTerminal;
+use std::path::Path;
 
 use crate::config::Config;
 use crate::io;
@@ -97,45 +98,91 @@ pub(crate) fn guard_output_collisions(
         }
     }
 
-    // The summary is written after the output file, so it would clobber it.
-    if let (Some(out), Some(sum)) = (cfg.io.output.as_deref(), cfg.summary_json.as_deref())
-        && same_path(out, sum)
-    {
-        anyhow::bail!(
-            "--summary-json ({}) and the output are the same file; the summary would replace \
-             the trimmed reads with JSON",
-            sum.display()
-        );
+    // The summary is written after the reads, so it would clobber them. With no
+    // `-o` the reads go to stdout, which a shell redirect can point at the very
+    // file `--summary-json` names, leaving no path for `same_path` to compare.
+    if let Some(sum) = cfg.summary_json.as_deref() {
+        let collides = match cfg.io.output.as_deref() {
+            Some(out) => same_path(out, sum),
+            None => stdout_is(sum),
+        };
+        if collides {
+            anyhow::bail!(
+                "--summary-json ({}) and the output are the same file; the summary would \
+                 replace the trimmed reads with JSON",
+                sum.display()
+            );
+        }
+    }
+
+    // Catch a mistyped summary path now rather than after the reads are written,
+    // which on a large BAM throws away hours of work. Probing the parent instead
+    // of creating the file leaves nothing behind on a run that ends up writing no
+    // summary at all (`--adapter-infer report`). A permission failure still
+    // surfaces late; a wrong path, the common typo, does not.
+    if let Some(sum) = cfg.summary_json.as_deref() {
+        if sum.is_dir() {
+            anyhow::bail!("--summary-json {} is a directory", sum.display());
+        }
+        let parent = sum
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.is_dir() {
+            anyhow::bail!(
+                "--summary-json {}: the directory {} does not exist",
+                sum.display(),
+                parent.display()
+            );
+        }
     }
     Ok(())
 }
 
-/// Whether `path` names the same file the process has open on stdin.
+/// Whether `path` names the same file the process has open on `fd`.
 ///
-/// A shell redirect (`whittle -o reads.fastq < reads.fastq`) leaves no path for
-/// the same-file check to compare, but fd 0 still resolves to the inode.
+/// A shell redirect leaves no path for `same_path` to compare, but the
+/// descriptor still resolves to an inode. Only a regular file can be clobbered,
+/// so a pipe, tty, or `/dev/null` is never a match.
 #[cfg(unix)]
-fn stdin_is(path: &std::path::Path) -> bool {
-    use std::os::fd::AsFd;
+fn redirects_to(fd: std::os::fd::BorrowedFd<'_>, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
 
-    // `try_clone_to_owned` dups fd 0, so stdin itself is never closed here, and
-    // it needs no `unsafe` (which this crate forbids).
-    let Ok(dup) = std::io::stdin().as_fd().try_clone_to_owned() else {
+    // `try_clone_to_owned` dups the descriptor, so the original is never closed
+    // here, and it needs no `unsafe` (which this crate forbids).
+    let Ok(dup) = fd.try_clone_to_owned() else {
         return false;
     };
-    let Ok(m0) = std::fs::File::from(dup).metadata() else {
+    let Ok(mine) = std::fs::File::from(dup).metadata() else {
         return false;
     };
-    let Ok(mp) = std::fs::metadata(path) else {
+    let Ok(theirs) = std::fs::metadata(path) else {
         return false;
     };
-    // Only a regular file can collide; a pipe or tty shares no inode with a path.
-    m0.is_file() && m0.dev() == mp.dev() && m0.ino() == mp.ino()
+    mine.is_file() && mine.dev() == theirs.dev() && mine.ino() == theirs.ino()
+}
+
+/// Whether `path` is the file being read on stdin (`whittle -o x < x`).
+#[cfg(unix)]
+fn stdin_is(path: &Path) -> bool {
+    use std::os::fd::AsFd;
+    redirects_to(std::io::stdin().as_fd(), path)
+}
+
+/// Whether `path` is the file stdout is redirected to (`whittle --summary-json x > x`).
+#[cfg(unix)]
+fn stdout_is(path: &Path) -> bool {
+    use std::os::fd::AsFd;
+    redirects_to(std::io::stdout().as_fd(), path)
 }
 
 #[cfg(not(unix))]
-fn stdin_is(_path: &std::path::Path) -> bool {
+fn stdin_is(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn stdout_is(_path: &Path) -> bool {
     false
 }
 
@@ -144,7 +191,17 @@ fn stdin_is(_path: &std::path::Path) -> bool {
 /// it falls back to canonicalizing the parent directory and re-joining the file
 /// name. Conservative: any resolution failure yields `false` (don't block a run
 /// on a path that cannot be resolved).
-pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
+    // Only a regular file has contents to destroy. `/dev/null` as both endpoints,
+    // or a tty, is a deliberate discard, not a collision worth refusing.
+    for p in [a, b] {
+        if let Ok(m) = std::fs::metadata(p)
+            && !m.is_file()
+        {
+            return false;
+        }
+    }
+
     // When both paths already exist, an inode+device match is definitive, and it
     // also catches hard links to one inode, which path canonicalization misses.
     #[cfg(unix)]

@@ -1,9 +1,9 @@
 pub mod adapter;
-pub mod banner;
+pub(crate) mod banner;
 pub mod cli;
 pub mod config;
 pub mod filter;
-pub mod guards;
+pub(crate) mod guards;
 pub mod io;
 pub mod mods;
 pub mod obs;
@@ -151,7 +151,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let mut warnings: Vec<String> = Vec::new();
     warnings.extend(mismatch_warn);
     warnings.extend(out_mismatch_warn);
-    if is_no_op(&cfg, in_fmt, out_fmt) {
+    if is_no_op(&cfg, in_fmt == out_fmt) {
         warnings.push(NO_OP_WARNING.to_string());
     }
     announce(
@@ -373,10 +373,14 @@ fn announce(
     obs.start(s.total, counters);
 }
 
-/// True when the run neither trims, filters, nor converts, so it just re-emits
-/// (almost) what it read. Legitimate for a conversion-only run, which is why the
-/// format comparison is part of the test.
-fn is_no_op(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) -> bool {
+/// True when the run neither trims nor filters, so it just re-emits (almost)
+/// what it read.
+///
+/// `same_format` is the caller's answer to "is this also not a conversion",
+/// because the two entry points can only answer it differently: folder mode's
+/// family collapses `.fastq`, `.fastq.gz`, and `.fastq.bgz` into one value, so
+/// comparing families there would call a genuine decompression run a no-op.
+fn is_no_op(cfg: &Config, same_format: bool) -> bool {
     let no_trim = cfg.trim.head == 0 && cfg.trim.tail == 0 && cfg.trim.quality.is_none();
     let pass_through_filter = cfg.filter.min_length <= 1
         && cfg.filter.max_length == usize::MAX
@@ -384,7 +388,7 @@ fn is_no_op(cfg: &Config, in_fmt: io::Format, out_fmt: io::Format) -> bool {
         && cfg.filter.max_qual >= 1000.0
         && cfg.filter.min_gc.is_none()
         && cfg.filter.max_gc.is_none();
-    no_trim && pass_through_filter && cfg.adapters.is_none() && in_fmt == out_fmt
+    no_trim && pass_through_filter && cfg.adapters.is_none() && same_format
 }
 
 const NO_OP_WARNING: &str =
@@ -488,7 +492,10 @@ fn run_folder(
         cfg.io.out_format,
         cfg.io.output.as_deref(),
     ));
-    if is_no_op(cfg, family_fmt, out_fmt) {
+    // Every member file's precise format, not the collapsed family: a folder of
+    // .fastq.gz merged into plain .fastq really is a conversion.
+    let same_format = paths.iter().all(|p| io::from_extension(p) == Some(out_fmt));
+    if is_no_op(cfg, same_format) {
         warnings.push(NO_OP_WARNING.to_string());
     }
     announce(
@@ -526,7 +533,7 @@ fn run_folder(
             }
             note_tags_ignored(cfg, family_fmt, out_fmt);
             // Resolve report-only mode before creating the output file.
-            let records = io::dir::fastq_records(&paths, budget.decode);
+            let records = io::dir::fastq_records(&paths, budget.decode, counters.clone());
             let Some(records) = settle(records, cfg, budget, |r| Cow::Borrowed(r.seq.as_slice()))?
             else {
                 return Ok(());
@@ -543,7 +550,8 @@ fn run_folder(
                 // Only the first file's header is written; warn if the others
                 // declare different read groups (relevant only for BAM output).
                 io::dir::warn_on_bam_header_mismatch(&paths);
-                let (header, records) = io::dir::bam_reader(&paths, budget.decode)?;
+                let (header, records) =
+                    io::dir::bam_reader(&paths, budget.decode, counters.clone())?;
                 let Some(records) = settle(records, cfg, budget, adapter::resolve::bam_seq)? else {
                     return Ok(());
                 };
@@ -560,7 +568,8 @@ fn run_folder(
                 Ok(())
             },
             Format::Fastq | Format::FastqGz | Format::FastqBgzf => {
-                let (_header, records) = io::dir::bam_reader(&paths, budget.decode)?;
+                let (_header, records) =
+                    io::dir::bam_reader(&paths, budget.decode, counters.clone())?;
                 let Some(records) = settle(records, cfg, budget, adapter::resolve::bam_seq)? else {
                     return Ok(());
                 };

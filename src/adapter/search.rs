@@ -1,13 +1,20 @@
-use sassy::profiles::{Dna, Iupac};
-use sassy::{CachedRev, Searcher};
+use sassy::CachedRev;
+use sassy::Searcher;
+use sassy::profiles::Iupac;
 
-/// Reusable DNA searcher (searches a pattern against both strands of the text).
-pub type DnaSearcher = Searcher<Dna>;
+/// Reusable adapter searcher (searches a pattern against both strands of the text).
+///
+/// The IUPAC profile, not `Dna`, and this is load-bearing: sassy's `Dna` profile
+/// PANICS during traceback if the text holds any byte outside `ACGTacgt`, and
+/// real ONT reads contain `N`. IUPAC treats an ambiguity code as matching the
+/// bases it stands for, which is both the standard reading and the only one that
+/// does not abort the run. On pure A/C/G/T text the two profiles are equivalent,
+/// so this costs nothing on the common case. Sassy's pattern-batched API is
+/// IUPAC-only anyway, so this makes one profile serve both paths.
+pub type AdapterSearcher = Searcher<Iupac>;
 
-/// Sassy only implements its pattern-batched v1 API for the IUPAC profile.
-/// For A/C/G/T adapter patterns and read windows this has the same matching
-/// semantics as `Dna`, while enabling SIMD lanes across patterns.
-pub type BatchedDnaSearcher = Searcher<Iupac>;
+/// The same profile, used through the pattern-batched API.
+pub type BatchedAdapterSearcher = Searcher<Iupac>;
 
 /// One approximate match of a pattern in the text: half-open `[start, end)` into
 /// the text, with its edit `cost`. Strand is not exposed. A reverse-complement
@@ -20,18 +27,18 @@ pub struct Hit {
 }
 
 /// A fresh searcher configured to also match the reverse-complement strand.
-pub fn new_searcher() -> DnaSearcher {
-    Searcher::<Dna>::new_rc()
+pub fn new_searcher() -> AdapterSearcher {
+    Searcher::<Iupac>::new_rc()
 }
 
 /// A fresh searcher that matches the FORWARD strand only (no reverse-complement).
 /// Used by inference's k-mer recount, where each read-end window is already
 /// strand-oriented and RC hits would inflate the per-window presence count.
-pub fn new_searcher_fwd() -> DnaSearcher {
-    Searcher::<Dna>::new_fwd()
+pub fn new_searcher_fwd() -> AdapterSearcher {
+    Searcher::<Iupac>::new_fwd()
 }
 
-pub fn new_batched_searcher() -> BatchedDnaSearcher {
+pub fn new_batched_searcher() -> BatchedAdapterSearcher {
     Searcher::<Iupac>::new_rc()
 }
 
@@ -39,7 +46,7 @@ pub fn new_batched_searcher() -> BatchedDnaSearcher {
 /// This retains `search`'s reverse-text semantics while avoiding the repeated
 /// short-text setup of calling `search` once per pattern.
 pub fn pattern_hits(
-    searcher: &mut BatchedDnaSearcher,
+    searcher: &mut BatchedAdapterSearcher,
     patterns: &[Vec<u8>],
     text: &[u8],
     k: usize,
@@ -55,7 +62,7 @@ pub fn pattern_hits(
 /// `new_searcher` (RC-enabled) matches both strands, `new_searcher_fwd`
 /// matches the forward strand only. Reuses `searcher`'s internal buffers
 /// across calls.
-pub fn hits(searcher: &mut DnaSearcher, pattern: &[u8], text: &[u8], k: usize) -> Vec<Hit> {
+pub fn hits(searcher: &mut AdapterSearcher, pattern: &[u8], text: &[u8], k: usize) -> Vec<Hit> {
     searcher
         .search(pattern, text, k)
         .into_iter()

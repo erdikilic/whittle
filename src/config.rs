@@ -348,7 +348,7 @@ mod resolve_threads_tests {
 /// equivalent), this is everything `config::thread_budget` needs; both call sites
 /// (`run`, `run_folder`) resolve their budget from this exactly once, before the
 /// startup banner, and reuse it for the actual workflow dispatch below.
-pub fn encode_kind_for(out_fmt: crate::io::Format) -> EncodeKind {
+pub(crate) fn encode_kind_for(out_fmt: crate::io::Format) -> EncodeKind {
     match out_fmt {
         crate::io::Format::Bam => EncodeKind::Bgzf,
         crate::io::Format::FastqGz => EncodeKind::Gzip,
@@ -363,7 +363,7 @@ pub fn encode_kind_for(out_fmt: crate::io::Format) -> EncodeKind {
 /// input is normally trim-only (light), but adapter matching or ab-initio
 /// inference runs an approximate search per read, which is heavy too, so it
 /// gets a render-pool share rather than being starved as pure compression.
-pub fn render_heavy_for(
+pub(crate) fn render_heavy_for(
     in_fmt: crate::io::Format,
     _out_fmt: crate::io::Format,
     cfg: &Config,

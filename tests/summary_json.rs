@@ -148,8 +148,8 @@ fn summary_is_written_for_a_folder_run() {
     assert_eq!(v["bases"]["output"], 16);
 }
 
-/// An unwritable summary path is a hard error: silently skipping it would let a
-/// pipeline consume a stale file from a previous run.
+/// A mistyped summary path fails before any reads are processed, not after: on a
+/// large BAM the late failure threw away the whole run.
 #[test]
 fn unwritable_summary_path_fails_the_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -166,7 +166,10 @@ fn unwritable_summary_path_fails_the_run() {
         .write_stdin(reads())
         .assert()
         .failure()
-        .stderr(predicate::str::contains("writing summary JSON"));
+        .stderr(predicate::str::contains("does not exist"))
+        // "Failed after 0ms" proves it bailed during setup rather than after the
+        // reads were written.
+        .stderr(predicate::str::contains("Failed after 0ms"));
 }
 
 /// Without the flag, nothing is written and no stray file appears.
