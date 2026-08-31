@@ -11,7 +11,8 @@ use std::sync::OnceLock;
 
 use aho_corasick::AhoCorasick;
 use search::{
-    AdapterSearcher, BatchedAdapterSearcher, hits, new_batched_searcher, new_searcher, pattern_hits,
+    AmbiguousSearcher, BatchedAdapterSearcher, PlainSearcher, hits, is_plain_acgt,
+    new_ambiguous_searcher, new_batched_searcher, new_searcher, pattern_hits,
 };
 
 thread_local! {
@@ -19,10 +20,14 @@ thread_local! {
     /// `adapter_segments` doesn't allocate a fresh searcher (and its scratch
     /// buffers) on every call. Per-thread, so the parallel workflows stay
     /// data-race-free without sharing.
-    static RC_SEARCHER: RefCell<AdapterSearcher> = RefCell::new(new_searcher());
+    /// The fast all-ACGT searcher. Only used when both the pattern and the
+    /// searched text are plain ACGT; see `is_plain_acgt`.
+    static RC_SEARCHER: RefCell<PlainSearcher> = RefCell::new(new_searcher());
 
     /// Pattern-batched searcher. Sassy's `Dna` profile does not implement
     /// `search_patterns`; on A/C/G/T input its IUPAC profile is equivalent.
+    /// The ambiguity-tolerant searcher, used for a degenerate primer.
+    static RC_AMBIGUOUS: RefCell<AmbiguousSearcher> = RefCell::new(new_ambiguous_searcher());
     static BATCH_SEARCHER: RefCell<BatchedAdapterSearcher> = RefCell::new(new_batched_searcher());
 }
 
@@ -245,6 +250,44 @@ enum Terminal {
     None,
 }
 
+/// Search `pattern` in `text`, choosing the profile by what the PATTERN holds.
+///
+/// A degenerate primer needs the IUPAC profile so its wobble positions match the
+/// bases they stand for. A plain ACGT pattern takes the materially faster DNA
+/// profile, which matters because a narrowed adapter set is searched one pattern
+/// at a time rather than batched across SIMD lanes.
+///
+/// `text` is always plain ACGT by the time it gets here; see the rewrite in
+/// `adapter_segments`.
+fn search(
+    plain: &mut PlainSearcher,
+    ambiguous: &mut AmbiguousSearcher,
+    pattern: &[u8],
+    text: &[u8],
+    k: usize,
+) -> Vec<search::Hit> {
+    if is_plain_acgt(pattern) {
+        hits(plain, pattern, text, k)
+    } else {
+        hits(ambiguous, pattern, text, k)
+    }
+}
+
+/// What an ambiguity code in a read is rewritten to before searching.
+///
+/// An uncalled base is evidence of nothing, so it should consume error budget
+/// rather than match for free: a short `N` inside a real adapter still matches
+/// within `--adapter-error-rate`, while a run of them never looks like an
+/// adapter. Leaving the codes in place and searching on the IUPAC profile would
+/// do the opposite and excise the whole run as if it were adapter.
+///
+/// Any ACGT byte serves; what matters is that it is one fixed base, so no real
+/// adapter matches a homopolymer run of it within its budget. The rewrite also
+/// keeps the fast profile usable, which panics during traceback on anything else,
+/// and it is what lets the batched path stay consistent, since sassy implements
+/// batching only for IUPAC.
+const AMBIGUOUS_READ_BASE: u8 = b'A';
+
 /// Classify a hit at window coords `[start, end)` in a length-`n` window.
 ///
 /// A hit eligible for BOTH ends means the end-zones overlap (`n <= 2*end_size`),
@@ -298,6 +341,27 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
     }
     let end_size = cfg.end_size.min(n);
 
+    // Rewrite any ambiguity code in the read before indexing or searching, so
+    // every path (batched, singleton, candidate) sees the same plain-ACGT text.
+    // See `AMBIGUOUS_READ_BASE`. Reads without one, the overwhelming majority,
+    // borrow their window unchanged and allocate nothing.
+    let rewritten: Vec<u8>;
+    let window: &[u8] = if is_plain_acgt(window) {
+        window
+    } else {
+        rewritten = window
+            .iter()
+            .map(|&b| {
+                if matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't') {
+                    b
+                } else {
+                    AMBIGUOUS_READ_BASE
+                }
+            })
+            .collect();
+        &rewritten
+    };
+
     let mut lo = 0usize; // 5' keep-boundary (advances inward on terminal hits)
     let mut hi = n; // 3' keep-boundary (retreats inward on terminal hits)
     let mut interior: Vec<(usize, usize)> = Vec::new();
@@ -308,117 +372,122 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
         .split
         .then(|| search_index.candidate_windows(window, cfg.adapters.len()));
     RC_SEARCHER.with_borrow_mut(|searcher| {
-        // All adapters in a batch have the same length and edit budget, so the
-        // head/tail windows are shared. This collapses the ONT catalog's 96
-        // equal-length barcode searches into one SIMD pattern search per end.
-        if !search_index.terminal_batches.is_empty() {
-            BATCH_SEARCHER.with_borrow_mut(|batch_searcher| {
-                for batch in &search_index.terminal_batches {
-                    let head_end = (end_size + batch.len + batch.k_end).min(n);
-                    for h in pattern_hits(
-                        batch_searcher,
-                        &batch.patterns,
-                        &window[..head_end],
-                        batch.k_end,
-                    ) {
-                        let ad = &cfg.adapters[batch.adapter_indices[h.pattern_idx]];
-                        let terminal = if cfg.split {
-                            classify_terminal(h.text_start, h.text_end, n, end_size, ad.end)
-                        } else {
-                            ends_only_terminal(h.text_start, h.text_end, n, end_size, ad.end)
-                        };
-                        match terminal {
-                            Terminal::Five => lo = lo.max(h.text_end),
-                            Terminal::Excise => interior.push((h.text_start, h.text_end)),
-                            Terminal::Three | Terminal::None => {},
+        RC_AMBIGUOUS.with_borrow_mut(|ambiguous| {
+            // All adapters in a batch have the same length and edit budget, so the
+            // head/tail windows are shared. This collapses the ONT catalog's 96
+            // equal-length barcode searches into one SIMD pattern search per end.
+            if !search_index.terminal_batches.is_empty() {
+                BATCH_SEARCHER.with_borrow_mut(|batch_searcher| {
+                    for batch in &search_index.terminal_batches {
+                        let head_end = (end_size + batch.len + batch.k_end).min(n);
+                        for h in pattern_hits(
+                            batch_searcher,
+                            &batch.patterns,
+                            &window[..head_end],
+                            batch.k_end,
+                        ) {
+                            let ad = &cfg.adapters[batch.adapter_indices[h.pattern_idx]];
+                            let terminal = if cfg.split {
+                                classify_terminal(h.text_start, h.text_end, n, end_size, ad.end)
+                            } else {
+                                ends_only_terminal(h.text_start, h.text_end, n, end_size, ad.end)
+                            };
+                            match terminal {
+                                Terminal::Five => lo = lo.max(h.text_end),
+                                Terminal::Excise => interior.push((h.text_start, h.text_end)),
+                                Terminal::Three | Terminal::None => {},
+                            }
+                        }
+
+                        let tail_start = n.saturating_sub(end_size + batch.len + batch.k_end);
+                        for h in pattern_hits(
+                            batch_searcher,
+                            &batch.patterns,
+                            &window[tail_start..],
+                            batch.k_end,
+                        ) {
+                            let ad = &cfg.adapters[batch.adapter_indices[h.pattern_idx]];
+                            let (start, end) = (tail_start + h.text_start, tail_start + h.text_end);
+                            let terminal = if cfg.split {
+                                classify_terminal(start, end, n, end_size, ad.end)
+                            } else {
+                                ends_only_terminal(start, end, n, end_size, ad.end)
+                            };
+                            match terminal {
+                                Terminal::Three => hi = hi.min(start),
+                                Terminal::Excise => interior.push((start, end)),
+                                Terminal::Five | Terminal::None => {},
+                            }
                         }
                     }
-
-                    let tail_start = n.saturating_sub(end_size + batch.len + batch.k_end);
-                    for h in pattern_hits(
-                        batch_searcher,
-                        &batch.patterns,
-                        &window[tail_start..],
-                        batch.k_end,
-                    ) {
-                        let ad = &cfg.adapters[batch.adapter_indices[h.pattern_idx]];
-                        let (start, end) = (tail_start + h.text_start, tail_start + h.text_end);
-                        let terminal = if cfg.split {
-                            classify_terminal(start, end, n, end_size, ad.end)
-                        } else {
-                            ends_only_terminal(start, end, n, end_size, ad.end)
-                        };
-                        match terminal {
-                            Terminal::Three => hi = hi.min(start),
-                            Terminal::Excise => interior.push((start, end)),
-                            Terminal::Five | Terminal::None => {},
-                        }
-                    }
-                }
-            });
-        }
-
-        // Adapters with no equal-length partner are searched one at a time; the
-        // batched loop above already covered the rest.
-        for (adapter_idx, ad) in cfg.adapters.iter().enumerate() {
-            let len = ad.seq.len();
-            if len < MIN_PATTERN_LEN || search_index.batched_adapters[adapter_idx] {
-                continue;
+                });
             }
-            let k_end = (cfg.error_rate * len as f64).floor() as usize;
-            let head_end = (end_size + len + k_end).min(n);
-            for h in hits(searcher, &ad.seq, &window[..head_end], k_end) {
-                if cfg.split {
-                    match classify_terminal(h.start, h.end, n, end_size, ad.end) {
-                        Terminal::Five => lo = lo.max(h.end),
-                        Terminal::Excise => interior.push((h.start, h.end)),
-                        Terminal::Three | Terminal::None => {},
-                    }
-                } else if ends_only_terminal(h.start, h.end, n, end_size, ad.end) == Terminal::Five
-                {
-                    lo = lo.max(h.end);
-                }
-            }
-            let tail_start = n.saturating_sub(end_size + len + k_end);
-            for h in hits(searcher, &ad.seq, &window[tail_start..], k_end) {
-                let (s, e) = (tail_start + h.start, tail_start + h.end);
-                if cfg.split {
-                    match classify_terminal(s, e, n, end_size, ad.end) {
-                        Terminal::Three => hi = hi.min(s),
-                        Terminal::Excise => interior.push((s, e)),
-                        Terminal::Five | Terminal::None => {},
-                    }
-                } else if ends_only_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
-                    hi = hi.min(s);
-                }
-            }
-        }
 
-        // Exact partition seeds identify every possible interior match.
-        // Interior hits are accepted only up to `k_mid`, so Sassy searches the
-        // candidate window at that limit rather than the looser end budget.
-        if let Some(candidate_windows) = &interior_windows {
+            // Adapters with no equal-length partner are searched one at a time; the
+            // batched loop above already covered the rest.
             for (adapter_idx, ad) in cfg.adapters.iter().enumerate() {
-                if ad.seq.len() < MIN_PATTERN_LEN {
+                let len = ad.seq.len();
+                if len < MIN_PATTERN_LEN || search_index.batched_adapters[adapter_idx] {
                     continue;
                 }
-                let k_mid = (0.5 * cfg.error_rate * ad.seq.len() as f64).floor() as usize;
-                for &(candidate_start, candidate_end) in &candidate_windows[adapter_idx] {
-                    for h in hits(
-                        searcher,
-                        &ad.seq,
-                        &window[candidate_start..candidate_end],
-                        k_mid,
-                    ) {
-                        let start = candidate_start + h.start;
-                        let end = candidate_start + h.end;
-                        if classify_terminal(start, end, n, end_size, ad.end) == Terminal::None {
-                            interior.push((start, end));
+                let k_end = (cfg.error_rate * len as f64).floor() as usize;
+                let head_end = (end_size + len + k_end).min(n);
+                for h in search(searcher, ambiguous, &ad.seq, &window[..head_end], k_end) {
+                    if cfg.split {
+                        match classify_terminal(h.start, h.end, n, end_size, ad.end) {
+                            Terminal::Five => lo = lo.max(h.end),
+                            Terminal::Excise => interior.push((h.start, h.end)),
+                            Terminal::Three | Terminal::None => {},
+                        }
+                    } else if ends_only_terminal(h.start, h.end, n, end_size, ad.end)
+                        == Terminal::Five
+                    {
+                        lo = lo.max(h.end);
+                    }
+                }
+                let tail_start = n.saturating_sub(end_size + len + k_end);
+                for h in search(searcher, ambiguous, &ad.seq, &window[tail_start..], k_end) {
+                    let (s, e) = (tail_start + h.start, tail_start + h.end);
+                    if cfg.split {
+                        match classify_terminal(s, e, n, end_size, ad.end) {
+                            Terminal::Three => hi = hi.min(s),
+                            Terminal::Excise => interior.push((s, e)),
+                            Terminal::Five | Terminal::None => {},
+                        }
+                    } else if ends_only_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
+                        hi = hi.min(s);
+                    }
+                }
+            }
+
+            // Exact partition seeds identify every possible interior match.
+            // Interior hits are accepted only up to `k_mid`, so Sassy searches the
+            // candidate window at that limit rather than the looser end budget.
+            if let Some(candidate_windows) = &interior_windows {
+                for (adapter_idx, ad) in cfg.adapters.iter().enumerate() {
+                    if ad.seq.len() < MIN_PATTERN_LEN {
+                        continue;
+                    }
+                    let k_mid = (0.5 * cfg.error_rate * ad.seq.len() as f64).floor() as usize;
+                    for &(candidate_start, candidate_end) in &candidate_windows[adapter_idx] {
+                        for h in search(
+                            searcher,
+                            ambiguous,
+                            &ad.seq,
+                            &window[candidate_start..candidate_end],
+                            k_mid,
+                        ) {
+                            let start = candidate_start + h.start;
+                            let end = candidate_start + h.end;
+                            if classify_terminal(start, end, n, end_size, ad.end) == Terminal::None
+                            {
+                                interior.push((start, end));
+                            }
                         }
                     }
                 }
             }
-        }
+        });
     });
 
     if lo >= hi {
