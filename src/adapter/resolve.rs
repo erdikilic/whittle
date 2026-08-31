@@ -124,10 +124,6 @@ pub(crate) fn buffer_prefix<R>(
     Ok(sample)
 }
 
-/// Resolve adapter inference or presence sampling before workflow dispatch.
-/// Report-only mode returns `None` so callers do not create an output writer;
-/// trimming modes return the buffered prefix chained with the remaining input.
-/// `seq_of` exposes a record's sequence without constraining its storage type.
 /// What resolution decided: the stream to process, with any sampled prefix
 /// chained back in front of it, and the adapter set to trim it against.
 pub(crate) struct Resolved<R> {

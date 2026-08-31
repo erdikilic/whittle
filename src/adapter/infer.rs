@@ -4,7 +4,7 @@
 //! peeling, boundary drop-trim, and presence-fraction confidence. Implemented
 //! from the paper (not translated from GPL source). Pure and format-neutral.
 
-use crate::adapter::search::{DnaSearcher, hits, new_searcher};
+use crate::adapter::search::{AdapterSearcher, hits, new_searcher};
 use crate::adapter::{Adapter, AdapterConfig, End, MIN_PATTERN_LEN};
 
 /// k-mer length used for end-window counting and assembly graph nodes.
@@ -178,7 +178,7 @@ fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
 /// forward-only (see `new_searcher_fwd`) so reverse-complement occurrences do
 /// not inflate the count. Callers provide an already bounded window sample.
 fn two_error_freq(
-    searcher: &mut DnaSearcher,
+    searcher: &mut AdapterSearcher,
     kmer: &[u8],
     windows: &[&[u8]],
     max_edits: usize,

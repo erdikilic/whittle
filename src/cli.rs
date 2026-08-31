@@ -560,13 +560,32 @@ fn read_adapter_fasta(
             .filter(|b| !b.is_ascii_whitespace())
             .map(u8::to_ascii_uppercase)
             .collect();
+        // RNA primers are written with U; a DNA read stores T, and sassy would
+        // treat U as a fifth base matching nothing, so fold it here.
+        let seq: Vec<u8> = seq
+            .into_iter()
+            .map(|b| if b == b'U' { b'T' } else { b })
+            .collect();
         let name = String::from_utf8_lossy(rec.head()).into_owned();
-        if !seq.iter().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
+
+        // IUPAC ambiguity codes are searched as the bases they stand for, which
+        // is what a degenerate primer means. Anything outside the nucleotide
+        // alphabet is a malformed record, not a degenerate one.
+        let Some(degeneracy) = seq
+            .iter()
+            .map(|&b| crate::adapter::search::iupac_degeneracy(b).map(u32::from))
+            .sum::<Option<u32>>()
+        else {
+            let bad: String = seq
+                .iter()
+                .filter(|&&b| crate::adapter::search::iupac_degeneracy(b).is_none())
+                .map(|&b| b as char)
+                .collect();
             advisories.push(crate::config::Advisory::warn(format!(
-                "adapter {name:?} has non-ACGT bases; skipped"
+                "adapter {name:?} contains non-nucleotide characters ({bad}); skipped"
             )));
             continue;
-        }
+        };
         if seq.len() < crate::adapter::MIN_PATTERN_LEN {
             advisories.push(crate::config::Advisory::warn(format!(
                 "adapter {name:?} is {} bp; shorter than the {}-bp minimum match length, skipped",
@@ -575,6 +594,17 @@ fn read_adapter_fasta(
             )));
             continue;
         }
+        // A fully-degenerate stretch matches anywhere, so a pattern with more
+        // ambiguity than specificity will trim real insert. Searched anyway, since
+        // the user asked for it, but not silently.
+        if degeneracy as usize >= seq.len() * 2 {
+            advisories.push(crate::config::Advisory::warn(format!(
+                "adapter {name:?} averages {:.1} bases per position; a pattern this degenerate \
+                 matches almost anywhere and may trim real sequence",
+                f64::from(degeneracy) / seq.len() as f64
+            )));
+        }
+
         out.push(crate::adapter::Adapter {
             name,
             seq,
@@ -668,24 +698,58 @@ mod tests {
         assert_eq!(adapters[0].seq, b"ACGTACGTACGTACGTACGT".to_vec());
     }
 
-    // Parity with the built-in catalog: entries with non-ACGT bases (IUPAC
-    // ambiguity codes like N) are rejected, not silently searched as-is.
+    /// Degenerate primers are the point of the IUPAC alphabet, so ambiguity codes
+    /// are kept and searched as the bases they stand for. Only characters outside
+    /// the nucleotide alphabet are a malformed record.
     #[test]
-    fn read_adapter_fasta_skips_non_acgt_entries() {
+    fn read_adapter_fasta_keeps_iupac_and_rejects_non_nucleotides() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("adapters.fasta");
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, ">kept_valid_20bp").unwrap();
-        writeln!(f, "ACGTACGTACGTACGTACGT").unwrap(); // 20 bp, valid ACGT
-        writeln!(f, ">skipped_n_20bp").unwrap();
-        writeln!(f, "ACGTACGTACGTACGTACGN").unwrap(); // 20 bp, but has an N
+        writeln!(f, ">plain_20bp").unwrap();
+        writeln!(f, "ACGTACGTACGTACGTACGT").unwrap();
+        writeln!(f, ">degenerate_20bp").unwrap();
+        writeln!(f, "ACGTACGTYCGTACGTACGN").unwrap();
+        writeln!(f, ">rna_20bp").unwrap();
+        writeln!(f, "ACGUACGUACGUACGUACGU").unwrap();
+        writeln!(f, ">protein_20bp").unwrap();
+        writeln!(f, "ACGTACGTZCGTACGTACGT").unwrap();
         drop(f);
 
         let mut advisories = Vec::new();
         let adapters = read_adapter_fasta(&path, &mut advisories).unwrap();
 
-        assert_eq!(adapters.len(), 1);
-        assert_eq!(adapters[0].name, "kept_valid_20bp");
-        assert_eq!(adapters[0].seq, b"ACGTACGTACGTACGTACGT".to_vec());
+        let names: Vec<&str> = adapters.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["plain_20bp", "degenerate_20bp", "rna_20bp"]);
+        assert_eq!(adapters[1].seq, b"ACGTACGTYCGTACGTACGN".to_vec());
+        // U folds to T: a DNA read stores T, and sassy would treat U as a fifth
+        // base that matches nothing.
+        assert_eq!(adapters[2].seq, b"ACGTACGTACGTACGTACGT".to_vec());
+        assert!(
+            advisories
+                .iter()
+                .any(|a| a.message.contains("non-nucleotide")),
+            "the protein-alphabet entry should be reported"
+        );
+    }
+
+    /// A pattern with more ambiguity than specificity matches almost anywhere.
+    /// It is still searched, but the user is told.
+    #[test]
+    fn read_adapter_fasta_warns_about_a_very_degenerate_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapters.fasta");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, ">mostly_n").unwrap();
+        writeln!(f, "NNNNNNNNNNNNNNNACGTA").unwrap();
+        drop(f);
+
+        let mut advisories = Vec::new();
+        let adapters = read_adapter_fasta(&path, &mut advisories).unwrap();
+        assert_eq!(adapters.len(), 1, "still searched");
+        assert!(
+            advisories.iter().any(|a| a.message.contains("degenerate")),
+            "a near-wildcard pattern should warn"
+        );
     }
 }

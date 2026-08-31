@@ -1,4 +1,4 @@
-use super::search::{DnaSearcher, hits, new_searcher};
+use super::search::{AdapterSearcher, hits, new_searcher};
 use super::{Adapter, MIN_PATTERN_LEN, Terminal, classify_terminal};
 use rayon::prelude::*;
 
@@ -16,7 +16,7 @@ pub fn presence_min(sample_size: usize) -> usize {
 /// when `split`, an interior hit (`cost <= k_mid`, split). Mirrors the
 /// per-adapter body of `adapter_segments` so "present" == "does something".
 fn adapter_present_in(
-    searcher: &mut DnaSearcher,
+    searcher: &mut AdapterSearcher,
     window: &[u8],
     ad: &Adapter,
     error_rate: f64,

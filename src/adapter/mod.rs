@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 use aho_corasick::AhoCorasick;
 use search::{
-    BatchedDnaSearcher, DnaSearcher, hits, new_batched_searcher, new_searcher, pattern_hits,
+    AdapterSearcher, BatchedAdapterSearcher, hits, new_batched_searcher, new_searcher, pattern_hits,
 };
 
 thread_local! {
@@ -19,11 +19,11 @@ thread_local! {
     /// `adapter_segments` doesn't allocate a fresh searcher (and its scratch
     /// buffers) on every call. Per-thread, so the parallel workflows stay
     /// data-race-free without sharing.
-    static RC_SEARCHER: RefCell<DnaSearcher> = RefCell::new(new_searcher());
+    static RC_SEARCHER: RefCell<AdapterSearcher> = RefCell::new(new_searcher());
 
     /// Pattern-batched searcher. Sassy's `Dna` profile does not implement
     /// `search_patterns`; on A/C/G/T input its IUPAC profile is equivalent.
-    static BATCH_SEARCHER: RefCell<BatchedDnaSearcher> = RefCell::new(new_batched_searcher());
+    static BATCH_SEARCHER: RefCell<BatchedAdapterSearcher> = RefCell::new(new_batched_searcher());
 }
 
 /// Which read end a catalog sequence is expected at. This gates TERMINAL
@@ -307,28 +307,11 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
     let interior_windows = cfg
         .split
         .then(|| search_index.candidate_windows(window, cfg.adapters.len()));
-    // `search_patterns` is only available through Sassy's IUPAC profile. It is
-    // exactly equivalent to the existing DNA path on A/C/G/T text; preserve
-    // prior behavior when either terminal search region has another symbol.
-    // Only inspect the bounded terminal regions, not the potentially huge
-    // interior of a long read that no terminal search will touch.
-    let batch_span = search_index
-        .terminal_batches
-        .iter()
-        .map(|batch| end_size + batch.len + batch.k_end)
-        .max()
-        .unwrap_or(0)
-        .min(n);
-    let use_batches = window[..batch_span]
-        .iter()
-        .chain(&window[n - batch_span..])
-        .all(|b| matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'));
-
     RC_SEARCHER.with_borrow_mut(|searcher| {
         // All adapters in a batch have the same length and edit budget, so the
         // head/tail windows are shared. This collapses the ONT catalog's 96
         // equal-length barcode searches into one SIMD pattern search per end.
-        if use_batches {
+        if !search_index.terminal_batches.is_empty() {
             BATCH_SEARCHER.with_borrow_mut(|batch_searcher| {
                 for batch in &search_index.terminal_batches {
                     let head_end = (end_size + batch.len + batch.k_end).min(n);
@@ -375,12 +358,11 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
             });
         }
 
-        // Singleton length groups retain the original one-pattern search. On a
-        // non-ACGT window every adapter takes this path for exact compatibility.
+        // Adapters with no equal-length partner are searched one at a time; the
+        // batched loop above already covered the rest.
         for (adapter_idx, ad) in cfg.adapters.iter().enumerate() {
             let len = ad.seq.len();
-            if len < MIN_PATTERN_LEN || (use_batches && search_index.batched_adapters[adapter_idx])
-            {
+            if len < MIN_PATTERN_LEN || search_index.batched_adapters[adapter_idx] {
                 continue;
             }
             let k_end = (cfg.error_rate * len as f64).floor() as usize;

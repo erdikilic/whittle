@@ -1,10 +1,13 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Context;
 use noodles_sam::{self as sam};
 
 use crate::io::{Format, from_extension};
 use crate::record::ReadRecord;
+use crate::workflow::Counters;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
@@ -77,19 +80,27 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
 pub fn fastq_records(
     paths: &[PathBuf],
     bgzf_workers: usize,
+    counters: Arc<Counters>,
 ) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
     let paths = paths.to_vec();
     Box::new(paths.into_iter().flat_map(
         move |p| -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
-            let reader = match from_extension(&p) {
-                Some(Format::FastqBgzf) => std::fs::File::open(&p)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|file| {
-                        crate::io::fastq::reader_from_bgzf(Box::new(file), bgzf_workers)
-                    }),
-                Some(Format::FastqGz) => crate::io::fastq::reader(Some(&p), true),
-                _ => crate::io::fastq::reader(Some(&p), false),
-            };
+            // Counting wraps the file itself, innermost, so compressed inputs are
+            // measured on disk. That matches the folder total, which sums file
+            // sizes, and it is what drives the progress bar.
+            let counted = std::fs::File::open(&p)
+                .map(|f| -> Box<dyn Read + Send> {
+                    Box::new(crate::io::counting::CountingReader::new(
+                        f,
+                        counters.clone(),
+                    ))
+                })
+                .map_err(anyhow::Error::from);
+            let reader = counted.and_then(|inner| match from_extension(&p) {
+                Some(Format::FastqBgzf) => crate::io::fastq::reader_from_bgzf(inner, bgzf_workers),
+                Some(Format::FastqGz) => Ok(crate::io::fastq::reader_from(inner, true)),
+                _ => Ok(crate::io::fastq::reader_from(inner, false)),
+            });
             match reader {
                 Ok(reader) => reader,
                 Err(e) => Box::new(std::iter::once(Err(e))),
@@ -115,14 +126,26 @@ type BamRecordIter = crate::io::bam::RawRecordIter;
 pub fn bam_reader(
     paths: &[PathBuf],
     workers: usize,
+    counters: Arc<Counters>,
 ) -> anyhow::Result<(sam::Header, BamRecordIter)> {
     let (first, rest) = paths
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("bam_reader called with no BAM files"))?;
-    let (header, first_records) = crate::io::bam::reader(Some(first), workers)?;
+    // See `fastq_records`: counting wraps the file, so BGZF bytes are measured
+    // compressed, matching the summed file sizes the bar is scaled against.
+    let counted = |p: &Path, counters: Arc<Counters>| -> anyhow::Result<Box<dyn Read + Send>> {
+        let f = std::fs::File::open(p)?;
+        Ok(Box::new(crate::io::counting::CountingReader::new(
+            f, counters,
+        )))
+    };
+    let (header, first_records) =
+        crate::io::bam::reader_from(counted(first, counters.clone())?, workers)?;
     let rest = rest.to_vec();
     let rest_records = rest.into_iter().flat_map(move |p| -> BamRecordIter {
-        match crate::io::bam::reader(Some(&p), workers) {
+        match counted(&p, counters.clone())
+            .and_then(|inner| crate::io::bam::reader_from(inner, workers))
+        {
             Ok((_hdr, recs)) => recs,
             Err(e) => Box::new(std::iter::once(Err(e))),
         }

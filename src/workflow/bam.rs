@@ -707,6 +707,7 @@ fn run_bam_seq<R: InputRecord>(
     for rec in records {
         let rec = rec?.decode()?;
         crate::io::bam::ensure_unaligned(&rec)?;
+        crate::io::bam::ensure_modern_mod_tags(&rec)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
         let seq = rec.sequence().as_ref();
@@ -945,14 +946,40 @@ fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(bool, bool
 }
 
 fn ensure_raw_unaligned(record: &bam::Record) -> anyhow::Result<()> {
-    if record.flags().is_unmapped() {
-        return Ok(());
+    let flags = record.flags();
+    let name = || {
+        record
+            .name()
+            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+            .unwrap_or_else(|| "<unnamed>".to_string())
+    };
+    if !flags.is_unmapped() {
+        anyhow::bail!(
+            "read {} is aligned (mapped); whittle v1 supports unaligned BAM (uBAM) only",
+            name()
+        );
     }
-    let name = record
-        .name()
-        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-        .unwrap_or_else(|| "<unnamed>".to_string());
-    anyhow::bail!("read {name} is aligned (mapped); whittle v1 supports unaligned BAM (uBAM) only")
+    for lt in crate::io::bam::LEGACY_MOD_TAGS {
+        if record.data().get(&Tag::new(lt[0], lt[1])).is_some() {
+            anyhow::bail!(
+                "read {} carries the legacy `{}` base-modification tag; whittle rewrites only \
+                 the current `MM`/`ML` spelling, so trimming this record would leave its \
+                 modification calls pointing at the wrong bases",
+                name(),
+                String::from_utf8_lossy(&lt)
+            );
+        }
+    }
+    // See `io::bam::ensure_unaligned` for why a reverse-complemented record is
+    // refused rather than trimmed.
+    if flags.is_reverse_complemented() {
+        anyhow::bail!(
+            "read {} is flagged reverse-complemented; whittle trims in read orientation and \
+             cannot keep position-indexed tags correct for it",
+            name()
+        );
+    }
+    Ok(())
 }
 
 fn raw_gc_fraction(record: &bam::Record) -> f64 {
@@ -1207,6 +1234,7 @@ pub fn run_bam<R: InputRecord>(
         // helper does the per-segment filter + reconstruct survivors -> Vec<RecordBuf>.
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
+            crate::io::bam::ensure_modern_mod_tags(rec)?;
             let seq = rec.sequence().as_ref();
             let qual = rec.quality_scores().as_ref();
             if qual.len() != seq.len() {
@@ -1330,6 +1358,7 @@ where
     for rec in records {
         let rec = rec?.decode()?;
         crate::io::bam::ensure_unaligned(&rec)?;
+        crate::io::bam::ensure_modern_mod_tags(&rec)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
 
         let seq = rec.sequence().as_ref();
@@ -1399,6 +1428,7 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
         // survivors only).
         |rec, cfg| {
             crate::io::bam::ensure_unaligned(rec)?;
+            crate::io::bam::ensure_modern_mod_tags(rec)?;
             let seq = rec.sequence().as_ref();
             let qual = rec.quality_scores().as_ref();
             if qual.len() != seq.len() {

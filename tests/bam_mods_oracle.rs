@@ -801,13 +801,13 @@ fn write_fixture_strands(path: &Path) {
     let mut rec = RecordBuf::default();
     *rec.flags_mut() = Flags::UNMAPPED;
     *rec.name_mut() = Some(b"read1".into());
-    // G at 1,2,5,8 ; T at 3,7,11 ; length 12.
+    // AGGTACGATCGT: G at 1,2,6,10 ; T at 3,8,11 ; length 12.
     *rec.sequence_mut() = b"AGGTACGATCGT".to_vec().into();
     *rec.quality_scores_mut() = vec![40u8; 12].into();
     let data = rec.data_mut();
-    // G-m at G-occurrences 0,2 -> abs 1,5.
+    // G-m at G-occurrences 0,2 -> abs 1,6.
     // U+m at T-occurrences 0,2 -> abs 3,11.
-    // N+n at any-base occurrences 4,6 -> abs 4,11.
+    // N+n at any-base occurrences 4,6 -> abs 4,6.
     data.insert(
         Tag::BASE_MODIFICATIONS,
         Value::String(b"G-m,0,1;U+m,0,1;N+n,4,1;".to_vec().into()),
@@ -882,4 +882,100 @@ fn strand_and_ambiguity_groups_match_oracle_when_trimmed() {
         "trimmed calls must equal the original restricted to [{head},{tail_start})"
     );
     assert!(!got.is_empty(), "window must retain at least one call");
+}
+
+/// Build a one-read uBAM with caller-chosen flags and tag spelling.
+fn write_flagged(path: &Path, flags: Flags, mm_tag: &[u8; 2], ml_tag: &[u8; 2]) {
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
+    w.write_header(&header).unwrap();
+
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = flags;
+    *rec.name_mut() = Some(b"read1".into());
+    *rec.sequence_mut() = b"AGCTACGTNACGGTACCGTA".to_vec().into();
+    *rec.quality_scores_mut() = vec![40u8; 20].into();
+    let data = rec.data_mut();
+    data.insert(
+        Tag::new(mm_tag[0], mm_tag[1]),
+        Value::String(b"C+m,0,1;".to_vec().into()),
+    );
+    data.insert(
+        Tag::new(ml_tag[0], ml_tag[1]),
+        Value::Array(Array::UInt8(vec![200, 201])),
+    );
+    data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(20));
+    w.write_alignment_record(&header, &rec).unwrap();
+}
+
+/// htslib reads the pre-spec lowercase `Mm`/`Ml` (old guppy and megalodon emit
+/// them). whittle rewrites only `MM`/`ML`, so it used to copy them through onto a
+/// trimmed sequence, leaving every call pointing at the wrong base with no
+/// warning. Refused loudly instead.
+#[test]
+fn legacy_lowercase_mod_tags_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("legacy.ubam");
+    let output = dir.path().join("out.ubam");
+    write_flagged(&input, Flags::UNMAPPED, b"Mm", b"Ml");
+
+    let cfg = whittle::cli::config_for_test(&input, &output, 3, 4);
+    let mut h = whittle::obs::ProgressHandle::disabled();
+    let err = whittle::run(cfg, &mut h).expect_err("a legacy-tag record must be refused");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("legacy") && msg.contains("Mm"),
+        "error should name the legacy tag, got: {msg}"
+    );
+}
+
+/// A record flagged reverse-complemented stores SEQ reverse-complemented and
+/// htslib decodes its MM right to left with complemented bases. whittle trims in
+/// read orientation, so it would crop the wrong ends and relocate every call.
+/// Basecallers do not emit `0x4|0x10`, but `samtools view -f 4` of an aligned
+/// file preserves it.
+#[test]
+fn unmapped_but_reverse_complemented_records_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rev.ubam");
+    let output = dir.path().join("out.ubam");
+    write_flagged(
+        &input,
+        Flags::UNMAPPED | Flags::REVERSE_COMPLEMENTED,
+        b"MM",
+        b"ML",
+    );
+
+    let cfg = whittle::cli::config_for_test(&input, &output, 2, 2);
+    let mut h = whittle::obs::ProgressHandle::disabled();
+    let err = whittle::run(cfg, &mut h).expect_err("a reverse-complemented record must be refused");
+    assert!(
+        format!("{err:#}").contains("reverse-complemented"),
+        "error should name the flag, got: {err:#}"
+    );
+}
+
+/// The same record without either problem still round-trips, so the two refusals
+/// above are not just rejecting everything.
+#[test]
+fn plain_unmapped_record_with_modern_tags_still_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("ok.ubam");
+    let output = dir.path().join("out.ubam");
+    write_flagged(&input, Flags::UNMAPPED, b"MM", b"ML");
+
+    let cfg = whittle::cli::config_for_test(&input, &output, 3, 4);
+    let mut h = whittle::obs::ProgressHandle::disabled();
+    whittle::run(cfg, &mut h).expect("a modern uBAM record trims normally");
+
+    let (head, tail, len) = (3usize, 4usize, 20usize);
+    let mut expected: Vec<_> = hts_mods(&input)
+        .iter()
+        .filter(|(pos, ..)| *pos >= head && *pos < len - tail)
+        .map(|&(pos, cb, mb, st, q)| (pos - head, cb, mb, st, q))
+        .collect();
+    let mut got = hts_mods(&output);
+    expected.sort();
+    got.sort();
+    assert_eq!(expected, got, "surviving calls must match htslib");
 }

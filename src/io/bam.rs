@@ -7,6 +7,7 @@ use noodles_bam as bam;
 use noodles_bgzf as bgzf;
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::io::Write as _; // write_header / write_alignment_record
+use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::{self as sam};
 
 /// A boxed, owning iterator over raw BAM records (or per-record errors). A
@@ -28,14 +29,64 @@ fn workers_nonzero(workers: usize) -> NonZero<usize> {
 
 /// Error (naming the read) if the record is aligned. uBAM only in v1.
 pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
-    if rec.flags().is_unmapped() {
-        return Ok(());
+    let flags = rec.flags();
+    let name = || {
+        rec.name()
+            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+            .unwrap_or_else(|| "<unnamed>".to_string())
+    };
+    if !flags.is_unmapped() {
+        anyhow::bail!(
+            "read {} is aligned (mapped); whittle v1 supports unaligned BAM (uBAM) only",
+            name()
+        );
     }
-    let name = rec
-        .name()
-        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-        .unwrap_or_else(|| "<unnamed>".to_string());
-    anyhow::bail!("read {name} is aligned (mapped); whittle v1 supports unaligned BAM (uBAM) only")
+    // A record flagged reverse stores SEQ as the reverse complement of the read,
+    // and htslib decodes its MM right to left with complemented bases
+    // (`sam_mods.c`, the `BAM_FREVERSE` branches). whittle trims and renumbers
+    // left to right, so it would crop the wrong ends and relocate every call.
+    // Basecallers do not emit `0x4|0x10`, but the SAM spec does not forbid it and
+    // `samtools view -f 4` of an aligned file preserves it, so refuse rather than
+    // silently disagree with every other tool.
+    if flags.is_reverse_complemented() {
+        anyhow::bail!(
+            "read {} is flagged reverse-complemented; whittle trims in read \
+             orientation and cannot keep position-indexed tags correct for it",
+            name()
+        );
+    }
+    Ok(())
+}
+
+/// The pre-spec lowercase spellings of the base-modification tags.
+///
+/// htslib still reads them (`sam_mods.c` falls back to `Mm` when `MM` is absent,
+/// and to `Ml` for `Ml`), so old guppy and megalodon output decodes fine
+/// elsewhere while whittle, which looks only for the uppercase tags, would copy
+/// them through untouched onto a trimmed sequence and silently relocate every
+/// call.
+pub(crate) const LEGACY_MOD_TAGS: [[u8; 2]; 2] = [*b"Mm", *b"Ml"];
+
+/// Error if the record carries legacy `Mm`/`Ml` rather than `MM`/`ML`.
+///
+/// Refused rather than rewritten: supporting both spellings means choosing which
+/// to emit, and quietly modernizing a tag is its own surprise. Loudly declining
+/// beats the silent corruption that copying them through produces.
+pub fn ensure_modern_mod_tags(rec: &RecordBuf) -> anyhow::Result<()> {
+    for t in LEGACY_MOD_TAGS {
+        if rec.data().get(&Tag::new(t[0], t[1])).is_some() {
+            anyhow::bail!(
+                "read {} carries the legacy `{}` base-modification tag; whittle rewrites only \
+                 the current `MM`/`ML` spelling, so trimming this record would leave its \
+                 modification calls pointing at the wrong bases",
+                rec.name()
+                    .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+                    .unwrap_or_else(|| "<unnamed>".to_string()),
+                String::from_utf8_lossy(&t)
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Open a BAM reader; MT-bgzf when `workers > 1`. Returns the header and a Send

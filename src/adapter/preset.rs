@@ -57,18 +57,25 @@ mod tests {
         assert_eq!(v[1].end, End::Three, "unique entry keeps its own end");
     }
 
-    /// The search engine only handles uppercase ACGT, and a zero-length pattern
-    /// would match everywhere. The old TSV filtered both out at parse time; as
-    /// literals they cannot be filtered, so this guards future catalog edits.
+    /// A zero-length pattern matches everywhere, and a byte outside the
+    /// nucleotide alphabet would panic the searcher. The old TSV filtered both
+    /// out at parse time; as literals they cannot be, so this guards future edits.
+    ///
+    /// Ambiguity codes are permitted (the searcher handles them), though every
+    /// entry ONT publishes today is plain ACGT.
     #[test]
-    fn entries_are_uppercase_acgt() {
+    fn entries_are_valid_nucleotide_sequences() {
         for &(name, _, seq) in CATALOG {
             assert!(!seq.is_empty(), "{name} has an empty sequence");
-            assert!(
-                seq.iter().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')),
-                "{name} has a non-ACGT base: {}",
-                String::from_utf8_lossy(seq)
-            );
+            for &b in seq {
+                assert!(
+                    crate::adapter::search::iupac_degeneracy(b).is_some(),
+                    "{name} has a non-nucleotide byte {:?}: {}",
+                    b as char,
+                    String::from_utf8_lossy(seq)
+                );
+                assert_eq!(b, b.to_ascii_uppercase(), "{name} must be uppercase");
+            }
         }
     }
 
