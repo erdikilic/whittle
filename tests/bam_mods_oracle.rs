@@ -785,3 +785,101 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
         "sanity: must decode all 3 modified positions, not an empty-vs-empty pass: {a:?}"
     );
 }
+
+/// Fixture covering the three MM shapes the `+`/ACGT fixtures above never reach:
+/// a `-` strand group, an RNA `U+` group, and an `N+` group.
+///
+/// These are exactly the cases where whittle previously disagreed with htslib.
+/// `G-m` was counted against `C` (the complement), `U+m` matched nothing because
+/// BAM SEQ stores `T`, and `N+n` counted only literal `N` characters instead of
+/// every base.
+fn write_fixture_strands(path: &Path) {
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
+    w.write_header(&header).unwrap();
+
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = Flags::UNMAPPED;
+    *rec.name_mut() = Some(b"read1".into());
+    // G at 1,2,5,8 ; T at 3,7,11 ; length 12.
+    *rec.sequence_mut() = b"AGGTACGATCGT".to_vec().into();
+    *rec.quality_scores_mut() = vec![40u8; 12].into();
+    let data = rec.data_mut();
+    // G-m at G-occurrences 0,2 -> abs 1,5.
+    // U+m at T-occurrences 0,2 -> abs 3,11.
+    // N+n at any-base occurrences 4,6 -> abs 4,11.
+    data.insert(
+        Tag::BASE_MODIFICATIONS,
+        Value::String(b"G-m,0,1;U+m,0,1;N+n,4,1;".to_vec().into()),
+    );
+    data.insert(
+        Tag::BASE_MODIFICATION_PROBABILITIES,
+        Value::Array(Array::UInt8(vec![200, 201, 150, 151, 90, 91])),
+    );
+    data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(12));
+    w.write_alignment_record(&header, &rec).unwrap();
+}
+
+/// Untrimmed round trip: a no-op run must carry all three group shapes through
+/// byte-for-byte. This guards the pass-through path only. It cannot catch a
+/// counting-base error, because an untrimmed record never reaches the rewrite at
+/// all; `strand_and_ambiguity_groups_match_oracle_when_trimmed` is the test that
+/// covers that, and it was verified to fail against each bug in turn.
+#[test]
+fn strand_and_ambiguity_groups_survive_untrimmed_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.ubam");
+    let output = dir.path().join("out.ubam");
+    write_fixture_strands(&input);
+
+    let cfg = whittle::cli::config_for_test(&input, &output, 0, 0);
+    let mut h = whittle::obs::ProgressHandle::disabled();
+    whittle::run(cfg, &mut h).unwrap();
+
+    let mut before = hts_mods(&input);
+    let mut after = hts_mods(&output);
+    before.sort();
+    after.sort();
+    assert_eq!(
+        before, after,
+        "a no-op run must not move, drop, or relabel any modification call"
+    );
+
+    // Guard against a trivial pass: all three groups must actually be present.
+    assert_eq!(before.len(), 6, "fixture should decode to six calls");
+    let canonical: std::collections::HashSet<char> = before.iter().map(|t| t.1).collect();
+    assert!(
+        canonical.contains(&'G') && canonical.contains(&'T'),
+        "expected G and T canonical bases, got {canonical:?}"
+    );
+}
+
+/// The same three shapes through a real head/tail crop, compared against htslib's
+/// decode of the input restricted to the surviving window.
+#[test]
+fn strand_and_ambiguity_groups_match_oracle_when_trimmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.ubam");
+    let output = dir.path().join("out.ubam");
+    write_fixture_strands(&input);
+
+    let (head, tail, len) = (2usize, 2usize, 12usize);
+    let cfg = whittle::cli::config_for_test(&input, &output, head, tail);
+    let mut h = whittle::obs::ProgressHandle::disabled();
+    whittle::run(cfg, &mut h).unwrap();
+
+    let tail_start = len - tail;
+    let mut expected: Vec<_> = hts_mods(&input)
+        .iter()
+        .filter(|(pos, ..)| *pos >= head && *pos < tail_start)
+        .map(|&(pos, cb, mb, st, q)| (pos - head, cb, mb, st, q))
+        .collect();
+    let mut got = hts_mods(&output);
+    expected.sort();
+    got.sort();
+    assert_eq!(
+        expected, got,
+        "trimmed calls must equal the original restricted to [{head},{tail_start})"
+    );
+    assert!(!got.is_empty(), "window must retain at least one call");
+}
