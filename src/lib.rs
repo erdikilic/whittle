@@ -43,18 +43,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         return run_folder(&dir, &mut cfg, obs);
     }
 
-    // Refuse to read and write the same file: `whittle` streams the input, so
-    // truncating it on `File::create` before it is fully read destroys the data
-    // (a plain FASTQ run would silently emit an empty file with a success exit).
-    if let (Some(inp), Some(outp)) = (cfg.io.input.as_deref(), cfg.io.output.as_deref())
-        && same_path(inp, outp)
-    {
-        anyhow::bail!(
-            "input and output are the same file ({}); whittle streams the input and \
-             would truncate it before reading; write to a different path",
-            outp.display()
-        );
-    }
+    guard_output_collisions(&cfg, &[])?;
 
     let in_path = cfg.io.input.as_deref();
 
@@ -739,6 +728,98 @@ fn finish_run(
     Ok(())
 }
 
+/// Every file the run writes, checked against every file it reads.
+///
+/// `whittle` streams its input, so `File::create` truncating a file that is still
+/// being read destroys it: a plain FASTQ run would emit an empty file and exit 0.
+/// The same applies to `--summary-json`, which is written last and would replace
+/// an input, the just-written output, or a folder member with JSON.
+///
+/// `extra_inputs` carries the folder-mode member files, which are not reachable
+/// from `cfg` alone.
+fn guard_output_collisions(
+    cfg: &Config,
+    extra_inputs: &[std::path::PathBuf],
+) -> anyhow::Result<()> {
+    let mut reads: Vec<(&str, &std::path::Path)> = Vec::new();
+    if let Some(p) = cfg.io.input.as_deref() {
+        reads.push(("the input", p));
+    }
+    if let Some(ac) = cfg.adapter_fasta.as_deref() {
+        reads.push(("--adapter-fasta", ac));
+    }
+    for p in extra_inputs {
+        reads.push(("an input file in the directory", p.as_path()));
+    }
+
+    for (what, dest) in [
+        ("the output", cfg.io.output.as_deref()),
+        ("--summary-json", cfg.summary_json.as_deref()),
+    ] {
+        let Some(dest) = dest else { continue };
+        for (label, src) in &reads {
+            if same_path(src, dest) {
+                anyhow::bail!(
+                    "{what} ({}) and {label} are the same file; whittle streams its input and \
+                     would overwrite it, so write to a different path",
+                    dest.display()
+                );
+            }
+        }
+        // With no `-i`, the input is stdin, which has no path to compare. Its
+        // file descriptor still resolves to an inode, so a shell redirect from
+        // the very file being written is caught here.
+        if cfg.io.input.is_none() && stdin_is(dest) {
+            anyhow::bail!(
+                "{what} ({}) and the file being read on stdin are the same file; whittle \
+                 streams its input and would truncate it mid-read, so write to a different path",
+                dest.display()
+            );
+        }
+    }
+
+    // The summary is written after the output file, so it would clobber it.
+    if let (Some(out), Some(sum)) = (cfg.io.output.as_deref(), cfg.summary_json.as_deref())
+        && same_path(out, sum)
+    {
+        anyhow::bail!(
+            "--summary-json ({}) and the output are the same file; the summary would replace \
+             the trimmed reads with JSON",
+            sum.display()
+        );
+    }
+    Ok(())
+}
+
+/// Whether `path` names the same file the process has open on stdin.
+///
+/// A shell redirect (`whittle -o reads.fastq < reads.fastq`) leaves no path for
+/// the same-file check to compare, but fd 0 still resolves to the inode.
+#[cfg(unix)]
+fn stdin_is(path: &std::path::Path) -> bool {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+
+    // `try_clone_to_owned` dups fd 0, so stdin itself is never closed here, and
+    // it needs no `unsafe` (which this crate forbids).
+    let Ok(dup) = std::io::stdin().as_fd().try_clone_to_owned() else {
+        return false;
+    };
+    let Ok(m0) = std::fs::File::from(dup).metadata() else {
+        return false;
+    };
+    let Ok(mp) = std::fs::metadata(path) else {
+        return false;
+    };
+    // Only a regular file can collide; a pipe or tty shares no inode with a path.
+    m0.is_file() && m0.dev() == mp.dev() && m0.ino() == mp.ino()
+}
+
+#[cfg(not(unix))]
+fn stdin_is(_path: &std::path::Path) -> bool {
+    false
+}
+
 /// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
 /// then merge its read files into a single trimmed output through the same
 /// workflows as the single-file path.
@@ -757,6 +838,9 @@ fn run_folder(
     let folder_in_format_ignored = cfg.io.in_format.is_some();
 
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
+    // `classify` already refuses an output inside the directory; this also covers
+    // --summary-json and --adapter-fasta against every member file.
+    guard_output_collisions(cfg, &paths)?;
     let family_fmt = match family {
         io::dir::Family::Fastq => Format::Fastq,
         io::dir::Family::Bam => Format::Bam,
@@ -1256,19 +1340,35 @@ fn provenance_header(mut header: noodles_sam::Header) -> noodles_sam::Header {
     header
 }
 
-/// True if any `@PG` record's `PP` field references an ID that is not itself a
-/// program in the header. `Programs::leaves` (used internally by
-/// `Programs::add`) panics on such a chain instead of returning an error, so
-/// this must be checked before calling `add`.
+/// True if the header's `@PG` chain is one `Programs::add` cannot walk safely.
+///
+/// `Programs::add` calls `Programs::leaves`, which indexes the program map
+/// directly and panics when a `PP` names an absent ID, and which only terminates
+/// a cycle that returns to the node it started from. A rho-shaped chain
+/// (`pgA -> pgB -> pgC -> pgB`) has every ID present and never revisits `pgA`, so
+/// it loops forever. Both shapes are rejected here by walking each chain with a
+/// visited set.
 fn has_dangling_program_chain(header: &noodles_sam::Header) -> bool {
+    use std::collections::HashSet;
+
     use noodles_sam::header::record::value::map::program::tag;
 
     let programs = header.programs().as_ref();
-    programs.values().any(|program| {
-        program
-            .other_fields()
-            .get(&tag::PREVIOUS_PROGRAM_ID)
-            .is_some_and(|previous_id| !programs.contains_key(previous_id))
+    programs.keys().any(|start| {
+        let mut seen: HashSet<&[u8]> = HashSet::new();
+        let mut id: &[u8] = start.as_ref();
+        loop {
+            if !seen.insert(id) {
+                return true; // revisited a node: cyclic
+            }
+            let Some(program) = programs.get(id) else {
+                return true; // PP names an ID that is not a program: dangling
+            };
+            match program.other_fields().get(&tag::PREVIOUS_PROGRAM_ID) {
+                Some(previous) => id = previous.as_ref(),
+                None => return false, // reached the root of this chain
+            }
+        }
     })
 }
 
@@ -1332,6 +1432,53 @@ mod tests {
             !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
             "expected no whittle @PG line to be added when the existing chain is dangling"
         );
+    }
+
+    /// A rho-shaped chain (`pgA -> pgB -> pgC -> pgB`) has no absent ID, so the
+    /// old dangling-only check passed it through to `Programs::add`, whose
+    /// `leaves()` walk only terminates on a cycle that returns to its start node.
+    /// Walking from `pgA` never revisits `pgA`, so it looped forever at 100% CPU.
+    #[test]
+    fn provenance_header_rejects_a_cycle_that_excludes_the_entry_node() {
+        fn with_pp(previous: &str) -> Map<Program> {
+            Map::<Program>::builder()
+                .insert(tag::PREVIOUS_PROGRAM_ID, previous)
+                .build()
+                .expect("valid PP field")
+        }
+
+        let header = noodles_sam::Header::builder()
+            .add_program("pgA", with_pp("pgB"))
+            .add_program("pgB", with_pp("pgC"))
+            .add_program("pgC", with_pp("pgB"))
+            .build();
+
+        assert!(
+            has_dangling_program_chain(&header),
+            "a rho-shaped chain must be rejected before `Programs::add` sees it"
+        );
+
+        // Reaching this line at all is the assertion: the old code hung here.
+        let out_header = provenance_header(header);
+        assert!(
+            !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
+            "no @PG line should be added when the existing chain cannot be walked"
+        );
+    }
+
+    /// A self-referential record (`pgA -> pgA`) is the degenerate cycle.
+    #[test]
+    fn provenance_header_rejects_a_self_referential_program() {
+        let header = noodles_sam::Header::builder()
+            .add_program(
+                "pgA",
+                Map::<Program>::builder()
+                    .insert(tag::PREVIOUS_PROGRAM_ID, "pgA")
+                    .build()
+                    .expect("valid PP field"),
+            )
+            .build();
+        assert!(has_dangling_program_chain(&header));
     }
 
     /// A valid program chain receives the `whittle` provenance record.
@@ -1507,6 +1654,7 @@ mod tests {
             threads_clamped: None,
             summary_json: None,
             advisories: Vec::new(),
+            adapter_fasta: None,
         }
     }
 

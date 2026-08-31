@@ -19,6 +19,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo run --example gen-man`; `clap_mangen` is a dev-dependency, so the
   shipped binary is unchanged.
 
+### Fixed
+- Reverse-strand `MM` groups were counted against the complement of the
+  fundamental base, so every call on a `-` strand group was relocated onto a
+  different base, some were dropped, and the `ML` bytes shifted relative to
+  their positions. htslib counts the literal base; whittle now matches it.
+  `U` is folded to `T` (BAM's SEQ encoding has no `U`) and `N` counts every
+  base, both of which previously deleted the whole group.
+- BGZF compression and decompression ran single-threaded regardless of `-t`.
+  The `noodles-bgzf` 0.48 API ignored its worker count and used Rayon's global
+  pool, which whittle configured; 0.51 takes an explicit count and builds a
+  private pool, defaulting to one worker. Measured 3.5x faster BAM-to-BAM at
+  `-t 16`.
+- whittle no longer overwrites a file it is also reading: `--summary-json`
+  pointing at the input, the output, or a folder member; `-o` pointing at
+  `--adapter-fasta`; or `-o` naming the file redirected onto stdin, which the
+  path-based check could not see.
+- A cyclic `@PG` chain that does not return to its entry node (`pgA` to `pgB`
+  to `pgC` to `pgB`) hung the run at 100% CPU. The chain walk now tracks
+  visited IDs.
+- `--summary-json` reported `elapsed_seconds: null` under `--quiet`, and was
+  silently skipped under `--adapter-infer report`, which now says the flag is
+  ignored.
+- Argument-parsing diagnostics bypassed the log level filter, printing even
+  under `--quiet` without the standard prefix and ahead of the version line.
+
 ### Changed
 - Release tarballs now contain a versioned directory holding the binary, `man/`,
   and the README, CHANGELOG, and LICENSE, instead of a bare `whittle`
