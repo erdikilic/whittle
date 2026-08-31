@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped binary is unchanged.
 
 ### Fixed
+- Folder mode (`-i <dir>`) was missing two advisories the single-file path
+  emits: the `--out-format` extension mismatch and the no-trimming no-op
+  warning. It also rendered a bare spinner instead of a progress bar with a
+  percentage and ETA, despite having already measured the input.
 - Reverse-strand `MM` groups were counted against the complement of the
   fundamental base, so every call on a `-` strand group was relocated onto a
   different base, some were dropped, and the `ML` bytes shifted relative to

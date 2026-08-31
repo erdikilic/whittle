@@ -34,7 +34,7 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
         if matches!(
             format,
             Some(Format::Fastq | Format::FastqGz | Format::FastqBgzf | Format::Bam)
-        ) && output.is_some_and(|o| crate::same_path(&path, o))
+        ) && output.is_some_and(|o| crate::guards::same_path(&path, o))
         {
             anyhow::bail!(
                 "output {} is a read file inside the input directory {}; refusing to \

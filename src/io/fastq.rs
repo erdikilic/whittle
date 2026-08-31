@@ -1,12 +1,16 @@
 use std::fs::File;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
+use gzp::deflate::Mgzip;
+use gzp::par::compress::{ParCompress, ParCompressBuilder};
+use gzp::{Compression, ZWriter};
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use seq_io::fastq::{Reader, Record};
 
+use crate::config::Config;
 use crate::record::ReadRecord;
 
 /// Build a streaming FASTQ record iterator over a file (or stdin when `input`
@@ -306,6 +310,104 @@ pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
 fn reader_from_slice(bytes: &'static [u8]) -> RecordIter<&'static [u8]> {
     RecordIter {
         reader: Reader::new(bytes),
+    }
+}
+
+/// FASTQ output writer: a plain buffered writer, or a `gzp` parallel gzip writer
+/// when the output format is explicitly `FastqGz`.
+///
+/// `gzp`'s `ParCompress` requires an explicit `finish()`: its `Write` impl hands
+/// only full chunks to the compressor threads, so the tail block and gzip footer
+/// are never flushed by `flush()`. Its `Drop` calls `finish()` as a backstop but
+/// `.unwrap()`s the result, turning an I/O error into a panic; calling it
+/// explicitly keeps that failure an ordinary `Err`.
+pub(crate) enum FastqOut {
+    Plain(BufWriter<Box<dyn Write + Send>>),
+    Gz(ParCompress<'static, Mgzip, Box<dyn Write + Send>>),
+    Bgzf(noodles_bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>),
+}
+
+impl Write for FastqOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            FastqOut::Plain(w) => w.write(buf),
+            FastqOut::Gz(w) => w.write(buf),
+            FastqOut::Bgzf(w) => w.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            FastqOut::Plain(w) => w.flush(),
+            FastqOut::Gz(w) => w.flush(),
+            FastqOut::Bgzf(w) => w.flush(),
+        }
+    }
+}
+
+impl FastqOut {
+    /// Finalize: for gz, flush the final block + gzip footer via gzp's
+    /// `ZWriter::finish` (required, see the type's docs above); for plain,
+    /// flush the `BufWriter`. Must be called before returning success.
+    pub(crate) fn finish(self) -> anyhow::Result<()> {
+        match self {
+            FastqOut::Plain(mut w) => {
+                w.flush()?;
+                Ok(())
+            },
+            FastqOut::Gz(mut w) => {
+                w.finish()?;
+                Ok(())
+            },
+            FastqOut::Bgzf(mut w) => {
+                w.finish()?;
+                Ok(())
+            },
+        }
+    }
+}
+
+/// Build the FASTQ output writer: a file or stdout, wrapped in a parallel gzip
+/// encoder (`gzp`, using `gz_workers` worker threads, the caller's
+/// workload-aware ENCODE share of the `-t` budget) when the output format is
+/// `FastqGz`, else a plain buffered writer. `gz_workers` is only read on the
+/// `FastqGz` branch, so plain-output callers may pass any value.
+pub(crate) fn writer(
+    cfg: &Config,
+    out_fmt: crate::io::Format,
+    gz_workers: usize,
+) -> anyhow::Result<FastqOut> {
+    let base: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
+        Some(p) => Box::new(std::fs::File::create(p)?),
+        None => Box::new(std::io::stdout()),
+    };
+    match out_fmt {
+        crate::io::Format::FastqGz => {
+            // gzp's `Mgzip` (libdeflate-backed blocked gzip) rather than `Gzip`
+            // (flate2/zlib-ng). libdeflater is already linked, and the output is
+            // a valid multi-member gzip stream that `MultiGzDecoder` and standard
+            // gzip tools decode.
+            let w = ParCompressBuilder::<Mgzip>::new()
+                .num_threads(gz_workers)
+                .unwrap()
+                .compression_level(Compression::new(cfg.compression_level as u32))
+                .from_writer(base);
+            Ok(FastqOut::Gz(w))
+        },
+        crate::io::Format::FastqBgzf => {
+            let level = noodles_bgzf::io::writer::CompressionLevel::new(cfg.compression_level)
+                .ok_or_else(|| anyhow::anyhow!("invalid BGZF compression level"))?;
+            let w = noodles_bgzf::io::multithreaded_writer::Builder::default()
+                .set_compression_level(level)
+                .set_worker_count(
+                    std::num::NonZero::new(gz_workers.max(1))
+                        .unwrap_or(std::num::NonZero::<usize>::MIN),
+                )
+                .build_from_writer(base);
+            Ok(FastqOut::Bgzf(w))
+        },
+        crate::io::Format::Fastq | crate::io::Format::Bam => {
+            Ok(FastqOut::Plain(BufWriter::new(base)))
+        },
     }
 }
 
