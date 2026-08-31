@@ -48,8 +48,10 @@ pub fn reader_from_bgzf(
     workers: usize,
 ) -> anyhow::Result<Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send>> {
     let inner: Box<dyn Read + Send> = if workers > 1 {
-        crate::io::bam::configure_bgzf_pool(workers)?;
-        Box::new(noodles_bgzf::io::MultithreadedReader::new(inner))
+        Box::new(noodles_bgzf::io::MultithreadedReader::with_worker_count(
+            std::num::NonZero::new(workers).unwrap_or(std::num::NonZero::<usize>::MIN),
+            inner,
+        ))
     } else {
         Box::new(noodles_bgzf::io::Reader::new(inner))
     };

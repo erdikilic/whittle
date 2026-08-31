@@ -170,11 +170,6 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         parallel_decode,
         encode_kind_for(out_fmt),
     );
-    configure_shared_bgzf_pool(
-        matches!(in_fmt, Format::FastqBgzf | Format::Bam),
-        matches!(out_fmt, Format::FastqBgzf | Format::Bam),
-        budget,
-    )?;
     let out_desc = output_desc(cfg.io.output.as_deref());
 
     if obs.shows_lines() {
@@ -667,11 +662,14 @@ fn fastq_writer(cfg: &Config, out_fmt: io::Format, gz_workers: usize) -> anyhow:
             Ok(FastqOut::Gz(w))
         },
         io::Format::FastqBgzf => {
-            io::bam::configure_bgzf_pool(gz_workers)?;
             let level = noodles_bgzf::io::writer::CompressionLevel::new(cfg.compression_level)
                 .ok_or_else(|| anyhow::anyhow!("invalid BGZF compression level"))?;
             let w = noodles_bgzf::io::multithreaded_writer::Builder::default()
                 .set_compression_level(level)
+                .set_worker_count(
+                    std::num::NonZero::new(gz_workers.max(1))
+                        .unwrap_or(std::num::NonZero::<usize>::MIN),
+                )
                 .build_from_writer(base);
             Ok(FastqOut::Bgzf(w))
         },
@@ -787,14 +785,6 @@ fn run_folder(
         parallel_decode,
         encode_kind_for(out_fmt),
     );
-    configure_shared_bgzf_pool(
-        matches!(family_fmt, Format::Bam)
-            || paths
-                .iter()
-                .any(|p| io::from_extension(p) == Some(Format::FastqBgzf)),
-        matches!(out_fmt, Format::FastqBgzf | Format::Bam),
-        budget,
-    )?;
     let out_desc = output_desc(cfg.io.output.as_deref());
 
     if obs.shows_lines() {
@@ -940,22 +930,6 @@ fn encode_kind_for(out_fmt: io::Format) -> config::EncodeKind {
         io::Format::FastqBgzf => config::EncodeKind::Bgzf,
         io::Format::Fastq => config::EncodeKind::None,
     }
-}
-
-/// Noodles decode and encode jobs share Rayon's one global registry. When both
-/// sides are BGZF, configure it before either reader or writer can lock in only
-/// its own smaller stage allocation.
-fn configure_shared_bgzf_pool(
-    bgzf_input: bool,
-    bgzf_output: bool,
-    budget: config::ThreadBudget,
-) -> anyhow::Result<()> {
-    let workers = usize::from(bgzf_input && budget.decode > 1) * budget.decode
-        + usize::from(bgzf_output && budget.encode > 1) * budget.encode;
-    if workers > 1 {
-        io::bam::configure_bgzf_pool(workers)?;
-    }
-    Ok(())
 }
 
 /// Whether the render stage has substantial per-record work. BAM input remains
