@@ -351,13 +351,17 @@ pub fn parse() -> anyhow::Result<Config> {
              inference finds, run --adapter-infer report --adapter-fasta <file> first."
         );
     }
+    // Diagnostics are collected, not printed: `parse` runs before the log
+    // subscriber exists, so `run` emits these once it does. See `Advisory`.
+    let mut advisories: Vec<crate::config::Advisory> = Vec::new();
+
     // The preset is redundant for trimming under infer (inference builds its
     // own set) -- kept only so its names can be cross-referenced.
     if adapter_infer != AdapterInfer::Off && c.adapter_preset != AdapterPresetArg::None {
-        eprintln!(
-            "[WARN] --adapter-preset is ignored for trimming under --adapter-infer \
-             (used only for naming discovered adapters)"
-        );
+        advisories.push(crate::config::Advisory::warn(
+            "--adapter-preset is ignored for trimming under --adapter-infer \
+             (used only for naming discovered adapters)",
+        ));
     }
     // --adapter-infer report + --adapter-fasta is allowed (unlike trim,
     // which rejects a FASTA outright above): report mode names discovered
@@ -365,10 +369,10 @@ pub fn parse() -> anyhow::Result<Config> {
     // `infer::discover`), so a user combining the two flags gets their own
     // adapter names surfaced too, not just catalog matches.
     if adapter_infer.is_report() && c.adapter_fasta.is_some() {
-        eprintln!(
-            "[INFO] --adapter-infer report with --adapter-fasta: discovered adapters are named \
-             against the built-in ONT catalog plus your FASTA's adapters"
-        );
+        advisories.push(crate::config::Advisory::info(
+            "--adapter-infer report with --adapter-fasta: discovered adapters are named \
+             against the built-in ONT catalog plus your FASTA's adapters",
+        ));
     }
 
     let mut adapter_seqs: Vec<crate::adapter::Adapter> = Vec::new();
@@ -381,7 +385,7 @@ pub fn parse() -> anyhow::Result<Config> {
     // (already covered by `infer::discover`'s own built-in catalog lookup).
     let mut fasta_adapters: Vec<crate::adapter::Adapter> = Vec::new();
     if let Some(path) = &c.adapter_fasta {
-        let from_fasta = read_adapter_fasta(path)?;
+        let from_fasta = read_adapter_fasta(path, &mut advisories)?;
         if from_fasta.is_empty() {
             anyhow::bail!(
                 "--adapter-fasta {}: no usable adapters (all entries were empty, \
@@ -395,9 +399,9 @@ pub fn parse() -> anyhow::Result<Config> {
     }
     let adapters = if adapter_seqs.is_empty() && adapter_infer == AdapterInfer::Off {
         if c.adapter_ends_only {
-            eprintln!(
-                "[WARN] --adapter-ends-only has no effect without --adapter-fasta or --adapter-preset"
-            );
+            advisories.push(crate::config::Advisory::warn(
+                "--adapter-ends-only has no effect without --adapter-fasta or --adapter-preset",
+            ));
         }
         None
     } else {
@@ -423,10 +427,10 @@ pub fn parse() -> anyhow::Result<Config> {
         let infer_forces_ends_only =
             adapter_infer != AdapterInfer::Off && !adapter_infer.is_aggressive();
         if infer_forces_ends_only && !c.adapter_ends_only {
-            eprintln!(
-                "[INFO] conservative adapter inference trims read ends only; use \
-                 --adapter-infer-policy aggressive to enable full-consensus interior splitting"
-            );
+            advisories.push(crate::config::Advisory::info(
+                "conservative adapter inference trims read ends only; use \
+                 --adapter-infer-policy aggressive to enable full-consensus interior splitting",
+            ));
         }
         Some(crate::adapter::AdapterConfig {
             adapters: trim_adapters,
@@ -485,9 +489,10 @@ pub fn parse() -> anyhow::Result<Config> {
     // inference buffer, not presence detection, so it's left alone).
     let adapter_sample = if adapter_infer == AdapterInfer::Off && c.adapter_fasta.is_some() {
         if adapter_sample > 0 {
-            eprintln!(
-                "[WARN] --adapter-sample is ignored with --adapter-fasta (presence detection is preset-only)"
-            );
+            advisories.push(crate::config::Advisory::warn(
+                "--adapter-sample is ignored with --adapter-fasta (presence detection is \
+                 preset-only)",
+            ));
         }
         0
     } else {
@@ -527,6 +532,7 @@ pub fn parse() -> anyhow::Result<Config> {
         quiet: c.quiet,
         threads_clamped,
         summary_json: c.summary_json,
+        advisories,
     })
 }
 
@@ -536,7 +542,10 @@ pub fn parse() -> anyhow::Result<Config> {
 /// ACGT-only rule. Entries shorter than `adapter::MIN_PATTERN_LEN` (the
 /// matcher's minimum pattern length) are also skipped with a warning, since a
 /// shorter pattern would never be matched anyway.
-fn read_adapter_fasta(path: &std::path::Path) -> anyhow::Result<Vec<crate::adapter::Adapter>> {
+fn read_adapter_fasta(
+    path: &std::path::Path,
+    advisories: &mut Vec<crate::config::Advisory>,
+) -> anyhow::Result<Vec<crate::adapter::Adapter>> {
     use seq_io::fasta::{Reader, Record};
     let mut reader = Reader::from_path(path)
         .map_err(|e| anyhow::anyhow!("--adapter-fasta {}: {e}", path.display()))?;
@@ -551,15 +560,17 @@ fn read_adapter_fasta(path: &std::path::Path) -> anyhow::Result<Vec<crate::adapt
             .collect();
         let name = String::from_utf8_lossy(rec.head()).into_owned();
         if !seq.iter().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
-            eprintln!("[WARN] adapter {name:?} has non-ACGT bases; skipped");
+            advisories.push(crate::config::Advisory::warn(format!(
+                "adapter {name:?} has non-ACGT bases; skipped"
+            )));
             continue;
         }
         if seq.len() < crate::adapter::MIN_PATTERN_LEN {
-            eprintln!(
-                "[WARN] adapter {name:?} is {} bp; shorter than the {}-bp minimum match length, skipped",
+            advisories.push(crate::config::Advisory::warn(format!(
+                "adapter {name:?} is {} bp; shorter than the {}-bp minimum match length, skipped",
                 seq.len(),
                 crate::adapter::MIN_PATTERN_LEN
-            );
+            )));
             continue;
         }
         out.push(crate::adapter::Adapter {
@@ -625,6 +636,7 @@ pub fn config_for_test_threads(
         quiet: true,
         threads_clamped: None,
         summary_json: None,
+        advisories: Vec::new(),
     }
 }
 
@@ -645,7 +657,8 @@ mod tests {
         writeln!(f, "ACGTACGT").unwrap(); // 8 bp, below the 11bp MIN_PATTERN_LEN
         drop(f);
 
-        let adapters = read_adapter_fasta(&path).unwrap();
+        let mut advisories = Vec::new();
+        let adapters = read_adapter_fasta(&path, &mut advisories).unwrap();
 
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].seq, b"ACGTACGTACGTACGTACGT".to_vec());
@@ -664,7 +677,8 @@ mod tests {
         writeln!(f, "ACGTACGTACGTACGTACGN").unwrap(); // 20 bp, but has an N
         drop(f);
 
-        let adapters = read_adapter_fasta(&path).unwrap();
+        let mut advisories = Vec::new();
+        let adapters = read_adapter_fasta(&path, &mut advisories).unwrap();
 
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].name, "kept_valid_20bp");

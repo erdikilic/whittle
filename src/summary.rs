@@ -75,8 +75,10 @@ struct QualityOpParams {
 
 #[derive(Debug, Serialize)]
 struct AdapterParams {
-    /// Adapters in the trimming set. `0` under inference, since discovery
-    /// replaces the set after this config is resolved.
+    /// Adapters actually trimmed against, after presence detection has narrowed
+    /// the preset or inference has replaced it. This is deliberately the
+    /// resolved set, so it can differ from the startup banner's count, which is
+    /// printed before either step runs.
     count: usize,
     error_rate: f64,
     end_size: usize,
@@ -321,6 +323,7 @@ mod tests {
             quiet: false,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         }
     }
 

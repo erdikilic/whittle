@@ -1578,6 +1578,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
 
         let result = run_bam(
@@ -1702,6 +1703,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         }
     }
 
@@ -2543,6 +2545,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         // 300 reads with mods so reconstruction runs on every one.
         let recs: Vec<RecordBuf> = (0..300)
@@ -2652,6 +2655,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let recs: Vec<anyhow::Result<RecordBuf>> = (0..3000)
             .map(|_| anyhow::Ok(RecordBuf::default()))
@@ -2728,6 +2732,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
             (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -2790,6 +2795,7 @@ mod tests {
             quiet: true,
             threads_clamped: None,
             summary_json: None,
+            advisories: Vec::new(),
         };
         let recs: Vec<RecordBuf> = (0..300)
             .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))
