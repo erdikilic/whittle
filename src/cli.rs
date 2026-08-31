@@ -532,7 +532,7 @@ pub fn parse() -> anyhow::Result<Config> {
 
 /// Read adapter sequences from a FASTA. Lowercase acgt is uppercased and
 /// accepted; entries with any other non-ACGT byte (e.g. IUPAC ambiguity
-/// codes) are skipped with a warning, matching `preset::parse_catalog`'s
+/// codes) are skipped with a warning, matching the built-in catalog's
 /// ACGT-only rule. Entries shorter than `adapter::MIN_PATTERN_LEN` (the
 /// matcher's minimum pattern length) are also skipped with a warning, since a
 /// shorter pattern would never be matched anyway.
@@ -651,7 +651,7 @@ mod tests {
         assert_eq!(adapters[0].seq, b"ACGTACGTACGTACGTACGT".to_vec());
     }
 
-    // Parity with `preset::parse_catalog`: entries with non-ACGT bases (IUPAC
+    // Parity with the built-in catalog: entries with non-ACGT bases (IUPAC
     // ambiguity codes like N) are rejected, not silently searched as-is.
     #[test]
     fn read_adapter_fasta_skips_non_acgt_entries() {
