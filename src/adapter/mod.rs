@@ -288,6 +288,27 @@ fn search(
 /// batching only for IUPAC.
 const AMBIGUOUS_READ_BASE: u8 = b'A';
 
+/// Record one adapter hit and what was decided about it.
+///
+/// This is the detail needed to answer why a read was cut where it was: which
+/// sequence matched, over what span, how far off an exact match it was, and
+/// whether that made it a terminal trim, an excision, or nothing at all.
+fn trace_hit(name: &str, start: usize, end: usize, cost: i64, terminal: Terminal) {
+    tracing::trace!(
+        adapter = name,
+        start,
+        end,
+        cost,
+        action = match terminal {
+            Terminal::Five => "trim 5'",
+            Terminal::Three => "trim 3'",
+            Terminal::Excise => "excise and split",
+            Terminal::None => "no action",
+        },
+        "adapter hit"
+    );
+}
+
 /// Classify a hit at window coords `[start, end)` in a length-`n` window.
 ///
 /// A hit eligible for BOTH ends means the end-zones overlap (`n <= 2*end_size`),
@@ -392,6 +413,13 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
                             } else {
                                 ends_only_terminal(h.text_start, h.text_end, n, end_size, ad.end)
                             };
+                            trace_hit(
+                                &ad.name,
+                                h.text_start,
+                                h.text_end,
+                                i64::from(h.cost),
+                                terminal,
+                            );
                             match terminal {
                                 Terminal::Five => lo = lo.max(h.text_end),
                                 Terminal::Excise => interior.push((h.text_start, h.text_end)),
@@ -413,6 +441,7 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
                             } else {
                                 ends_only_terminal(start, end, n, end_size, ad.end)
                             };
+                            trace_hit(&ad.name, start, end, i64::from(h.cost), terminal);
                             match terminal {
                                 Terminal::Three => hi = hi.min(start),
                                 Terminal::Excise => interior.push((start, end)),

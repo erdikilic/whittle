@@ -213,7 +213,7 @@ fn verbose_shows_phase_timing() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Processing")); // phase timing line appears at DEBUG
+        .stderr(predicate::str::contains("processing started")); // phase timing line appears at DEBUG
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn default_hides_debug() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Processing").not());
+        .stderr(predicate::str::contains("processing started").not());
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn whittle_log_overrides_verbosity_when_not_quiet() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Processing"));
+        .stderr(predicate::str::contains("processing started"));
 }
 
 #[test]

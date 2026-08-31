@@ -33,6 +33,20 @@ pub enum DropReason {
     Gc,
 }
 
+impl DropReason {
+    /// The wording used for this reason wherever it is reported, so the
+    /// end-of-run summary and a per-segment trace line name it identically.
+    pub fn label(self) -> &'static str {
+        match self {
+            DropReason::TooShort => "too short",
+            DropReason::TooLong => "too long",
+            DropReason::LowQuality => "low quality",
+            DropReason::HighQuality => "high quality",
+            DropReason::Gc => "GC out of range",
+        }
+    }
+}
+
 /// Evaluate bounds cheapest-first and stop at the first rejection. `None`
 /// indicates that the segment passes; empty segments are `TooShort` even when
 /// `min_length` is zero.

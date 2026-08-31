@@ -127,9 +127,10 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     guards::guard_stdout_binary(&cfg, out_fmt)?;
 
     tracing::debug!(
-        "Detected {} input in {}",
-        in_fmt.label(),
-        obs::human_dur(setup_start.elapsed())
+        stage = "setup",
+        format = in_fmt.label(),
+        elapsed_ms = setup_start.elapsed().as_millis() as u64,
+        "input format detected"
     );
 
     // Resolved once here so the banner's Threads line and the dispatch arm below
@@ -179,7 +180,16 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     // Stages run concurrently internally (read/trim/write overlap across
     // threads), so this is a phase boundary, not a CPU-time split.
     let t0 = std::time::Instant::now();
-    tracing::debug!("Processing {}, {} threads", in_fmt.label(), cfg.threads);
+    tracing::debug!(
+        stage = "dispatch",
+        input = in_fmt.label(),
+        output = out_fmt.label(),
+        threads = cfg.threads,
+        decode = budget.decode,
+        render = budget.render,
+        encode = budget.encode,
+        "processing started"
+    );
 
     // BAM dispatch happens before creating/truncating the output file, and so
     // do the FASTQ->BAM rejection and the BAM->FASTQ conversion, so a rejected
@@ -404,7 +414,15 @@ fn finish_run(
     cfg: &Config,
     t0: std::time::Instant,
 ) -> anyhow::Result<()> {
-    tracing::debug!("Processing finished in {}", obs::human_dur(t0.elapsed()));
+    tracing::debug!(
+        stage = "dispatch",
+        elapsed_ms = t0.elapsed().as_millis() as u64,
+        reads_in = stats.input_reads,
+        reads_out = stats.output_reads,
+        bases_in = stats.input_bases,
+        bases_out = stats.output_bases,
+        "processing finished"
+    );
     let elapsed = obs.finish(stats, out_desc);
     if let Some(path) = cfg.summary_json.as_deref() {
         summary::Summary::new(
@@ -519,9 +537,15 @@ fn run_folder(
 
     let t0 = std::time::Instant::now();
     tracing::debug!(
-        "Processing folder ({}), {} threads",
-        family_fmt.label(),
-        cfg.threads
+        stage = "dispatch",
+        input = family_fmt.label(),
+        output = out_fmt.label(),
+        files = paths.len(),
+        threads = cfg.threads,
+        decode = budget.decode,
+        render = budget.render,
+        encode = budget.encode,
+        "processing started"
     );
 
     match family {

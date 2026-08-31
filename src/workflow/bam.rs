@@ -790,6 +790,9 @@ fn run_bam_seq<R: InputRecord>(
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
+        let _read =
+            crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
+        let _read = _read.enter();
         let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
         process_read_segments(
             &produced,
@@ -1316,6 +1319,9 @@ pub fn run_bam<R: InputRecord>(
                     qual.len()
                 );
             }
+            let _read =
+                crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
+            let _read = _read.enter();
             let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
             let mut items = Vec::with_capacity(produced.len());
             process_read_segments(
@@ -1449,6 +1455,9 @@ where
             malformed_tag_reads += 1;
         }
         let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
+        let _read =
+            crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
+        let _read = _read.enter();
         let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
         process_read_segments(
             &produced,
@@ -1511,6 +1520,9 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
                 );
             }
             let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
+            let _read =
+                crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
+            let _read = _read.enter();
             let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
             let mut out = Vec::with_capacity(produced.len());
             process_read_segments(

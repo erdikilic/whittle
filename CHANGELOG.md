@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped binary is unchanged.
 
 ### Changed
+- `-vv` now reports the per-read decisions it always claimed to: which adapter
+  matched where and at what cost, what that made whittle do, and why each segment
+  was kept or dropped, each line attributed to the read that produced it. There
+  were previously no trace-level events at all, so `-vv` was indistinguishable
+  from `-v`. `-v` gains the resolved thread budget and the run counters. Log
+  events carry structured fields rather than preformatted prose. Measured at no
+  cost to throughput at the default level.
 - BAM to FASTQ no longer re-parses and re-serializes `MM`/`ML` for a record whose
   window is not being trimmed. Over the full window the reconstruction is the
   identity, so the source bytes are reused after an allocation-free `ML` length

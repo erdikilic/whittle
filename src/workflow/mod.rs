@@ -167,6 +167,19 @@ impl Counters {
 /// contains the ranges to evaluate. For each surviving segment, `render`
 /// receives `(idx, total, start, end)`. A render error stops processing before
 /// the read-level outcome counter is updated.
+/// A trace-level span naming the read, so the segment decisions logged while
+/// processing it are attributable without repeating the name on every event.
+///
+/// Returns a disabled span when trace is off, which costs a level check rather
+/// than any formatting, keeping the hot path unaffected at the default level.
+pub(crate) fn read_span(name: &[u8]) -> tracing::Span {
+    if tracing::enabled!(tracing::Level::TRACE) {
+        tracing::trace_span!("read", name = %String::from_utf8_lossy(name))
+    } else {
+        tracing::Span::none()
+    }
+}
+
 pub(crate) fn process_read_segments<Rn>(
     produced: &[(usize, usize)],
     seq: &[u8],
@@ -182,9 +195,28 @@ where
     let mut survived = 0usize;
     for (idx, &(s, e)) in produced.iter().enumerate() {
         if let Some(reason) = crate::filter::check(&seq[s..e], &qual[s..e], filter_cfg) {
+            // The per-segment verdict is the answer to "why is this read missing
+            // from my output", which no run-level counter can give.
+            tracing::trace!(
+                segment = idx + 1,
+                of = total,
+                start = s,
+                end = e,
+                len = e - s,
+                reason = reason.label(),
+                "segment dropped"
+            );
             counters.record_segment_drop(reason);
             continue;
         }
+        tracing::trace!(
+            segment = idx + 1,
+            of = total,
+            start = s,
+            end = e,
+            len = e - s,
+            "segment kept"
+        );
         render(idx, total, s, e)?;
         counters.output_reads.fetch_add(1, Ordering::Relaxed);
         counters
@@ -193,10 +225,12 @@ where
         survived += 1;
     }
     if produced.is_empty() {
+        tracing::trace!("read produced no segments");
         counters
             .reads_trimmed_to_nothing
             .fetch_add(1, Ordering::Relaxed);
     } else if survived == 0 {
+        tracing::trace!(produced = total, "every segment filtered");
         counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
     } else {
         counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
