@@ -21,7 +21,7 @@ fn main() {
     // argv) feeds `command_line`.
     if obs.shows_lines() {
         tracing::info!("whittle {}", env!("CARGO_PKG_VERSION"));
-        tracing::info!("{}", whittle::command_line(std::env::args_os()));
+        tracing::info!("Command: {}", whittle::command_line(std::env::args_os()));
     }
 
     let start = std::time::Instant::now();
