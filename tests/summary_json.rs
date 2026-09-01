@@ -268,7 +268,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "conservative adapter inference trims read ends only",
+            "Conservative adapter inference trims read ends only",
         ));
 
     whittle()
@@ -279,7 +279,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         // The INFO advisory is filtered out; the WARN one still belongs on stderr,
         // since --quiet keeps warnings.
         .stderr(
-            predicate::str::contains("conservative adapter inference")
+            predicate::str::contains("Conservative adapter inference")
                 .not()
                 .and(predicate::str::contains("--adapter-preset is ignored")),
         );

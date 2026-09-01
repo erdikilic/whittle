@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output.
 
 ### Fixed
+- `--summary-json` wrote its `command` field with the banner's `Command: ` label
+  glued to the front of the value, so a consumer re-running the recorded
+  invocation had to strip it first. The label now belongs to the banner line and
+  the JSON carries the bare, shell-quoted argv it always documented.
 - `thread_budget` allocated zero render workers at exactly `-t 3` with parallel
   decode and uncompressed output, so the banner reported `trim 0` and the
   workflow silently fell back to its own default. Every other thread count is

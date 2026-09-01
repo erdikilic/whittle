@@ -417,7 +417,7 @@ pub fn parse() -> anyhow::Result<Config> {
         if from_fasta.is_empty() {
             anyhow::bail!(
                 "--adapter-fasta {}: no usable adapters (all entries were empty, \
-                 shorter than the {}-bp minimum, or non-ACGT)",
+                 shorter than the {}-bp minimum, or non-nucleotide)",
                 path.display(),
                 crate::adapter::MIN_PATTERN_LEN
             );
@@ -456,7 +456,7 @@ pub fn parse() -> anyhow::Result<Config> {
             adapter_infer != AdapterInfer::Off && !adapter_infer.is_aggressive();
         if infer_forces_ends_only && !c.adapter_ends_only {
             advisories.push(crate::config::Advisory::info(
-                "conservative adapter inference trims read ends only; use \
+                "Conservative adapter inference trims read ends only; use \
                  --adapter-infer-policy aggressive to enable full-consensus interior splitting",
             ));
         }
@@ -611,13 +611,13 @@ fn read_adapter_fasta(
                 .map(|&b| b as char)
                 .collect();
             advisories.push(crate::config::Advisory::warn(format!(
-                "adapter {name:?} contains non-nucleotide characters ({bad}); skipped"
+                "Adapter {name:?} contains non-nucleotide characters ({bad}); skipped"
             )));
             continue;
         };
         if seq.len() < crate::adapter::MIN_PATTERN_LEN {
             advisories.push(crate::config::Advisory::warn(format!(
-                "adapter {name:?} is {} bp; shorter than the {}-bp minimum match length, skipped",
+                "Adapter {name:?} is {} bp; shorter than the {}-bp minimum match length, skipped",
                 seq.len(),
                 crate::adapter::MIN_PATTERN_LEN
             )));
@@ -628,7 +628,7 @@ fn read_adapter_fasta(
         // the user asked for it, but not silently.
         if degeneracy as usize >= seq.len() * 2 {
             advisories.push(crate::config::Advisory::warn(format!(
-                "adapter {name:?} averages {:.1} bases per position; a pattern this degenerate \
+                "Adapter {name:?} averages {:.1} bases per position; a pattern this degenerate \
                  matches almost anywhere and may trim real sequence",
                 f64::from(degeneracy) / seq.len() as f64
             )));

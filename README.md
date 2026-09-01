@@ -20,7 +20,7 @@ whittle filters and trims long reads (ONT, PacBio) in FASTQ, gzip/BGZF-compresse
 
 - **Correct modification tags.** `MM`/`ML`/`MN` are rebuilt for every trimmed or split uBAM read, and checked against an independent `htslib` decoder.
 - **Trim-aware tags.** Per-base kinetics (`ip`/`pw`/…) are sliced along with the sequence. ONT signal tags (`mv`/`ts`/`ns`/…) are dropped, or rewritten dorado-style with `--update-moves`.
-- **Adapter trimming.** Terminal trimming plus interior chimera splitting, driven by a built-in ONT catalog, your own FASTA, or ab-initio discovery.
+- **Adapter trimming.** Terminal trimming plus interior chimera splitting, driven by a built-in ONT catalog, your own FASTA (IUPAC codes included, so a degenerate primer matches every variant it covers), or ab-initio discovery.
 - **Formats.** FASTQ, gzip/BGZF-compressed FASTQ, and unaligned BAM, plus BAM→FASTQ conversion. Formats are auto-detected, including BGZF FASTQ or BAM piped over stdin.
 - **Pipeline-friendly.** `--summary-json` writes the run's counters and resolved settings as JSON, even under `--quiet`.
 - **Fast and self-contained.** Multithreaded throughout, with a thread budget that adapts to the workload, and no external `htslib` to build or run.

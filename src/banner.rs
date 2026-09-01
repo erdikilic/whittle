@@ -216,22 +216,23 @@ pub(crate) fn shell_quote(arg: &str) -> String {
     }
 }
 
-/// The startup banner's `Command: ...` line: the real process argv, space-joined
-/// and shell-quoted so it can be copied back out and re-run. Takes `OsStr`-like
-/// items (`args_os()`, not `args()`, which panics on non-UTF-8 argv) and converts
-/// lossily here, at the one seam that must never panic on a malformed argv.
-/// Generic over the iterator so it is unit-testable without the real argv.
+/// The real process argv, space-joined and shell-quoted so it can be copied back
+/// out and re-run. Takes `OsStr`-like items (`args_os()`, not `args()`, which
+/// panics on non-UTF-8 argv) and converts lossily here, at the one seam that must
+/// never panic on a malformed argv. Generic over the iterator so it is
+/// unit-testable without the real argv.
+///
+/// The value carries no label: the banner prefixes its own `Command: `, while
+/// `--summary-json` stores the bare line under its `command` key.
 pub fn command_line<I, S>(args: I) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let joined = args
-        .into_iter()
+    args.into_iter()
         .map(|a| shell_quote(&a.as_ref().to_string_lossy()))
         .collect::<Vec<_>>()
-        .join(" ");
-    format!("Command: {joined}")
+        .join(" ")
 }
 
 /// The output path (or `<stdout>`) shown in both the startup banner's `Output:`
@@ -563,11 +564,11 @@ mod tests {
     fn command_line_quotes_only_unsafe_args() {
         assert_eq!(
             command_line(["whittle", "-i", "in.fastq", "-o", "out.fastq"]),
-            "Command: whittle -i in.fastq -o out.fastq"
+            "whittle -i in.fastq -o out.fastq"
         );
         assert_eq!(
             command_line(["whittle", "-i", "my reads.fastq"]),
-            "Command: whittle -i 'my reads.fastq'"
+            "whittle -i 'my reads.fastq'"
         );
     }
 
