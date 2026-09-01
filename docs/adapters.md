@@ -2,20 +2,24 @@
 
 Off by default. Turn it on with `-a`/`--adapter-fasta <FILE>` (your own sequences,
 one per record, each at least 11 bp) and/or `--adapter-preset ont` (the built-in
-catalog).
+catalog). Either one alone is enough, and they combine.
 
 Adapter sequences may use the full IUPAC alphabet, so a degenerate primer is
 written the way it is designed: `ACGTACGTYCGTACGRACGT` matches reads carrying
 either base at each wobble position. `U` is folded to `T`, since a DNA read
-stores `T`. Anything outside the nucleotide alphabet is a malformed record and is
-skipped with a warning, as is a pattern averaging two or more bases per position,
-which would match almost anywhere.
+stores `T`. A record holding anything outside the nucleotide alphabet is
+malformed rather than degenerate, and is skipped with a warning; so is one
+shorter than the 11-bp minimum. A pattern averaging two or more bases per
+position is still searched, since you asked for it, but it warns that something
+that degenerate matches almost anywhere.
 
 An ambiguity code in a *read* is treated the other way round: as a mismatch, not
 a free match. An uncalled base is evidence of nothing, so it costs error budget.
 A stray `N` inside a real adapter still matches within `--adapter-error-rate`,
-while a run of them never looks like an adapter and is not excised. Either one alone is enough, and they combine. Every adapter is searched
-on both strands, so orientation doesn't matter, and each read gets two treatments:
+while a run of them never looks like an adapter and is not excised.
+
+Every adapter is searched on both strands, so orientation doesn't matter, and
+each read gets two treatments:
 
 - **Terminal trimming.** An adapter within `--adapter-end-size` bases of an end
   (default 150) is trimmed off.

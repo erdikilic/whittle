@@ -13,8 +13,10 @@ bytes of a stream, or accepts it from `--in-format`/`--out-format
 Output is plain FASTQ by default and is never compressed on its own. A `.gz` or
 `.bgz` input does not imply compressed output; you get that only by asking for
 it, with a `.gz`/`.bgz` output path or the matching format flag. Compressed
-output is written by a parallel encoder using `-t` threads. BGZF FASTQ input is
-decompressed block-parallel too; ordinary gzip stays a serial input format.
+output is written by a parallel encoder, which takes its share of the `-t`
+budget alongside reading and trimming. BGZF FASTQ input is decompressed
+block-parallel too, unless adapter trimming is on, in which case the budget goes
+to trimming instead; ordinary gzip stays a serial input format.
 
 With no output extension or `--out-format`, the output format mirrors the input,
 except that compressed FASTQ input defaults back to plain FASTQ. FASTQ→BAM
@@ -51,7 +53,7 @@ tell a real input from a stale prior output, and merging over either loses data.
 | `-o, --output <PATH>` | Output file (omit for stdout) |
 | `--in-format`, `--out-format {fastq,fastq-gz,fastq-bgz,bam}` | Force a format instead of detecting it |
 | `--fastq-tags {all,none,LIST}` | Aux tags to carry into FASTQ headers on BAM→FASTQ (default `all`) |
-| `-c, --compression-level <0-9>` | DEFLATE level for compressed output (default 6); ignored for plain FASTQ |
+| `-c, --compression-level <0-9>` | DEFLATE level for compressed output (default 4 for gzip FASTQ, 6 for BGZF and BAM); ignored for plain FASTQ |
 | `--summary-json <PATH>` | Write a machine-readable run summary to PATH (see below) |
 | `-t, --threads <N>` | Worker threads (default: all detected CPUs, clamped to that max) |
 | `-l, --min-length <N>` | Minimum length to keep, per output segment (default 1) |
@@ -113,6 +115,9 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
 }
 ```
 
+`params` is abbreviated above; the real file carries every resolved setting,
+including the ones left at their defaults.
+
 `reads.output` counts output segments, not input reads, so under `--qual-split` it
 can legitimately exceed `reads.input`. The three read-level buckets
 (`with_output`, `trimmed_to_nothing`, `all_filtered`) do partition `reads.input`.
@@ -145,12 +150,18 @@ detection took, the thread budget actually handed to each stage, and the read an
 base counts when processing finishes. Every field is emitted as structured data
 rather than prose, so a filter or a log collector can read it.
 
+Every line has the same shape: a timestamp, the level, the enclosing span with
+the fields identifying it, a capitalized message, and then the structured fields.
+The message is prose and the field values are data, so `Segment dropped
+reason="too short"` is greppable on either half.
+
 `-vv` adds the per-read decisions, each attributed to the read that produced it:
 
 ```text
-[TRACE] [read{name=read_adapter}] adapter hit adapter="LSK109_front" start=0 end=28 cost=3 action="trim 5'"
-[TRACE] [read{name=read_adapter}] read produced no segments
-[TRACE] [read{name=read_short}] segment dropped segment=1 of=1 start=0 end=30 len=30 reason="too short"
+[2026-09-01 12:13:45] [TRACE] [read{name=read_adapter}] Adapter hit adapter="LSK109_front" start=0 end=28 cost=0 action="trim 5'"
+[2026-09-01 12:13:45] [TRACE] [read{name=read_adapter}] Segment kept segment=1 of=1 start=28 end=217 len=189
+[2026-09-01 12:13:45] [TRACE] [read{name=read_short}] Segment dropped segment=1 of=1 start=0 end=30 len=30 reason="too short"
+[2026-09-01 12:13:45] [TRACE] [read{name=read_short}] Every segment filtered produced=1
 ```
 
 That is how to answer why a particular read was cut where it was, or why it is
@@ -164,7 +175,8 @@ per-segment lines, and `--quiet` still wins over it.
 
 All logging goes to stderr, so stdout carries only read data. By default progress
 shows as a live bar when stderr is a terminal, and as periodic lines (about every
-30s, or 10s under `-v`) when it is redirected to a file or a pipe. The bar is
+30s, or 10s under `-v`) when it is redirected to a file or a pipe.
+`WHITTLE_PROGRESS_INTERVAL` overrides that cadence, in whole seconds. The bar is
 never written to a non-terminal, so a redirected log holds no escape sequences or
 carriage returns.
 
