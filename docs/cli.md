@@ -68,11 +68,12 @@ tell a real input from a stale prior output, and merging over either loses data.
 | `-Q, --max-qual <F>` | Maximum read quality, a finite value of at least 0 (default 1000) |
 | `-g, --min-gc <F>`, `-G, --max-gc <F>` | GC-fraction bounds (0 to 1) |
 | `-m, --qual-mode {mean,arithmetic,median}` | How read quality is summarized (default `mean`, the error-probability mean) |
-| `-H, --head-crop <N>`, `-T, --tail-crop <N>` | Fixed crop from each end; always runs first |
+| `-H, --head-crop <N>`, `-T, --tail-crop <N>` | Fixed crop from each end; runs before adapter and quality trimming |
 | `--qual-trim <Q>` | Trim low-quality bases from both ends down to the first base >= Q |
 | `--qual-best-segment <Q>` | Keep only the longest contiguous run of quality >= Q |
 | `--qual-split <Q>` | Split at low-quality (< Q) runs, keeping each surviving segment |
 | `--qual-split-window <N>` | Tolerate low-quality runs shorter than N without splitting (default 1); requires `--qual-split` |
+| `--trim-barcodes` | Remove the barcode spans dorado recorded in the `bi` aux tag, before every other stage (BAM input) |
 | `--update-moves` | Rewrite ONT signal tags through trimming instead of dropping them (BAM-to-BAM) |
 | `-a, --adapter-fasta <FILE>` | Adapter/primer FASTA; enables adapter trimming |
 | `--adapter-preset {none,ont}` | Built-in adapter catalog (default `none`; `ont` enables trimming) |
@@ -89,6 +90,39 @@ tell a real input from a stale prior output, and merging over either loses data.
 `--qual-trim`, `--qual-best-segment`, and `--qual-split` are three strategies for
 the same step, so at most one is accepted. `-H`/`-T` are independent and compose
 with any of them.
+
+The trimming stages run in a fixed order: barcode removal, then the fixed crop,
+then adapter trimming and chimera splitting, then the quality strategy. Each
+stage sees what the previous one left, so `--head-crop` counts from the first
+base after the front barcode, and the report separates the stages rather than
+summing them.
+
+## Barcode trimming
+
+`--trim-barcodes` removes the barcode spans dorado recorded in the `bi` aux tag.
+It reads the positions rather than searching for the sequences, so the cut is
+exactly the one `dorado demux` would have made, and it runs through the same
+trimming machinery as every other stage: `MM`/`ML`/`MN`, per-base kinetics and
+the ONT move table stay in register with the trimmed sequence.
+
+```bash
+whittle -i barcoded.bam -o trimmed.bam --trim-barcodes --update-moves
+```
+
+The tag holds seven floats, of which four are positions: the front barcode's
+start and length, and the rear barcode's end and length. A barcode dorado did
+not find is written as a negative position and leaves that end of the read
+alone, so a read barcoded at one end only is trimmed at that end only. A record
+without `bi` passes through untouched.
+
+`bi` itself is dropped from a trimmed read, since its positions index the
+untrimmed sequence; the barcode call (`BC`, `bv`) is a per-read label and is
+kept. A `bi` that is not a seven-element float array, or whose positions
+describe an empty, inverted or out-of-range window, leaves the read untrimmed
+and is counted under `warnings.barcode_tag_malformed_reads`.
+
+The positions come from a BAM aux tag, so the flag requires BAM input and is
+refused on FASTQ rather than accepted and ignored.
 
 An adapter source is `--adapter-fasta`, `--adapter-preset ont`, or
 `--adapter-infer`. The tuning flags `--adapter-error-rate`, `--adapter-end-size`,
@@ -121,7 +155,7 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
   "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 30 },
   "bases": { "input": 10000000, "output": 9500000 },
   "segments_dropped": { "too_short": 12, "too_long": 0, "low_quality": 5, "high_quality": 0, "gc_out_of_range": 0 },
-  "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0 }
+  "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0, "barcode_tag_malformed_reads": 0 }
 }
 ```
 
@@ -130,10 +164,11 @@ including the ones left at their defaults. `params.ordered` records whether a
 multithreaded run wrote records in input order.
 
 Under `warnings`, `malformed_tag_reads` counts reads whose per-base kinetics tag
-length disagreed with the sequence and was left untouched, and
+length disagreed with the sequence and was left untouched,
 `malformed_mod_reads` counts reads whose MM/ML/MN modification block could not be
-parsed and was removed from the output. Both are also reported at the end of the
-run on stderr.
+parsed and was removed from the output, and `barcode_tag_malformed_reads` counts
+reads whose `bi` barcode positions did not describe a window inside the read
+under `--trim-barcodes`. All are also reported at the end of the run on stderr.
 
 `reads.output` counts output segments, not input reads, so under `--qual-split` it
 can exceed `reads.input`. The three read-level buckets (`with_output`,

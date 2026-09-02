@@ -59,6 +59,7 @@ struct Params {
     /// `None` when no quality-trimming strategy was selected.
     quality_op: Option<QualityOpParams>,
     update_moves: bool,
+    trim_barcodes: bool,
     ordered: bool,
     /// `all`, `none`, or the comma-joined tag list.
     fastq_tags: String,
@@ -143,6 +144,9 @@ struct Warnings {
     /// Reads whose `MM`/`ML`/`MN` block was malformed and removed.
     malformed_mod_reads: u64,
     undo_tags_dropped_reads: u64,
+    /// Reads whose `bi` barcode tag was unusable under `--trim-barcodes` and
+    /// were left untrimmed by that stage.
+    barcode_tag_malformed_reads: u64,
 }
 
 impl Summary {
@@ -194,6 +198,7 @@ impl Summary {
                 malformed_tag_reads: stats.malformed_tag_reads,
                 malformed_mod_reads: stats.malformed_mod_reads,
                 undo_tags_dropped_reads: stats.undo_tags_dropped_reads,
+                barcode_tag_malformed_reads: stats.barcode_tag_malformed_reads,
             },
         }
     }
@@ -251,6 +256,7 @@ impl Params {
                 },
             }),
             update_moves: cfg.update_moves,
+            trim_barcodes: cfg.trim_barcodes,
             ordered: cfg.ordered,
             fastq_tags: match &cfg.fastq_tags {
                 FastqTags::All => "all".to_string(),
@@ -348,6 +354,7 @@ mod tests {
             adapter_fasta: None,
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
+            trim_barcodes: false,
         }
     }
 
@@ -360,6 +367,7 @@ mod tests {
             malformed_tag_reads: 2,
             malformed_mod_reads: 0,
             undo_tags_dropped_reads: 0,
+            barcode_tag_malformed_reads: 0,
             reads_trimmed_to_nothing: 5,
             reads_all_filtered: 3,
             segments_dropped_short: 7,

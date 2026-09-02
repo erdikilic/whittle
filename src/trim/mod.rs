@@ -1,4 +1,4 @@
-//! Per-read trimming: fixed crop, adapter stage and quality stage, producing kept intervals.
+//! Per-read trimming: barcode window, fixed crop, adapter stage and quality stage, producing kept intervals.
 
 pub mod strategies;
 
@@ -32,15 +32,21 @@ pub struct TrimPlan {
 }
 
 /// Applies `plan` to one read and returns the kept intervals in read
-/// coordinates: the fixed crop first, then the adapter stage on the cropped
-/// window (when configured), then the quality operation within each adapter
-/// segment. Every segment is returned, including short ones; the caller filters
-/// each by length, quality and GC.
+/// coordinates: `barcode` first, then the fixed crop, then the adapter stage on
+/// the cropped window (when configured), then the quality operation within each
+/// adapter segment. Every segment is returned, including short ones; the caller
+/// filters each by length, quality and GC.
+///
+/// `barcode` is the per-read window an outer stage leaves for the rest of the
+/// trim, in read coordinates and within `[0, seq.len()]`. `--trim-barcodes`
+/// resolves it from the record's `bi` aux tag; every other path passes `None`,
+/// which is the whole read.
 pub fn apply(
     seq: &[u8],
     phred: &[u8],
     plan: &TrimPlan,
     adapters: Option<&crate::adapter::AdapterConfig>,
+    barcode: Option<(usize, usize)>,
 ) -> Vec<(usize, usize)> {
     debug_assert_eq!(
         seq.len(),
@@ -48,8 +54,14 @@ pub fn apply(
         "Sequence and quality lengths must be equal"
     );
     let seq_len = seq.len();
-    let start = plan.head.min(seq_len);
-    let end = seq_len.saturating_sub(plan.tail).max(start);
+    // The barcode window is the outermost stage, so the crop counts from its
+    // first base rather than from the read's.
+    let (outer_start, outer_end) = match barcode {
+        Some((s, e)) => (s.min(seq_len), e.clamp(s.min(seq_len), seq_len)),
+        None => (0, seq_len),
+    };
+    let start = outer_start.saturating_add(plan.head).min(outer_end);
+    let end = outer_end.saturating_sub(plan.tail).max(start);
     if start >= end {
         return vec![];
     }
@@ -102,7 +114,7 @@ mod tests {
             tail: 3,
             quality: None,
         };
-        assert_eq!(apply(&seq, &phred, &plan, None), vec![(5, 17)]);
+        assert_eq!(apply(&seq, &phred, &plan, None, None), vec![(5, 17)]);
     }
 
     #[test]
@@ -119,7 +131,7 @@ mod tests {
             tail: 0,
             quality: Some(QualityOp::TrimQual(30)),
         };
-        assert_eq!(apply(&seq, &phred, &plan, None), vec![(2, 20)]);
+        assert_eq!(apply(&seq, &phred, &plan, None, None), vec![(2, 20)]);
     }
 
     /// `apply` applies no length filter; the caller filters per segment after
@@ -133,7 +145,7 @@ mod tests {
             tail: 0,
             quality: None,
         };
-        assert_eq!(apply(&seq, &phred, &plan, None), vec![(0, 4)]);
+        assert_eq!(apply(&seq, &phred, &plan, None, None), vec![(0, 4)]);
     }
 
     #[test]
@@ -146,7 +158,7 @@ mod tests {
             quality: None,
         };
         assert_eq!(
-            apply(&seq, &phred, &plan, None),
+            apply(&seq, &phred, &plan, None, None),
             Vec::<(usize, usize)>::new()
         );
     }
@@ -174,7 +186,7 @@ mod tests {
             split: false,
             candidate_index: std::sync::OnceLock::new(),
         };
-        assert_eq!(apply(&seq, &phred, &plan, Some(&ac)), vec![(12, 24)]);
+        assert_eq!(apply(&seq, &phred, &plan, Some(&ac), None), vec![(12, 24)]);
     }
 
     #[test]
@@ -186,6 +198,42 @@ mod tests {
             tail: 3,
             quality: None,
         };
-        assert_eq!(apply(&seq, &phred, &plan, None), vec![(5, 17)]);
+        assert_eq!(apply(&seq, &phred, &plan, None, None), vec![(5, 17)]);
+    }
+}
+
+#[cfg(test)]
+mod barcode_tests {
+    use super::*;
+
+    /// The barcode window is the outermost stage, so the head crop counts from
+    /// the first base after the front barcode.
+    #[test]
+    fn barcode_window_precedes_the_crop() {
+        let seq = vec![b'A'; 20];
+        let phred = vec![40u8; 20];
+        let plan = TrimPlan {
+            head: 2,
+            tail: 1,
+            quality: None,
+        };
+        assert_eq!(
+            apply(&seq, &phred, &plan, None, Some((5, 15))),
+            vec![(7, 14)]
+        );
+    }
+
+    /// A crop wider than the barcode window keeps nothing.
+    #[test]
+    fn crop_beyond_the_barcode_window_keeps_nothing() {
+        let seq = vec![b'A'; 20];
+        let phred = vec![40u8; 20];
+        let plan = TrimPlan {
+            head: 6,
+            tail: 6,
+            quality: None,
+        };
+        let kept = apply(&seq, &phred, &plan, None, Some((5, 15)));
+        assert!(kept.is_empty());
     }
 }

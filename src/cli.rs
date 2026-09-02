@@ -155,6 +155,10 @@ struct Cli {
     /// instead of dropping them. BAM-to-BAM only.
     #[arg(long, help_heading = "Trimming")]
     update_moves: bool,
+    /// Remove the barcode spans dorado recorded in the bi aux tag, before every
+    /// other trimming stage. BAM input only.
+    #[arg(long, help_heading = "Trimming")]
+    trim_barcodes: bool,
 
     /// Adapter FASTA; each sequence must be at least 11 bp. Enables adapter
     /// trimming.
@@ -361,7 +365,7 @@ pub fn parse() -> anyhow::Result<Config> {
         _ => None,
     };
 
-    Ok(Config {
+    let cfg = Config {
         io: IoConfig {
             input: c.input,
             output: c.output,
@@ -399,7 +403,20 @@ pub fn parse() -> anyhow::Result<Config> {
         progress: c.progress.into(),
         adapter_fasta: c.adapter_fasta,
         adapters_configured: None,
-    })
+        trim_barcodes: c.trim_barcodes,
+    };
+
+    // Only an explicit `--in-format` or a known extension decides the input
+    // format here; a stream or an extensionless path is classified by `run`,
+    // which applies the same guard once detection has run.
+    if let Some(fmt) = cfg
+        .io
+        .in_format
+        .or_else(|| cfg.io.input.as_deref().and_then(crate::io::from_extension))
+    {
+        crate::guards::guard_barcode_input(&cfg, fmt)?;
+    }
+    Ok(cfg)
 }
 
 /// Rejects contradictory or out-of-domain trim and filter settings before the
@@ -802,6 +819,7 @@ pub fn config_for_test_threads(
         quiet: true,
         threads_clamped: None,
         summary_json: None,
+        trim_barcodes: false,
         advisories: Vec::new(),
         adapter_fasta: None,
         progress: crate::config::ProgressMode::Auto,

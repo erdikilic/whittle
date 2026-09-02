@@ -404,6 +404,13 @@ impl ProgressHandle {
                 "PacBio undo blobs (ds/ls) were removed from trimmed reads"
             );
         }
+        if stats.barcode_tag_malformed_reads > 0 {
+            tracing::warn!(
+                reads = stats.barcode_tag_malformed_reads,
+                "Barcode positions (bi) that did not describe a window inside the read were \
+                 left untrimmed"
+            );
+        }
 
         // Guardrail warnings: an empty input and an all-dropped run both exit
         // successfully, and both are reported at WARN so they are

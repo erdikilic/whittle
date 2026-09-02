@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--trim-barcodes`: removes the barcode spans dorado recorded in the `bi` aux
+  tag. The positions are read rather than the sequences searched for, so the cut
+  is the one `dorado demux` would have made, and it runs through the same
+  trimming machinery as every other stage, keeping `MM`/`ML`/`MN`, per-base
+  kinetics and the ONT move table in register. It is the outermost stage, so
+  `--head-crop` counts from the first base after the front barcode. A barcode dorado
+  did not find leaves that end of the read alone; a `bi` that does not describe a
+  window inside the read leaves it untrimmed and is counted under
+  `warnings.barcode_tag_malformed_reads`. BAM input only.
 - `--progress {auto,bar,plain,none}` selects how progress is reported,
   independently of the log level. `--progress none` keeps the banner and the run
   summary while reporting nothing in flight, which suits a pipeline log;
