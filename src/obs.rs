@@ -388,7 +388,7 @@ impl ProgressHandle {
         if stats.malformed_tag_reads > 0 {
             tracing::warn!(
                 reads = stats.malformed_tag_reads,
-                "Per-base kinetics tags (ip/pw/fi/fp/ri/rp) whose length did not match \
+                "Per-base tags (ip/pw/fi/fp/ri/rp/sm/sx or a malformed sa) whose length did not match \
                  the sequence were left unchanged"
             );
         }
@@ -396,6 +396,12 @@ impl ProgressHandle {
             tracing::warn!(
                 reads = stats.malformed_mod_reads,
                 "Malformed MM/ML/MN modification blocks were removed from the output"
+            );
+        }
+        if stats.undo_tags_dropped_reads > 0 {
+            tracing::warn!(
+                reads = stats.undo_tags_dropped_reads,
+                "PacBio undo blobs (ds/ls) were removed from trimmed reads"
             );
         }
 

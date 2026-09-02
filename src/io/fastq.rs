@@ -194,6 +194,28 @@ pub fn write_segment_tagged<W: Write>(
     tags: &[u8],
 ) -> io::Result<()> {
     write_head(w, name, total_segments, segment_idx)?;
+    write_body(w, seq, phred, tags)
+}
+
+/// Writes one FASTQ record under `name` exactly as given, with no segment
+/// suffix, and `tags` (already TAB-prefixed per field, or empty) after it:
+/// `@<name><tags>`. For callers that name their segments themselves, such as
+/// the BAM-to-FASTQ path with its per-platform split names.
+pub fn write_named_record<W: Write>(
+    w: &mut W,
+    name: &[u8],
+    seq: &[u8],
+    phred: &[u8],
+    tags: &[u8],
+) -> io::Result<()> {
+    w.write_all(b"@")?;
+    w.write_all(name)?;
+    write_body(w, seq, phred, tags)
+}
+
+/// Writes the rest of a record after its header id: the tags, the sequence,
+/// the `+` line and the Phred+33 qualities.
+fn write_body<W: Write>(w: &mut W, seq: &[u8], phred: &[u8], tags: &[u8]) -> io::Result<()> {
     w.write_all(tags)?;
     w.write_all(b"\n")?;
     w.write_all(seq)?;
@@ -735,5 +757,20 @@ mod tests {
         let mut out = Vec::new();
         write_segment_tagged(&mut out, b"read2", b"AC", &[40, 40], 2, 1, b"\tMN:i:2").unwrap();
         assert_eq!(out, b"@read2_segment_2\tMN:i:2\nAC\n+\nII\n");
+    }
+
+    /// The named writer takes the name as given: no suffix, no description
+    /// handling, and the same body layout as the segment writers.
+    #[test]
+    fn named_writer_uses_the_name_verbatim() {
+        let mut out = Vec::new();
+        write_named_record(&mut out, b"m1/7/ccs/10_12", b"AC", &[40, 40], b"\tqs:i:10").unwrap();
+        assert_eq!(out, b"@m1/7/ccs/10_12\tqs:i:10\nAC\n+\nII\n");
+
+        let mut named = Vec::new();
+        write_named_record(&mut named, b"r1 desc", b"ACGT", &[40; 4], b"").unwrap();
+        let mut segment = Vec::new();
+        write_segment(&mut segment, b"r1 desc", b"ACGT", &[40; 4], 1, 0).unwrap();
+        assert_eq!(named, segment);
     }
 }
