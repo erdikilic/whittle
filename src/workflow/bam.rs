@@ -24,14 +24,28 @@ use crate::{mods, trim};
 pub(crate) const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] =
     [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp"];
 
+/// PacBio reverse-strand kinetics: the PacBio BAM spec stores them from the
+/// last base to the first, so the window `[start, end)` maps to array indexes
+/// `[len - end, len - start)`.
+pub(crate) const REVERSED_PERBASE_TAGS: [[u8; 2]; 2] = [*b"ri", *b"rp"];
+
+/// PacBio `B` arrays with a fixed element count unrelated to the read length:
+/// `sn` (SNR per channel, 4), `ac` (adapter counts, 4), `bc` (barcode
+/// indexes, 2). Excluded from the structural per-base rule, which would
+/// otherwise slice them on a read whose length equals their size.
+pub(crate) const FIXED_ARRAY_TAGS: [[u8; 2]; 3] = [*b"sn", *b"ac", *b"bc"];
+
 /// ONT signal-mapping tags: the `mv` move table plus the `ts`/`ns` sample counts
 /// and the `sp`/`pi` split linkage. On a trimmed read these are either rewritten
 /// (`--update-moves`) or dropped (default), never left stale. Handled by
 /// `signal_tag_updates`, not the per-base pass.
 pub(crate) const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 
-/// Poly-A tail tags handled together with the move table: `pa` (signal boundaries,
-/// stored in original-signal coordinates) and `pt` (tail length in bases). Under
+/// Poly-A tail tags handled together with the move table: `pa` (signal
+/// boundaries) and `pt` (tail length in bases). `pa` positions are absolute
+/// POD5 sample indexes, the frame `ts` uses: dorado adds `num_trimmed_samples`
+/// to the anchor and to both boundary ranges before writing the tag
+/// (`PolyACalculatorNode.cpp`, `poly_tail_calculator.cpp`). Under
 /// `--update-moves` they are kept/shifted when the poly-A tail survives the trim
 /// and dropped when it's cut; without it (or a malformed move table) they are
 /// dropped, since signal cannot be related to sequence.
@@ -50,6 +64,13 @@ pub(crate) const DROP_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"bi"];
 /// ship a stale timestamp/duration. A head/tail crop keeps the same read identity,
 /// so they stay valid there.
 pub(crate) const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
+
+/// The base-modification block, in the order it is emitted.
+const MOD_TAGS: [Tag; 3] = [
+    Tag::BASE_MODIFICATIONS,
+    Tag::BASE_MODIFICATION_PROBABILITIES,
+    Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
+];
 
 /// Input accepted by the BAM workflows. Production readers yield lazy raw
 /// `bam::Record`s, so structured field/tag decoding happens on a render worker;
@@ -188,13 +209,29 @@ fn slice_array(a: &Array, start: usize, end: usize) -> Array {
 
 /// A per-base `B` array (any array whose length equals the read length; this
 /// covers the known kinetics tags and any custom per-base tag) sliced to the
-/// window `[start, end)`; `None` to leave the tag unchanged. Callers must already
-/// have excluded MM/ML/MN and the signal tags. A known kinetics tag whose length
-/// does NOT match is left unchanged and surfaced via `has_malformed_perbase_tag`.
-fn perbase_slice(value: &Value, orig_len: usize, start: usize, end: usize) -> Option<Value> {
+/// window `[start, end)`; `None` to leave the tag unchanged. Reverse-strand
+/// kinetics are stored last base first and are sliced from the other end.
+/// Callers must already have excluded MM/ML/MN and the signal tags. A known
+/// kinetics tag whose length does NOT match is left unchanged and surfaced via
+/// `has_malformed_perbase_tag`.
+fn perbase_slice(
+    tag: [u8; 2],
+    value: &Value,
+    orig_len: usize,
+    start: usize,
+    end: usize,
+) -> Option<Value> {
+    if FIXED_ARRAY_TAGS.contains(&tag) {
+        return None;
+    }
     match value {
         Value::Array(arr) if array_len(arr) == orig_len => {
-            Some(Value::Array(slice_array(arr, start, end)))
+            let (s, e) = if REVERSED_PERBASE_TAGS.contains(&tag) {
+                (orig_len - end, orig_len - start)
+            } else {
+                (start, end)
+            };
+            Some(Value::Array(slice_array(arr, s, e)))
         },
         _ => None,
     }
@@ -217,14 +254,79 @@ fn aux_integer(value: &Value) -> Option<i64> {
     })
 }
 
-fn full_window_mods_already_consistent(src: &RecordBuf, seq_len: usize) -> bool {
-    let Some(Value::String(_)) = src.data().get(&Tag::BASE_MODIFICATIONS) else {
-        return true;
+/// The state of a record's `MM`/`ML`/`MN` block relative to its sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModBlock {
+    /// No `MM:Z` tag. An `ML` or `MN` present on its own is copied verbatim.
+    Absent,
+    /// `MM` parses to its end, `ML` (when present) is a `B:C` array of the
+    /// length `MM` declares, and `MN` equals the sequence length.
+    Consistent,
+    /// As `Consistent`, with `MN` absent; the output gains one.
+    MissingMn,
+    /// `MM` does not parse to its end, `ML` is not a `B:C` array or has the
+    /// wrong length, or `MN` disagrees with the sequence length. The calls
+    /// cannot be placed on the sequence, so the block is removed from the
+    /// output and the read is counted in `Counters::malformed_mod_reads`.
+    Malformed,
+}
+
+/// Classifies a modification block from its parts. `ml` is `None` when the tag
+/// is absent and `Some(None)` when it is present with a subtype other than
+/// `B:C`; `mn` is `None` when absent and `Some(None)` when not an integer.
+fn classify_mod_block(
+    mm: &[u8],
+    ml: Option<Option<usize>>,
+    mn: Option<Option<i64>>,
+    seq_len: usize,
+) -> ModBlock {
+    let Ok(expected) = mods::expected_ml_len(mm) else {
+        return ModBlock::Malformed;
     };
-    match src.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
-        Some(v) => aux_integer(v) == i64::try_from(seq_len).ok(),
-        None => false,
+    match ml {
+        Some(None) => return ModBlock::Malformed,
+        Some(Some(len)) if len != expected => return ModBlock::Malformed,
+        _ => {},
     }
+    match mn {
+        None => ModBlock::MissingMn,
+        Some(Some(n)) if i64::try_from(seq_len).ok() == Some(n) => ModBlock::Consistent,
+        Some(_) => ModBlock::Malformed,
+    }
+}
+
+/// The `MM` bytes of a record and, when it carries a `B:C` array, its `ML`
+/// bytes. `None` when `MM` is absent or not a string.
+fn mod_tags(src: &RecordBuf) -> Option<(&[u8], Option<&[u8]>)> {
+    let mm: &[u8] = match src.data().get(&Tag::BASE_MODIFICATIONS) {
+        Some(Value::String(s)) => AsRef::<[u8]>::as_ref(s),
+        _ => return None,
+    };
+    let ml = match src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
+        Some(Value::Array(Array::UInt8(v))) => Some(v.as_slice()),
+        _ => None,
+    };
+    Some((mm, ml))
+}
+
+/// Classifies the modification block of a decoded record whose sequence has
+/// `seq_len` bases.
+pub fn inspect_mod_block(src: &RecordBuf, seq_len: usize) -> ModBlock {
+    let Some((mm, _)) = mod_tags(src) else {
+        return ModBlock::Absent;
+    };
+    let ml = src
+        .data()
+        .get(&Tag::BASE_MODIFICATION_PROBABILITIES)
+        .map(|v| match v {
+            Value::Array(Array::UInt8(a)) => Some(a.len()),
+            _ => None,
+        });
+    let mn = src
+        .data()
+        .get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH)
+        .map(aux_integer);
+    classify_mod_block(mm, ml, mn, seq_len)
 }
 
 /// Parse an `mv` move table value into `(stride, moves)`. `None` unless it is a
@@ -247,15 +349,9 @@ pub(crate) fn parse_move_table(value: &Value) -> Option<(i8, &[i8])> {
 
 /// Read an integer aux tag as `i64`, regardless of stored width.
 fn signal_int(src: &RecordBuf, tag: &[u8; 2]) -> Option<i64> {
-    match src.data().get(&Tag::new(tag[0], tag[1])) {
-        Some(Value::Int8(n)) => Some(i64::from(*n)),
-        Some(Value::UInt8(n)) => Some(i64::from(*n)),
-        Some(Value::Int16(n)) => Some(i64::from(*n)),
-        Some(Value::UInt16(n)) => Some(i64::from(*n)),
-        Some(Value::Int32(n)) => Some(i64::from(*n)),
-        Some(Value::UInt32(n)) => Some(i64::from(*n)),
-        _ => None,
-    }
+    src.data()
+        .get(&Tag::new(tag[0], tag[1]))
+        .and_then(aux_integer)
 }
 
 fn signal_offset(blocks: usize, stride: usize) -> Option<i64> {
@@ -284,12 +380,20 @@ fn parent_read_id(src: &RecordBuf) -> Vec<u8> {
     }
 }
 
+/// The output name of segment `idx` (0-based) of a split read: the source name
+/// with `_segment_<n>` appended.
+fn segment_name(src: &RecordBuf, idx: usize) -> Vec<u8> {
+    let mut name = src.name().map(|n| n.to_vec()).unwrap_or_default();
+    name.extend_from_slice(format!("_segment_{}", idx + 1).as_bytes());
+    name
+}
+
 /// Trim-aware handling of the poly-A tags (`pa` signal boundaries, `pt` tail
-/// length). `pa` holds absolute original-signal positions; `-1`/`-2` are dorado's
-/// not-found/not-enabled sentinels and are left as-is. When every real position
-/// falls inside `[kept_start, kept_end)` the tail survived: a split shifts `pa`
-/// into the subread's own signal frame, a crop keeps both unchanged. Otherwise,
-/// or with no poly-A array, drop `pa`/`pt`.
+/// length). `pa` holds absolute original-signal positions, the frame `ts` and
+/// `ns` use; `-1`/`-2` are dorado's not-found/not-enabled sentinels and are left
+/// as-is. When every real position falls inside `[kept_start, kept_end)` the
+/// tail survived: a split shifts `pa` into the subread's own signal frame, a
+/// crop keeps both unchanged. Otherwise, or with no poly-A array, drop `pa`/`pt`.
 fn polya_updates(
     src: &RecordBuf,
     kept_start: i64,
@@ -355,8 +459,10 @@ fn polya_updates(
 /// read isn't trimmed. With `update_moves` off, or a missing/malformed move
 /// table, all five tags are removed. With it on, `mv` is sliced by block range
 /// (stride-aligned, following dorado `splitter::subread`) and:
-///   - crop (`total == 1`, name kept): `ts += block_first*stride`, `ns` unchanged.
-///   - split (`total > 1`, renamed): `ts = 0`, `ns = span*stride`,
+///   - crop (`total == 1`, name kept): `ts += block_first*stride`; `ns` is the
+///     kept signal's end, which is the source `ns` when the window runs to the
+///     last base.
+///   - split (`total > 1`, renamed): `ts = 0`, `ns = span`,
 ///     `sp = parent offset`, `pi = parent id`.
 fn signal_tag_updates(
     src: &RecordBuf,
@@ -410,13 +516,18 @@ fn signal_tag_updates(
     }
 
     let stride_n = stride as usize;
-    // `start < end <= seq_len`, so the start-th base always exists; the end-th
-    // exists only when `end < seq_len`, else the window runs to the table end.
-    let block_first = block_first.expect("start < seq_len == base count");
+    // The end-th base exists only when `end < seq_len`; otherwise the window
+    // runs to the table end. An empty or out-of-range window has no start base.
+    let Some(block_first) = block_first else {
+        return drop_all();
+    };
     let block_second = if end == seq_len {
         moves.len()
     } else {
-        block_second.expect("end < seq_len == base count")
+        match block_second {
+            Some(b) => b,
+            None => return drop_all(),
+        }
     };
 
     let mut new_mv = Vec::with_capacity(1 + block_second - block_first);
@@ -438,14 +549,17 @@ fn signal_tag_updates(
     let Some(second_offset) = signal_offset(block_second, stride_n) else {
         return drop_all();
     };
-    let Some(span) = signal_offset(block_second - block_first, stride_n) else {
-        return drop_all();
-    };
     let Some(kept_start) = ts0.checked_add(first_offset) else {
         return drop_all();
     };
-    let Some(kept_end) = ts0.checked_add(second_offset) else {
+    let Some(block_end) = ts0.checked_add(second_offset) else {
         return drop_all();
+    };
+    // The move table resolves the signal end only to the stride; the source
+    // `ns` names it exactly when the window runs to the last base.
+    let kept_end = match signal_int(src, b"ns") {
+        Some(ns0) if end == seq_len && ns0 > block_end => ns0,
+        _ => block_end,
     };
 
     if total > 1 {
@@ -456,7 +570,7 @@ fn signal_tag_updates(
         else {
             return drop_all();
         };
-        let Some(ns_value) = signal_int_value(span) else {
+        let Some(ns_value) = signal_int_value(kept_end - kept_start) else {
             return drop_all();
         };
         let Some(sp_value) = signal_int_value(sp) else {
@@ -467,17 +581,12 @@ fn signal_tag_updates(
         updates.push((Tag::new(b'n', b's'), Some(ns_value)));
         updates.push((Tag::new(b's', b'p'), Some(sp_value)));
         updates.push((Tag::new(b'p', b'i'), Some(Value::String(pi.into()))));
-        // Dorado marks split products with read_number -1.
-        updates.push((Tag::new(b'r', b'n'), Some(Value::Int32(-1))));
     } else {
         // Head/tail crop in place: keep the read identity, advance the front trim.
         let Some(ts_value) = signal_int_value(kept_start) else {
             return drop_all();
         };
-        let Some(ns) = kept_start.checked_add(span) else {
-            return drop_all();
-        };
-        let Some(ns_value) = signal_int_value(ns) else {
+        let Some(ns_value) = signal_int_value(kept_end) else {
             return drop_all();
         };
         updates.push((Tag::new(b't', b's'), Some(ts_value)));
@@ -498,9 +607,31 @@ pub fn has_malformed_perbase_tag(rec: &RecordBuf, seq_len: usize) -> bool {
     })
 }
 
-/// Build one output uBAM record for interval [start,end): slice SEQ/QUAL, rebuild
-/// MM/ML/MN, slice per-base kinetics arrays, drop stale signal-space tags on trim,
-/// suffix the name on splits. Remaining aux tags ride through unchanged.
+/// One output window of a read: bases `[start, end)`, segment `idx` (0-based)
+/// of `total`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Window {
+    pub start: usize,
+    pub end: usize,
+    pub idx: usize,
+    pub total: usize,
+}
+
+/// Whether `t` is handled by a dedicated rule rather than the structural
+/// per-base slice: the modification block, the signal and poly-A tags, and the
+/// tags dropped on a trim or a split.
+fn has_dedicated_rule(t: [u8; 2]) -> bool {
+    matches!(&t, b"MM" | b"ML" | b"MN")
+        || SIGNAL_TAGS.contains(&t)
+        || POLYA_TAGS.contains(&t)
+        || DROP_ON_TRIM_TAGS.contains(&t)
+        || DROP_ON_SPLIT_TAGS.contains(&t)
+}
+
+/// Builds one output uBAM record for interval `[start, end)`, segment `idx` of
+/// `total`: SEQ/QUAL sliced, `MM`/`ML`/`MN` rebuilt, per-base kinetics sliced,
+/// stale signal-space tags rewritten or dropped, the name suffixed on a split.
+/// Remaining aux tags ride through unchanged.
 pub fn reconstruct_record(
     src: &RecordBuf,
     start: usize,
@@ -509,159 +640,126 @@ pub fn reconstruct_record(
     idx: usize,
     update_moves: bool,
 ) -> RecordBuf {
-    let orig_len = src.sequence().as_ref().len();
-    if start == 0
-        && end == orig_len
-        && total == 1
-        && full_window_mods_already_consistent(src, orig_len)
-    {
-        return src.clone();
-    }
-
     let seq = src.sequence().as_ref();
     let qual = src.quality_scores().as_ref();
-    reconstruct_record_with_bases(src, seq, qual, start, end, total, idx, update_moves)
+    let mod_block = inspect_mod_block(src, seq.len());
+    let window = Window {
+        start,
+        end,
+        idx,
+        total,
+    };
+    reconstruct_record_with_bases(src, seq, qual, window, mod_block, update_moves)
 }
 
-// Rebuilding one output record legitimately needs all of these: the source
-// record, its (already-extracted) bases, the window, the split index/count, and
-// the move-table flag. Bundling them into a struct would only add indirection.
-#[allow(clippy::too_many_arguments)]
+/// Builds one output record for `window`. The record is assembled field by
+/// field: SEQ/QUAL are sliced, aux tags are copied in source order with the
+/// rewritten ones replaced in place, removed ones skipped and new ones
+/// appended. A `Malformed` block is removed. An untrimmed, unsplit record with
+/// an `Absent` or `Consistent` block is cloned as is.
 fn reconstruct_record_with_bases(
     src: &RecordBuf,
     seq: &[u8],
     qual: &[u8],
-    start: usize,
-    end: usize,
-    total: usize,
-    idx: usize,
+    window: Window,
+    mod_block: ModBlock,
     update_moves: bool,
 ) -> RecordBuf {
+    let Window {
+        start,
+        end,
+        idx,
+        total,
+    } = window;
     let orig_len = seq.len();
     debug_assert_eq!(src.sequence().as_ref(), seq);
     debug_assert_eq!(src.quality_scores().as_ref(), qual);
-    if start == 0
-        && end == orig_len
-        && total == 1
-        && full_window_mods_already_consistent(src, orig_len)
-    {
+    let trimmed = start != 0 || end != orig_len;
+    let split = total > 1;
+    if !trimmed && !split && matches!(mod_block, ModBlock::Absent | ModBlock::Consistent) {
         return src.clone();
     }
 
-    let mut out = src.clone();
-
-    // Slice sequence + quality.
+    let mut out = RecordBuf::default();
+    *out.name_mut() = if split {
+        Some(segment_name(src, idx).into())
+    } else {
+        src.name().map(Into::into)
+    };
+    *out.flags_mut() = src.flags();
+    *out.reference_sequence_id_mut() = src.reference_sequence_id();
+    *out.alignment_start_mut() = src.alignment_start();
+    *out.mapping_quality_mut() = src.mapping_quality();
+    *out.cigar_mut() = src.cigar().clone();
+    *out.mate_reference_sequence_id_mut() = src.mate_reference_sequence_id();
+    *out.mate_alignment_start_mut() = src.mate_alignment_start();
+    *out.template_length_mut() = src.template_length();
     *out.sequence_mut() = seq[start..end].to_vec().into();
     *out.quality_scores_mut() = qual[start..end].to_vec().into();
 
-    // Name suffix on splits.
-    if total > 1 {
-        let base = src.name().map(|n| n.to_vec()).unwrap_or_default();
-        let mut name = base;
-        name.extend_from_slice(format!("_segment_{}", idx + 1).as_bytes());
-        *out.name_mut() = Some(name.into());
-    }
-
-    // Rebuild MM/ML/MN when the source carried modification tags. Only touch the
-    // three tags when the source actually had `MM` (preserves prior behavior:
-    // a source with ML/MN but no MM is left untouched).
-    if matches!(
-        src.data().get(&Tag::BASE_MODIFICATIONS),
-        Some(Value::String(_))
-    ) {
-        let data = out.data_mut();
-        match reconstruct_mods(src, seq, start, end) {
-            Some((mm_new, ml_new)) => {
-                data.insert(Tag::BASE_MODIFICATIONS, Value::String(mm_new.into()));
-                match ml_new {
-                    // Source had a valid ML: write the sliced ML.
-                    Some(ml) => {
-                        data.insert(
-                            Tag::BASE_MODIFICATION_PROBABILITIES,
-                            Value::Array(Array::UInt8(ml)),
-                        );
-                    },
-                    // Source was MM-only, or its ML length did not match MM:
-                    // drop the cloned ML rather than emit an invalid tag.
-                    None => {
-                        data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
-                    },
-                }
-                data.insert(
+    // Tags with dedicated handling: `Some` replaces the source value in place,
+    // or is appended when the source lacks the tag; `None` removes it.
+    let mut updates: Vec<(Tag, Option<Value>)> = Vec::new();
+    match mod_block {
+        ModBlock::Absent => {},
+        ModBlock::Malformed => updates.extend(MOD_TAGS.map(|t| (t, None))),
+        ModBlock::Consistent | ModBlock::MissingMn => {
+            if let Some((mm, ml)) = mod_tags(src) {
+                let (mm, ml) = rebuild_mods(mm, ml, seq, start, end);
+                updates.push((Tag::BASE_MODIFICATIONS, Some(Value::String(mm.into()))));
+                updates.push((
+                    Tag::BASE_MODIFICATION_PROBABILITIES,
+                    ml.map(|ml| Value::Array(Array::UInt8(ml))),
+                ));
+                updates.push((
                     Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
-                    Value::Int32((end - start) as i32),
-                );
-            },
-            None => {
-                data.remove(&Tag::BASE_MODIFICATIONS);
-                data.remove(&Tag::BASE_MODIFICATION_PROBABILITIES);
-                data.remove(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH);
-            },
-        }
-    }
-
-    // ONT signal tags (mv/ts/ns/sp/pi): rewrite for the window under
-    // `--update-moves`, else drop on trim. Kept separate from the per-base pass
-    // because it decodes the move table and updates several tags together.
-    for (tag, val) in signal_tag_updates(src, orig_len, start, end, total, update_moves) {
-        match val {
-            Some(v) => {
-                out.data_mut().insert(tag, v);
-            },
-            None => {
-                out.data_mut().remove(&tag);
-            },
-        }
-    }
-
-    if start != 0 || end != orig_len {
-        // Drop position/signal tags that cannot be reconstructed (poly-A / barcode coords).
-        for t in DROP_ON_TRIM_TAGS {
-            out.data_mut().remove(&Tag::new(t[0], t[1]));
-        }
-        // Refresh qs (mean read qscore) from the trimmed quality, as dorado
-        // recomputes it per (sub)read, but only when the source carried one.
-        if src.data().get(&Tag::new(b'q', b's')).is_some() {
-            let qs = crate::qual::mean_prob_q(&qual[start..end]) as f32;
-            out.data_mut()
-                .insert(Tag::new(b'q', b's'), Value::Float(qs));
-        }
-    }
-
-    // st/du describe the whole parent read; on a split they no longer fit the
-    // subread (which starts later in the signal), so drop them.
-    if total > 1 {
-        for t in DROP_ON_SPLIT_TAGS {
-            out.data_mut().remove(&Tag::new(t[0], t[1]));
-        }
-    }
-
-    // Per-base arrays (PacBio ip/pw/fi/fp/ri/rp, or any read-length `B` array) are
-    // sliced to the window so the trimmed record stays valid. MM/ML/MN, the signal
-    // tags, and the dropped-on-trim tags are handled above and skipped here.
-    if start != 0 || end != orig_len {
-        let data = out.data_mut();
-        let mut to_replace: Vec<(Tag, Value)> = Vec::new();
-        for (tag, value) in data.iter() {
-            let t = <[u8; 2]>::from(tag);
-            // Skip every tag with dedicated handling above (mods, signal, poly-A,
-            // and the drop-on-trim/split sets) so the structural per-base slicer
-            // can't re-slice e.g. a kept `pa` array that happens to be read-length.
-            if t == *b"MM"
-                || t == *b"ML"
-                || t == *b"MN"
-                || SIGNAL_TAGS.contains(&t)
-                || POLYA_TAGS.contains(&t)
-                || DROP_ON_TRIM_TAGS.contains(&t)
-                || DROP_ON_SPLIT_TAGS.contains(&t)
-            {
-                continue;
+                    Some(Value::Int32((end - start) as i32)),
+                ));
             }
-            if let Some(v) = perbase_slice(value, orig_len, start, end) {
-                to_replace.push((tag, v));
-            }
+        },
+    }
+    updates.extend(signal_tag_updates(
+        src,
+        orig_len,
+        start,
+        end,
+        total,
+        update_moves,
+    ));
+    if trimmed {
+        updates.extend(DROP_ON_TRIM_TAGS.map(|t| (Tag::new(t[0], t[1]), None)));
+        // Dorado's `qs:f` is the mean read qscore and follows the trimmed
+        // quality; PacBio's `qs:i` is a query coordinate and is left as is.
+        let qs = Tag::new(b'q', b's');
+        if matches!(src.data().get(&qs), Some(Value::Float(_))) {
+            let mean = crate::qual::mean_prob_q(&qual[start..end]) as f32;
+            updates.push((qs, Some(Value::Float(mean))));
         }
-        for (tag, v) in to_replace {
+    }
+    if split {
+        updates.extend(DROP_ON_SPLIT_TAGS.map(|t| (Tag::new(t[0], t[1]), None)));
+        // Dorado marks split products with read number -1.
+        updates.push((Tag::new(b'r', b'n'), Some(Value::Int32(-1))));
+    }
+
+    let data = out.data_mut();
+    for (tag, value) in src.data().iter() {
+        if let Some(i) = updates.iter().position(|(t, _)| *t == tag) {
+            if let (_, Some(v)) = updates.remove(i) {
+                data.insert(tag, v);
+            }
+            continue;
+        }
+        let t = <[u8; 2]>::from(tag);
+        let sliced = if trimmed && !has_dedicated_rule(t) {
+            perbase_slice(t, value, orig_len, start, end)
+        } else {
+            None
+        };
+        data.insert(tag, sliced.unwrap_or_else(|| value.clone()));
+    }
+    for (tag, value) in updates {
+        if let Some(v) = value {
             data.insert(tag, v);
         }
     }
@@ -669,89 +767,94 @@ fn reconstruct_record_with_bases(
     out
 }
 
-/// Slice MM/ML to the window `[start, end)` and re-serialize. `None` when the
-/// source has no `MM`, or when no modified position survives (the caller then
-/// drops MM/ML/MN). The inner `Option<Vec<u8>>` is the sliced ML, `None` when the
-/// source had `MM` but no valid `ML`: ML is optional per the SAM spec, so such a
-/// record must not gain a bogus one. Shared by BAM→BAM and BAM→FASTQ.
+/// Slices a record's `MM`/`ML` to the window `[start, end)` and re-serializes
+/// them. `None` when the record carries no `MM:Z` or its block is `Malformed`
+/// (see `ModBlock`). The inner `Option` is the sliced `ML`, `None` when the
+/// source has none: `ML` is optional per the SAM spec, so such a record must not
+/// gain one. Shared by BAM→BAM and BAM→FASTQ.
 pub fn reconstruct_mods(
     src: &RecordBuf,
     seq: &[u8],
     start: usize,
     end: usize,
 ) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    let mm_raw: &[u8] = match src.data().get(&Tag::BASE_MODIFICATIONS) {
-        Some(Value::String(s)) => AsRef::<[u8]>::as_ref(s),
-        _ => return None,
-    };
-    // Whether the source actually carried an ML array. If it didn't, the output must not
-    // emit one: declaring N modified positions with zero probabilities is an
-    // invalid record that samtools/modkit reject. Borrow the bytes rather than
-    // cloning; `parse` copies only what it keeps into owned groups.
-    let ml_opt: Option<&[u8]> = match src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
-        Some(Value::Array(Array::UInt8(v))) => Some(v.as_slice()),
-        _ => None,
-    };
-    let ml_present = ml_opt.is_some();
-    let ml_raw: &[u8] = ml_opt.unwrap_or(&[]);
-
-    // Over the full window the reconstruction is the identity, so the source
-    // bytes are already the answer and the parse, slice and re-serialize can be
-    // skipped. This is the dominant cost of a BAM to FASTQ run that does not
-    // trim. The `ML` length is still checked, by counting rather than parsing, so
-    // a record whose `ML` disagrees with its `MM` is handled exactly as before.
-    if !mm_raw.is_empty()
-        && start == 0
-        && end == seq.len()
-        && full_window_mods_already_consistent(src, seq.len())
-    {
-        let ml_valid = !ml_present || mods::parse::expected_ml_len(mm_raw) == ml_raw.len();
-        let fast = (
-            mm_raw.to_vec(),
-            (ml_present && ml_valid).then(|| ml_raw.to_vec()),
-        );
-        debug_assert_eq!(
-            Some(&fast),
-            reconstruct_mods_windowed(src, seq, start, end).as_ref(),
-            "the full-window shortcut must agree with the general path"
-        );
-        return Some(fast);
+    match inspect_mod_block(src, seq.len()) {
+        ModBlock::Consistent | ModBlock::MissingMn => {
+            let (mm, ml) = mod_tags(src)?;
+            Some(rebuild_mods(mm, ml, seq, start, end))
+        },
+        ModBlock::Absent | ModBlock::Malformed => None,
     }
-    reconstruct_mods_windowed(src, seq, start, end)
 }
 
-/// The general MM/ML slice, used for any window the shortcut above does not cover.
-fn reconstruct_mods_windowed(
-    src: &RecordBuf,
+/// The `MM`/`ML` block of a `Consistent` or `MissingMn` record rebuilt for the
+/// window `[start, end)`: skip-counts renumbered, `ML` re-sliced. `ml` is
+/// `None` when the source carries no `ML`, and so is the result's.
+fn rebuild_mods(
+    mm: &[u8],
+    ml: Option<&[u8]>,
     seq: &[u8],
     start: usize,
     end: usize,
-) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    let mm_raw: &[u8] = match src.data().get(&Tag::BASE_MODIFICATIONS) {
-        Some(Value::String(s)) => AsRef::<[u8]>::as_ref(s),
-        _ => return None,
-    };
-    let ml_opt: Option<&[u8]> = match src.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
-        Some(Value::Array(Array::UInt8(v))) => Some(v.as_slice()),
-        _ => None,
-    };
-    let ml_present = ml_opt.is_some();
-    let ml_raw: &[u8] = ml_opt.unwrap_or(&[]);
-    let parsed = mods::parse(mm_raw, ml_raw);
-    let ml_valid = !ml_present
-        || parsed
-            .groups
-            .iter()
-            .map(|g| g.deltas.len() * g.codes.len().max(1))
-            .sum::<usize>()
-            == ml_raw.len();
+) -> (Vec<u8>, Option<Vec<u8>>) {
+    // Over the full window the rebuild is the identity, so the source bytes are
+    // already the answer and the parse, slice and re-serialize can be skipped.
+    // This is the dominant cost of a BAM to FASTQ run that does not trim.
+    if start == 0 && end == seq.len() {
+        let fast = (mm.to_vec(), ml.map(<[u8]>::to_vec));
+        debug_assert_eq!(
+            fast,
+            rebuild_mods_windowed(mm, ml, seq, start, end),
+            "the full-window shortcut must agree with the general path"
+        );
+        return fast;
+    }
+    rebuild_mods_windowed(mm, ml, seq, start, end)
+}
+
+/// The general MM/ML slice, used for any window the shortcut above does not cover.
+fn rebuild_mods_windowed(
+    mm: &[u8],
+    ml: Option<&[u8]>,
+    seq: &[u8],
+    start: usize,
+    end: usize,
+) -> (Vec<u8>, Option<Vec<u8>>) {
+    let parsed = mods::parse(mm, ml.unwrap_or(&[]));
     let sliced = mods::reconstruct(&parsed, seq, start, end);
     let (mm_new, ml_new) = mods::serialize(&sliced);
-    if mm_new.is_empty() {
-        None
-    } else {
-        Some((mm_new, (ml_present && ml_valid).then_some(ml_new)))
+    (mm_new, ml.map(|_| ml_new))
+}
+
+/// Per-read guards and bookkeeping shared by the decoded workflows: refuses
+/// aligned reads and legacy mod tags, requires full per-base quality, and
+/// classifies the modification block, counting a malformed one. Returns the
+/// record's bases, qualities and block.
+fn prepare_read<'a>(
+    rec: &'a RecordBuf,
+    counters: &Counters,
+) -> anyhow::Result<(&'a [u8], &'a [u8], ModBlock)> {
+    crate::io::bam::ensure_unaligned(rec)?;
+    crate::io::bam::ensure_modern_mod_tags(rec)?;
+    let seq = rec.sequence().as_ref();
+    let qual = rec.quality_scores().as_ref();
+    if qual.len() != seq.len() {
+        let name = rec
+            .name()
+            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+            .unwrap_or_else(|| "<unnamed>".to_string());
+        anyhow::bail!(
+            "read {name}: BAM record SEQ length {} != QUAL length {} \
+             (records without full per-base quality are not supported)",
+            seq.len(),
+            qual.len()
+        );
     }
+    let mod_block = inspect_mod_block(rec, seq.len());
+    if mod_block == ModBlock::Malformed {
+        counters.malformed_mod_reads.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok((seq, qual, mod_block))
 }
 
 /// Single-threaded uBAM workflow: refuse aligned reads, trim, filter each
@@ -766,27 +869,11 @@ fn run_bam_seq<R: InputRecord>(
     let mut malformed_tag_reads = 0u64;
     for rec in records {
         let rec = rec?.decode()?;
-        crate::io::bam::ensure_unaligned(&rec)?;
-        crate::io::bam::ensure_modern_mod_tags(&rec)?;
+        let (seq, qual, mod_block) = prepare_read(&rec, counters)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
-
-        let seq = rec.sequence().as_ref();
         counters
             .input_bases
             .fetch_add(seq.len() as u64, Ordering::Relaxed);
-        let qual = rec.quality_scores().as_ref();
-        if qual.len() != seq.len() {
-            let name = rec
-                .name()
-                .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-                .unwrap_or_else(|| "<unnamed>".to_string());
-            anyhow::bail!(
-                "read {name}: BAM record SEQ length {} != QUAL length {} \
-                 (records without full per-base quality are not supported)",
-                seq.len(),
-                qual.len()
-            );
-        }
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
@@ -803,14 +890,18 @@ fn run_bam_seq<R: InputRecord>(
             counters,
             |idx, total, s, e| {
                 survivors.push((s, e));
+                let window = Window {
+                    start: s,
+                    end: e,
+                    idx,
+                    total,
+                };
                 let out = reconstruct_record_with_bases(
                     &rec,
                     seq,
                     qual,
-                    s,
-                    e,
-                    total,
-                    idx,
+                    window,
+                    mod_block,
                     cfg.update_moves,
                 );
                 sink.write_record(header, &out)?;
@@ -821,7 +912,7 @@ fn run_bam_seq<R: InputRecord>(
     Ok(counters.snapshot(malformed_tag_reads))
 }
 
-/// BAM adapter over `workflow::run_parallel`: decodes each raw record on the
+/// Runs `workflow::run_parallel` for BAM input: decodes each raw record on the
 /// pool, notes a malformed per-base tag, and hands the decoded record to
 /// `render`. `render` returns the surviving segments only; the per-segment
 /// filter and counters are updated inside it by `process_read_segments`.
@@ -882,33 +973,50 @@ fn raw_array_len(value: &noodles_sam::alignment::record::data::field::Value<'_>)
     }
 }
 
-/// Inspect only the aux metadata that can change or affect advisories on an
-/// otherwise full-window record. Returns `(mods_already_consistent,
-/// malformed_perbase_tag)` without allocating owned tag values.
-fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(bool, bool)> {
+/// The integer a raw aux value holds, whatever width it was stored at; the
+/// borrowed counterpart of `aux_integer`.
+fn raw_integer(value: &noodles_sam::alignment::record::data::field::Value<'_>) -> Option<i64> {
     use noodles_sam::alignment::record::data::field::Value as RawValue;
 
+    Some(match value {
+        RawValue::UInt8(n) => i64::from(*n),
+        RawValue::Int8(n) => i64::from(*n),
+        RawValue::UInt16(n) => i64::from(*n),
+        RawValue::Int16(n) => i64::from(*n),
+        RawValue::UInt32(n) => i64::from(*n),
+        RawValue::Int32(n) => i64::from(*n),
+        _ => return None,
+    })
+}
+
+/// Inspects only the aux metadata that can change or affect advisories on an
+/// otherwise full-window record. Returns the modification block's state and
+/// whether a known per-base tag is malformed, without allocating owned tag
+/// values.
+fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(ModBlock, bool)> {
+    use noodles_sam::alignment::record::data::field::Value as RawValue;
+    use noodles_sam::alignment::record::data::field::value::Array as RawArray;
+
     let seq_len = record.sequence().len();
-    let mut mm_is_string = false;
-    let mut mn = None;
+    let data = record.data();
+    let mut mm: Option<&[u8]> = None;
+    let mut ml: Option<Option<usize>> = None;
+    let mut mn: Option<Option<i64>> = None;
     let mut malformed_perbase = false;
 
-    for result in record.data().iter() {
+    for result in data.iter() {
         let (tag, value) = result?;
         if tag == Tag::BASE_MODIFICATIONS {
-            mm_is_string = matches!(value, RawValue::String(_));
-        } else if tag == Tag::BASE_MODIFICATION_SEQUENCE_LENGTH {
-            // Same subtype-width point as `aux_integer`, over the borrowed
-            // raw value: dorado writes `MN:S` for an ordinary-length read.
-            mn = match value {
-                RawValue::UInt8(n) => Some(i64::from(n)),
-                RawValue::Int8(n) => Some(i64::from(n)),
-                RawValue::UInt16(n) => Some(i64::from(n)),
-                RawValue::Int16(n) => Some(i64::from(n)),
-                RawValue::UInt32(n) => Some(i64::from(n)),
-                RawValue::Int32(n) => Some(i64::from(n)),
+            if let RawValue::String(s) = &value {
+                mm = Some(AsRef::<[u8]>::as_ref(*s));
+            }
+        } else if tag == Tag::BASE_MODIFICATION_PROBABILITIES {
+            ml = Some(match &value {
+                RawValue::Array(RawArray::UInt8(v)) => Some(v.len()),
                 _ => None,
-            };
+            });
+        } else if tag == Tag::BASE_MODIFICATION_SEQUENCE_LENGTH {
+            mn = Some(raw_integer(&value));
         }
 
         let tag_bytes = <[u8; 2]>::from(tag);
@@ -919,8 +1027,11 @@ fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(bool, bool
         }
     }
 
-    let mods_consistent = !mm_is_string || mn == i64::try_from(seq_len).ok();
-    Ok((mods_consistent, malformed_perbase))
+    let block = match mm {
+        None => ModBlock::Absent,
+        Some(mm) => classify_mod_block(mm, ml, mn, seq_len),
+    };
+    Ok((block, malformed_perbase))
 }
 
 fn ensure_raw_unaligned(record: &bam::Record) -> anyhow::Result<()> {
@@ -972,6 +1083,13 @@ fn raw_gc_fraction(record: &bam::Record) -> f64 {
     gc as f64 / sequence.len() as f64
 }
 
+/// Filters one raw record over its full window and decides its output: the raw
+/// record itself when nothing changes, a decoded rebuild when `MN` is missing
+/// or the modification block is malformed, nothing when the filter drops it.
+/// The QC observations follow the trimmed path: the input read and its tags
+/// are observed for every record, the tags against the surviving window or
+/// against none when the read is dropped. Returns the output and whether a
+/// known per-base tag is malformed.
 fn process_raw_full_window(
     record: bam::Record,
     cfg: &Config,
@@ -993,19 +1111,31 @@ fn process_raw_full_window(
         );
     }
 
-    let (mods_consistent, malformed_perbase) = raw_full_window_metadata(&record)?;
-    if seq_len == 0 {
+    let (mod_block, malformed_perbase) = raw_full_window_metadata(&record)?;
+    if mod_block == ModBlock::Malformed {
+        counters.malformed_mod_reads.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let mut tag_source: Option<RecordBuf> = None;
+
+    let dropped = if seq_len == 0 {
         counters
             .reads_trimmed_to_nothing
             .fetch_add(1, Ordering::Relaxed);
-        return Ok((None, malformed_perbase));
-    }
-
-    let gc = (cfg.filter.min_gc.is_some() || cfg.filter.max_gc.is_some())
-        .then(|| raw_gc_fraction(&record));
-    if let Some(reason) = crate::filter::check_metrics(seq_len, qual, gc, &cfg.filter) {
-        counters.record_segment_drop(reason);
-        counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        let gc = (cfg.filter.min_gc.is_some() || cfg.filter.max_gc.is_some())
+            .then(|| raw_gc_fraction(&record));
+        match crate::filter::check_metrics(seq_len, qual, gc, &cfg.filter) {
+            Some(reason) => {
+                counters.record_segment_drop(reason);
+                counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
+                true
+            },
+            None => false,
+        }
+    };
+    if dropped {
         return Ok((None, malformed_perbase));
     }
 
@@ -1016,18 +1146,28 @@ fn process_raw_full_window(
         .fetch_add(seq_len as u64, Ordering::Relaxed);
     counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
 
-    let output = if mods_consistent {
-        BamOutputRecord::Raw(record)
-    } else {
-        let decoded = decode_raw_record(&record)?;
-        BamOutputRecord::Decoded(reconstruct_record(
-            &decoded,
-            0,
-            seq_len,
-            1,
-            0,
-            cfg.update_moves,
-        ))
+    let output = match mod_block {
+        ModBlock::Absent | ModBlock::Consistent => BamOutputRecord::Raw(record),
+        ModBlock::MissingMn | ModBlock::Malformed => {
+            let decoded = tag_source
+                .take()
+                .map_or_else(|| decode_raw_record(&record), Ok)?;
+            let seq = decoded.sequence().as_ref();
+            let window = Window {
+                start: 0,
+                end: seq_len,
+                idx: 0,
+                total: 1,
+            };
+            BamOutputRecord::Decoded(reconstruct_record_with_bases(
+                &decoded,
+                seq,
+                qual,
+                window,
+                mod_block,
+                cfg.update_moves,
+            ))
+        },
     };
     Ok((Some(output), malformed_perbase))
 }
@@ -1134,22 +1274,7 @@ pub fn run_bam<R: InputRecord>(
         // render: per-record guards + trim, then the shared `process_read_segments`
         // helper does the per-segment filter + reconstruct survivors -> Vec<RecordBuf>.
         |rec, cfg| {
-            crate::io::bam::ensure_unaligned(rec)?;
-            crate::io::bam::ensure_modern_mod_tags(rec)?;
-            let seq = rec.sequence().as_ref();
-            let qual = rec.quality_scores().as_ref();
-            if qual.len() != seq.len() {
-                let name = rec
-                    .name()
-                    .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-                    .unwrap_or_else(|| "<unnamed>".to_string());
-                anyhow::bail!(
-                    "read {name}: BAM record SEQ length {} != QUAL length {} \
-                     (records without full per-base quality are not supported)",
-                    seq.len(),
-                    qual.len()
-                );
-            }
+            let (seq, qual, mod_block) = prepare_read(rec, counters)?;
             let _read =
                 crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
             let _read = _read.enter();
@@ -1164,14 +1289,18 @@ pub fn run_bam<R: InputRecord>(
                 counters,
                 |idx, total, s, e| {
                     survivors.push((s, e));
+                    let window = Window {
+                        start: s,
+                        end: e,
+                        idx,
+                        total,
+                    };
                     items.push(reconstruct_record_with_bases(
                         rec,
                         seq,
                         qual,
-                        s,
-                        e,
-                        total,
-                        idx,
+                        window,
+                        mod_block,
                         cfg.update_moves,
                     ));
                     Ok(())
@@ -1185,24 +1314,29 @@ pub fn run_bam<R: InputRecord>(
     )
 }
 
-/// Assemble the TAB-prefixed aux-tag block for one interval: carried non-mod
-/// tags verbatim in source order, then the reconstructed MM/ML/MN block. Empty
-/// when nothing is carried (caller writes a plain FASTQ record).
+/// Assembles the TAB-prefixed aux-tag block for one window: carried non-mod
+/// tags verbatim in source order (per-base arrays sliced, `qs:f` refreshed,
+/// `rn` set to -1 on a split), then the rebuilt MM/ML/MN block. Empty when
+/// nothing is carried (the caller writes a plain FASTQ record). A `Malformed`
+/// block is omitted.
 fn build_fastq_tags(
     src: &RecordBuf,
     seq: &[u8],
-    start: usize,
-    end: usize,
-    total: usize,
+    window: Window,
+    mod_block: ModBlock,
     sel: &FastqTags,
 ) -> Vec<u8> {
+    let Window {
+        start, end, total, ..
+    } = window;
     let mut tags = Vec::new();
     let orig_len = seq.len();
     let trimmed = start != 0 || end != orig_len;
+    let split = total > 1;
     for (tag, value) in src.data().iter() {
         let t = <[u8; 2]>::from(tag);
-        if t == *b"MM" || t == *b"ML" || t == *b"MN" {
-            continue; // handled by the reconstructed block below
+        if matches!(&t, b"MM" | b"ML" | b"MN") {
+            continue; // handled by the rebuilt block below
         }
         // On trim, drop the ONT signal tags (a sliced move table is impractical in
         // a FASTQ header, and signal-aware callers consume BAM, and `--update-moves`
@@ -1215,30 +1349,38 @@ fn build_fastq_tags(
             continue;
         }
         // On a split, st/du describe the parent read, not the subread.
-        if total > 1 && DROP_ON_SPLIT_TAGS.contains(&t) {
+        if split && DROP_ON_SPLIT_TAGS.contains(&t) {
             continue;
         }
         if !sel.carries(&t) {
             continue;
         }
-        // Refresh qs from the trimmed quality (matches the BAM→BAM path).
-        if t == *b"qs" && trimmed {
+        tags.push(b'\t');
+        // Dorado's `qs:f` follows the trimmed quality (matches the BAM→BAM
+        // path); PacBio's `qs:i` is a query coordinate and is left as is.
+        if t == *b"qs" && trimmed && matches!(value, Value::Float(_)) {
             let ql = src.quality_scores().as_ref();
             let qs = crate::qual::mean_prob_q(&ql[start..end]) as f32;
-            tags.push(b'\t');
             tags.extend_from_slice(&format_aux_field(t, &Value::Float(qs)));
             continue;
         }
-        // Per-base kinetics stay consistent with the trimmed sequence.
-        tags.push(b'\t');
-        match perbase_slice(value, orig_len, start, end) {
-            Some(v) => tags.extend_from_slice(&format_aux_field(t, &v)),
-            None => tags.extend_from_slice(&format_aux_field(t, value)),
+        if t == *b"rn" && split {
+            tags.extend_from_slice(&format_aux_field(t, &Value::Int32(-1)));
+            continue;
         }
+        // Per-base kinetics stay consistent with the trimmed sequence.
+        let sliced = if trimmed {
+            perbase_slice(t, value, orig_len, start, end)
+        } else {
+            None
+        };
+        tags.extend_from_slice(&format_aux_field(t, sliced.as_ref().unwrap_or(value)));
     }
     if sel.carries_mods()
-        && let Some((mm, ml)) = reconstruct_mods(src, seq, start, end)
+        && matches!(mod_block, ModBlock::Consistent | ModBlock::MissingMn)
+        && let Some((mm, ml)) = mod_tags(src)
     {
+        let (mm, ml) = rebuild_mods(mm, ml, seq, start, end);
         tags.push(b'\t');
         tags.extend_from_slice(&format_mods_aux(&mm, ml.as_deref(), end - start));
     }
@@ -1263,27 +1405,11 @@ where
     let mut malformed_tag_reads = 0u64;
     for rec in records {
         let rec = rec?.decode()?;
-        crate::io::bam::ensure_unaligned(&rec)?;
-        crate::io::bam::ensure_modern_mod_tags(&rec)?;
+        let (seq, qual, mod_block) = prepare_read(&rec, counters)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
-
-        let seq = rec.sequence().as_ref();
         counters
             .input_bases
             .fetch_add(seq.len() as u64, Ordering::Relaxed);
-        let qual = rec.quality_scores().as_ref();
-        if qual.len() != seq.len() {
-            let name = rec
-                .name()
-                .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-                .unwrap_or_else(|| "<unnamed>".to_string());
-            anyhow::bail!(
-                "read {name}: BAM record SEQ length {} != QUAL length {} \
-                 (records without full per-base quality are not supported)",
-                seq.len(),
-                qual.len()
-            );
-        }
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
@@ -1303,7 +1429,13 @@ where
                 survivors.push((s, e));
                 let seg_seq = &seq[s..e];
                 let seg_qual = &qual[s..e];
-                let tags = build_fastq_tags(&rec, seq, s, e, total, &cfg.fastq_tags);
+                let window = Window {
+                    start: s,
+                    end: e,
+                    idx,
+                    total,
+                };
+                let tags = build_fastq_tags(&rec, seq, window, mod_block, &cfg.fastq_tags);
                 if tags.is_empty() {
                     write_segment(writer, &name, seg_seq, seg_qual, total, idx)?;
                 } else {
@@ -1338,22 +1470,7 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
         // does the per-segment filter -> Vec<Vec<u8>> (rendered FASTQ segments,
         // survivors only).
         |rec, cfg| {
-            crate::io::bam::ensure_unaligned(rec)?;
-            crate::io::bam::ensure_modern_mod_tags(rec)?;
-            let seq = rec.sequence().as_ref();
-            let qual = rec.quality_scores().as_ref();
-            if qual.len() != seq.len() {
-                let name = rec
-                    .name()
-                    .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-                    .unwrap_or_else(|| "<unnamed>".to_string());
-                anyhow::bail!(
-                    "read {name}: BAM record SEQ length {} != QUAL length {} \
-                     (records without full per-base quality are not supported)",
-                    seq.len(),
-                    qual.len()
-                );
-            }
+            let (seq, qual, mod_block) = prepare_read(rec, counters)?;
             let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
             let _read =
                 crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
@@ -1371,7 +1488,13 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
                     survivors.push((s, e));
                     let seg_seq = &seq[s..e];
                     let seg_qual = &qual[s..e];
-                    let tags = build_fastq_tags(rec, seq, s, e, total, &cfg.fastq_tags);
+                    let window = Window {
+                        start: s,
+                        end: e,
+                        idx,
+                        total,
+                    };
+                    let tags = build_fastq_tags(rec, seq, window, mod_block, &cfg.fastq_tags);
                     let mut buf = Vec::new();
                     if tags.is_empty() {
                         write_segment(&mut buf, &name, seg_seq, seg_qual, total, idx)?;
@@ -1593,24 +1716,49 @@ mod tests {
         );
     }
 
+    /// A segment that loses every listed position keeps the group with no
+    /// positions: `C+m;` still declares the segment's C's canonical, which the
+    /// group's absence would turn into "no call".
     #[test]
-    fn split_suffixes_name_and_drops_empty_mods() {
+    fn split_suffixes_name_and_keeps_empty_mod_group() {
         let src = ubam_with_mods(b"CCAC", vec![30, 31, 32, 33], b"C+m,0;", vec![10]); // mod at pos0
-        // segment [2,4) has no surviving C mod -> MM/ML removed entirely.
+        // segment [2,4) has no surviving C mod.
         let out = reconstruct_record(&src, 2, 4, 2, 1, false);
         // `.as_ref()` is ambiguous on `&BStr` (impls `AsRef<[u8]>` and `AsRef<BStr>`);
         // disambiguate with a turbofish (noodles-sam 0.85 / bstr 1.x adjustment).
         assert_eq!(AsRef::<[u8]>::as_ref(out.name().unwrap()), b"r1_segment_2");
-        assert!(out.data().get(&Tag::BASE_MODIFICATIONS).is_none());
-        assert!(
-            out.data()
-                .get(&Tag::BASE_MODIFICATION_PROBABILITIES)
-                .is_none()
+        match out.data().get(&Tag::BASE_MODIFICATIONS) {
+            Some(Value::String(s)) => assert_eq!(s.to_vec(), b"C+m;"),
+            other => panic!("empty group must be kept, got {other:?}"),
+        }
+        match out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
+            Some(Value::Array(Array::UInt8(v))) => assert!(v.is_empty(), "ML must be empty"),
+            other => panic!("ML must be an empty B:C array, got {other:?}"),
+        }
+        assert_eq!(
+            out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH),
+            Some(&Value::Int32(2))
         );
+    }
+
+    /// The FASTQ header spells an empty group as `MM:Z:C+m;` with a zero-length
+    /// `ML:B:C` array.
+    #[test]
+    fn bam2fq_keeps_empty_mod_group_after_a_crop() {
+        let rec = ubam_with_mods(b"CCAC", vec![40; 4], b"C+m,0;", vec![10]);
+        let cfg = cfg_bam2fq(None, 2, FastqTags::All);
+        let mut out = Vec::new();
+        run_bam_to_fastq(
+            [Ok(rec)].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        let s = String::from_utf8(out).unwrap();
         assert!(
-            out.data()
-                .get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH)
-                .is_none()
+            s.starts_with("@r1\tMM:Z:C+m;\tML:B:C\tMN:i:2\n"),
+            "got: {s:?}"
         );
     }
 
@@ -1851,74 +1999,157 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reconstruct_record_truncated_ml_omits_ml_but_keeps_mm_mn() {
-        let mut src = RecordBuf::default();
-        *src.flags_mut() = Flags::UNMAPPED;
-        *src.name_mut() = Some(b"r1".into());
-        *src.sequence_mut() = b"CCC".to_vec().into();
-        *src.quality_scores_mut() = vec![40; 3].into();
-        src.data_mut().insert(
-            Tag::BASE_MODIFICATIONS,
-            Value::String(b"C+m,0,0,0;".to_vec().into()),
-        );
-        // Malformed source: MM declares 3 modified positions, but ML has only 1 byte.
-        src.data_mut().insert(
-            Tag::BASE_MODIFICATION_PROBABILITIES,
-            Value::Array(Array::UInt8(vec![5])),
-        );
-
-        let out = reconstruct_record(&src, 0, 3, 1, 0, false);
-
-        match out.data().get(&Tag::BASE_MODIFICATIONS) {
-            Some(Value::String(s)) => assert_eq!(s.to_vec(), b"C+m,0,0,0;"),
-            other => panic!("expected MM retained, got {other:?}"),
-        }
-        assert!(
-            out.data()
-                .get(&Tag::BASE_MODIFICATION_PROBABILITIES)
-                .is_none(),
-            "truncated ML must be omitted rather than re-emitted invalid"
-        );
-        match out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
-            Some(Value::Int32(3)) => {},
-            other => panic!("expected MN=3, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn bam2fq_truncated_ml_omits_ml_field() {
+    /// A record whose modification block cannot be placed on its sequence: the
+    /// variants `malformed_mod_blocks` feeds through both output paths.
+    fn malformed_mod_record(variant: &str) -> RecordBuf {
         let mut rec = RecordBuf::default();
         *rec.flags_mut() = Flags::UNMAPPED;
         *rec.name_mut() = Some(b"r1".into());
-        *rec.sequence_mut() = b"CCC".to_vec().into();
-        *rec.quality_scores_mut() = vec![40; 3].into();
-        rec.data_mut().insert(
-            Tag::BASE_MODIFICATIONS,
-            Value::String(b"C+m,0,0,0;".to_vec().into()),
-        );
-        rec.data_mut().insert(
-            Tag::BASE_MODIFICATION_PROBABILITIES,
-            Value::Array(Array::UInt8(vec![5])),
-        );
+        *rec.sequence_mut() = b"CCCA".to_vec().into();
+        *rec.quality_scores_mut() = vec![40; 4].into();
+        let d = rec.data_mut();
+        let (mm, ml, mn) = match variant {
+            // MM declares 3 positions, ML has 1 byte.
+            "ml_short" => (&b"C+m,0,0,0;"[..], Value::Array(Array::UInt8(vec![5])), 4),
+            // MM stops parsing at the `x`.
+            "mm_garbled" => (
+                &b"C+m,0,0x,0;"[..],
+                Value::Array(Array::UInt8(vec![5, 6, 7])),
+                4,
+            ),
+            // ML at a subtype other than B:C.
+            "ml_subtype" => (
+                &b"C+m,0,0,0;"[..],
+                Value::Array(Array::Int8(vec![5, 6, 7])),
+                4,
+            ),
+            // MN disagrees with the sequence length.
+            "mn_mismatch" => (
+                &b"C+m,0,0,0;"[..],
+                Value::Array(Array::UInt8(vec![5, 6, 7])),
+                40,
+            ),
+            other => panic!("unknown variant {other}"),
+        };
+        d.insert(Tag::BASE_MODIFICATIONS, Value::String(mm.to_vec().into()));
+        d.insert(Tag::BASE_MODIFICATION_PROBABILITIES, ml);
+        d.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(mn));
+        d.insert(Tag::READ_GROUP, Value::String(b"grp".as_slice().into()));
+        rec
+    }
 
+    const MALFORMED_MOD_VARIANTS: [&str; 4] =
+        ["ml_short", "mm_garbled", "ml_subtype", "mn_mismatch"];
+
+    /// Each defect classifies as `Malformed`, on the full window and on a crop.
+    #[test]
+    fn malformed_mod_blocks_are_classified() {
+        for variant in MALFORMED_MOD_VARIANTS {
+            let rec = malformed_mod_record(variant);
+            assert_eq!(inspect_mod_block(&rec, 4), ModBlock::Malformed, "{variant}");
+        }
+        let ok = ubam_with_mods(b"CCCA", vec![40; 4], b"C+m,0,0,0;", vec![5, 6, 7]);
+        assert_eq!(inspect_mod_block(&ok, 4), ModBlock::MissingMn);
+    }
+
+    /// The BAM output drops the whole block, keeps every other tag, and the run
+    /// counts the read once, whether or not the read is trimmed or split.
+    #[test]
+    fn malformed_mod_block_is_removed_and_counted_on_bam_output() {
+        for variant in MALFORMED_MOD_VARIANTS {
+            for head in [0, 1] {
+                let mut cfg = cfg_bam2fq(None, head, FastqTags::All);
+                cfg.trim.quality = Some(QualityOp::Split {
+                    cutoff: 20,
+                    window: 1,
+                });
+                let mut rec = malformed_mod_record(variant);
+                // A low-quality base in the middle splits the read in two.
+                *rec.quality_scores_mut() = vec![40, 40, 1, 40].into();
+                let header = sam::Header::default();
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("o.bam");
+                let mut sink = crate::io::bam::writer(Some(&path), &header, 1, 6).unwrap();
+                let counters = Arc::new(Counters::default());
+                let stats =
+                    run_bam(&header, [Ok(rec)].into_iter(), &mut sink, &cfg, &counters).unwrap();
+                sink.finish().unwrap();
+                assert_eq!(
+                    stats.malformed_mod_reads, 1,
+                    "{variant} head={head}: counted once per read"
+                );
+
+                let bytes = std::fs::read(&path).unwrap();
+                let mut reader = noodles_bam::io::Reader::new(bytes.as_slice());
+                let h = reader.read_header().unwrap();
+                let mut buf = RecordBuf::default();
+                let mut n = 0;
+                while reader.read_record_buf(&h, &mut buf).unwrap() != 0 {
+                    n += 1;
+                    for t in MOD_TAGS {
+                        assert!(
+                            buf.data().get(&t).is_none(),
+                            "{variant} head={head}: {t:?} must be removed"
+                        );
+                    }
+                    assert!(
+                        buf.data().get(&Tag::READ_GROUP).is_some(),
+                        "{variant}: other tags ride through"
+                    );
+                }
+                assert_eq!(n, stats.output_reads as usize);
+                assert!(n >= 1, "{variant} head={head}: segments written");
+            }
+        }
+    }
+
+    /// The FASTQ header carries no MM/ML/MN for a malformed block, and the run
+    /// counts the read.
+    #[test]
+    fn malformed_mod_block_is_omitted_and_counted_on_fastq_output() {
+        for variant in MALFORMED_MOD_VARIANTS {
+            for head in [0, 2] {
+                let cfg = cfg_bam2fq(None, head, FastqTags::All);
+                let mut out = Vec::new();
+                let stats = run_bam_to_fastq(
+                    [Ok(malformed_mod_record(variant))].into_iter(),
+                    &mut out,
+                    &cfg,
+                    &Arc::new(Counters::default()),
+                )
+                .unwrap();
+                assert_eq!(stats.malformed_mod_reads, 1, "{variant} head={head}");
+                let s = String::from_utf8(out).unwrap();
+                assert!(
+                    s.starts_with("@r1\tRG:Z:grp\n"),
+                    "{variant} head={head}: mod block must be omitted, got {s:?}"
+                );
+            }
+        }
+    }
+
+    /// A well-formed block is not counted, and an absent `MN` is added rather
+    /// than treated as a defect.
+    #[test]
+    fn well_formed_mod_block_is_not_counted_and_gains_mn() {
+        let rec = ubam_with_mods(b"CCCA", vec![40; 4], b"C+m,0,0,0;", vec![5, 6, 7]);
         let cfg = cfg_bam2fq(None, 0, FastqTags::All);
         let mut out = Vec::new();
-        run_bam_to_fastq(
-            [Ok(rec)].into_iter(),
+        let stats = run_bam_to_fastq(
+            [Ok(rec.clone())].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
         )
         .unwrap();
+        assert_eq!(stats.malformed_mod_reads, 0);
         let s = String::from_utf8(out).unwrap();
-        assert!(
-            s.contains("MM:Z:C+m,0,0,0;\tMN:i:3"),
-            "expected MM+MN, got: {s:?}"
-        );
-        assert!(
-            !s.contains("ML:B"),
-            "truncated ML must not be emitted into FASTQ tags: {s:?}"
+        assert!(s.contains("MM:Z:C+m,0,0,0;\tML:B:C,5,6,7\tMN:i:4"), "{s:?}");
+        let out = reconstruct_record(&rec, 0, 4, 1, 0, false);
+        assert_eq!(
+            out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH),
+            Some(&Value::Int32(4)),
+            "MN is added when absent"
         );
     }
 
@@ -2889,8 +3120,9 @@ mod tests {
                 Value::String(b"C+m,0;".to_vec().into()),
             );
             d.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, v.clone());
-            assert!(
-                full_window_mods_already_consistent(&rec, 12),
+            assert_eq!(
+                inspect_mod_block(&rec, 12),
+                ModBlock::Consistent,
                 "MN stored as {v:?} should be recognized"
             );
         }
@@ -2925,5 +3157,356 @@ mod tests {
             "MN must keep the subtype it arrived with"
         );
         assert_eq!(out, rec, "an untrimmed record is passed through unchanged");
+    }
+
+    /// Encodes a decoded record as the raw BAM record a production reader yields.
+    fn raw_record(rec: &RecordBuf) -> bam::Record {
+        use noodles_sam::alignment::io::Write as _;
+
+        let header = sam::Header::default();
+        let mut bytes = Vec::new();
+        {
+            let mut w = bam::io::Writer::new(&mut bytes);
+            w.write_header(&header).unwrap();
+            w.write_alignment_record(&header, rec).unwrap();
+            w.try_finish().unwrap();
+        }
+        let mut r = bam::io::Reader::new(bytes.as_slice());
+        r.read_header().unwrap();
+        let mut raw = bam::Record::default();
+        assert_ne!(r.read_record(&mut raw).unwrap(), 0);
+        raw
+    }
+
+    /// A 10-base PacBio-style record: `fi[i]` belongs to base `i`, `ri[i]` to
+    /// base `9 - i` (reverse kinetics are stored last base first).
+    fn pacbio_kinetics_record() -> RecordBuf {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTACGTAC".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 10].into();
+        let d = src.data_mut();
+        d.insert(
+            Tag::new(b'f', b'i'),
+            Value::Array(Array::UInt8((0..10).collect())),
+        );
+        d.insert(
+            Tag::new(b'r', b'i'),
+            Value::Array(Array::UInt8((10..20).collect())),
+        );
+        src
+    }
+
+    fn u8_array(rec: &RecordBuf, tag: [u8; 2]) -> Vec<u8> {
+        match rec.data().get(&Tag::new(tag[0], tag[1])) {
+            Some(Value::Array(Array::UInt8(v))) => v.clone(),
+            other => panic!("{}: {other:?}", std::str::from_utf8(&tag).unwrap()),
+        }
+    }
+
+    /// Reverse-strand kinetics take array indexes `[len - end, len - start)`,
+    /// so a head crop removes entries from the end of `ri` and a tail crop from
+    /// its start, while `fi` is sliced in read order.
+    #[test]
+    fn reverse_strand_kinetics_are_sliced_from_the_other_end() {
+        let src = pacbio_kinetics_record();
+        // Head crop 2: bases 2..=9 keep fi[2..10] and ri[0..8] (bases 9..2).
+        let head = reconstruct_record(&src, 2, 10, 1, 0, false);
+        assert_eq!(u8_array(&head, *b"fi"), (2..10).collect::<Vec<u8>>());
+        assert_eq!(u8_array(&head, *b"ri"), (10..18).collect::<Vec<u8>>());
+        // Tail crop 3: bases 0..=6 keep fi[0..7] and ri[3..10] (bases 6..0).
+        let tail = reconstruct_record(&src, 0, 7, 1, 0, false);
+        assert_eq!(u8_array(&tail, *b"fi"), (0..7).collect::<Vec<u8>>());
+        assert_eq!(u8_array(&tail, *b"ri"), (13..20).collect::<Vec<u8>>());
+    }
+
+    #[test]
+    fn bam2fq_slices_reverse_strand_kinetics_from_the_other_end() {
+        let cfg = cfg_bam2fq(None, 2, FastqTags::All); // head crop 2
+        let mut out = Vec::new();
+        run_bam_to_fastq(
+            [Ok(pacbio_kinetics_record())].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\tfi:B:C,2,3,4,5,6,7,8,9\t"), "{s:?}");
+        assert!(s.contains("\tri:B:C,10,11,12,13,14,15,16,17\n"), "{s:?}");
+    }
+
+    /// PacBio's `qs:i`/`qe:i` are query coordinates, not a quality, and are
+    /// copied verbatim; only a float `qs` is recomputed.
+    #[test]
+    fn integer_qs_and_qe_survive_a_crop_unchanged() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGTAC".to_vec().into();
+        *src.quality_scores_mut() = vec![2, 2, 40, 40, 40, 40].into();
+        src.data_mut()
+            .insert(Tag::new(b'q', b's'), Value::Int32(1200));
+        src.data_mut()
+            .insert(Tag::new(b'q', b'e'), Value::Int32(4800));
+
+        let out = reconstruct_record(&src, 2, 6, 1, 0, false);
+        assert_eq!(
+            out.data().get(&Tag::new(b'q', b's')),
+            Some(&Value::Int32(1200))
+        );
+        assert_eq!(
+            out.data().get(&Tag::new(b'q', b'e')),
+            Some(&Value::Int32(4800))
+        );
+
+        let cfg = cfg_bam2fq(None, 2, FastqTags::All);
+        let mut fastq = Vec::new();
+        run_bam_to_fastq(
+            [Ok(src.clone())].into_iter(),
+            &mut fastq,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        let s = String::from_utf8(fastq).unwrap();
+        assert!(s.starts_with("@r1\tqs:i:1200\tqe:i:4800\n"), "{s:?}");
+
+        // Dorado's float qs follows the trimmed quality on both outputs.
+        src.data_mut()
+            .insert(Tag::new(b'q', b's'), Value::Float(20.0));
+        let expected = crate::qual::mean_prob_q(&[40, 40, 40, 40]) as f32;
+        match reconstruct_record(&src, 2, 6, 1, 0, false)
+            .data()
+            .get(&Tag::new(b'q', b's'))
+        {
+            Some(Value::Float(q)) => assert!((q - expected).abs() < 1e-4),
+            other => panic!("qs: {other:?}"),
+        }
+        let mut fastq = Vec::new();
+        run_bam_to_fastq(
+            [Ok(src)].into_iter(),
+            &mut fastq,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        let s = String::from_utf8(fastq).unwrap();
+        assert!(s.starts_with("@r1\tqs:f:"), "{s:?}");
+        assert!(!s.contains("qs:f:20"), "{s:?}");
+    }
+
+    /// The untrimmed fast path removes a block whose `MN` disagrees with the
+    /// sequence instead of rewriting `MN`, adds a missing `MN`, and passes a
+    /// consistent record through raw.
+    #[test]
+    fn raw_full_window_removes_malformed_block_and_adds_missing_mn() {
+        let cfg = cfg_bam2fq(None, 0, FastqTags::All);
+        let counters = Arc::new(Counters::default());
+
+        let (out, _) = process_raw_full_window(
+            raw_record(&malformed_mod_record("mn_mismatch")),
+            &cfg,
+            &counters,
+        )
+        .unwrap();
+        let Some(BamOutputRecord::Decoded(rec)) = out else {
+            panic!("a malformed block forces a rebuild");
+        };
+        for t in MOD_TAGS {
+            assert!(rec.data().get(&t).is_none(), "{t:?} must be removed");
+        }
+        assert!(rec.data().get(&Tag::READ_GROUP).is_some());
+        assert_eq!(counters.malformed_mod_reads.load(Ordering::Relaxed), 1);
+
+        let missing = ubam_with_mods(b"CCCA", vec![40; 4], b"C+m,0,0,0;", vec![5, 6, 7]);
+        let (out, _) = process_raw_full_window(raw_record(&missing), &cfg, &counters).unwrap();
+        let Some(BamOutputRecord::Decoded(rec)) = out else {
+            panic!("a missing MN forces a rebuild");
+        };
+        assert_eq!(
+            rec.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH),
+            Some(&Value::Int32(4))
+        );
+        assert_eq!(
+            counters.malformed_mod_reads.load(Ordering::Relaxed),
+            1,
+            "a missing MN is not a defect"
+        );
+
+        let (out, _) =
+            process_raw_full_window(raw_record(&read2_with_mods_and_rg()), &cfg, &counters)
+                .unwrap();
+        assert!(matches!(out, Some(BamOutputRecord::Raw(_))));
+    }
+
+    /// The move table resolves the signal end only to the stride, so a window
+    /// that runs to the last base keeps the source `ns`.
+    #[test]
+    fn update_moves_window_to_the_last_base_keeps_the_source_ns() {
+        let mut src = ubam_with_moves();
+        // One sample past the last full stride block (10 + 8*2 = 26).
+        src.data_mut()
+            .insert(Tag::new(b'n', b's'), Value::Int32(27));
+        let ns = |rec: &RecordBuf| rec.data().get(&Tag::new(b'n', b's')).cloned();
+
+        let head = reconstruct_record(&src, 2, 6, 1, 0, true);
+        assert_eq!(ns(&head), Some(Value::Int32(27)), "head crop keeps ns");
+        let tail = reconstruct_record(&src, 0, 4, 1, 0, true);
+        assert_eq!(
+            ns(&tail),
+            Some(Value::Int32(22)),
+            "tail crop ends at a block"
+        );
+        // The last split segment spans [18, 27).
+        let last = reconstruct_record(&src, 3, 6, 2, 1, true);
+        assert_eq!(ns(&last), Some(Value::Int32(9)));
+    }
+
+    /// An empty window at the sequence end has no start base; the signal tags
+    /// are dropped rather than the process aborted.
+    #[test]
+    fn update_moves_empty_window_at_the_end_drops_signal_tags() {
+        let out = reconstruct_record(&ubam_with_moves(), 6, 6, 1, 0, true);
+        assert!(out.sequence().as_ref().is_empty());
+        for t in [b"mv", b"ts", b"ns"] {
+            assert!(
+                out.data().get(&Tag::new(t[0], t[1])).is_none(),
+                "{} dropped",
+                std::str::from_utf8(t).unwrap()
+            );
+        }
+    }
+
+    /// PacBio's fixed-size arrays are never per-base, even on a read whose
+    /// length equals their element count.
+    #[test]
+    fn fixed_size_pacbio_arrays_are_not_sliced() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"ACGT".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 4].into();
+        let d = src.data_mut();
+        d.insert(
+            Tag::new(b's', b'n'),
+            Value::Array(Array::Float(vec![1.0, 2.0, 3.0, 4.0])),
+        );
+        d.insert(
+            Tag::new(b'a', b'c'),
+            Value::Array(Array::Int32(vec![0, 1, 1, 0])),
+        );
+        let out = reconstruct_record(&src, 1, 3, 1, 0, false);
+        assert_eq!(
+            out.data().get(&Tag::new(b's', b'n')),
+            src.data().get(&Tag::new(b's', b'n'))
+        );
+        assert_eq!(
+            out.data().get(&Tag::new(b'a', b'c')),
+            src.data().get(&Tag::new(b'a', b'c'))
+        );
+
+        let mut two = RecordBuf::default();
+        *two.flags_mut() = Flags::UNMAPPED;
+        *two.name_mut() = Some(b"r2".into());
+        *two.sequence_mut() = b"AC".to_vec().into();
+        *two.quality_scores_mut() = vec![40; 2].into();
+        two.data_mut().insert(
+            Tag::new(b'b', b'c'),
+            Value::Array(Array::UInt16(vec![3, 7])),
+        );
+        let cfg = cfg_bam2fq(None, 1, FastqTags::All);
+        let mut out = Vec::new();
+        run_bam_to_fastq(
+            [Ok(two)].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\tbc:B:S,3,7\n"), "{s:?}");
+    }
+
+    /// A split product is not the sequencer's read, so `rn` is -1 on both
+    /// outputs whether or not the move table is rewritten; a crop keeps it.
+    #[test]
+    fn split_sets_rn_to_minus_one_without_update_moves() {
+        let mut src = ubam_with_mods(b"CCAC", vec![40, 40, 1, 40], b"C+m,0;", vec![10]);
+        src.data_mut().insert(Tag::new(b'r', b'n'), Value::Int32(7));
+        let rn = |rec: &RecordBuf| rec.data().get(&Tag::new(b'r', b'n')).cloned();
+
+        assert_eq!(
+            rn(&reconstruct_record(&src, 0, 2, 2, 0, false)),
+            Some(Value::Int32(-1))
+        );
+        assert_eq!(
+            rn(&reconstruct_record(&src, 1, 4, 1, 0, false)),
+            Some(Value::Int32(7))
+        );
+
+        let cfg = cfg_bam2fq(
+            Some(QualityOp::Split {
+                cutoff: 20,
+                window: 1,
+            }),
+            0,
+            FastqTags::All,
+        );
+        let mut out = Vec::new();
+        let stats = run_bam_to_fastq(
+            [Ok(src)].into_iter(),
+            &mut out,
+            &cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        assert_eq!(stats.output_reads, 2);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("@r1_segment_1\trn:i:-1\t"), "{s:?}");
+        assert!(s.contains("@r1_segment_2\trn:i:-1\t"), "{s:?}");
+    }
+
+    /// The rebuilt record keeps its aux tags in source order: rewritten tags
+    /// stay in place, removed ones leave no hole, new ones are appended.
+    #[test]
+    fn rebuilt_record_keeps_aux_order() {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(b"r1".into());
+        *src.sequence_mut() = b"CCAC".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 4].into();
+        let d = src.data_mut();
+        d.insert(Tag::READ_GROUP, Value::String(b"grp".as_slice().into()));
+        d.insert(
+            Tag::BASE_MODIFICATIONS,
+            Value::String(b"C+m,0,1;".to_vec().into()),
+        );
+        d.insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(vec![10, 20])),
+        );
+        d.insert(
+            Tag::new(b'm', b'v'),
+            Value::Array(Array::Int8(vec![5, 1, 1, 1, 1])),
+        );
+        d.insert(
+            Tag::new(b'i', b'p'),
+            Value::Array(Array::UInt8(vec![1, 2, 3, 4])),
+        );
+        d.insert(Tag::new(b'z', b'z'), Value::Int32(5));
+
+        let out = reconstruct_record(&src, 2, 4, 1, 0, false);
+        let order: Vec<[u8; 2]> = out.data().iter().map(|(t, _)| <[u8; 2]>::from(t)).collect();
+        assert_eq!(
+            order,
+            [*b"RG", *b"MM", *b"ML", *b"ip", *b"zz", *b"MN"],
+            "mv removed in place, MN appended"
+        );
+        assert_eq!(
+            out.data().get(&Tag::new(b'z', b'z')),
+            Some(&Value::Int32(5))
+        );
     }
 }
