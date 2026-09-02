@@ -90,6 +90,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aho-corasick`, and `jiff` to their latest patch releases.
 - The gzip decoder is zlib-rs rather than zlib-ng, which reads compressed FASTQ
   about 7 percent faster and drops a C build dependency from the decode path.
+- Release binaries are profile-guided for the targets whose runner can execute
+  what it builds: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
+  `x86_64-apple-darwin`, and `aarch64-apple-darwin`. An instrumented build runs
+  over a synthetic corpus covering the FASTQ, gzip, adapter, BAM and report
+  paths, and the merged profile drives a second build, worth a few percent on
+  the adapter and BAM paths. Output is byte-identical either way. The two
+  aarch64 Linux targets are cross-compiled, so nothing on the runner can train
+  on them, and they are built as before. `scripts/pgo-build.sh` reproduces the
+  flow locally and CI runs it on every pull request.
 
 ### Fixed
 - `--summary-json` wrote its `command` field with the banner's `Command: ` label

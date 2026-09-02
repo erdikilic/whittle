@@ -36,6 +36,56 @@ cargo run --example gen-man
 reaches the shipped binary. The release workflow ships the committed page; the
 `Man page is current` CI job fails when it is stale.
 
+## Profile-guided release builds
+
+Release binaries for the targets that run on their own build runner
+(`x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `x86_64-apple-darwin`,
+`aarch64-apple-darwin`) are built with profile-guided optimization, worth a few
+percent on the adapter and BAM paths. The two aarch64 Linux targets are
+cross-compiled, so the runner cannot execute what it built and cannot train on
+it; those binaries are built without a profile and are identical in every other
+respect.
+
+`scripts/pgo-build.sh` runs the whole flow for one target, and both the release
+workflow and the `pgo` CI job call it:
+
+```bash
+rustup component add llvm-tools
+scripts/pgo-build.sh "$(rustc -vV | sed -n 's/^host: //p')"
+```
+
+Its five steps, each runnable on its own. `$TARGET` is the triple, and
+`-C target-cpu` is repeated because `RUSTFLAGS` replaces the rustflags in
+`.cargo/config.toml` rather than adding to them:
+
+```bash
+TARGET=x86_64-unknown-linux-gnu
+
+# 1. Instrument.
+RUSTFLAGS="-C target-cpu=x86-64-v3 -Cprofile-generate=$PWD/target/pgo" \
+    cargo build --release --locked --target "$TARGET"
+
+# 2. Write the training corpus: plain and gzip FASTQ with ONT header fields and
+#    preset adapters, and a uBAM with modification calls, per-base kinetics, a
+#    move table and the run fields. About 32 MB, from a fixed seed.
+cargo run --locked --example gen-training-data -- target/training-data
+
+# 3. Train: one single-threaded run per hot path.
+scripts/pgo-train.sh "target/$TARGET/release/whittle" target/training-data
+
+# 4. Merge the raw profiles.
+"$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata" \
+    merge -o target/pgo/whittle.profdata target/pgo/*.profraw
+
+# 5. Rebuild against the merged profile.
+RUSTFLAGS="-C target-cpu=x86-64-v3 -Cprofile-use=$PWD/target/pgo/whittle.profdata" \
+    cargo build --release --locked --target "$TARGET"
+```
+
+The profile changes speed and nothing else: the optimized binary and a plain
+`cargo build --release` binary write byte-identical reads, summaries and
+reports.
+
 ## Commit messages
 
 Commit subjects follow [Conventional Commits](https://www.conventionalcommits.org/),
