@@ -60,7 +60,9 @@ pub fn check(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> Option<DropReason>
 
 /// Filter from precomputed sequence metrics. The raw BAM fast path can obtain
 /// length and GC directly from packed sequence views without materializing an
-/// owned decoded sequence. `gc` is required only when a GC bound is active.
+/// owned decoded sequence. `gc` is required whenever a GC bound is active;
+/// a missing value there is a caller bug and panics rather than filtering on
+/// a fabricated fraction.
 pub(crate) fn check_metrics(
     len: usize,
     phred: &[u8],
@@ -83,17 +85,12 @@ pub(crate) fn check_metrics(
         }
     }
     if cfg.min_gc.is_some() || cfg.max_gc.is_some() {
-        let gc = gc.unwrap_or(0.0);
+        let gc = gc.expect("the GC fraction is computed whenever a GC bound is active");
         if gc < cfg.min_gc.unwrap_or(0.0) || gc > cfg.max_gc.unwrap_or(1.0) {
             return Some(DropReason::Gc);
         }
     }
     None
-}
-
-/// Cheapest-first, short-circuiting. Empty reads never pass.
-pub fn passes(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> bool {
-    check(seq, phred, cfg).is_none()
 }
 
 #[cfg(test)]
@@ -111,6 +108,10 @@ mod tests {
             max_gc: None,
             qual_mode: QualMode::Mean,
         }
+    }
+
+    fn passes(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> bool {
+        check(seq, phred, cfg).is_none()
     }
 
     #[test]
@@ -155,6 +156,27 @@ mod tests {
     }
 
     #[test]
+    fn check_metrics_uses_the_supplied_gc_when_a_bound_is_active() {
+        let mut c = base();
+        c.min_gc = Some(0.4);
+        assert_eq!(check_metrics(4, &[30; 4], Some(0.5), &c), None);
+        assert_eq!(
+            check_metrics(4, &[30; 4], Some(0.1), &c),
+            Some(DropReason::Gc)
+        );
+        // No bound active: a missing GC value is not consulted.
+        assert_eq!(check_metrics(4, &[30; 4], None, &base()), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "GC")]
+    fn check_metrics_panics_without_gc_when_a_bound_is_active() {
+        let mut c = base();
+        c.max_gc = Some(0.6);
+        check_metrics(4, &[30; 4], None, &c);
+    }
+
+    #[test]
     fn check_reports_too_short() {
         let mut c = base();
         c.min_length = 4;
@@ -196,19 +218,5 @@ mod tests {
     #[test]
     fn check_none_when_passing() {
         assert_eq!(check(b"ACGT", &[30; 4], &base()), None);
-    }
-
-    #[test]
-    fn passes_matches_check_is_none() {
-        let mut c = base();
-        c.min_length = 4;
-        assert_eq!(
-            passes(b"AT", &[30, 30], &c),
-            check(b"AT", &[30, 30], &c).is_none()
-        );
-        assert_eq!(
-            passes(b"ATGC", &[30; 4], &c),
-            check(b"ATGC", &[30; 4], &c).is_none()
-        );
     }
 }

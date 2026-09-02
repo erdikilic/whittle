@@ -36,6 +36,37 @@ fn folder_merge_fastq_sorted_and_ignores_non_read_files() {
     assert_eq!(got, "@r1\nGTAC\n+\nIIII\n@r2\nTTGG\n+\nIIII\n");
 }
 
+#[test]
+fn folder_merge_skips_hidden_files_and_orders_members_naturally() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, id) in [
+        ("run_10.fastq", "r10"),
+        ("run_2.fastq", "r2"),
+        ("run_1.fastq", "r1"),
+    ] {
+        std::fs::write(dir.path().join(name), format!("@{id}\nACGT\n+\nIIII\n")).unwrap();
+    }
+    // An AppleDouble sidecar is not FASTQ and fails to parse if ingested.
+    std::fs::write(dir.path().join("._run_1.fastq"), b"\x00\x05\x16\x07junk").unwrap();
+    std::fs::write(dir.path().join(".hidden.fastq"), "@hidden\nACGT\n+\nIIII\n").unwrap();
+    let out = dir.path().join("merged.fastq");
+
+    whittle()
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
+        .args(["-t", "1"])
+        .assert()
+        .success();
+
+    let got = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(
+        got,
+        "@r1\nACGT\n+\nIIII\n@r2\nACGT\n+\nIIII\n@r10\nACGT\n+\nIIII\n"
+    );
+}
+
 fn write_ubam(path: &Path, name: &[u8], seq: &[u8], quals: Vec<u8>) {
     let header = noodles_sam::Header::default();
     let mut w = bam::io::Writer::new(File::create(path).unwrap());

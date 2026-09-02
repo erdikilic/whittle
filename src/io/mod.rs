@@ -57,15 +57,15 @@ pub fn from_extension(path: &Path) -> Option<Format> {
 }
 
 /// Detect input format from the path extension; if unknown or reading stdin,
-/// fall back to sniffing the first bytes.
+/// fall back to sniffing the first bytes. A BGZF header is refused here: BAM
+/// and BGZF FASTQ share it, and only the decoded first block tells them apart
+/// (see `detect_bgzf_block`).
 pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format> {
     if let Some(f) = path.and_then(from_extension) {
         return Ok(f);
     }
-    // BAM is BGZF-compressed and shares gzip's magic, so test BGZF first. The
-    // `BAM\x01` magic becomes visible only after decompression.
     if is_bgzf(sniff) {
-        Ok(Format::Bam)
+        anyhow::bail!("BGZF input needs the block probe to tell BAM from FASTQ")
     } else if sniff.starts_with(&[0x1f, 0x8b]) {
         Ok(Format::FastqGz)
     } else if sniff.starts_with(b"BAM\x01") {
@@ -116,6 +116,40 @@ pub(crate) fn is_bgzf(sniff: &[u8]) -> bool {
         && (sniff[3] & 0x04) != 0    // FLG.FEXTRA set
         && sniff[12] == b'B'         // first extra subfield SI1
         && sniff[13] == b'C' //                      SI2 -> "BC" = BGZF
+}
+
+/// True if the file at `path` starts with a BGZF block header. Best effort for
+/// thread budgeting: a file that cannot be read is not BGZF here and reports
+/// its error when opened for records.
+pub fn is_bgzf_file(path: &Path) -> bool {
+    let mut header = [0u8; 18];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut header))
+        .is_ok_and(|()| is_bgzf(&header))
+}
+
+/// Tells BGZF from plain gzip on a stream whose extension says `.gz`, by the
+/// first block header. The probed bytes are replayed ahead of `source`, so the
+/// stream is unchanged. BGZF is framed in independent blocks that inflate on
+/// several threads; plain gzip decodes on one.
+pub fn probe_gz(source: &mut Box<dyn Read + Send>) -> anyhow::Result<Format> {
+    let mut probe = [0u8; 18];
+    let mut n = 0;
+    while n < probe.len() {
+        let r = source.read(&mut probe[n..])?;
+        if r == 0 {
+            break;
+        }
+        n += r;
+    }
+    let format = if is_bgzf(&probe[..n]) {
+        Format::FastqBgzf
+    } else {
+        Format::FastqGz
+    };
+    let rest = std::mem::replace(source, Box::new(std::io::empty()));
+    *source = Box::new(std::io::Cursor::new(probe[..n].to_vec()).chain(rest));
+    Ok(format)
 }
 
 /// Identify the payload carried by one complete BGZF block. BAM begins with
@@ -253,9 +287,9 @@ mod tests {
     }
 
     #[test]
-    fn bgzf_header_sniffs_as_bam_not_gz() {
-        // A real BAM is BGZF, which starts with the gzip magic but sets FLG.FEXTRA
-        // and carries a "BC" subfield. It must be detected as Bam, not FastqGz.
+    fn bgzf_header_is_refused_by_the_byte_sniff() {
+        // A BGZF header (gzip magic, FLG.FEXTRA, "BC" subfield) can carry BAM
+        // or FASTQ; only the decoded block tells them apart.
         let mut bgzf = vec![
             0x1f, 0x8b, 0x08, 0x04, // magic, CM=deflate, FLG=FEXTRA
             0x00, 0x00, 0x00, 0x00, // MTIME
@@ -264,18 +298,87 @@ mod tests {
             b'B', b'C', 0x02, 0x00, // "BC" subfield, SLEN=2
             0x1b, 0x00, // BSIZE
         ];
-        assert_eq!(detect_input(None, &bgzf).unwrap(), Format::Bam);
+        let err = detect_input(None, &bgzf).unwrap_err().to_string();
+        assert!(err.contains("block probe"), "got: {err}");
 
-        // A plain-gzip FASTQ stream (FLG=0, no BC) must still be FastqGz even with
-        // a full-length header present.
+        // A plain-gzip stream (FLG=0, no BC) is FastqGz even with a full-length
+        // header present.
         bgzf[3] = 0x00; // clear FEXTRA
         assert_eq!(detect_input(None, &bgzf).unwrap(), Format::FastqGz);
 
-        // Too-short gzip-magic buffer can't be BGZF -> defaults to FastqGz.
+        // A gzip-magic buffer shorter than a block header cannot be BGZF.
         assert_eq!(
             detect_input(None, &[0x1f, 0x8b, 0x08, 0x04]).unwrap(),
             Format::FastqGz
         );
+    }
+
+    #[test]
+    fn uppercase_extensions_are_recognized() {
+        assert_eq!(
+            from_extension(Path::new("X.FASTQ.GZ")),
+            Some(Format::FastqGz)
+        );
+        assert_eq!(from_extension(Path::new("X.FQ")), Some(Format::Fastq));
+        assert_eq!(
+            from_extension(Path::new("X.Fastq.BGZ")),
+            Some(Format::FastqBgzf)
+        );
+        assert_eq!(from_extension(Path::new("X.BAM")), Some(Format::Bam));
+    }
+
+    #[test]
+    fn is_bgzf_file_reads_the_block_header() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = noodles_bgzf::io::Writer::new(Vec::new());
+        w.write_all(b"@r1\nACGT\n+\nIIII\n").unwrap();
+        let bgzf = dir.path().join("a.fastq.gz");
+        std::fs::write(&bgzf, w.finish().unwrap()).unwrap();
+        assert!(is_bgzf_file(&bgzf));
+
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"@r1\nACGT\n+\nIIII\n").unwrap();
+        let gz = dir.path().join("b.fastq.gz");
+        std::fs::write(&gz, enc.finish().unwrap()).unwrap();
+        assert!(!is_bgzf_file(&gz));
+
+        let short = dir.path().join("c.fastq.gz");
+        std::fs::write(&short, [0x1f, 0x8b, 0x08]).unwrap();
+        assert!(!is_bgzf_file(&short));
+        assert!(!is_bgzf_file(&dir.path().join("missing.fastq.gz")));
+    }
+
+    fn read_all(source: &mut Box<dyn Read + Send>) -> Vec<u8> {
+        let mut out = Vec::new();
+        source.read_to_end(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn probe_gz_tells_bgzf_from_plain_gzip_and_replays_the_bytes() {
+        use std::io::Write;
+
+        let mut w = noodles_bgzf::io::Writer::new(Vec::new());
+        w.write_all(b"@r1\nACGT\n+\nIIII\n").unwrap();
+        let bgzf = w.finish().unwrap();
+        let mut source: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(bgzf.clone()));
+        assert_eq!(probe_gz(&mut source).unwrap(), Format::FastqBgzf);
+        assert_eq!(read_all(&mut source), bgzf);
+
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"@r1\nACGT\n+\nIIII\n").unwrap();
+        let gz = enc.finish().unwrap();
+        let mut source: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(gz.clone()));
+        assert_eq!(probe_gz(&mut source).unwrap(), Format::FastqGz);
+        assert_eq!(read_all(&mut source), gz);
+
+        // Shorter than a block header: plain gzip, bytes preserved.
+        let short = vec![0x1f, 0x8b, 0x08];
+        let mut source: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(short.clone()));
+        assert_eq!(probe_gz(&mut source).unwrap(), Format::FastqGz);
+        assert_eq!(read_all(&mut source), short);
     }
 
     #[test]

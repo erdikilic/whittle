@@ -437,12 +437,18 @@ mod tests {
 
         let kept = provenance_header(header.clone(), true);
         let fields = kept.header().unwrap().other_fields();
-        assert_eq!(fields.get(&tag::SORT_ORDER).map(|v| v.as_slice()), Some(&b"queryname"[..]));
+        assert_eq!(
+            fields.get(&tag::SORT_ORDER).map(|v| v.as_slice()),
+            Some(&b"queryname"[..])
+        );
         assert!(fields.contains_key(&tag::GROUP_ORDER));
 
         let unordered = provenance_header(header, false);
         let fields = unordered.header().unwrap().other_fields();
-        assert_eq!(fields.get(&tag::SORT_ORDER).map(|v| v.as_slice()), Some(&b"unsorted"[..]));
+        assert_eq!(
+            fields.get(&tag::SORT_ORDER).map(|v| v.as_slice()),
+            Some(&b"unsorted"[..])
+        );
         assert!(!fields.contains_key(&tag::GROUP_ORDER));
     }
 }

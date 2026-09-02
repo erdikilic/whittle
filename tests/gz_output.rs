@@ -1,5 +1,6 @@
-//! Compressed FASTQ output coverage. Unspecified output remains plain FASTQ,
-//! while requested gzip output is finalized with a complete footer.
+//! Gzip FASTQ coverage. Unspecified output remains plain FASTQ, requested gzip
+//! output is finalized with a complete footer, and damaged gzip input fails
+//! with one clearly attributed error.
 
 use std::io::{Read, Write};
 
@@ -7,11 +8,69 @@ use assert_cmd::Command;
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
+use predicates::prelude::*;
 
 fn whittle() -> Command {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
     cmd
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(bytes).unwrap();
+    enc.finish().unwrap()
+}
+
+#[test]
+fn truncated_gz_input_fails_once_with_record_context() {
+    // Enough records that several parser buffers of records precede the
+    // truncation point, so the error names the last record read.
+    let mut fastq = String::new();
+    for i in 0..20000 {
+        fastq.push_str(&format!(
+            "@r{i}\nACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIII\n"
+        ));
+    }
+    let gz = gzip(fastq.as_bytes());
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("trunc.fastq.gz");
+    std::fs::write(&input, &gz[..gz.len() * 6 / 10]).unwrap();
+
+    let assert = whittle()
+        .arg("-i")
+        .arg(&input)
+        .args(["-t", "1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reading FASTQ record after r"));
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let failed = stderr
+        .lines()
+        .find(|l| l.contains("Failed after"))
+        .unwrap_or_else(|| panic!("no failure line in: {stderr}"));
+    let cause = failed.rsplit(": ").next().unwrap();
+    assert_eq!(
+        failed.matches(cause).count(),
+        1,
+        "the cause must be printed once: {failed}"
+    );
+}
+
+#[test]
+fn quality_byte_outside_phred33_range_is_a_hard_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("bad.fastq.gz");
+    std::fs::write(&input, gzip(b"@r1\nACGTACGT\n+\nII I\x01III\n")).unwrap();
+
+    whittle()
+        .arg("-i")
+        .arg(&input)
+        .args(["-t", "1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("record r1"))
+        .stderr(predicate::str::contains("0x20"));
 }
 
 #[test]

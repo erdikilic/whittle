@@ -518,8 +518,12 @@ mod tests {
 
     #[test]
     fn batches_stop_at_weight_or_record_limit() {
-        let by_weight: Vec<Vec<usize>> =
-            Batches::new(vec![200_000usize; 5].into_iter(), |n: &usize| *n, FASTQ_BATCH).collect();
+        let by_weight: Vec<Vec<usize>> = Batches::new(
+            vec![200_000usize; 5].into_iter(),
+            |n: &usize| *n,
+            FASTQ_BATCH,
+        )
+        .collect();
         assert_eq!(by_weight.iter().map(Vec::len).collect::<Vec<_>>(), [3, 2]);
 
         let bam: Vec<Vec<usize>> =
