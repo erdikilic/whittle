@@ -17,9 +17,10 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use aho_corasick::AhoCorasick;
+use aho_corasick::{AhoCorasick, AhoCorasickKind};
 use search::{
-    AmbiguousSearcher, BatchedAdapterSearcher, PlainSearcher, hits, is_plain_acgt, iupac_bases,
+    AmbiguousSearcher, BatchedAdapterSearcher, EncodedAdapterBatch, Hit, PlainSearcher, Strands,
+    encode_patterns, encoded_pattern_hits, for_each_hit, is_plain_acgt, iupac_bases,
     new_ambiguous_searcher, new_batched_searcher, new_searcher, pattern_hits,
 };
 
@@ -34,10 +35,37 @@ thread_local! {
     /// The ambiguity-tolerant searcher, used for a degenerate primer.
     static RC_AMBIGUOUS: RefCell<AmbiguousSearcher> = RefCell::new(new_ambiguous_searcher());
 
-    /// The pattern-batched searcher. Sassy implements `search_patterns` only
-    /// for the IUPAC profile, which on A/C/G/T input is equivalent to the DNA
-    /// profile.
+    /// The tiled searcher, for the pre-encoded terminal batches. Sassy
+    /// implements pattern tiling only for the IUPAC profile, which on A/C/G/T
+    /// input is equivalent to the DNA profile.
     static BATCH_SEARCHER: RefCell<BatchedAdapterSearcher> = RefCell::new(new_batched_searcher());
+
+    /// Per-read buffers, reused across reads.
+    static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::default());
+}
+
+/// Per-read buffers of one thread. Each keeps its capacity across reads, so
+/// the adapter stage itself allocates only the segments it returns; the
+/// remaining per-read allocations are sassy's own, inside each search call.
+#[derive(Debug, Default)]
+struct Scratch {
+    /// The normalized read, when the input is not its own normalization.
+    normalized: Vec<u8>,
+    /// The normalized read reversed, for the reverse strand of every search.
+    reversed: Vec<u8>,
+    /// Candidate windows; see `candidate_windows`.
+    windows: WindowScratch,
+}
+
+/// Candidate windows of one read as `(adapter, start, end)` triples.
+#[derive(Debug, Default)]
+struct WindowScratch {
+    /// Windows in seed-emission order.
+    emitted: Vec<(usize, usize, usize)>,
+    /// Windows grouped by adapter and merged: the interior search input.
+    grouped: Vec<(usize, usize, usize)>,
+    /// Per-adapter offsets into `grouped` while grouping.
+    offsets: Vec<usize>,
 }
 
 /// The read end a catalog sequence is expected at. The tag gates terminal
@@ -126,23 +154,39 @@ impl Budget {
 /// read for that adapter instead of candidate windows.
 const MAX_SEED_EXPANSIONS: usize = 256;
 
+/// Upper bound on the seed automaton's DFA size. A DFA past it is rebuilt as
+/// a contiguous NFA, which is a few times slower per byte but grows with the
+/// seed count rather than the state count times the alphabet stride.
+const MAX_SEED_DFA_BYTES: usize = 64 << 20;
+
 /// Exact-seed index over the adapter set. Aho-Corasick partition seeds bound
 /// the interior search to candidate windows, and equal-length adapters are
 /// grouped into SIMD batches for the terminal search.
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateIndex {
-    /// Automaton over every seed expansion; `None` when no adapter has seeds.
+    /// Automaton over every seed expansion (see `seed_automaton`); `None`
+    /// when no adapter has seeds.
     matcher: Option<AhoCorasick>,
     /// Adapters owning each seed, indexed by automaton pattern id.
     seed_adapters: Vec<Vec<usize>>,
     /// Per-adapter edit budgets, computed once per adapter set.
     budgets: Vec<Budget>,
+    /// Per-adapter `is_plain_acgt`, which selects the search profile.
+    plain: Vec<bool>,
     /// Adapters with no usable seeds (see `MAX_SEED_EXPANSIONS`).
     unfiltered: Vec<bool>,
     /// Equal-length adapter groups searched together over the end windows.
     terminal_batches: Vec<TerminalBatch>,
     /// Adapters covered by a batch and skipped by the singleton search.
     batched_adapters: Vec<bool>,
+}
+
+/// The per-thread single-pattern searchers `search` chooses between.
+struct Searchers<'a> {
+    /// The DNA-profile searcher, for a plain pattern.
+    plain: &'a mut PlainSearcher,
+    /// The IUPAC-profile searcher, for a degenerate pattern.
+    ambiguous: &'a mut AmbiguousSearcher,
 }
 
 /// Equal-length adapters searched together through sassy's pattern-parallel
@@ -153,6 +197,9 @@ struct TerminalBatch {
     adapter_indices: Vec<usize>,
     /// The adapter sequences, in `adapter_indices` order.
     patterns: Vec<Vec<u8>>,
+    /// `patterns` encoded once for the tiled search; `None` past
+    /// `MAX_TILED_PATTERN_LEN`, where the batch is searched from `patterns`.
+    encoded: Option<EncodedAdapterBatch>,
     /// The shared pattern length.
     len: usize,
     /// The shared terminal edit budget.
@@ -166,6 +213,10 @@ impl CandidateIndex {
         let budgets: Vec<Budget> = adapters
             .iter()
             .map(|adapter| Budget::new(adapter.seq.len(), error_rate))
+            .collect();
+        let plain: Vec<bool> = adapters
+            .iter()
+            .map(|adapter| is_plain_acgt(&adapter.seq))
             .collect();
         let mut unfiltered = vec![false; adapters.len()];
         let (matcher, seed_adapters) = if include_interior {
@@ -193,12 +244,7 @@ impl CandidateIndex {
 
             let patterns: Vec<Vec<u8>> = seeds.keys().cloned().collect();
             let seed_adapters: Vec<Vec<usize>> = seeds.into_values().collect();
-            let matcher = (!patterns.is_empty()).then(|| {
-                AhoCorasick::builder()
-                    .ascii_case_insensitive(true)
-                    .build(&patterns)
-                    .expect("Adapter seeds are nonempty ASCII DNA patterns")
-            });
+            let matcher = (!patterns.is_empty()).then(|| seed_automaton(&patterns));
             (matcher, seed_adapters)
         } else {
             (None, Vec::new())
@@ -228,9 +274,11 @@ impl CandidateIndex {
                     batched_adapters[adapter_idx] = true;
                 }
                 let k_end = budgets[adapter_indices[0]].k_end;
+                let encoded = encode_patterns(&batch_patterns);
                 terminal_batches.push(TerminalBatch {
                     adapter_indices,
                     patterns: batch_patterns,
+                    encoded,
                     len,
                     k_end,
                 });
@@ -240,59 +288,113 @@ impl CandidateIndex {
             matcher,
             seed_adapters,
             budgets,
+            plain,
             unfiltered,
             terminal_batches,
             batched_adapters,
         }
     }
 
-    /// Returns the per-adapter text spans that can hold an interior hit: a
-    /// radius around every exact seed occurrence, merged, or the whole text for
-    /// an `unfiltered` adapter.
-    fn candidate_windows(&self, text: &[u8]) -> Vec<Vec<(usize, usize)>> {
-        let mut windows: Vec<Vec<(usize, usize)>> = self
-            .unfiltered
-            .iter()
-            .map(|&whole| {
-                if whole {
-                    vec![(0, text.len())]
-                } else {
-                    Vec::new()
-                }
-            })
-            .collect();
-        let Some(matcher) = &self.matcher else {
-            return windows;
-        };
-        for m in matcher.find_overlapping_iter(text) {
-            for &adapter_idx in &self.seed_adapters[m.pattern().as_usize()] {
-                let Budget { len, k_end, .. } = self.budgets[adapter_idx];
-                // The exact seed lies inside the `<= k_mid` alignment. A radius
-                // of pattern length + `k_end` on each side contains that entire
-                // alignment and enough context for the full-window `k_end`
-                // search to reproduce its span and tie behavior.
-                let radius = len + k_end;
-                windows[adapter_idx].push((
-                    m.start().saturating_sub(radius),
-                    m.end().saturating_add(radius).min(text.len()),
-                ));
+    /// Fills `scratch.grouped` with the text spans that can hold an interior
+    /// hit, as `(adapter, start, end)` sorted by adapter then start: a radius
+    /// around every exact seed occurrence, merged per adapter, or the whole
+    /// text for an `unfiltered` adapter. `text` is a `normalized_read`; the
+    /// seed automaton matches uppercase bases only.
+    fn candidate_windows(&self, text: &[u8], scratch: &mut WindowScratch) {
+        let WindowScratch {
+            emitted,
+            grouped,
+            offsets,
+        } = scratch;
+        emitted.clear();
+        for (adapter_idx, &whole) in self.unfiltered.iter().enumerate() {
+            if whole {
+                emitted.push((adapter_idx, 0, text.len()));
             }
         }
-        for adapter_windows in &mut windows {
-            adapter_windows.sort_unstable();
-            let mut merged: Vec<(usize, usize)> = Vec::with_capacity(adapter_windows.len());
-            for &(start, end) in adapter_windows.iter() {
-                if let Some(last) = merged.last_mut()
-                    && start <= last.1
-                {
-                    last.1 = last.1.max(end);
-                } else {
-                    merged.push((start, end));
+        if let Some(matcher) = &self.matcher {
+            for m in matcher.find_overlapping_iter(text) {
+                for &adapter_idx in &self.seed_adapters[m.pattern().as_usize()] {
+                    let Budget { len, k_end, .. } = self.budgets[adapter_idx];
+                    // The exact seed lies inside the `<= k_mid` alignment. A
+                    // radius of pattern length + `k_end` on each side contains
+                    // that entire alignment and enough context for the
+                    // full-window `k_end` search to reproduce its span and tie
+                    // behavior.
+                    let radius = len + k_end;
+                    emitted.push((
+                        adapter_idx,
+                        m.start().saturating_sub(radius),
+                        m.end().saturating_add(radius).min(text.len()),
+                    ));
                 }
             }
-            *adapter_windows = merged;
         }
-        windows
+
+        // Groups the windows per adapter with a counting scatter and sorts
+        // each run on its own. The automaton emits in text order, so a run
+        // is nearly sorted already and costs a short insertion pass, where
+        // one sort of every window costs a comparison sort of hundreds.
+        let adapters = self.budgets.len();
+        offsets.clear();
+        offsets.resize(adapters + 1, 0);
+        for &(adapter_idx, _, _) in emitted.iter() {
+            offsets[adapter_idx + 1] += 1;
+        }
+        for adapter_idx in 0..adapters {
+            offsets[adapter_idx + 1] += offsets[adapter_idx];
+        }
+        grouped.clear();
+        grouped.resize(emitted.len(), (0, 0, 0));
+        for &window in emitted.iter() {
+            let slot = &mut offsets[window.0];
+            grouped[*slot] = window;
+            *slot += 1;
+        }
+
+        // Merges overlapping or touching windows of one adapter in place.
+        // After the scatter `offsets[a]` is the end of run `a`, and the
+        // merged prefix never reaches the run being read.
+        let mut merged = 0;
+        let mut run_start = 0;
+        for &run_end in offsets[..adapters].iter() {
+            grouped[run_start..run_end].sort_unstable();
+            let first = merged;
+            for i in run_start..run_end {
+                let (_, start, end) = grouped[i];
+                if merged > first && start <= grouped[merged - 1].2 {
+                    grouped[merged - 1].2 = grouped[merged - 1].2.max(end);
+                } else {
+                    grouped[merged] = grouped[i];
+                    merged += 1;
+                }
+            }
+            run_start = run_end;
+        }
+        grouped.truncate(merged);
+    }
+}
+
+/// Builds the overlapping-match automaton over `seeds`. The seed scan runs
+/// over every base of every read, so the automaton is a DFA: one table lookup
+/// per byte, against the contiguous NFA's per-state transition scan. Byte
+/// classes fold the bytes outside ACGT into one column and keep the table
+/// small. The automaton is case-sensitive over uppercase seeds: the scanned
+/// text is always a `normalized_read`, and a case-insensitive alphabet would
+/// double the table stride for nothing. A DFA past `MAX_SEED_DFA_BYTES`, or
+/// one the builder rejects, gives way to the contiguous NFA.
+fn seed_automaton(seeds: &[Vec<u8>]) -> AhoCorasick {
+    let build = |kind: AhoCorasickKind| {
+        AhoCorasick::builder()
+            .kind(Some(kind))
+            .byte_classes(true)
+            .prefilter(true)
+            .build(seeds)
+    };
+    match build(AhoCorasickKind::DFA) {
+        Ok(dfa) if dfa.memory_usage() <= MAX_SEED_DFA_BYTES => dfa,
+        _ => build(AhoCorasickKind::ContiguousNFA)
+            .expect("Adapter seeds are nonempty ASCII DNA patterns"),
     }
 }
 
@@ -388,25 +490,45 @@ enum Terminal {
     None,
 }
 
-/// Searches `pattern` in `text`, choosing the profile by the pattern's alphabet.
+/// Searches the adapter at `adapter_idx` in `text` and passes each hit to
+/// `accept`, choosing the profile by the pattern's alphabet (`plain`,
+/// precomputed per adapter).
 ///
 /// A degenerate primer needs the IUPAC profile so its wobble positions match the
 /// bases they stand for. A plain ACGT pattern takes the faster DNA profile,
 /// which matters because a narrowed adapter set is searched one pattern at a
 /// time rather than batched across SIMD lanes.
 ///
+/// Sassy's per-pattern search rebuilds the pattern profile and the
+/// complemented pattern on every call, a few allocations each. The tiled
+/// searcher would avoid them, but its column-major scan has no early exit and
+/// fills one lane of eight with a single pattern, and it measured slower on
+/// these short windows than the allocations cost.
+///
 /// `text` is plain ACGT on every call; see `normalized_read`.
 fn search(
-    plain: &mut PlainSearcher,
-    ambiguous: &mut AmbiguousSearcher,
+    searchers: &mut Searchers<'_>,
+    index: &CandidateIndex,
+    adapter_idx: usize,
     pattern: &[u8],
-    text: &[u8],
+    text: Strands<'_>,
     k: usize,
-) -> Vec<search::Hit> {
-    if is_plain_acgt(pattern) {
-        hits(plain, pattern, text, k)
+    accept: impl FnMut(Hit),
+) {
+    if index.plain[adapter_idx] {
+        for_each_hit(searchers.plain, pattern, &text, k, accept);
     } else {
-        hits(ambiguous, pattern, text, k)
+        for_each_hit(searchers.ambiguous, pattern, &text, k, accept);
+    }
+}
+
+/// Returns the strands of `read[start..end]`, given `reversed` as `read`
+/// reversed.
+fn strands<'a>(read: &'a [u8], reversed: &'a [u8], start: usize, end: usize) -> Strands<'a> {
+    let n = read.len();
+    Strands {
+        forward: &read[start..end],
+        reversed: &reversed[n - end..n - start],
     }
 }
 
@@ -425,25 +547,38 @@ fn search(
 /// only for IUPAC.
 const AMBIGUOUS_READ_BASE: u8 = b'A';
 
-/// Returns the read as every searcher sees it: each byte outside ACGT rewritten
-/// to `AMBIGUOUS_READ_BASE`. A plain read, the common case, borrows unchanged
-/// and allocates nothing.
+/// Returns the read as every searcher sees it: uppercase, with each byte
+/// outside ACGT rewritten to `AMBIGUOUS_READ_BASE`. An uppercase plain read,
+/// the common case, borrows unchanged and allocates nothing. Sassy's profiles
+/// fold case themselves; the seed automaton does not, so the text is folded
+/// once here rather than on every seed transition.
 pub(crate) fn normalized_read(window: &[u8]) -> Cow<'_, [u8]> {
-    if is_plain_acgt(window) {
+    if is_upper_acgt(window) {
         return Cow::Borrowed(window);
     }
-    Cow::Owned(
-        window
-            .iter()
-            .map(|&b| {
-                if matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't') {
-                    b
-                } else {
-                    AMBIGUOUS_READ_BASE
-                }
-            })
-            .collect(),
-    )
+    Cow::Owned(window.iter().map(|&b| normalize_base(b)).collect())
+}
+
+/// Returns the normalized form of one read byte: its uppercase base, or
+/// `AMBIGUOUS_READ_BASE` for a byte outside ACGT.
+#[inline]
+fn normalize_base(b: u8) -> u8 {
+    match b {
+        b'A' | b'C' | b'G' | b'T' => b,
+        b'a' | b'c' | b'g' | b't' => b.to_ascii_uppercase(),
+        _ => AMBIGUOUS_READ_BASE,
+    }
+}
+
+/// Returns whether every byte is an uppercase A/C/G/T, so that the window is
+/// its own `normalized_read`. Folded 32 bytes at a time without an early exit
+/// and with the four comparisons or-ed rather than matched, which lets the
+/// scan vectorize; it runs over every base of every read.
+fn is_upper_acgt(seq: &[u8]) -> bool {
+    let upper_acgt = |b: u8| (b == b'A') | (b == b'C') | (b == b'G') | (b == b'T');
+    let mut chunks = seq.chunks_exact(32);
+    let body = chunks.all(|chunk| chunk.iter().fold(true, |ok, &b| ok & upper_acgt(b)));
+    body && chunks.remainder().iter().all(|&b| upper_acgt(b))
 }
 
 /// Emits a trace event for one adapter hit: the sequence, its span, its edit
@@ -658,50 +793,79 @@ impl<'a> Keep<'a> {
 /// Searches every equal-length batch over the two end windows. All adapters in
 /// a batch share a length and budget, so the windows are shared too; this
 /// collapses the ONT catalog's 96 equal-length barcode searches into one SIMD
-/// pattern search per end.
+/// pattern search per end. `reversed` is `window` reversed.
 fn search_batched(
     index: &CandidateIndex,
     window: &[u8],
+    reversed: &[u8],
     searcher: &mut BatchedAdapterSearcher,
     keep: &mut Keep<'_>,
 ) {
     let n = window.len();
     for batch in &index.terminal_batches {
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, batch.len, batch.k_end);
-        for h in pattern_hits(searcher, &batch.patterns, &window[..head_end], batch.k_end) {
-            keep.accept(
-                Site::Head,
-                batch.adapter_indices[h.pattern_idx],
-                h.text_start,
-                h.text_end,
-                h.cost as usize,
-            );
-        }
-        for h in pattern_hits(
+        accept_batch_hits(
+            batch,
             searcher,
-            &batch.patterns,
+            &window[..head_end],
+            &reversed[n - head_end..],
+            0,
+            Site::Head,
+            keep,
+        );
+        accept_batch_hits(
+            batch,
+            searcher,
             &window[tail_start..],
-            batch.k_end,
-        ) {
-            keep.accept(
-                Site::Tail { head_end },
-                batch.adapter_indices[h.pattern_idx],
-                tail_start + h.text_start,
-                tail_start + h.text_end,
-                h.cost as usize,
-            );
-        }
+            &reversed[..n - tail_start],
+            tail_start,
+            Site::Tail { head_end },
+            keep,
+        );
+    }
+}
+
+/// Searches one batch over `text`, a window starting at `offset` in the read
+/// whose reversal is `reversed`, and passes every hit to `keep` at `site` in
+/// read coordinates.
+fn accept_batch_hits(
+    batch: &TerminalBatch,
+    searcher: &mut BatchedAdapterSearcher,
+    text: &[u8],
+    reversed: &[u8],
+    offset: usize,
+    site: Site,
+    keep: &mut Keep<'_>,
+) {
+    let mut accept = |pattern_idx: usize, start: usize, end: usize, cost: usize| {
+        keep.accept(
+            site,
+            batch.adapter_indices[pattern_idx],
+            offset + start,
+            offset + end,
+            cost,
+        );
+    };
+    match &batch.encoded {
+        Some(encoded) => {
+            encoded_pattern_hits(searcher, encoded, text, reversed, batch.k_end, accept);
+        },
+        None => {
+            for h in pattern_hits(searcher, &batch.patterns, text, batch.k_end) {
+                accept(h.pattern_idx, h.text_start, h.text_end, h.cost as usize);
+            }
+        },
     }
 }
 
 /// Searches every adapter without an equal-length partner over the two end
-/// windows, one pattern at a time.
+/// windows, one pattern at a time. `reversed` is `window` reversed.
 fn search_singletons(
     cfg: &AdapterConfig,
     index: &CandidateIndex,
     window: &[u8],
-    plain: &mut PlainSearcher,
-    ambiguous: &mut AmbiguousSearcher,
+    reversed: &[u8],
+    searchers: &mut Searchers<'_>,
     keep: &mut Keep<'_>,
 ) {
     let n = window.len();
@@ -711,41 +875,60 @@ fn search_singletons(
             continue;
         }
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, len, k_end);
-        for h in search(plain, ambiguous, &adapter.seq, &window[..head_end], k_end) {
-            keep.accept(Site::Head, adapter_idx, h.start, h.end, h.cost);
-        }
-        for h in search(plain, ambiguous, &adapter.seq, &window[tail_start..], k_end) {
-            keep.accept(
-                Site::Tail { head_end },
-                adapter_idx,
-                tail_start + h.start,
-                tail_start + h.end,
-                h.cost,
-            );
-        }
+        search(
+            searchers,
+            index,
+            adapter_idx,
+            &adapter.seq,
+            strands(window, reversed, 0, head_end),
+            k_end,
+            |h| keep.accept(Site::Head, adapter_idx, h.start, h.end, h.cost),
+        );
+        search(
+            searchers,
+            index,
+            adapter_idx,
+            &adapter.seq,
+            strands(window, reversed, tail_start, n),
+            k_end,
+            |h| {
+                keep.accept(
+                    Site::Tail { head_end },
+                    adapter_idx,
+                    tail_start + h.start,
+                    tail_start + h.end,
+                    h.cost,
+                );
+            },
+        );
     }
 }
 
 /// Searches every adapter's candidate windows at `k_mid`. Exact partition
 /// seeds identify every possible interior match, and interior hits are
 /// accepted only up to `k_mid`, so the search runs at that limit rather than
-/// the looser end budget.
+/// the looser end budget. `reversed` is `window` reversed. An adapter below
+/// `MIN_PATTERN_LEN` has no seeds and no windows.
 fn search_interior(
     cfg: &AdapterConfig,
     index: &CandidateIndex,
     window: &[u8],
-    plain: &mut PlainSearcher,
-    ambiguous: &mut AmbiguousSearcher,
+    reversed: &[u8],
+    windows: &mut WindowScratch,
+    searchers: &mut Searchers<'_>,
     keep: &mut Keep<'_>,
 ) {
-    let candidate_windows = index.candidate_windows(window);
-    for (adapter_idx, adapter) in cfg.adapters.iter().enumerate() {
-        let Budget { len, k_mid, .. } = index.budgets[adapter_idx];
-        if len < MIN_PATTERN_LEN {
-            continue;
-        }
-        for &(start, end) in &candidate_windows[adapter_idx] {
-            for h in search(plain, ambiguous, &adapter.seq, &window[start..end], k_mid) {
+    index.candidate_windows(window, windows);
+    for &(adapter_idx, start, end) in windows.grouped.iter() {
+        let Budget { k_mid, .. } = index.budgets[adapter_idx];
+        search(
+            searchers,
+            index,
+            adapter_idx,
+            &cfg.adapters[adapter_idx].seq,
+            strands(window, reversed, start, end),
+            k_mid,
+            |h| {
                 keep.accept(
                     Site::Interior,
                     adapter_idx,
@@ -753,8 +936,8 @@ fn search_interior(
                     start + h.end,
                     h.cost,
                 );
-            }
-        }
+            },
+        );
     }
 }
 
@@ -774,22 +957,46 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
     if cfg.adapters.is_empty() {
         return vec![(0, n)];
     }
-    let window = normalized_read(window);
     let index = cfg
         .candidate_index
         .get_or_init(|| CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.split));
     let mut keep = Keep::new(&cfg.adapters, n, cfg.end_size.min(n), cfg.split);
-    RC_SEARCHER.with_borrow_mut(|plain| {
-        RC_AMBIGUOUS.with_borrow_mut(|ambiguous| {
-            if !index.terminal_batches.is_empty() {
-                BATCH_SEARCHER.with_borrow_mut(|batch| {
-                    search_batched(index, &window, batch, &mut keep);
-                });
-            }
-            search_singletons(cfg, index, &window, plain, ambiguous, &mut keep);
-            if cfg.split {
-                search_interior(cfg, index, &window, plain, ambiguous, &mut keep);
-            }
+    SCRATCH.with_borrow_mut(|scratch| {
+        let Scratch {
+            normalized,
+            reversed,
+            windows,
+        } = scratch;
+        let window: &[u8] = if is_upper_acgt(window) {
+            window
+        } else {
+            normalized.clear();
+            normalized.extend(window.iter().map(|&b| normalize_base(b)));
+            normalized
+        };
+        reversed.clear();
+        reversed.extend(window.iter().rev());
+        if !index.terminal_batches.is_empty() {
+            BATCH_SEARCHER.with_borrow_mut(|tiled| {
+                search_batched(index, window, reversed, tiled, &mut keep);
+            });
+        }
+        RC_SEARCHER.with_borrow_mut(|plain| {
+            RC_AMBIGUOUS.with_borrow_mut(|ambiguous| {
+                let mut searchers = Searchers { plain, ambiguous };
+                search_singletons(cfg, index, window, reversed, &mut searchers, &mut keep);
+                if cfg.split {
+                    search_interior(
+                        cfg,
+                        index,
+                        window,
+                        reversed,
+                        windows,
+                        &mut searchers,
+                        &mut keep,
+                    );
+                }
+            });
         });
     });
 
@@ -837,6 +1044,33 @@ mod segment_tests {
             .collect()
     }
 
+    /// Searches `pattern` over a plain slice through the profile its alphabet
+    /// selects, as the reference for `search`.
+    fn reference_search(
+        plain: &mut PlainSearcher,
+        ambiguous: &mut AmbiguousSearcher,
+        pattern: &[u8],
+        text: &[u8],
+        k: usize,
+    ) -> Vec<Hit> {
+        if is_plain_acgt(pattern) {
+            search::hits(plain, pattern, text, k)
+        } else {
+            search::hits(ambiguous, pattern, text, k)
+        }
+    }
+
+    /// Returns `candidate_windows` grouped per adapter.
+    fn windows_by_adapter(index: &CandidateIndex, text: &[u8]) -> Vec<Vec<(usize, usize)>> {
+        let mut scratch = WindowScratch::default();
+        index.candidate_windows(text, &mut scratch);
+        let mut by_adapter = vec![Vec::new(); index.budgets.len()];
+        for (adapter_idx, start, end) in scratch.grouped {
+            by_adapter[adapter_idx].push((start, end));
+        }
+        by_adapter
+    }
+
     /// Computes the segments by exhaustive full-window search, as the reference
     /// for the candidate filter.
     fn reference_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
@@ -862,7 +1096,9 @@ mod segment_tests {
             }
             let Budget { k_end, k_mid, .. } = Budget::new(len, cfg.error_rate);
             if cfg.split {
-                for hit in search(&mut plain, &mut ambiguous, &adapter.seq, &window, k_end) {
+                for hit in
+                    reference_search(&mut plain, &mut ambiguous, &adapter.seq, &window, k_end)
+                {
                     match classify_terminal(hit.start, hit.end, n, end_size, adapter.end) {
                         Terminal::Five => lo = lo.max(hit.end),
                         Terminal::Three => hi = hi.min(hit.start),
@@ -875,7 +1111,7 @@ mod segment_tests {
                 }
             } else {
                 let head_end = (end_size + len + k_end).min(n);
-                for hit in search(
+                for hit in reference_search(
                     &mut plain,
                     &mut ambiguous,
                     &adapter.seq,
@@ -889,7 +1125,7 @@ mod segment_tests {
                     }
                 }
                 let tail_start = n.saturating_sub(end_size + len + k_end);
-                for hit in search(
+                for hit in reference_search(
                     &mut plain,
                     &mut ambiguous,
                     &adapter.seq,
@@ -1137,7 +1373,7 @@ mod segment_tests {
                 text.make_ascii_lowercase();
             }
             assert!(
-                !index.candidate_windows(&text)[0].is_empty(),
+                !windows_by_adapter(&index, &normalized_read(&text))[0].is_empty(),
                 "Lossless seed filter rejected <=k edit case {case}"
             );
         }
@@ -1261,7 +1497,7 @@ mod segment_tests {
             index.matcher.is_none(),
             "No seed is built for an unfiltered adapter"
         );
-        assert_eq!(index.candidate_windows(&w), vec![vec![(0, w.len())]]);
+        assert_eq!(windows_by_adapter(&index, &w), vec![vec![(0, w.len())]]);
         let segs = adapter_segments(&w, &c);
         assert_eq!(segs, reference_segments(&w, &c));
         assert_eq!(
