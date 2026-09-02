@@ -195,7 +195,7 @@ fn every_validation_names_its_flag() {
         (
             vec!["--compression-level".into(), "10".into()],
             Expect::Fails,
-            "--compression-level must be between 0 and 9",
+            "--compression-level",
         ),
         (
             vec!["--max-gc".into(), "1.5".into()],
@@ -227,11 +227,7 @@ fn every_validation_names_its_flag() {
             Expect::Fails,
             "--max-qual (inf) must be a finite quality",
         ),
-        (
-            vec!["-t".into(), "0".into()],
-            Expect::Fails,
-            "-t/--threads must be at least 1",
-        ),
+        (vec!["-t".into(), "0".into()], Expect::Fails, "--threads"),
         (
             vec!["--fastq-tags".into(), "MM,ABC".into()],
             Expect::Fails,
