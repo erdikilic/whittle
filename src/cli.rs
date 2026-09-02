@@ -42,8 +42,13 @@ struct Cli {
     out_format: Option<FormatArg>,
     /// Worker threads, at least 1; values above the CPU count are clamped to
     /// it. Defaults to all detected CPUs.
-    #[arg(short = 't', long, help_heading = "Setup")]
-    threads: Option<usize>,
+    #[arg(
+        short = 't',
+        long,
+        value_parser = clap::value_parser!(u64).range(1..),
+        help_heading = "Setup"
+    )]
+    threads: Option<u64>,
     /// Write records in input order when running with more than one thread.
     /// Without it, records are written as they finish, which is faster and uses
     /// less memory but is not reproducible between runs.
@@ -57,7 +62,14 @@ struct Cli {
     /// .bgz, gzip for FASTQ.gz. Lower levels are faster and produce larger
     /// files. Ignored for plain FASTQ. Defaults to 4 for gzip FASTQ and 6 for
     /// BGZF.
-    #[arg(short = 'c', long, help_heading = "Setup")]
+    // bgzf (libdeflate) accepts up to 12 and gzip up to 9; the cap is the
+    // common 0-9 so a single flag is valid for both compressed output formats.
+    #[arg(
+        short = 'c',
+        long,
+        value_parser = clap::value_parser!(u8).range(0..=9),
+        help_heading = "Setup"
+    )]
     compression_level: Option<u8>,
     /// Write a machine-readable JSON run summary (counters plus the resolved
     /// settings) to this path. Written even under --quiet.
@@ -327,9 +339,6 @@ pub fn parse() -> anyhow::Result<Config> {
     if c.verbose > 2 {
         anyhow::bail!("verbosity accepts at most -vv (debug with -v, trace with -vv)");
     }
-    if c.threads == Some(0) {
-        anyhow::bail!("-t/--threads must be at least 1 (got 0)");
-    }
     validate_filters(&c)?;
     let compression_level = compression_level_for(&c);
     let quality = quality_op_for(&c);
@@ -343,8 +352,11 @@ pub fn parse() -> anyhow::Result<Config> {
     let ncpu = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let threads = crate::config::resolve_threads(c.threads, ncpu);
-    let threads_clamped = match c.threads {
+    // `-t` is parsed as u64 so clap enforces the lower bound; a value beyond
+    // usize saturates and is clamped to the CPU count like any other excess.
+    let threads_requested = c.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    let threads = crate::config::resolve_threads(threads_requested, ncpu);
+    let threads_clamped = match threads_requested {
         Some(n) if n > ncpu => Some((n, ncpu)),
         _ => None,
     };
@@ -404,14 +416,6 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
     if n_quality > 1 {
         anyhow::bail!("--qual-trim, --qual-best-segment and --qual-split are mutually exclusive");
     }
-    // bgzf (libdeflate) accepts up to 12 and gzip up to 9; the cap is the
-    // common 0-9 so a single flag is valid for both compressed output formats.
-    if let Some(level) = c.compression_level
-        && level > 9
-    {
-        anyhow::bail!("--compression-level must be between 0 and 9 (got {level})");
-    }
-
     let max_length = c.max_length.unwrap_or(usize::MAX);
     if c.min_length > max_length {
         anyhow::bail!(

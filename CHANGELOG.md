@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `noodles-bam`, `noodles-sam`, and `noodles-bgzf` updated to 0.95, 0.90, and
   0.51; `clap`, `anyhow`, `thiserror`, `crossbeam-channel`, `gzp`, `bstr`,
   `aho-corasick`, and `jiff` to their latest patch releases.
+- The gzip decoder is zlib-rs rather than zlib-ng, which reads compressed FASTQ
+  about 7 percent faster and drops a C build dependency from the decode path.
 
 ### Fixed
 - `--summary-json` wrote its `command` field with the banner's `Command: ` label
