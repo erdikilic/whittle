@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::filter::FilterConfig;
 use crate::io::Format;
@@ -145,7 +145,7 @@ impl Advisory {
 
 /// How progress is reported, chosen independently of the log level.
 ///
-/// `--quiet` silences everything and still wins over this. The point of the
+/// `--quiet` conflicts with `--progress` at parse time. The point of the
 /// separation is that a pipeline may want the run summary without a progress line
 /// every thirty seconds in its log, and a terminal user may want the summary
 /// without an animated bar.
@@ -154,7 +154,9 @@ pub enum ProgressMode {
     /// A bar on a terminal, periodic lines otherwise.
     #[default]
     Auto,
-    /// Always the animated bar, even when output is redirected.
+    /// The animated bar, even when output is redirected. Falls back to
+    /// periodic lines under `-v`/`-vv` or `WHITTLE_LOG`, since debug output and
+    /// a live bar cannot share a terminal.
     Bar,
     /// Always periodic lines, never a bar.
     Plain,
@@ -193,9 +195,9 @@ pub struct Config {
     /// Only meaningful when `adapters` is `Some`.
     pub adapter_sample: usize,
     /// DEFLATE compression level (0-9) for compressed output: bgzf for BAM,
-    /// gzip for FASTQ.gz. `6` is the bgzf/gzip default; lower it (e.g. 1-3) to
-    /// trade ratio for speed on the compression-bound BAM path. Plain FASTQ
-    /// output ignores it. Validated to 0..=9 by `cli::parse`.
+    /// gzip for FASTQ.gz. `cli::parse` defaults it to 4 for gzip FASTQ and 6
+    /// for BGZF (BAM and `.bgz`), and validates an explicit value to 0..=9.
+    /// Plain FASTQ output ignores it.
     pub compression_level: u8,
     /// When true, keep ONT signal tags consistent through trimming instead of
     /// dropping them: slice the `mv` move table and update `ts`/`ns`/`sp`/`pi`
@@ -229,12 +231,26 @@ pub struct Config {
     pub adapters_configured: Option<usize>,
 }
 
+impl Config {
+    /// Every file the run writes, each paired with the flag that named it. The
+    /// overwrite guards and the report-only advisories both derive from this
+    /// list, so a new artifact flag is covered by both once it is added here.
+    pub fn write_targets(&self) -> impl Iterator<Item = (&'static str, &Path)> {
+        [
+            ("-o/--output", self.io.output.as_deref()),
+            ("--summary-json", self.summary_json.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(flag, path)| path.map(|p| (flag, p)))
+    }
+}
+
 /// How a `-t` total worker budget splits across the workflow stages. The split
 /// is workload-aware (see `thread_budget`): decode never benefits from more
 /// than 1 thread (serial inflate keeps up), while render (MM/ML
 /// reconstruction, or the trim-only pass for FASTQ) and encode (bgzf/gzip
 /// compression) are weighted against each other based on how heavy each stage
-/// actually is for the dispatched (input, output) pair.
+/// is for the dispatched (input, output) pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadBudget {
     pub decode: usize,
@@ -243,10 +259,11 @@ pub struct ThreadBudget {
 }
 
 impl ThreadBudget {
-    /// Sum across all three stages: the resolved total worker count shown in
-    /// the startup banner's `Threads: {total} total (...)` line. May exceed the
-    /// requested `-t` value at very low counts, since `thread_budget` floors
-    /// `render`/`encode` at >= 1 each even when the overall total is 1.
+    /// Sum across all three stages. Exceeds the requested `-t` value at very
+    /// low counts, since `thread_budget` floors `render` and `encode` at 1 each
+    /// even when the overall total is 1, which is why the banner prints the
+    /// requested count instead.
+    #[cfg(test)]
     pub fn total(&self) -> usize {
         self.decode + self.render + self.encode
     }
@@ -346,8 +363,10 @@ pub fn thread_budget(
     }
 }
 
-/// Resolve the worker-thread count. `None` (flag omitted) → all available CPUs;
-/// `Some(n)` → clamp into `[1, ncpu]`. The caller warns when it clamped down.
+/// Resolves the worker-thread count. `None` (flag omitted) means all available
+/// CPUs; `Some(n)` is clamped into `[1, ncpu]`. The caller warns when it clamped
+/// down; `cli::parse` rejects 0 before this runs, so the floor covers library
+/// callers only.
 pub fn resolve_threads(requested: Option<usize>, ncpu: usize) -> usize {
     let ncpu = ncpu.max(1);
     match requested {
@@ -380,10 +399,9 @@ mod resolve_threads_tests {
 
 /// The output compression stage's weight for a given output format: `Bgzf` for
 /// BAM (always bgzf-compressed), `Gzip` for `FASTQ.gz`, `None` for plain FASTQ.
-/// Paired with `render_heavy` (`in_fmt == Format::Bam`, or the folder-mode
-/// equivalent), this is everything `config::thread_budget` needs; both call sites
-/// (`run`, `run_folder`) resolve their budget from this exactly once, before the
-/// startup banner, and reuse it for the actual workflow dispatch below.
+/// Paired with `render_heavy_for`, this is everything `thread_budget` needs;
+/// `lib::plan_budget` resolves the budget from both exactly once, before the
+/// startup banner, and reuses it for the workflow dispatch.
 pub(crate) fn encode_kind_for(out_fmt: crate::io::Format) -> EncodeKind {
     match out_fmt {
         crate::io::Format::Bam => EncodeKind::Bgzf,
@@ -393,17 +411,13 @@ pub(crate) fn encode_kind_for(out_fmt: crate::io::Format) -> EncodeKind {
     }
 }
 
-/// Whether the render stage has substantial per-record work. BAM input remains
-/// render-heavy even for a full-window output because the current parallel path
-/// still clones owned `RecordBuf`s before handing them to the writer. FASTQ
-/// input is normally trim-only (light), but adapter matching or ab-initio
-/// inference runs an approximate search per read, which is heavy too, so it
-/// gets a render-pool share rather than being starved as pure compression.
-pub(crate) fn render_heavy_for(
-    in_fmt: crate::io::Format,
-    _out_fmt: crate::io::Format,
-    cfg: &Config,
-) -> bool {
+/// Whether the render stage has substantial per-record work. BAM input is
+/// render-heavy for every output format because the parallel path clones owned
+/// `RecordBuf`s before handing them to the writer. FASTQ input is normally
+/// trim-only (light), but adapter matching or ab-initio inference runs an
+/// approximate search per read, which is heavy too, so it gets a render-pool
+/// share rather than being starved as pure compression.
+pub(crate) fn render_heavy_for(in_fmt: crate::io::Format, cfg: &Config) -> bool {
     matches!(in_fmt, crate::io::Format::Bam)
         || cfg.adapters.is_some()
         || cfg.adapter_infer != AdapterInfer::Off
@@ -411,6 +425,7 @@ pub(crate) fn render_heavy_for(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     /// Every stage must get at least one worker at every thread count, for every
     /// combination of inputs. A stage of zero is not a slower configuration, it is
@@ -460,7 +475,6 @@ mod tests {
             }
         }
     }
-    use super::*;
 
     #[test]
     fn parse_all_none() {
@@ -547,14 +561,6 @@ mod tests {
                 encode: 1
             }
         );
-        for t in [1usize, 2, 3, 4, 16] {
-            for rh in [true, false] {
-                for e in [None, Bgzf, Gzip] {
-                    let b = thread_budget(t, rh, false, e);
-                    assert!(b.decode >= 1 && b.render >= 1 && b.encode >= 1);
-                }
-            }
-        }
     }
 
     #[test]

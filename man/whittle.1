@@ -17,10 +17,10 @@ Print help (see a summary with \*(Aq\-h\*(Aq)
 Print version information and exit
 .TP
 \fB\-i\fR, \fB\-\-input\fR \fI<INPUT>\fR
-Input FASTQ\-family file, unaligned BAM, or directory. Reads stdin when omitted
+Input FASTQ\-family file, unaligned BAM, or directory. Reads stdin when omitted or given as \-
 .TP
 \fB\-o\fR, \fB\-\-output\fR \fI<OUTPUT>\fR
-Output file. Writes stdout when omitted; the path extension selects its format
+Output file; the path extension selects its format. Writes stdout when omitted or given as \-
 .TP
 \fB\-\-in\-format\fR \fI<IN_FORMAT>\fR
 Force the input format instead of detecting it from the path or stream
@@ -57,29 +57,29 @@ bam
 .RE
 .TP
 \fB\-t\fR, \fB\-\-threads\fR \fI<THREADS>\fR
-Worker threads (default: all detected CPUs; values above the CPU count are clamped)
+Worker threads, at least 1; values above the CPU count are clamped to it. Defaults to all detected CPUs
 .TP
 \fB\-\-ordered\fR
 Write records in input order when running with more than one thread. Without it, records are written as they finish, which is faster and uses less memory but is not reproducible between runs
 .TP
 \fB\-\-fastq\-tags\fR \fI<FASTQ_TAGS>\fR [default: all]
-BAM auxiliary tags copied into BAM\-to\-FASTQ headers: all, none, or a list such as MM,ML,RG
+BAM auxiliary tags copied into BAM\-to\-FASTQ headers: all, none, or a list such as MM,ML,RG. Defaults to all
 .TP
 \fB\-c\fR, \fB\-\-compression\-level\fR \fI<COMPRESSION_LEVEL>\fR
-DEFLATE compression level for compressed output (bgzf for BAM, gzip for FASTQ.gz). Lower = faster/larger. Ignored for plain FASTQ. Default when unset: 4 for gzip FASTQ output, 6 for BGZF (BAM and .bgz)
+DEFLATE compression level (0\-9) for compressed output: bgzf for BAM and .bgz, gzip for FASTQ.gz. Lower is faster and larger. Ignored for plain FASTQ. Defaults to 4 for gzip FASTQ and 6 for BGZF
 .TP
 \fB\-\-summary\-json\fR \fI<PATH>\fR
 Write a machine\-readable JSON run summary (counters plus the resolved settings) to this path. Written even under \-\-quiet
 .SH LOGGING
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
-Increase logging detail: \-v = debug, \-vv = trace (maximum two). Overridden by WHITTLE_LOG
+Increase logging detail: \-v is debug, \-vv is trace (at most two). Overridden by WHITTLE_LOG
 .TP
 \fB\-\-quiet\fR
-Silence progress and info output; warnings and errors still print
+Silence progress and info output; warnings and errors still print. Conflicts with \-v and \-\-progress
 .TP
 \fB\-\-progress\fR \fI<PROGRESS>\fR [default: auto]
-How to report progress, independently of the log level: a bar on a terminal and periodic lines otherwise (auto), always one or the other, or none at all while keeping the banner and summary
+How to report progress, independently of the log level: a bar on a terminal and periodic lines otherwise (auto), always one or the other, or none at all while keeping the banner and summary. A bar falls back to lines under \-v or WHITTLE_LOG. Defaults to auto
 .br
 
 .br
@@ -88,7 +88,7 @@ How to report progress, independently of the log level: a bar on a terminal and 
 .IP \(bu 2
 auto: A bar on a terminal, periodic lines otherwise
 .IP \(bu 2
-bar: Always the animated bar
+bar: The animated bar, unless \-v or WHITTLE_LOG asks for log lines
 .IP \(bu 2
 plain: Always periodic lines, never a bar
 .IP \(bu 2
@@ -97,25 +97,25 @@ none: No progress reporting; the banner and summary still print
 .SH FILTERING
 .TP
 \fB\-l\fR, \fB\-\-min\-length\fR \fI<MIN_LENGTH>\fR [default: 1]
-Minimum post\-trim segment length
+Minimum post\-trim segment length. Defaults to 1
 .TP
 \fB\-L\fR, \fB\-\-max\-length\fR \fI<MAX_LENGTH>\fR
 Maximum post\-trim segment length
 .TP
 \fB\-q\fR, \fB\-\-min\-qual\fR \fI<MIN_QUAL>\fR [default: 0]
-Minimum post\-trim read quality under \-\-qual\-mode
+Minimum post\-trim read quality under \-\-qual\-mode. Defaults to 0
 .TP
 \fB\-Q\fR, \fB\-\-max\-qual\fR \fI<MAX_QUAL>\fR [default: 1000]
-Maximum post\-trim read quality under \-\-qual\-mode
+Maximum post\-trim read quality under \-\-qual\-mode. Defaults to 1000
 .TP
 \fB\-g\fR, \fB\-\-min\-gc\fR \fI<MIN_GC>\fR
-Minimum post\-trim GC fraction (0\-1)
+Minimum post\-trim GC fraction (0 to 1)
 .TP
 \fB\-G\fR, \fB\-\-max\-gc\fR \fI<MAX_GC>\fR
-Maximum post\-trim GC fraction (0\-1)
+Maximum post\-trim GC fraction (0 to 1)
 .TP
 \fB\-m\fR, \fB\-\-qual\-mode\fR \fI<QUAL_MODE>\fR [default: mean]
-Read\-quality summary used by the quality filters
+Read\-quality summary used by the quality filters. Defaults to mean
 .br
 
 .br
@@ -131,10 +131,10 @@ median: Take the median per\-base Phred score
 .SH TRIMMING
 .TP
 \fB\-H\fR, \fB\-\-head\-crop\fR \fI<HEAD_CROP>\fR [default: 0]
-Remove this many bases from the 5\*(Aq end before other trimming
+Remove this many bases from the 5\*(Aq end before other trimming. Defaults to 0
 .TP
 \fB\-T\fR, \fB\-\-tail\-crop\fR \fI<TAIL_CROP>\fR [default: 0]
-Remove this many bases from the 3\*(Aq end before other trimming
+Remove this many bases from the 3\*(Aq end before other trimming. Defaults to 0
 .TP
 \fB\-\-qual\-trim\fR \fI<QUAL_TRIM>\fR
 Trim low\-quality bases from both ends until each boundary reaches Q
@@ -146,17 +146,17 @@ Keep the longest contiguous segment whose bases are all at least Q
 Split at low\-quality runs below Q and keep the surviving segments
 .TP
 \fB\-\-qual\-split\-window\fR \fI<QUAL_SPLIT_WINDOW>\fR [default: 1]
-Tolerate low\-quality runs shorter than this many bases when splitting
+Tolerate low\-quality runs shorter than this many bases when splitting. Requires \-\-qual\-split. Defaults to 1
 .TP
 \fB\-\-update\-moves\fR
-Keep ONT signal tags consistent through trimming (slice `mv`, update `ts`/`ns`/`sp`/`pi`) for signal\-aware tools (Remora, Clair3 v2), instead of dropping them. BAM→BAM only
+Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp and pi) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM to BAM only
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<ADAPTER_FASTA>\fR
-Adapter FASTA (each sequence >= the 11\-bp minimum match length). Enables adapter trimming
+Adapter FASTA (each sequence at least the 11 bp minimum match length). Enables adapter trimming
 .TP
 \fB\-\-adapter\-preset\fR \fI<ADAPTER_PRESET>\fR [default: none]
-Built\-in ONT adapter catalog. Enables adapter trimming
+Built\-in ONT adapter catalog. Enables adapter trimming. Defaults to none
 .br
 
 .br
@@ -168,20 +168,20 @@ none: Do not load a built\-in adapter catalog
 ont: Load the built\-in Oxford Nanopore adapter and barcode catalog
 .RE
 .TP
-\fB\-\-adapter\-error\-rate\fR \fI<ADAPTER_ERROR_RATE>\fR [default: 0.2]
-End\-match tolerance (fraction of adapter length). Interior splits use half
+\fB\-\-adapter\-error\-rate\fR \fI<ADAPTER_ERROR_RATE>\fR
+End\-match tolerance as a fraction of adapter length; interior splits use half. Requires an adapter source. Defaults to 0.2
 .TP
-\fB\-\-adapter\-end\-size\fR \fI<ADAPTER_END_SIZE>\fR [default: 150]
-Bases at each read end searched for a terminal adapter
+\fB\-\-adapter\-end\-size\fR \fI<ADAPTER_END_SIZE>\fR
+Bases at each read end searched for a terminal adapter. Requires an adapter source. Defaults to 150
 .TP
 \fB\-\-adapter\-ends\-only\fR
 Trim adapters at read ends only; never split on interior adapters
 .TP
 \fB\-\-adapter\-sample\fR \fI<ADAPTER_SAMPLE>\fR
-Reads sampled for preset detection or ab\-initio inference. Defaults to 0 for preset detection and 40000 for inference; inference requires >=100
+Reads sampled for preset detection or ab\-initio inference; inference requires at least 100. Requires an adapter source. Defaults to 0 for preset detection and 40000 for inference
 .TP
 \fB\-\-adapter\-infer\fR [\fI<ADAPTER_INFER>\fR]
-Discover adapters de novo. With no value, defaults to trim; report prints inferred FASTA and exits without writing read output
+Discover adapters de novo. Report prints the inferred FASTA and exits without writing read output. Defaults to trim when given no value
 .br
 
 .br
@@ -194,7 +194,7 @@ report: Print inferred FASTA to stdout and do not write read output
 .RE
 .TP
 \fB\-\-adapter\-infer\-policy\fR \fI<ADAPTER_INFER_POLICY>\fR
-Trust policy for inferred consensuses (default: conservative). Aggressive uses the complete consensus and permits splitting unless ends\-only is set
+Trust policy for inferred consensuses. Aggressive uses the complete consensus and permits splitting unless ends\-only is set. Defaults to conservative
 .br
 
 .br

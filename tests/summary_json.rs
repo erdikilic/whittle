@@ -149,13 +149,14 @@ fn summary_is_written_for_a_folder_run() {
 }
 
 /// A mistyped summary path fails before any reads are processed, not after: on a
-/// large BAM the late failure threw away the whole run.
+/// large BAM a late failure throws away the whole run.
 #[test]
 fn unwritable_summary_path_fails_the_run() {
     let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.fastq");
 
     whittle()
-        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .args(["-o", out.to_str().unwrap()])
         .args([
             "--summary-json",
             dir.path()
@@ -166,10 +167,12 @@ fn unwritable_summary_path_fails_the_run() {
         .write_stdin(reads())
         .assert()
         .failure()
-        .stderr(predicate::str::contains("does not exist"))
-        // "Failed after 0ms" proves it bailed during setup rather than after the
-        // reads were written.
-        .stderr(predicate::str::contains("Failed after 0ms"));
+        .stderr(predicate::str::contains("does not exist"));
+
+    assert!(
+        !out.exists(),
+        "The run bails during setup, before the output file is created"
+    );
 }
 
 /// Without the flag, nothing is written and no stray file appears.
@@ -210,21 +213,27 @@ fn elapsed_seconds_survives_quiet() {
     );
 }
 
+/// `n` reads, each opening with a known ONT adapter followed by a pseudo-random
+/// body, so ab-initio inference has something to find.
+fn adapted_reads(n: usize) -> String {
+    let mut fq = String::new();
+    for i in 0..n {
+        let body: String = (0..300)
+            .map(|j| b"ACGT"[(i * 7 + j * 13 + j * j) % 4] as char)
+            .collect();
+        let s = format!("CCTGTACTTCGTTCAGTTACGTATTGC{body}");
+        fq.push_str(&format!("@r{i}\n{s}\n+\n{}\n", "I".repeat(s.len())));
+    }
+    fq
+}
+
 /// Report mode writes no records, so it cannot write a summary either. Exiting 0
 /// with neither file and no explanation would strand a pipeline waiting on one.
 #[test]
 fn report_mode_warns_that_summary_json_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.fastq");
-    let mut fq = String::new();
-    for i in 0..200 {
-        let body: String = (0..300)
-            .map(|j| b"ACGT"[((i * 7 + j * 13 + j * j) % 4) as usize] as char)
-            .collect();
-        let s = format!("CCTGTACTTCGTTCAGTTACGTATTGC{body}");
-        fq.push_str(&format!("@r{i}\n{s}\n+\n{}\n", "I".repeat(s.len())));
-    }
-    std::fs::write(&input, fq).unwrap();
+    std::fs::write(&input, adapted_reads(200)).unwrap();
     let json = dir.path().join("summary.json");
 
     whittle()
@@ -237,7 +246,7 @@ fn report_mode_warns_that_summary_json_is_ignored() {
         .stderr(predicate::str::contains("--summary-json is ignored"))
         .stderr(predicate::str::contains("-o/--output is ignored"));
 
-    assert!(!json.exists(), "report mode writes no summary file");
+    assert!(!json.exists(), "Report mode writes no summary file");
 }
 
 /// Argument-parsing diagnostics are emitted through tracing, so the level filter
@@ -332,7 +341,7 @@ fn summary_reports_configured_and_resolved_adapter_counts() {
     let input = dir.path().join("in.fastq");
 
     // 300 reads all carrying one known ONT adapter, so detection keeps a handful
-    // of the catalog's 124 sequences and drops the rest.
+    // of the catalog's sequences and drops the rest.
     let adapter = "CCTGTACTTCGTTCAGTTACGTATTGC";
     let mut fq = String::new();
     for i in 0..300 {
@@ -358,7 +367,8 @@ fn summary_reports_configured_and_resolved_adapter_counts() {
     let configured = a["configured"].as_u64().expect("configured is a number");
     let count = a["count"].as_u64().expect("count is a number");
 
-    assert_eq!(configured, 124, "the full ONT catalog was configured");
+    let catalog = whittle::adapter::preset::preset_ont().len() as u64;
+    assert_eq!(configured, catalog, "The full ONT catalog was configured");
     assert!(
         count < configured,
         "detection should narrow the set: configured {configured}, resolved {count}"

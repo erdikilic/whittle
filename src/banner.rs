@@ -55,10 +55,11 @@ pub(crate) fn output_banner_line(
 /// per-stage split with `ThreadBudget`'s decode/render/encode renamed to the
 /// user-facing read/trim/write, as `Threads: 8 (read 1, trim 4, write 3)`.
 ///
-/// Deliberately not `b.total()`, which floors each stage at >= 1 and so can
-/// exceed `-t`, reading as a confusing second, larger total. For the same reason
-/// `threads <= 1` prints `Threads: 1 (sequential)` instead of a three-thread
-/// split for a run that is single-threaded.
+/// The header is the requested count, not the sum of the three stages: the
+/// budget floors each stage at 1, so the sum can exceed `-t` and would read as
+/// a second, larger total. For the same reason `threads <= 1` prints
+/// `Threads: 1 (sequential)` instead of a three-thread split for a run that is
+/// single-threaded.
 pub(crate) fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> String {
     if threads <= 1 {
         return "Threads: 1 (sequential)".to_string();
@@ -354,10 +355,8 @@ mod tests {
 
     #[test]
     fn threads_banner_line_sequential_for_one_or_fewer() {
-        // `-t 1` (or `-t 0`, which `resolve_threads` floors to 1): the
-        // read/trim/write split would otherwise show e.g. "(read 1, trim 1,
-        // write 1)" for what is actually a single-threaded run; collapse it
-        // to a plain "sequential" label instead.
+        // A single-threaded run collapses to a plain "sequential" label rather
+        // than a "(read 1, trim 1, write 1)" split.
         let b = config::thread_budget(1, true, false, config::EncodeKind::Bgzf);
         assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");
     }

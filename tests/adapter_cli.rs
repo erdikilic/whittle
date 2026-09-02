@@ -2,48 +2,37 @@ use std::io::Write;
 
 use assert_cmd::Command;
 
+/// `--help` lists every quality-trimming and adapter flag.
 #[test]
-fn old_qual_flag_is_gone_new_one_listed() {
-    Command::cargo_bin("whittle")
+fn help_lists_the_quality_and_adapter_flags() {
+    let assert = Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
         .args(["--help"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("--qual-split"))
-        .stdout(predicates::str::contains("--qual-trim"))
-        .stdout(predicates::str::contains("--qual-best-segment"));
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for flag in [
+        "--qual-split",
+        "--qual-trim",
+        "--qual-best-segment",
+        "--adapter-fasta",
+        "--adapter-preset",
+        "--adapter-error-rate",
+        "--adapter-end-size",
+        "--adapter-ends-only",
+        "--adapter-sample",
+        "--adapter-infer",
+        "--adapter-infer-policy",
+    ] {
+        assert!(stdout.contains(flag), "Help must list {flag}: {stdout}");
+    }
 }
 
-#[test]
-fn adapter_help_lists_flags() {
-    Command::cargo_bin("whittle")
-        .unwrap()
-        .env_remove("WHITTLE_LOG")
-        .args(["--help"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("--adapter-fasta"))
-        .stdout(predicates::str::contains("--adapter-preset"))
-        .stdout(predicates::str::contains("--adapter-error-rate"))
-        .stdout(predicates::str::contains("--adapter-ends-only"))
-        .stdout(predicates::str::contains("--adapter-infer-policy"));
-}
-
-#[test]
-fn adapter_sample_flag_listed() {
-    Command::cargo_bin("whittle")
-        .unwrap()
-        .env_remove("WHITTLE_LOG")
-        .args(["--help"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("--adapter-sample"));
-}
-
+/// The range check runs once an adapter source is active; `--in-format fastq`
+/// keeps format detection out of the failure so the flag is the only cause.
 #[test]
 fn rejects_out_of_range_error_rate() {
-    // error-rate is only validated when an adapter source is active.
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
@@ -52,11 +41,13 @@ fn rejects_out_of_range_error_rate() {
             "ont",
             "--adapter-error-rate",
             "2.0",
-            "-i",
-            "/dev/null",
+            "--in-format",
+            "fastq",
         ])
+        .write_stdin("")
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicates::str::contains("--adapter-error-rate"));
 }
 
 #[test]
@@ -69,9 +60,10 @@ fn adapter_sample_below_min_is_rejected() {
             "ont",
             "--adapter-sample",
             "50",
-            "-i",
-            "/dev/null",
+            "--in-format",
+            "fastq",
         ])
+        .write_stdin("")
         .assert()
         .failure()
         .stderr(predicates::str::contains("must be 0"));
@@ -329,10 +321,10 @@ fn detection_output_equals_full_set_for_present_adapter() {
     };
 
     // Detection ON (explicit opt-in sampling, since detection defaults to
-    // off): reduces the 124-entry catalog.
+    // off): narrows the catalog.
     let (detect_on, detect_on_err) = run(&["--adapter-sample", "10000"]);
-    // Detection OFF (the default: no --adapter-sample flag needed, but pass
-    // 0 explicitly for clarity): trims against the full 124-adapter set.
+    // Detection OFF (the default; 0 is passed explicitly for clarity): trims
+    // against the full catalog.
     let (detect_off, _) = run(&["--adapter-sample", "0"]);
 
     assert!(
@@ -340,9 +332,11 @@ fn detection_output_equals_full_set_for_present_adapter() {
         "detection-on output must be non-empty"
     );
     let stderr_on = String::from_utf8_lossy(&detect_on_err);
+    let catalog = whittle::adapter::preset::preset_ont().len();
     assert!(
-        stderr_on.contains("Adapter presence: sampled") && !stderr_on.contains("kept 124 of 124"),
-        "detection must genuinely engage (kept < full 124): {stderr_on}"
+        stderr_on.contains("Adapter presence: sampled")
+            && !stderr_on.contains(&format!("kept {catalog} of {catalog}")),
+        "Detection must narrow the catalog of {catalog}: {stderr_on}"
     );
     let detect_on_str = String::from_utf8(detect_on.clone()).unwrap();
     // A long run of the insert's A's, not the full 300 -- fuzzy end-matching
@@ -678,8 +672,8 @@ fn infer_report_prints_and_does_not_trim() {
     let out = assert.get_output();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("inferred") || stderr.contains("support"),
-        "report-only must log what it discovered: {stderr}"
+        stderr.contains("Adapter inference: sampled") && stderr.contains("discovered"),
+        "Report-only must log what it discovered: {stderr}"
     );
     // Report-only exits before dispatch: no FASTQ record header on stdout.
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -843,8 +837,8 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
     let assert = cmd.assert().success();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
-        stderr.contains("too few") || stderr.contains("no adapters"),
-        "must warn about the undersized sample: {stderr}"
+        stderr.contains("too few reads"),
+        "Must warn about the undersized sample: {stderr}"
     );
 
     // Untrimmed: every output record equals its full original (unstripped)
@@ -1431,6 +1425,7 @@ fn ambiguity_codes_in_reads_do_not_abort_adapter_trimming() {
 
     Command::cargo_bin("whittle")
         .unwrap()
+        .env_remove("WHITTLE_LOG")
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", output.to_str().unwrap()])
         .args(["--adapter-preset", "ont"])
@@ -1438,7 +1433,7 @@ fn ambiguity_codes_in_reads_do_not_abort_adapter_trimming() {
         .success();
 
     let out = std::fs::read_to_string(&output).unwrap();
-    assert_eq!(out.lines().count(), 16, "all four reads must survive");
+    assert_eq!(out.lines().count(), 16, "All four reads must survive");
     assert!(
         !out.contains("CCTGTACTTCGTTCAGTTACG"),
         "the adapter should still be trimmed despite the ambiguity code"
