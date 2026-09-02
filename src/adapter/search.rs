@@ -26,20 +26,36 @@ pub fn is_plain_acgt(seq: &[u8]) -> bool {
         .all(|b| matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'))
 }
 
-/// How many of the four bases an IUPAC code stands for, or `None` if the byte is
-/// not a nucleotide code at all.
+/// The plain bases an IUPAC code stands for, or `None` if the byte is not a
+/// nucleotide code at all.
 ///
-/// `U` is deliberately absent: callers fold it to `T` before it reaches here,
-/// because sassy would otherwise treat `U` as a fifth base that matches nothing
-/// in a DNA read.
-pub fn iupac_degeneracy(code: u8) -> Option<u8> {
+/// `U` is absent: callers fold it to `T` before it reaches here, because sassy
+/// would otherwise treat `U` as a fifth base that matches nothing in a DNA read.
+pub fn iupac_bases(code: u8) -> Option<&'static [u8]> {
     Some(match code.to_ascii_uppercase() {
-        b'A' | b'C' | b'G' | b'T' => 1,
-        b'R' | b'Y' | b'S' | b'W' | b'K' | b'M' => 2,
-        b'B' | b'D' | b'H' | b'V' => 3,
-        b'N' => 4,
+        b'A' => b"A",
+        b'C' => b"C",
+        b'G' => b"G",
+        b'T' => b"T",
+        b'R' => b"AG",
+        b'Y' => b"CT",
+        b'S' => b"CG",
+        b'W' => b"AT",
+        b'K' => b"GT",
+        b'M' => b"AC",
+        b'B' => b"CGT",
+        b'D' => b"AGT",
+        b'H' => b"ACT",
+        b'V' => b"ACG",
+        b'N' => b"ACGT",
         _ => return None,
     })
+}
+
+/// How many of the four bases an IUPAC code stands for, or `None` if the byte is
+/// not a nucleotide code at all. See `iupac_bases` for the `U` rule.
+pub fn iupac_degeneracy(code: u8) -> Option<u8> {
+    iupac_bases(code).map(|bases| bases.len() as u8)
 }
 
 /// One approximate match of a pattern in the text: half-open `[start, end)` into
@@ -146,6 +162,28 @@ mod tests {
         assert_eq!(hits(&mut s, b"AAAACCCC", b"TTGGGGTTTTAA", 0).len(), 0);
         // the forward pattern present -> found.
         assert_eq!(hits(&mut s, b"AAAACCCC", b"TTAAAACCCCTT", 0).len(), 1);
+    }
+
+    #[test]
+    fn iupac_bases_cover_the_alphabet_and_reject_the_rest() {
+        for (code, expected) in [
+            (b'A', &b"A"[..]),
+            (b'R', b"AG"),
+            (b'y', b"CT"),
+            (b'B', b"CGT"),
+            (b'N', b"ACGT"),
+        ] {
+            assert_eq!(iupac_bases(code), Some(expected), "Code {}", code as char);
+            assert_eq!(iupac_degeneracy(code), Some(expected.len() as u8));
+        }
+        for code in [b'U', b'X', b'.', b'-', b'0'] {
+            assert_eq!(
+                iupac_bases(code),
+                None,
+                "Code {} is not a nucleotide",
+                code as char
+            );
+        }
     }
 
     #[test]

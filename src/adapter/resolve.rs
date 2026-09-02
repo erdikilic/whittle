@@ -26,10 +26,11 @@ pub(crate) const MARGINAL_SUPPORT: f64 = 0.45;
 
 /// Log each ab-initio discovery at `info!`: `inferred_N ≈ NAME (pct%) · support
 /// X.XX`, or `(no catalog match)` when the sequence cross-names against nothing
-/// in the ONT catalog. `N` is the 1-based position in `discovered`'s own order,
-/// which agrees with the `inferred_{N}` name fallback. The raw sequence goes to
-/// `debug!` instead, too noisy for INFO. Support below `MARGINAL_SUPPORT` also
-/// gets a `warn!`, being close enough to the `KEEP_SUPPORT` floor to re-check.
+/// in the ONT catalog. `inferred_N` is the adapter's name (its 1-based position
+/// in `discovered`); the catalog match is an annotation. The raw sequence goes
+/// to `debug!` instead, too noisy for INFO. Support below `MARGINAL_SUPPORT`
+/// also gets a `warn!`, being close enough to the `KEEP_SUPPORT` floor to
+/// re-check.
 pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: usize) {
     tracing::info!(
         "Adapter inference: sampled {n_sampled} reads, discovered {} adapter{}",
@@ -106,6 +107,17 @@ pub(crate) fn print_discovered_fasta(discovered: &[infer::InferredAdapter]) {
         );
         println!("{}", String::from_utf8_lossy(&d.adapter.seq));
     }
+}
+
+/// Runs `f` over the sampled sequences as plain slices. The decoded views are
+/// materialized once here, so detection and inference share one borrow shape.
+fn with_sequences<R, F, T>(sample: &[R], seq_of: &F, f: impl FnOnce(&[&[u8]]) -> T) -> T
+where
+    F: for<'a> Fn(&'a R) -> Cow<'a, [u8]>,
+{
+    let storage: Vec<Cow<'_, [u8]>> = sample.iter().map(seq_of).collect();
+    let seqs: Vec<&[u8]> = storage.iter().map(|s| s.as_ref()).collect();
+    f(&seqs)
 }
 
 /// Buffer at most `n` records, stopping when the input is exhausted.
@@ -191,27 +203,14 @@ where
             }));
         }
 
-        let seq_storage: Vec<Cow<'_, [u8]>> = sample.iter().map(&seq_of).collect();
-        let seqs: Vec<&[u8]> = seq_storage.iter().map(|s| s.as_ref()).collect();
-        let discovered =
-            infer::discover_with_policy(&seqs, &base, cfg.adapter_infer.is_aggressive());
+        let discovered = with_sequences(&sample, &seq_of, |seqs| {
+            infer::discover_with_policy(seqs, &base, cfg.adapter_infer.is_aggressive())
+        });
         log_discovered(&discovered, s);
 
         if cfg.adapter_infer.is_report() {
-            // Report mode prints the inferred FASTA and writes no records, so
-            // there is nothing for `-o` to hold and no counters worth
-            // summarizing. Both flags are named explicitly: exiting 0 having
-            // silently created neither file strands a pipeline that expected one.
-            for (flag, given) in [
-                ("-o/--output", cfg.io.output.is_some()),
-                ("--summary-json", cfg.summary_json.is_some()),
-            ] {
-                if given {
-                    tracing::warn!(
-                        "{flag} is ignored under --adapter-infer report, which writes no records"
-                    );
-                }
-            }
+            // Report mode prints the inferred FASTA and writes no records.
+            // `lib::settle` warns about every write target this leaves unused.
             print_discovered_fasta(&discovered);
             return Ok(None);
         }
@@ -231,70 +230,65 @@ where
     }
 
     // Avoid buffering when neither inference nor presence sampling is active.
-    if cfg.adapters.is_none() || cfg.adapter_sample == 0 {
+    let Some(ac) = cfg.adapters.clone().filter(|_| cfg.adapter_sample > 0) else {
         return Ok(Some(Resolved {
             records: Box::new(records),
             adapters: cfg.adapters.clone(),
         }));
-    }
+    };
 
-    // Narrow the configured set to what the sampled prefix actually contains.
-    let mut sample: Vec<R> = Vec::new();
-    let mut adapters = cfg.adapters.clone();
-    if let Some(ac) = cfg.adapters.clone() {
-        sample = buffer_prefix(&mut records, cfg.adapter_sample)?;
-        let s = sample.len();
-        let full = ac.adapters.len();
-        let kept = if s < detect::MIN_SAMPLE_FOR_DETECTION {
-            tracing::info!(
-                "Adapter presence: only {s} reads (< {}); using all {full} adapters",
-                detect::MIN_SAMPLE_FOR_DETECTION
-            );
-            ac.adapters.clone()
-        } else {
-            let seq_storage: Vec<Cow<'_, [u8]>> = sample.iter().map(&seq_of).collect();
-            let seqs: Vec<&[u8]> = seq_storage.iter().map(|s| s.as_ref()).collect();
-            let detected = detect::present(
-                &seqs,
+    // Narrow the configured set to what the sampled prefix contains.
+    let sample: Vec<R> = buffer_prefix(&mut records, cfg.adapter_sample)?;
+    let s = sample.len();
+    let full = ac.adapters.len();
+    let kept = if s < detect::MIN_SAMPLE_FOR_DETECTION {
+        tracing::info!(
+            "Adapter presence: only {s} reads (< {}); using all {full} adapters",
+            detect::MIN_SAMPLE_FOR_DETECTION
+        );
+        ac.adapters.clone()
+    } else {
+        let detected = with_sequences(&sample, &seq_of, |seqs| {
+            detect::present(
+                seqs,
                 &ac.adapters,
                 ac.error_rate,
                 ac.end_size,
                 ac.split,
                 detect::presence_min(s),
                 cfg.threads,
+            )
+        });
+        if detected.is_empty() {
+            tracing::warn!(
+                "Adapter presence: no adapters detected in the first {s} sampled reads; using all {full} \
+                 (the sampled prefix may be unrepresentative; pass --adapter-sample 0 to always use the full set)"
             );
-            if detected.is_empty() {
-                tracing::warn!(
-                    "Adapter presence: no adapters detected in the first {s} sampled reads; using all {full} \
-                     (the sampled prefix may be unrepresentative; pass --adapter-sample 0 to always use the full set)"
-                );
-                ac.adapters.clone()
-            } else {
-                let names: Vec<&str> = detected.iter().take(12).map(|a| a.name.as_str()).collect();
-                let more = detected.len().saturating_sub(names.len());
-                tracing::info!(
-                    "Adapter presence: sampled {s} reads, kept {} of {full} adapters{}{}",
-                    detected.len(),
-                    if names.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", names.join(", "))
-                    },
-                    if more > 0 {
-                        format!(" +{more} more")
-                    } else {
-                        String::new()
-                    },
-                );
-                detected
-            }
-        };
-        let mut reduced = ac;
-        reduced.replace_adapters(kept);
-        adapters = Some(reduced);
-    }
+            ac.adapters.clone()
+        } else {
+            let names: Vec<&str> = detected.iter().take(12).map(|a| a.name.as_str()).collect();
+            let more = detected.len().saturating_sub(names.len());
+            tracing::info!(
+                "Adapter presence: sampled {s} reads, kept {} of {full} adapters{}{}",
+                detected.len(),
+                if names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", names.join(", "))
+                },
+                if more > 0 {
+                    format!(" +{more} more")
+                } else {
+                    String::new()
+                },
+            );
+            detected
+        }
+    };
+    let mut reduced = ac;
+    reduced.replace_adapters(kept);
     Ok(Some(Resolved {
         records: Box::new(sample.into_iter().map(anyhow::Ok).chain(records)),
-        adapters,
+        adapters: Some(reduced),
     }))
 }

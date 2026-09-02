@@ -79,6 +79,20 @@ mod tests {
         }
     }
 
+    /// A pattern below `MIN_PATTERN_LEN` is skipped by every search loop, so a
+    /// catalog entry that short would be counted as configured and never act.
+    #[test]
+    fn entries_meet_the_minimum_pattern_length() {
+        for &(name, _, seq) in CATALOG {
+            assert!(
+                seq.len() >= crate::adapter::MIN_PATTERN_LEN,
+                "{name} is {} bp, below the {} bp searchable minimum",
+                seq.len(),
+                crate::adapter::MIN_PATTERN_LEN
+            );
+        }
+    }
+
     #[test]
     fn entry_names_are_unique() {
         let mut seen = std::collections::HashSet::new();
@@ -104,11 +118,11 @@ mod tests {
 
     #[test]
     fn preset_has_the_expected_shape() {
-        assert_eq!(CATALOG.len(), 125, "catalog entries before dedup");
+        assert_eq!(CATALOG.len(), 121, "catalog entries before dedup");
         let v = preset_ont();
         // 96 barcodes plus adapters/primers/flanks, minus the one exact-duplicate
-        // sequence (PCR1_front == LWB_rear1). Expect 124 after dedup.
-        assert_eq!(v.len(), 124, "catalog entry count after dedup");
+        // sequence (PCR1_front == LWB_rear1). Expect 120 after dedup.
+        assert_eq!(v.len(), 120, "catalog entry count after dedup");
         assert!(v.iter().any(|a| a.name == "LSK114_front"));
         assert_eq!(v.iter().filter(|a| a.name.starts_with("BC")).count(), 96);
     }
