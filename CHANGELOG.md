@@ -177,6 +177,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quietly with status 0.
 - The end-of-run `Completed` line prints after the summary JSON is written, so a
   failed write is not preceded by a success line.
+- PacBio records are recognized by an integer `qs` or a PacBio read name, and
+  follow the PacBio BAM specification: `qs`/`qe` are shifted to the kept
+  window, split segments are named `{movie}/{zmw}/ccs/{qStart}_{qEnd}` (with a
+  by-strand `fwd`/`rev` component kept before the interval) so pbbam parses
+  them, `rn` (reverse passes) is left untouched, `du:Z` from pbmarkdup passes
+  through, the run-length `sa` coverage array is re-sliced, `sm`/`sx` are
+  sliced per base, and the `ds`/`ls` undo blobs are removed from trimmed reads
+  and counted under `warnings.undo_tags_dropped_reads`, since `skera undo` and
+  `lima-undo` would otherwise rebuild the wrong read.
+- ONT split segments carry `pi` (the parent read id) on both outputs without
+  `--update-moves`, `me:i:0` on every segment and `er:Z:unknown` on every
+  segment but the last, matching dorado. Under `--update-moves` a split
+  recomputes `st` and `du` from the parent's sample rate instead of dropping
+  them, and `sp` includes the parent's trimmed-sample offset as dorado's
+  splitter does.
+- The `@PG` record carries the command line (`CL`); a repeat run gets a
+  distinct ID and a `PP` link to the previous record.
 
 ## [0.1.1] - 2026-07-14
 

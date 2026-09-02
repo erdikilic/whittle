@@ -1,5 +1,6 @@
 //! uBAM workflows: record reconstruction (sequence, quality, MM/ML/MN, per-base and signal tags) and the sequential, parallel and raw full-window drivers for BAM and FASTQ output.
 
+use std::borrow::Cow;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -14,17 +15,33 @@ use noodles_sam::{self as sam};
 
 use super::{BAM_BATCH, Counters, Rendered, Stats, process_read_segments, run_parallel};
 use crate::config::{Config, FastqTags};
-use crate::io::fastq::{format_aux_field, format_mods_aux, write_segment, write_segment_tagged};
+use crate::io::fastq::{format_aux_field, format_mods_aux, write_named_record};
 use crate::{mods, trim};
 
-/// PacBio per-base kinetics tags: one value per SEQ base (`B` arrays), so they
-/// must be sliced in lockstep with the sequence when a read is trimmed. `ip`/`pw`
-/// are single-strand IPD/pulse-width; `fi`/`fp`/`ri`/`rp` are the CCS forward/
-/// reverse codec-V1 kinetics. Any other `B` array whose length equals the read
-/// length is also treated as per-base (structural rule), so custom tags need no
-/// dedicated handling.
-pub(crate) const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] =
-    [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp"];
+/// Per-base `B` arrays, one value per SEQ base, sliced in lockstep with the
+/// sequence when a read is trimmed: the PacBio kinetics `ip`/`pw` (single
+/// strand) and `fi`/`fp`/`ri`/`rp` (CCS forward/reverse codec-V1), and the
+/// PacBio `sm`/`sx` per-base aligned match and mismatch counts. Dorado's scalar
+/// `sm:f` (scaling midpoint) shares the `sm` name; the array match leaves it
+/// untouched. Any other `B` array whose length equals the read length is also
+/// treated as per-base (structural rule), so custom tags need no dedicated
+/// handling.
+pub(crate) const KNOWN_PERBASE_TAGS: [[u8; 2]; 8] = [
+    *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sm", *b"sx",
+];
+
+/// PacBio `sa:B:I`: run-length encoded per-base coverage by subread alignments,
+/// stored as `<length>,<coverage>` pairs. Decoded to per-base coverage, sliced
+/// to the window and re-encoded (`slice_rle_coverage`). A tag whose run lengths
+/// do not sum to the read length is left unchanged and surfaced via
+/// `has_malformed_perbase_tag`.
+pub(crate) const RLE_COVERAGE_TAG: [u8; 2] = *b"sa";
+
+/// PacBio undo blobs: `ds` (segmented-read reconstitution data for `skera
+/// undo`) and `ls` (clipped data for `lima-undo`). Both describe the untrimmed
+/// read and are removed from every output record of a trimmed read, counted
+/// once per read in `Counters::undo_tags_dropped_reads`.
+pub(crate) const UNDO_TAGS: [[u8; 2]; 2] = [*b"ds", *b"ls"];
 
 /// PacBio reverse-strand kinetics: the PacBio BAM spec stores them from the
 /// last base to the first, so the window `[start, end)` maps to array indexes
@@ -53,18 +70,19 @@ pub(crate) const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b
 /// they are dropped, since signal cannot be related to sequence.
 pub(crate) const POLYA_TAGS: [[u8; 2]; 2] = [*b"pa", *b"pt"];
 
-/// `bi` (barcode info) embeds front and rear sequence positions that shift under
-/// a crop and cannot be reconstructed from the BAM, so it is dropped on any
-/// trimmed read. The barcode call itself (`BC`/`bv`) is a per-read label and is
-/// copied unchanged.
-pub(crate) const DROP_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"bi"];
+/// Tags dropped on any trimmed read: `bi` (barcode info) embeds front and rear
+/// sequence positions that shift under a crop and cannot be reconstructed from
+/// the BAM, and the PacBio undo blobs `ds`/`ls` describe the untrimmed read.
+/// The barcode call itself (`BC`/`bv`) is a per-read label and is copied
+/// unchanged.
+pub(crate) const DROP_ON_TRIM_TAGS: [[u8; 2]; 3] = [*b"bi", *b"ds", *b"ls"];
 
-/// Tags dropped only when a read is split (not on a plain crop): `st` (read
-/// start time) and `du` (duration) describe the whole parent read, but a split
-/// subread starts later in the signal and spans less of it. Dorado recomputes
-/// both from the sample rate, which is not carried in the BAM, so they are
-/// dropped rather than left stale. A head/tail crop keeps the same read
-/// identity, so they stay valid there.
+/// Tags that describe the whole parent read, not a split subread: `st` (read
+/// start time) and `du` (duration). A head/tail crop keeps the same read
+/// identity, so they stay valid there. On a split they are recomputed from the
+/// sample rate when `--update-moves` resolves the subread's signal window
+/// (`split_time_updates`) and dropped otherwise. A non-float `du` (pbmarkdup's
+/// `du:Z`) is not a duration and is copied.
 pub(crate) const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
 
 /// The base-modification block, in the order it is emitted.
@@ -242,6 +260,103 @@ fn perbase_slice(
     }
 }
 
+/// Returns the integers a `B` array holds, `None` for a float array.
+fn array_integers(a: &Array) -> Option<Vec<i64>> {
+    Some(match a {
+        Array::Int8(v) => v.iter().map(|&n| i64::from(n)).collect(),
+        Array::UInt8(v) => v.iter().map(|&n| i64::from(n)).collect(),
+        Array::Int16(v) => v.iter().map(|&n| i64::from(n)).collect(),
+        Array::UInt16(v) => v.iter().map(|&n| i64::from(n)).collect(),
+        Array::Int32(v) => v.iter().map(|&n| i64::from(n)).collect(),
+        Array::UInt32(v) => v.iter().map(|&n| i64::from(n)).collect(),
+        Array::Float(_) => return None,
+    })
+}
+
+/// Returns `values` stored at the subtype of `template`, `None` when a value
+/// does not fit that subtype or the template is a float array.
+fn array_at_subtype(template: &Array, values: &[i64]) -> Option<Array> {
+    fn narrow<T: TryFrom<i64>>(values: &[i64]) -> Option<Vec<T>> {
+        values.iter().map(|&n| T::try_from(n).ok()).collect()
+    }
+    Some(match template {
+        Array::Int8(_) => Array::Int8(narrow(values)?),
+        Array::UInt8(_) => Array::UInt8(narrow(values)?),
+        Array::Int16(_) => Array::Int16(narrow(values)?),
+        Array::UInt16(_) => Array::UInt16(narrow(values)?),
+        Array::Int32(_) => Array::Int32(narrow(values)?),
+        Array::UInt32(_) => Array::UInt32(narrow(values)?),
+        Array::Float(_) => return None,
+    })
+}
+
+/// Returns the number of bases the `<length>,<coverage>` runs of an `sa` array
+/// cover. `None` for an odd element count or a negative or overflowing length.
+fn rle_runs_len(runs: &[i64]) -> Option<usize> {
+    if !runs.len().is_multiple_of(2) {
+        return None;
+    }
+    runs.iter().step_by(2).try_fold(0usize, |sum, &len| {
+        sum.checked_add(usize::try_from(len).ok()?)
+    })
+}
+
+/// Returns the number of bases an `sa` run-length coverage array covers,
+/// `None` when it is not a well-formed run list (`rle_runs_len`).
+fn rle_coverage_len(a: &Array) -> Option<usize> {
+    rle_runs_len(&array_integers(a)?)
+}
+
+/// Slices an `sa` run-length coverage array to the window `[start, end)`: each
+/// run is clipped to the window and adjacent runs of equal coverage are merged.
+/// `None` when the runs do not cover exactly `orig_len` bases, which leaves the
+/// tag unchanged.
+fn slice_rle_coverage(a: &Array, orig_len: usize, start: usize, end: usize) -> Option<Array> {
+    let runs = array_integers(a)?;
+    if rle_runs_len(&runs)? != orig_len {
+        return None;
+    }
+    let mut out: Vec<i64> = Vec::new();
+    let mut pos = 0usize;
+    for run in runs.chunks_exact(2) {
+        // `rle_runs_len` has checked that every length is a non-negative
+        // `usize` and that the sum fits.
+        let (len, coverage) = (run[0] as usize, run[1]);
+        let run_start = pos;
+        pos += len;
+        let kept = run_start.max(start)..pos.min(end);
+        if kept.is_empty() {
+            continue;
+        }
+        match out.as_mut_slice() {
+            [.., last_len, last_coverage] if *last_coverage == coverage => {
+                *last_len += kept.len() as i64;
+            },
+            _ => out.extend([kept.len() as i64, coverage]),
+        }
+    }
+    array_at_subtype(a, &out)
+}
+
+/// Returns a tag's value for the window `[start, end)`: the `sa` coverage runs
+/// re-encoded, or a per-base array sliced (`perbase_slice`). `None` leaves the
+/// tag unchanged.
+fn windowed_value(
+    tag: [u8; 2],
+    value: &Value,
+    orig_len: usize,
+    start: usize,
+    end: usize,
+) -> Option<Value> {
+    if tag == RLE_COVERAGE_TAG {
+        return match value {
+            Value::Array(a) => slice_rle_coverage(a, orig_len, start, end).map(Value::Array),
+            _ => None,
+        };
+    }
+    perbase_slice(tag, value, orig_len, start, end)
+}
+
 /// Returns the integer an aux value holds, whatever width it was stored at.
 ///
 /// SAM integer tags are written at the smallest subtype that fits, so a tag is
@@ -385,12 +500,126 @@ fn parent_read_id(src: &RecordBuf) -> Vec<u8> {
     }
 }
 
-/// Returns the output name of segment `idx` (0-based) of a split read: the
-/// source name with `_segment_<n>` appended.
-fn segment_name(src: &RecordBuf, idx: usize) -> Vec<u8> {
-    let mut name = src.name().map(|n| n.to_vec()).unwrap_or_default();
-    name.extend_from_slice(format!("_segment_{}", idx + 1).as_bytes());
-    name
+/// The platform whose tag conventions a record follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    /// PacBio: integer `qs`/`qe` query coordinates, `{movie}/{zmw}/...` read
+    /// names, `rn` as a pass count, `du:Z` from pbmarkdup.
+    PacBio,
+    /// ONT (dorado): float `qs`, the `mv`/`ts`/`ns` signal tags, `st`/`du`
+    /// read timing, `_segment_N` split names.
+    Ont,
+}
+
+/// Classifies a record: `PacBio` when it carries an integer `qs` (dorado's `qs`
+/// is a float) or its name follows a PacBio convention (`parse_pacbio_name`),
+/// `Ont` otherwise.
+pub fn platform(rec: &RecordBuf) -> Platform {
+    let integer_qs = rec
+        .data()
+        .get(&Tag::new(b'q', b's'))
+        .and_then(aux_integer)
+        .is_some();
+    let pacbio_name = rec
+        .name()
+        .is_some_and(|n| parse_pacbio_name(AsRef::<[u8]>::as_ref(n)).is_some());
+    if integer_qs || pacbio_name {
+        Platform::PacBio
+    } else {
+        Platform::Ont
+    }
+}
+
+/// The parts of a PacBio read name a split segment name is built from.
+struct PacBioName<'a> {
+    /// The name without any `/{qStart}_{qEnd}` interval: `{movie}/{zmw}` for
+    /// a subread, `{movie}/{zmw}/ccs` for a CCS read, with `/fwd` or `/rev`
+    /// for a by-strand read.
+    stem: &'a [u8],
+    /// The `qStart` of a `{qStart}_{qEnd}` interval in the name.
+    query_start: Option<i64>,
+}
+
+/// Parses a read name against the PacBio BAM conventions: `{movie}/{zmw}/ccs`
+/// with an optional `/fwd` or `/rev` and an optional `/{qStart}_{qEnd}`
+/// (segmented reads), or the subread form `{movie}/{zmw}/{qStart}_{qEnd}`.
+/// `None` for any other name.
+fn parse_pacbio_name(name: &[u8]) -> Option<PacBioName<'_>> {
+    fn is_digits(s: &[u8]) -> bool {
+        !s.is_empty() && s.iter().all(u8::is_ascii_digit)
+    }
+    fn interval_start(s: &[u8]) -> Option<i64> {
+        let (start, end) = s.split_at(s.iter().position(|&c| c == b'_')?);
+        if !is_digits(start) || !is_digits(&end[1..]) {
+            return None;
+        }
+        std::str::from_utf8(start).ok()?.parse().ok()
+    }
+
+    let parts: Vec<&[u8]> = name.split(|&c| c == b'/').collect();
+    let [movie, zmw, rest @ ..] = parts.as_slice() else {
+        return None;
+    };
+    if movie.is_empty() || !is_digits(zmw) {
+        return None;
+    }
+    match rest {
+        [b"ccs"] | [b"ccs", b"fwd" | b"rev"] => Some(PacBioName {
+            stem: name,
+            query_start: None,
+        }),
+        [interval] | [b"ccs", interval] | [b"ccs", b"fwd" | b"rev", interval] => {
+            let query_start = interval_start(interval)?;
+            Some(PacBioName {
+                stem: &name[..name.len() - interval.len() - 1],
+                query_start: Some(query_start),
+            })
+        },
+        _ => None,
+    }
+}
+
+/// Returns a record's integer `qs`/`qe` query coordinates, `None` unless both
+/// are present as integers.
+fn query_span(src: &RecordBuf) -> Option<(i64, i64)> {
+    Some((signal_int(src, b"qs")?, signal_int(src, b"qe")?))
+}
+
+/// Returns the query coordinates of window `[start, end)` in the frame of the
+/// original PacBio read whose query starts at `qs0`: the PacBio BAM spec keeps
+/// `qs`/`qe` with respect to the original read through clipping.
+fn window_coords(qs0: i64, start: usize, end: usize) -> (i64, i64) {
+    (qs0 + start as i64, qs0 + end as i64)
+}
+
+/// Returns the output name of `window` for a read named `name`. A crop keeps
+/// the name. A split names an ONT segment `{name}_segment_{n}` (1-based) and a
+/// PacBio segment `{stem}/{qStart}_{qEnd}` from `coords`, the segment's
+/// rewritten `qs`/`qe`; without them the interval is offset from the name's
+/// own `qStart` (0 when the name has none). A PacBio record whose name follows
+/// no PacBio convention takes the ONT suffix.
+pub(crate) fn segment_name(
+    platform: Platform,
+    name: &[u8],
+    window: Window,
+    coords: Option<(i64, i64)>,
+) -> Vec<u8> {
+    if window.total <= 1 {
+        return name.to_vec();
+    }
+    if platform == Platform::PacBio
+        && let Some(parts) = parse_pacbio_name(name)
+    {
+        let (qs, qe) = coords.unwrap_or_else(|| {
+            window_coords(parts.query_start.unwrap_or(0), window.start, window.end)
+        });
+        let mut out = parts.stem.to_vec();
+        out.extend_from_slice(format!("/{qs}_{qe}").as_bytes());
+        return out;
+    }
+    let mut out = name.to_vec();
+    out.extend_from_slice(format!("_segment_{}", window.idx + 1).as_bytes());
+    out
 }
 
 /// Computes the poly-A tag updates (`pa` signal boundaries, `pt` tail length)
@@ -460,11 +689,27 @@ fn polya_updates(
     }
 }
 
+/// The original-signal window a trimmed read's kept bases span, in the frame
+/// `ts`/`ns` use: samples `[kept_start, kept_end)`.
+#[derive(Debug, Clone, Copy)]
+struct SignalWindow {
+    /// First kept sample, inclusive.
+    kept_start: i64,
+    /// End of the kept signal, exclusive.
+    kept_end: i64,
+}
+
+/// Aux tag updates for one output window: `(tag, Some(value))` replaces the
+/// tag in place or appends it when the source lacks it, `(tag, None)` removes
+/// it.
+type TagUpdates = Vec<(Tag, Option<Value>)>;
+
 /// Computes the ONT signal tag updates for output window `[start, end)`.
-/// Returns `(tag, Some(value))` to set or `(tag, None)` to remove; empty when
-/// the read is not trimmed. With `update_moves` off, or a missing or malformed
-/// move table, the five signal tags and both poly-A tags are removed. With it
-/// on, `mv` is sliced by block range (stride-aligned, following dorado
+/// Returns `(tag, Some(value))` to set or `(tag, None)` to remove, with the
+/// kept signal window when the tags were rewritten; empty when the read is not
+/// trimmed. With `update_moves` off, or a missing or malformed move table, the
+/// five signal tags and both poly-A tags are removed. With it on, `mv` is
+/// sliced by block range (stride-aligned, following dorado
 /// `splitter::subread`) and:
 ///   - crop (`total == 1`, name kept): `ts += block_first*stride`; `ns` is the
 ///     kept signal's end, which is the source `ns` when the window runs to the
@@ -478,29 +723,37 @@ fn signal_tag_updates(
     end: usize,
     total: usize,
     update_moves: bool,
-) -> Vec<(Tag, Option<Value>)> {
+) -> (TagUpdates, Option<SignalWindow>) {
     if start == 0 && end == seq_len {
-        return Vec::new(); // untrimmed: nothing changes
+        return (Vec::new(), None);
     }
-    let drop_all = || -> Vec<(Tag, Option<Value>)> {
-        SIGNAL_TAGS
-            .iter()
-            .chain(POLYA_TAGS.iter())
-            .map(|t| (Tag::new(t[0], t[1]), None))
-            .collect()
-    };
-    if !update_moves {
-        return drop_all();
+    if update_moves && let Some((updates, window)) = signal_rewrite(src, seq_len, start, end, total)
+    {
+        return (updates, Some(window));
     }
+    let dropped = SIGNAL_TAGS
+        .iter()
+        .chain(POLYA_TAGS.iter())
+        .map(|t| (Tag::new(t[0], t[1]), None))
+        .collect();
+    (dropped, None)
+}
 
-    // A consistent move table (1-count == sequence length) is required to slice.
-    let Some((stride, moves)) = src
+/// Rewrites the signal and poly-A tags of a trimmed window from the move
+/// table. `None` when the table is missing or malformed, its base count
+/// disagrees with the sequence, the window has no start base, or a signal
+/// offset does not fit its tag; the caller then removes the tags.
+fn signal_rewrite(
+    src: &RecordBuf,
+    seq_len: usize,
+    start: usize,
+    end: usize,
+    total: usize,
+) -> Option<(TagUpdates, SignalWindow)> {
+    let (stride, moves) = src
         .data()
         .get(&Tag::new(b'm', b'v'))
-        .and_then(parse_move_table)
-    else {
-        return drop_all();
-    };
+        .and_then(parse_move_table)?;
     // The move index of the `start`-th and `end`-th base (each `1` in `moves`
     // is one emitted base), and the total base count, found in a single pass,
     // without materializing the whole positions list.
@@ -519,22 +772,17 @@ fn signal_tag_updates(
         }
     }
     if ones_seen != seq_len {
-        return drop_all(); // move table inconsistent with the sequence
+        return None;
     }
 
     let stride_n = stride as usize;
     // The end-th base exists only when `end < seq_len`; otherwise the window
     // runs to the table end. An empty or out-of-range window has no start base.
-    let Some(block_first) = block_first else {
-        return drop_all();
-    };
+    let block_first = block_first?;
     let block_second = if end == seq_len {
         moves.len()
     } else {
-        match block_second {
-            Some(b) => b,
-            None => return drop_all(),
-        }
+        block_second?
     };
 
     let mut new_mv = Vec::with_capacity(1 + block_second - block_first);
@@ -550,18 +798,8 @@ fn signal_tag_updates(
     // `ns = raw_data_samples + num_trimmed_samples` (a tail crop shrinks ns, a
     // head-only crop leaves it unchanged, a split gets the subread span).
     let ts0 = signal_int(src, b"ts").unwrap_or(0);
-    let Some(first_offset) = signal_offset(block_first, stride_n) else {
-        return drop_all();
-    };
-    let Some(second_offset) = signal_offset(block_second, stride_n) else {
-        return drop_all();
-    };
-    let Some(kept_start) = ts0.checked_add(first_offset) else {
-        return drop_all();
-    };
-    let Some(block_end) = ts0.checked_add(second_offset) else {
-        return drop_all();
-    };
+    let kept_start = ts0.checked_add(signal_offset(block_first, stride_n)?)?;
+    let block_end = ts0.checked_add(signal_offset(block_second, stride_n)?)?;
     // The move table resolves the signal end only to the stride; the source
     // `ns` names it exactly when the window runs to the last base.
     let kept_end = match signal_int(src, b"ns") {
@@ -571,19 +809,14 @@ fn signal_tag_updates(
 
     if total > 1 {
         // A split yields a dorado subread: renamed, front trim reset to 0, parent
-        // linkage set.
-        let Some(sp) = signal_int(src, b"sp")
+        // linkage set. Dorado's `split_point` is the parent's own plus the
+        // parent's trimmed samples plus the signal offset, so `sp` counts from
+        // the parent's POD5 signal start, not from its first basecalled sample.
+        let sp = signal_int(src, b"sp")
             .unwrap_or(0)
-            .checked_add(first_offset)
-        else {
-            return drop_all();
-        };
-        let Some(ns_value) = signal_int_value(kept_end - kept_start) else {
-            return drop_all();
-        };
-        let Some(sp_value) = signal_int_value(sp) else {
-            return drop_all();
-        };
+            .checked_add(kept_start)?;
+        let ns_value = signal_int_value(kept_end - kept_start)?;
+        let sp_value = signal_int_value(sp)?;
         let pi = parent_read_id(src);
         updates.push((Tag::new(b't', b's'), Some(Value::Int32(0))));
         updates.push((Tag::new(b'n', b's'), Some(ns_value)));
@@ -591,27 +824,95 @@ fn signal_tag_updates(
         updates.push((Tag::new(b'p', b'i'), Some(Value::String(pi.into()))));
     } else {
         // A head or tail crop keeps the read identity and advances the front trim.
-        let Some(ts_value) = signal_int_value(kept_start) else {
-            return drop_all();
-        };
-        let Some(ns_value) = signal_int_value(kept_end) else {
-            return drop_all();
-        };
+        let ts_value = signal_int_value(kept_start)?;
+        let ns_value = signal_int_value(kept_end)?;
         updates.push((Tag::new(b't', b's'), Some(ts_value)));
         updates.push((Tag::new(b'n', b's'), Some(ns_value)));
     }
     updates.extend(polya_updates(src, kept_start, kept_end, total > 1));
+    Some((
+        updates,
+        SignalWindow {
+            kept_start,
+            kept_end,
+        },
+    ))
+}
+
+/// Recomputes `st`/`du` for a split subread whose signal window is known,
+/// following dorado `splitter_utils.cpp`: the sample rate is the source `ns`
+/// over its `du`, the subread duration is its sample count over that rate, and
+/// its start time is the source `st` advanced by `kept_start` samples. A `du`
+/// that is not a positive float, a missing `ns`, or an `st` that does not
+/// parse leaves the tag unchanged.
+fn split_time_updates(src: &RecordBuf, window: SignalWindow) -> TagUpdates {
+    let du_tag = Tag::new(b'd', b'u');
+    let st_tag = Tag::new(b's', b't');
+    let mut updates = Vec::new();
+    let Some(Value::Float(du0)) = src.data().get(&du_tag) else {
+        return updates;
+    };
+    let Some(ns0) = signal_int(src, b"ns") else {
+        return updates;
+    };
+    if ns0 <= 0 || !du0.is_finite() || *du0 <= 0.0 {
+        return updates;
+    }
+    let rate = ns0 as f64 / f64::from(*du0);
+    let samples = (window.kept_end - window.kept_start) as f64;
+    updates.push((du_tag, Some(Value::Float((samples / rate) as f32))));
+    if let Some(Value::String(st0)) = src.data().get(&st_tag)
+        && let Some(shifted) = shift_timestamp(st0.as_ref(), window.kept_start as f64 / rate)
+    {
+        updates.push((st_tag, Some(Value::String(shifted.into()))));
+    }
     updates
 }
 
-/// Returns true if the record carries a known per-base kinetics tag whose array
-/// length disagrees with the sequence length, i.e. a malformed per-base tag
-/// that cannot be sliced. Used only to emit a run-level advisory.
+/// Returns an RFC 3339 `st` value advanced by `seconds`, at millisecond
+/// precision (dorado's own) and in the offset form the source uses: `Z`, a
+/// numeric offset, or none (a civil time read as UTC). `None` when the source
+/// does not parse.
+fn shift_timestamp(value: &[u8], seconds: f64) -> Option<Vec<u8>> {
+    use jiff::fmt::temporal::{Pieces, PiecesOffset};
+    use jiff::tz::Offset;
+
+    let text = std::str::from_utf8(value).ok()?;
+    let pieces = Pieces::parse(text).ok()?;
+    let datetime = pieces.date().to_datetime(pieces.time().unwrap_or_default());
+    let offset = pieces.offset();
+    let instant = offset
+        .as_ref()
+        .map_or(Offset::UTC, PiecesOffset::to_numeric_offset)
+        .to_timestamp(datetime)
+        .ok()?;
+    let millis = (seconds * 1000.0).round();
+    if !millis.is_finite() {
+        return None;
+    }
+    let shifted = instant
+        .checked_add(jiff::SignedDuration::from_millis(millis as i64))
+        .ok()?;
+    let out = match offset {
+        Some(PiecesOffset::Zulu) => format!("{shifted:.3}"),
+        Some(o) => format!("{:.3}", shifted.display_with_offset(o.to_numeric_offset())),
+        None => format!("{:.3}", Offset::UTC.to_datetime(shifted)),
+    };
+    Some(out.into_bytes())
+}
+
+/// Returns true if the record carries a known per-base tag whose array length
+/// disagrees with the sequence length, or an `sa` coverage array whose runs do
+/// not sum to it: a malformed per-base tag that cannot be sliced. Used only to
+/// emit a run-level advisory.
 pub fn has_malformed_perbase_tag(rec: &RecordBuf, seq_len: usize) -> bool {
     rec.data().iter().any(|(tag, value)| {
         let t = <[u8; 2]>::from(tag);
-        KNOWN_PERBASE_TAGS.contains(&t)
-            && matches!(value, Value::Array(a) if array_len(a) != seq_len)
+        match value {
+            Value::Array(a) if KNOWN_PERBASE_TAGS.contains(&t) => array_len(a) != seq_len,
+            Value::Array(a) if t == RLE_COVERAGE_TAG => rle_coverage_len(a) != Some(seq_len),
+            _ => false,
+        }
     })
 }
 
@@ -640,9 +941,121 @@ fn has_dedicated_rule(t: [u8; 2]) -> bool {
         || DROP_ON_SPLIT_TAGS.contains(&t)
 }
 
+/// Replaces the update for `tag` or appends one.
+fn set_update(updates: &mut TagUpdates, tag: Tag, value: Option<Value>) {
+    match updates.iter_mut().find(|(t, _)| *t == tag) {
+        Some(slot) => slot.1 = value,
+        None => updates.push((tag, value)),
+    }
+}
+
+/// Computes the aux tag updates for output window `window` of `src`, shared by
+/// the BAM and FASTQ output paths: `(tag, Some(value))` replaces the tag or
+/// adds it, `(tag, None)` removes it. Empty for a full, unsplit window. Covers
+/// the signal and poly-A tags, the tags dropped on a trim, the `qs:f` refresh,
+/// the PacBio `qs`/`qe` coordinates, `st`/`du` on a split, and the dorado
+/// subread tags `rn`, `pi`, `me` and `er` on an ONT split. The modification
+/// block and the per-base arrays are the callers' own.
+fn window_tag_updates(
+    src: &RecordBuf,
+    qual: &[u8],
+    window: Window,
+    platform: Platform,
+    update_moves: bool,
+) -> TagUpdates {
+    let Window {
+        start,
+        end,
+        idx,
+        total,
+    } = window;
+    let orig_len = qual.len();
+    let trimmed = start != 0 || end != orig_len;
+    let split = total > 1;
+    if !trimmed && !split {
+        return Vec::new();
+    }
+
+    let (mut updates, signal) = signal_tag_updates(src, orig_len, start, end, total, update_moves);
+    if trimmed {
+        updates.extend(DROP_ON_TRIM_TAGS.map(|t| (Tag::new(t[0], t[1]), None)));
+        let qs = Tag::new(b'q', b's');
+        // Dorado's `qs:f` is the mean read qscore and follows the trimmed
+        // quality.
+        if matches!(src.data().get(&qs), Some(Value::Float(_))) {
+            let mean = crate::qual::mean_prob_q(&qual[start..end]) as f32;
+            updates.push((qs, Some(Value::Float(mean))));
+        }
+        // PacBio's `qs:i`/`qe:i` are with respect to the original read and
+        // follow the window; one without the other is left as is.
+        if let Some((qs0, _)) = query_span(src) {
+            let (qs_new, qe_new) = window_coords(qs0, start, end);
+            if let (Some(qs_value), Some(qe_value)) =
+                (signal_int_value(qs_new), signal_int_value(qe_new))
+            {
+                updates.push((qs, Some(qs_value)));
+                updates.push((Tag::new(b'q', b'e'), Some(qe_value)));
+            }
+        }
+    }
+    if split {
+        let du = Tag::new(b'd', b'u');
+        match signal {
+            Some(window) => updates.extend(split_time_updates(src, window)),
+            None => {
+                updates.push((Tag::new(b's', b't'), None));
+                if matches!(src.data().get(&du), Some(Value::Float(_))) {
+                    updates.push((du, None));
+                }
+            },
+        }
+    }
+    if split && platform == Platform::Ont {
+        // Dorado's subread convention (`splitter_utils.cpp`): read number -1,
+        // the parent read id, zero MinKNOW events, and an unknown end reason on
+        // every subread but the last, which ends where the read did.
+        let me = Tag::new(b'm', b'e');
+        let er = Tag::new(b'e', b'r');
+        updates.push((Tag::new(b'r', b'n'), Some(Value::Int32(-1))));
+        set_update(
+            &mut updates,
+            Tag::new(b'p', b'i'),
+            Some(Value::String(parent_read_id(src).into())),
+        );
+        if src.data().get(&me).is_some() {
+            updates.push((me, Some(Value::Int32(0))));
+        }
+        if idx + 1 < total && src.data().get(&er).is_some() {
+            updates.push((er, Some(Value::String(b"unknown".as_slice().into()))));
+        }
+    }
+    updates
+}
+
+/// Bumps `Counters::undo_tags_dropped_reads` when a read carrying a PacBio
+/// undo blob (`ds`/`ls`) loses it in the output: at least one written window
+/// does not span the whole read.
+fn count_undo_tags_dropped(
+    counters: &Counters,
+    src: &RecordBuf,
+    orig_len: usize,
+    survivors: &[(usize, usize)],
+) {
+    let trimmed = survivors.iter().any(|&(s, e)| s != 0 || e != orig_len);
+    let carries_undo = UNDO_TAGS
+        .iter()
+        .any(|t| src.data().get(&Tag::new(t[0], t[1])).is_some());
+    if trimmed && carries_undo {
+        counters
+            .undo_tags_dropped_reads
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Builds one output uBAM record for interval `[start, end)`, segment `idx` of
 /// `total`: SEQ/QUAL sliced, `MM`/`ML`/`MN` rebuilt, per-base kinetics sliced,
-/// stale signal-space tags rewritten or dropped, the name suffixed on a split.
+/// stale signal-space tags rewritten or dropped, the name set per platform on a
+/// split (`segment_name`).
 /// Remaining aux tags are copied unchanged.
 pub fn reconstruct_record(
     src: &RecordBuf,
@@ -678,10 +1091,7 @@ fn reconstruct_record_with_bases(
     update_moves: bool,
 ) -> RecordBuf {
     let Window {
-        start,
-        end,
-        idx,
-        total,
+        start, end, total, ..
     } = window;
     let orig_len = seq.len();
     debug_assert_eq!(src.sequence().as_ref(), seq);
@@ -692,9 +1102,12 @@ fn reconstruct_record_with_bases(
         return src.clone();
     }
 
+    let platform = platform(src);
     let mut out = RecordBuf::default();
     *out.name_mut() = if split {
-        Some(segment_name(src, idx).into())
+        let name = src.name().map(|n| n.to_vec()).unwrap_or_default();
+        let coords = query_span(src).map(|(qs0, _)| window_coords(qs0, start, end));
+        Some(segment_name(platform, &name, window, coords).into())
     } else {
         src.name().map(Into::into)
     };
@@ -730,29 +1143,13 @@ fn reconstruct_record_with_bases(
             }
         },
     }
-    updates.extend(signal_tag_updates(
+    updates.extend(window_tag_updates(
         src,
-        orig_len,
-        start,
-        end,
-        total,
+        qual,
+        window,
+        platform,
         update_moves,
     ));
-    if trimmed {
-        updates.extend(DROP_ON_TRIM_TAGS.map(|t| (Tag::new(t[0], t[1]), None)));
-        // Dorado's `qs:f` is the mean read qscore and follows the trimmed
-        // quality; PacBio's `qs:i` is a query coordinate and is left as is.
-        let qs = Tag::new(b'q', b's');
-        if matches!(src.data().get(&qs), Some(Value::Float(_))) {
-            let mean = crate::qual::mean_prob_q(&qual[start..end]) as f32;
-            updates.push((qs, Some(Value::Float(mean))));
-        }
-    }
-    if split {
-        updates.extend(DROP_ON_SPLIT_TAGS.map(|t| (Tag::new(t[0], t[1]), None)));
-        // Dorado marks split products with read number -1.
-        updates.push((Tag::new(b'r', b'n'), Some(Value::Int32(-1))));
-    }
 
     let data = out.data_mut();
     for (tag, value) in src.data().iter() {
@@ -764,7 +1161,7 @@ fn reconstruct_record_with_bases(
         }
         let t = <[u8; 2]>::from(tag);
         let sliced = if trimmed && !has_dedicated_rule(t) {
-            perbase_slice(t, value, orig_len, start, end)
+            windowed_value(t, value, orig_len, start, end)
         } else {
             None
         };
@@ -920,6 +1317,7 @@ fn run_bam_seq<R: InputRecord>(
                 Ok(())
             },
         )?;
+        count_undo_tags_dropped(counters, &rec, seq.len(), &survivors);
     }
     Ok(counters.snapshot(malformed_tag_reads))
 }
@@ -988,6 +1386,29 @@ fn raw_array_len(value: &noodles_sam::alignment::record::data::field::Value<'_>)
     }
 }
 
+/// The number of bases a raw `sa` coverage array covers; the borrowed
+/// counterpart of `rle_coverage_len`.
+fn raw_rle_coverage_len(
+    value: &noodles_sam::alignment::record::data::field::Value<'_>,
+) -> Option<usize> {
+    use noodles_sam::alignment::record::data::field::Value as RawValue;
+    use noodles_sam::alignment::record::data::field::value::Array as RawArray;
+
+    fn collect<N: Into<i64>>(values: impl Iterator<Item = io::Result<N>>) -> Option<Vec<i64>> {
+        values.map(|n| n.ok().map(Into::into)).collect()
+    }
+    let runs = match value {
+        RawValue::Array(RawArray::Int8(v)) => collect(v.iter())?,
+        RawValue::Array(RawArray::UInt8(v)) => collect(v.iter())?,
+        RawValue::Array(RawArray::Int16(v)) => collect(v.iter())?,
+        RawValue::Array(RawArray::UInt16(v)) => collect(v.iter())?,
+        RawValue::Array(RawArray::Int32(v)) => collect(v.iter())?,
+        RawValue::Array(RawArray::UInt32(v)) => collect(v.iter())?,
+        _ => return None,
+    };
+    rle_runs_len(&runs)
+}
+
 /// The integer a raw aux value holds, whatever width it was stored at; the
 /// borrowed counterpart of `aux_integer`.
 fn raw_integer(value: &noodles_sam::alignment::record::data::field::Value<'_>) -> Option<i64> {
@@ -1037,6 +1458,12 @@ fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(ModBlock, 
         let tag_bytes = <[u8; 2]>::from(tag);
         if KNOWN_PERBASE_TAGS.contains(&tag_bytes)
             && raw_array_len(&value).is_some_and(|len| len != seq_len)
+        {
+            malformed_perbase = true;
+        }
+        if tag_bytes == RLE_COVERAGE_TAG
+            && raw_array_len(&value).is_some()
+            && raw_rle_coverage_len(&value) != Some(seq_len)
         {
             malformed_perbase = true;
         }
@@ -1325,6 +1752,7 @@ pub fn run_bam<R: InputRecord>(
                     Ok(())
                 },
             )?;
+            count_undo_tags_dropped(counters, rec, seq.len(), &survivors);
             Ok(items)
         },
         // Write: encode and write on the writer thread (BGZF compression is
@@ -1335,68 +1763,52 @@ pub fn run_bam<R: InputRecord>(
 }
 
 /// Assembles the TAB-prefixed aux-tag block for one window: carried non-mod
-/// tags in source order (per-base arrays sliced, `qs:f` refreshed, `rn` set to
-/// -1 on a split, signal and coordinate tags dropped on trim), then the
-/// rebuilt MM/ML/MN block. Empty when
-/// nothing is carried (the caller writes a plain FASTQ record). A `Malformed`
-/// block is omitted.
+/// tags in source order with the `window_tag_updates` rewrites applied in
+/// place and the removed ones skipped, per-base arrays sliced, then the rebuilt
+/// MM/ML/MN block, then the added tags. Empty when nothing is carried (the
+/// caller writes a plain FASTQ record). A `Malformed` block is omitted.
 fn build_fastq_tags(
     src: &RecordBuf,
     seq: &[u8],
     window: Window,
     mod_block: ModBlock,
     sel: &FastqTags,
+    platform: Platform,
 ) -> Vec<u8> {
-    let Window {
-        start, end, total, ..
-    } = window;
+    let Window { start, end, .. } = window;
     let mut tags = Vec::new();
     let orig_len = seq.len();
     let trimmed = start != 0 || end != orig_len;
-    let split = total > 1;
+    // BAM-to-FASTQ never rewrites the move table (a sliced one is impractical
+    // in a FASTQ header, and signal-aware consumers read BAM), so a trim drops
+    // the signal and poly-A tags.
+    let mut updates =
+        window_tag_updates(src, src.quality_scores().as_ref(), window, platform, false);
     for (tag, value) in src.data().iter() {
         let t = <[u8; 2]>::from(tag);
         if matches!(&t, b"MM" | b"ML" | b"MN") {
             continue; // handled by the rebuilt block below
         }
-        // On trim, the ONT signal tags are dropped (a sliced move table is
-        // impractical in a FASTQ header, signal-aware consumers read BAM, and
-        // `--update-moves` applies to BAM-to-BAM only), together with the poly-A
-        // and barcode-coordinate tags.
-        if trimmed
-            && (SIGNAL_TAGS.contains(&t)
-                || POLYA_TAGS.contains(&t)
-                || DROP_ON_TRIM_TAGS.contains(&t))
-        {
-            continue;
-        }
-        // On a split, `st`/`du` describe the parent read, not the subread.
-        if split && DROP_ON_SPLIT_TAGS.contains(&t) {
-            continue;
-        }
+        let rewritten = updates
+            .iter()
+            .position(|(u, _)| *u == tag)
+            .map(|i| updates.remove(i).1);
         if !sel.carries(&t) {
             continue;
         }
-        tags.push(b'\t');
-        // Dorado's `qs:f` follows the trimmed quality (matches the BAM-to-BAM
-        // path); PacBio's `qs:i` is a query coordinate and is left as is.
-        if t == *b"qs" && trimmed && matches!(value, Value::Float(_)) {
-            let ql = src.quality_scores().as_ref();
-            let qs = crate::qual::mean_prob_q(&ql[start..end]) as f32;
-            tags.extend_from_slice(&format_aux_field(t, &Value::Float(qs)));
-            continue;
-        }
-        if t == *b"rn" && split {
-            tags.extend_from_slice(&format_aux_field(t, &Value::Int32(-1)));
-            continue;
-        }
-        // Per-base kinetics stay consistent with the trimmed sequence.
-        let sliced = if trimmed {
-            perbase_slice(t, value, orig_len, start, end)
-        } else {
-            None
+        let value: Cow<Value> = match rewritten {
+            Some(None) => continue,
+            Some(Some(v)) => Cow::Owned(v),
+            None => match trimmed
+                .then(|| windowed_value(t, value, orig_len, start, end))
+                .flatten()
+            {
+                Some(v) => Cow::Owned(v),
+                None => Cow::Borrowed(value),
+            },
         };
-        tags.extend_from_slice(&format_aux_field(t, sliced.as_ref().unwrap_or(value)));
+        tags.push(b'\t');
+        tags.extend_from_slice(&format_aux_field(t, &value));
     }
     if sel.carries_mods()
         && matches!(mod_block, ModBlock::Consistent | ModBlock::MissingMn)
@@ -1406,7 +1818,37 @@ fn build_fastq_tags(
         tags.push(b'\t');
         tags.extend_from_slice(&format_mods_aux(&mm, ml.as_deref(), end - start));
     }
+    for (tag, value) in updates {
+        let t = <[u8; 2]>::from(tag);
+        if let Some(v) = value
+            && sel.carries(&t)
+        {
+            tags.push(b'\t');
+            tags.extend_from_slice(&format_aux_field(t, &v));
+        }
+    }
     tags
+}
+
+/// Writes one surviving window of a decoded record as a FASTQ record: the
+/// platform's segment name (`segment_name`), the selected aux tags, then the
+/// sliced bases and qualities.
+fn write_fastq_window<W: Write>(
+    w: &mut W,
+    rec: &RecordBuf,
+    window: Window,
+    mod_block: ModBlock,
+    platform: Platform,
+    sel: &FastqTags,
+) -> io::Result<()> {
+    let Window { start, end, .. } = window;
+    let seq = rec.sequence().as_ref();
+    let qual = rec.quality_scores().as_ref();
+    let coords = query_span(rec).map(|(qs0, _)| window_coords(qs0, start, end));
+    let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
+    let name = segment_name(platform, &name, window, coords);
+    let tags = build_fastq_tags(rec, seq, window, mod_block, sel, platform);
+    write_named_record(w, &name, &seq[start..end], &qual[start..end], &tags)
 }
 
 /// Runs the single-threaded uBAM-to-FASTQ workflow: refuses aligned reads,
@@ -1435,7 +1877,7 @@ where
         if has_malformed_perbase_tag(&rec, seq.len()) {
             malformed_tag_reads += 1;
         }
-        let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
+        let platform = platform(&rec);
         let _read =
             crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
         let _read = _read.enter();
@@ -1449,23 +1891,17 @@ where
             counters,
             |idx, total, s, e| {
                 survivors.push((s, e));
-                let seg_seq = &seq[s..e];
-                let seg_qual = &qual[s..e];
                 let window = Window {
                     start: s,
                     end: e,
                     idx,
                     total,
                 };
-                let tags = build_fastq_tags(&rec, seq, window, mod_block, &cfg.fastq_tags);
-                if tags.is_empty() {
-                    write_segment(writer, &name, seg_seq, seg_qual, total, idx)?;
-                } else {
-                    write_segment_tagged(writer, &name, seg_seq, seg_qual, total, idx, &tags)?;
-                }
+                write_fastq_window(writer, &rec, window, mod_block, platform, &cfg.fastq_tags)?;
                 Ok(())
             },
         )?;
+        count_undo_tags_dropped(counters, &rec, seq.len(), &survivors);
     }
     Ok(counters.snapshot(malformed_tag_reads))
 }
@@ -1493,7 +1929,7 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
         // segment into `Vec<Vec<u8>>` (rendered FASTQ segments, survivors only).
         |rec, cfg| {
             let (seq, qual, mod_block) = prepare_read(rec, counters)?;
-            let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
+            let platform = platform(rec);
             let _read =
                 crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
             let _read = _read.enter();
@@ -1508,27 +1944,26 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
                 counters,
                 |idx, total, s, e| {
                     survivors.push((s, e));
-                    let seg_seq = &seq[s..e];
-                    let seg_qual = &qual[s..e];
                     let window = Window {
                         start: s,
                         end: e,
                         idx,
                         total,
                     };
-                    let tags = build_fastq_tags(rec, seq, window, mod_block, &cfg.fastq_tags);
                     let mut buf = Vec::new();
-                    if tags.is_empty() {
-                        write_segment(&mut buf, &name, seg_seq, seg_qual, total, idx)?;
-                    } else {
-                        write_segment_tagged(
-                            &mut buf, &name, seg_seq, seg_qual, total, idx, &tags,
-                        )?;
-                    }
+                    write_fastq_window(
+                        &mut buf,
+                        rec,
+                        window,
+                        mod_block,
+                        platform,
+                        &cfg.fastq_tags,
+                    )?;
                     out.push(buf);
                     Ok(())
                 },
             )?;
+            count_undo_tags_dropped(counters, rec, seq.len(), &survivors);
             Ok(out)
         },
         // Write: append the rendered bytes to the `FastqOut` writer.
@@ -2464,8 +2899,10 @@ mod tests {
             Some(Value::Int32(8)) => {}, // (block 4-0)*stride 2
             o => panic!("Unexpected s1 ns: {o:?}"),
         }
+        // `sp` counts from the parent's POD5 signal start: ts0 10 + block 0 *
+        // stride 2 (dorado adds `num_trimmed_samples` to the split point).
         match s1.data().get(&Tag::new(b's', b'p')) {
-            Some(Value::Int32(0)) => {}, // block_first 0 * stride
+            Some(Value::Int32(10)) => {},
             o => panic!("Unexpected s1 sp: {o:?}"),
         }
         match s1.data().get(&Tag::new(b'p', b'i')) {
@@ -2477,14 +2914,15 @@ mod tests {
             Some(Value::Int32(-1)) => {},
             o => panic!("Segment 1 rn should be -1: {o:?}"),
         }
-        // `st`/`du` describe the parent read and are dropped on a split subread.
+        // `st`/`du` describe the parent read; with the signal window known
+        // they are recomputed for the subread (`update_moves_split_recomputes_st_and_du`).
         assert!(
-            s1.data().get(&Tag::new(b's', b't')).is_none(),
-            "The st tag is dropped on a split"
+            matches!(s1.data().get(&Tag::new(b's', b't')), Some(Value::String(s)) if s.to_vec() != b"2024-06-21T10:00:00Z"),
+            "The st tag is recomputed on a split"
         );
         assert!(
-            s1.data().get(&Tag::new(b'd', b'u')).is_none(),
-            "The du tag is dropped on a split"
+            matches!(s1.data().get(&Tag::new(b'd', b'u')), Some(Value::Float(d)) if *d < 5.0),
+            "The du tag is recomputed on a split"
         );
 
         let s2 = reconstruct_record(&ubam_with_moves(), 3, 6, 2, 1, true);
@@ -2499,7 +2937,7 @@ mod tests {
             o => panic!("Unexpected s2 ns: {o:?}"),
         }
         match s2.data().get(&Tag::new(b's', b'p')) {
-            Some(Value::Int32(8)) => {}, // block_first 4 * stride 2
+            Some(Value::Int32(18)) => {}, // ts0 10 + block_first 4 * stride 2
             o => panic!("Unexpected s2 sp: {o:?}"),
         }
     }
@@ -3287,10 +3725,11 @@ mod tests {
         assert!(s.contains("\tri:B:C,10,11,12,13,14,15,16,17\n"), "{s:?}");
     }
 
-    /// PacBio's `qs:i`/`qe:i` are query coordinates, not a quality, and are
-    /// copied verbatim; only a float `qs` is recomputed.
+    /// PacBio's `qs:i`/`qe:i` are query coordinates, not a quality, and follow
+    /// the window in the original read's frame; only a float `qs` is a quality
+    /// and is recomputed.
     #[test]
-    fn integer_qs_and_qe_survive_a_crop_unchanged() {
+    fn integer_qs_and_qe_follow_the_window() {
         let mut src = RecordBuf::default();
         *src.flags_mut() = Flags::UNMAPPED;
         *src.name_mut() = Some(b"r1".into());
@@ -3299,16 +3738,16 @@ mod tests {
         src.data_mut()
             .insert(Tag::new(b'q', b's'), Value::Int32(1200));
         src.data_mut()
-            .insert(Tag::new(b'q', b'e'), Value::Int32(4800));
+            .insert(Tag::new(b'q', b'e'), Value::Int32(1206));
 
         let out = reconstruct_record(&src, 2, 6, 1, 0, false);
         assert_eq!(
             out.data().get(&Tag::new(b'q', b's')),
-            Some(&Value::Int32(1200))
+            Some(&Value::Int32(1202))
         );
         assert_eq!(
             out.data().get(&Tag::new(b'q', b'e')),
-            Some(&Value::Int32(4800))
+            Some(&Value::Int32(1206))
         );
 
         let cfg = cfg_bam2fq(None, 2, FastqTags::All);
@@ -3321,7 +3760,7 @@ mod tests {
         )
         .unwrap();
         let s = String::from_utf8(fastq).unwrap();
-        assert!(s.starts_with("@r1\tqs:i:1200\tqe:i:4800\n"), "{s:?}");
+        assert!(s.starts_with("@r1\tqs:i:1202\tqe:i:1206\n"), "{s:?}");
 
         // Dorado's float qs follows the trimmed quality on both outputs.
         src.data_mut()
@@ -3558,5 +3997,522 @@ mod tests {
             out.data().get(&Tag::new(b'z', b'z')),
             Some(&Value::Int32(5))
         );
+    }
+
+    const HIFI: &[u8] = b"m64011_190830_220126/123/ccs";
+
+    /// A 10-base PacBio HiFi record: `qs`/`qe` query coordinates 100..110,
+    /// `rn` passes, the `sa` coverage runs (5 over bases 0..4, 7 over 4..7,
+    /// 5 over 7..10), the `sm`/`sx` per-base counts and the `ds`/`ls` undo
+    /// blobs.
+    fn pacbio_hifi_record(name: &[u8]) -> RecordBuf {
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(name.into());
+        *src.sequence_mut() = b"ACGTACGTAC".to_vec().into();
+        *src.quality_scores_mut() = vec![40; 10].into();
+        let d = src.data_mut();
+        d.insert(Tag::new(b'q', b's'), Value::Int32(100));
+        d.insert(Tag::new(b'q', b'e'), Value::Int32(110));
+        d.insert(Tag::new(b'r', b'n'), Value::Int32(3));
+        d.insert(
+            Tag::new(b's', b'a'),
+            Value::Array(Array::UInt32(vec![4, 5, 3, 7, 3, 5])),
+        );
+        d.insert(
+            Tag::new(b's', b'm'),
+            Value::Array(Array::UInt8((0..10).collect())),
+        );
+        d.insert(
+            Tag::new(b's', b'x'),
+            Value::Array(Array::UInt8((10..20).collect())),
+        );
+        d.insert(
+            Tag::new(b'd', b's'),
+            Value::Array(Array::UInt8(vec![1, 2, 3])),
+        );
+        d.insert(
+            Tag::new(b'l', b's'),
+            Value::Array(Array::UInt8(vec![4, 5, 6])),
+        );
+        src
+    }
+
+    /// A dorado record: `ubam_with_moves` (`mv`, `ts` 10, `ns` 26, `st`, `du`
+    /// 5 s) plus `qs:f`, `me` and `er`, without `pi`.
+    fn ont_record() -> RecordBuf {
+        let mut src = ubam_with_moves();
+        let d = src.data_mut();
+        d.insert(Tag::new(b'q', b's'), Value::Float(20.0));
+        d.insert(Tag::new(b'm', b'e'), Value::Int32(12));
+        d.insert(
+            Tag::new(b'e', b'r'),
+            Value::String(b"signal_positive".as_slice().into()),
+        );
+        src
+    }
+
+    fn tag(rec: &RecordBuf, t: [u8; 2]) -> Option<Value> {
+        rec.data().get(&Tag::new(t[0], t[1])).cloned()
+    }
+
+    fn string_value(s: &[u8]) -> Option<Value> {
+        Some(Value::String(s.into()))
+    }
+
+    fn name_of(rec: &RecordBuf) -> Vec<u8> {
+        rec.name().map(|n| n.to_vec()).unwrap_or_default()
+    }
+
+    /// Splits at a low-quality base and carries every tag.
+    fn split_cfg() -> Config {
+        cfg_bam2fq(
+            Some(QualityOp::Split {
+                cutoff: 20,
+                window: 1,
+            }),
+            0,
+            FastqTags::All,
+        )
+    }
+
+    /// Runs the BAM-to-FASTQ workflow and returns the stats and the text.
+    fn bam2fq(recs: Vec<RecordBuf>, cfg: &Config) -> (Stats, String) {
+        let mut out = Vec::new();
+        let stats = run_bam_to_fastq(
+            recs.into_iter().map(anyhow::Ok),
+            &mut out,
+            cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        (stats, String::from_utf8(out).unwrap())
+    }
+
+    /// Runs the BAM-to-BAM workflow and returns the stats and the decoded
+    /// output records.
+    fn bam2bam(recs: Vec<RecordBuf>, cfg: &Config) -> (Stats, Vec<RecordBuf>) {
+        let header = sam::Header::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("o.bam");
+        let mut sink = crate::io::bam::writer(Some(&path), &header, 1, 6).unwrap();
+        let stats = run_bam(
+            &header,
+            recs.into_iter().map(anyhow::Ok),
+            &mut sink,
+            cfg,
+            &Arc::new(Counters::default()),
+        )
+        .unwrap();
+        sink.finish().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut reader = noodles_bam::io::Reader::new(bytes.as_slice());
+        let h = reader.read_header().unwrap();
+        let mut out = Vec::new();
+        let mut buf = RecordBuf::default();
+        while reader.read_record_buf(&h, &mut buf).unwrap() != 0 {
+            out.push(buf.clone());
+        }
+        (stats, out)
+    }
+
+    /// An integer `qs` or a PacBio read name classifies a record as PacBio;
+    /// anything else is ONT.
+    #[test]
+    fn platform_follows_the_qs_type_and_the_read_name() {
+        assert_eq!(platform(&pacbio_hifi_record(HIFI)), Platform::PacBio);
+        assert_eq!(
+            platform(&pacbio_hifi_record(b"hifi_1")),
+            Platform::PacBio,
+            "An integer qs alone classifies"
+        );
+        assert_eq!(platform(&ont_record()), Platform::Ont);
+        let named = |name: &[u8]| {
+            let mut rec = RecordBuf::default();
+            *rec.name_mut() = Some(name.into());
+            platform(&rec)
+        };
+        let pacbio: [&[u8]; 6] = [
+            b"m1/123/ccs",
+            b"m1/123/ccs/fwd",
+            b"m1/123/ccs/rev",
+            b"m1/123/ccs/100_200",
+            b"m1/123/ccs/fwd/100_200",
+            b"m1/123/100_200",
+        ];
+        for name in pacbio {
+            assert_eq!(
+                named(name),
+                Platform::PacBio,
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        let ont: [&[u8]; 9] = [
+            b"r1",
+            b"m1/abc/ccs",
+            b"m1/123",
+            b"m1/123/ccs/x",
+            b"/123/ccs",
+            b"m1/123/100_",
+            b"m1/123/ccs/fwd/rev",
+            b"m1/123/ccs/100_200/fwd",
+            b"0123e4-uuid_segment_1",
+        ];
+        for name in ont {
+            assert_eq!(
+                named(name),
+                Platform::Ont,
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    /// One integer coordinate without the other leaves both unchanged.
+    #[test]
+    fn lone_integer_qs_is_left_unchanged() {
+        let mut src = pacbio_hifi_record(HIFI);
+        src.data_mut().remove(&Tag::new(b'q', b'e'));
+        let out = reconstruct_record(&src, 2, 7, 1, 0, false);
+        assert_eq!(tag(&out, *b"qs"), Some(Value::Int32(100)));
+        assert!(tag(&out, *b"qe").is_none());
+    }
+
+    /// A crop keeps the name; a split names PacBio segments by their query
+    /// coordinates in the spec's forms and ONT segments `_segment_N`.
+    #[test]
+    fn split_names_follow_the_platform() {
+        let w = |start, end, idx| Window {
+            start,
+            end,
+            idx,
+            total: 2,
+        };
+        let coords = Some((100, 104));
+        let crop = Window {
+            start: 0,
+            end: 4,
+            idx: 0,
+            total: 1,
+        };
+        assert_eq!(segment_name(Platform::PacBio, HIFI, crop, coords), HIFI);
+        let cases: [(&[u8], &[u8]); 5] = [
+            (b"m1/123/ccs", b"m1/123/ccs/100_104"),
+            (b"m1/123/ccs/100_110", b"m1/123/ccs/100_104"),
+            (b"m1/123/ccs/fwd", b"m1/123/ccs/fwd/100_104"),
+            (b"m1/123/ccs/rev/100_110", b"m1/123/ccs/rev/100_104"),
+            (b"m1/123/100_110", b"m1/123/100_104"),
+        ];
+        for (name, want) in cases {
+            assert_eq!(
+                segment_name(Platform::PacBio, name, w(0, 4, 0), coords),
+                want,
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        // Without `qs`/`qe` the interval is offset from the name's own start.
+        assert_eq!(
+            segment_name(Platform::PacBio, b"m1/123/ccs/50_60", w(6, 10, 1), None),
+            b"m1/123/ccs/56_60"
+        );
+        assert_eq!(
+            segment_name(Platform::PacBio, b"m1/123/ccs", w(6, 10, 1), None),
+            b"m1/123/ccs/6_10"
+        );
+        // A PacBio record without a PacBio name, and any ONT record, take the
+        // suffix.
+        assert_eq!(
+            segment_name(Platform::PacBio, b"hifi_1", w(0, 4, 0), coords),
+            b"hifi_1_segment_1"
+        );
+        assert_eq!(
+            segment_name(Platform::Ont, b"m1/123/ccs", w(6, 10, 1), None),
+            b"m1/123/ccs_segment_2"
+        );
+        let out = reconstruct_record(&pacbio_hifi_record(b"hifi_1"), 0, 4, 2, 0, false);
+        assert_eq!(name_of(&out), b"hifi_1_segment_1");
+    }
+
+    /// Both output paths name a split PacBio read by its coordinates and
+    /// rewrite `qs`/`qe` per segment.
+    #[test]
+    fn pacbio_split_is_named_and_coordinated_on_both_outputs() {
+        let mut src = pacbio_hifi_record(HIFI);
+        // Base 2 is low quality, so the split is [0,2) and [3,10).
+        let mut quals = vec![40; 10];
+        quals[2] = 1;
+        *src.quality_scores_mut() = quals.into();
+        let cfg = split_cfg();
+        let (stats, recs) = bam2bam(vec![src.clone()], &cfg);
+        assert_eq!(stats.output_reads, 2);
+        assert_eq!(name_of(&recs[0]), b"m64011_190830_220126/123/ccs/100_102");
+        assert_eq!(name_of(&recs[1]), b"m64011_190830_220126/123/ccs/103_110");
+        assert_eq!(tag(&recs[1], *b"qs"), Some(Value::Int32(103)));
+        assert_eq!(tag(&recs[1], *b"qe"), Some(Value::Int32(110)));
+        let (_, s) = bam2fq(vec![src], &cfg);
+        assert!(
+            s.contains("@m64011_190830_220126/123/ccs/100_102\tqs:i:100\tqe:i:102\t"),
+            "{s:?}"
+        );
+        assert!(
+            s.contains("@m64011_190830_220126/123/ccs/103_110\tqs:i:103\tqe:i:110\t"),
+            "{s:?}"
+        );
+    }
+
+    /// `rn` is a pass count on PacBio and passes through a split, as does
+    /// pbmarkdup's `du:Z`; an ONT split gets `rn` -1 and loses its float `du`.
+    #[test]
+    fn rn_and_du_follow_the_platform_on_a_split() {
+        let mut src = pacbio_hifi_record(HIFI);
+        src.data_mut().insert(
+            Tag::new(b'd', b'u'),
+            Value::String(b"dup-info".as_slice().into()),
+        );
+        let out = reconstruct_record(&src, 0, 4, 2, 0, false);
+        assert_eq!(tag(&out, *b"rn"), Some(Value::Int32(3)));
+        assert_eq!(tag(&out, *b"du"), string_value(b"dup-info"));
+        assert!(tag(&out, *b"pi").is_none(), "pi is a dorado tag");
+        let (_, s) = bam2fq(vec![src], &split_cfg());
+        assert!(
+            s.contains("\trn:i:3\t") && s.contains("\tdu:Z:dup-info"),
+            "{s:?}"
+        );
+
+        let ont = reconstruct_record(&ont_record(), 0, 3, 2, 0, false);
+        assert_eq!(tag(&ont, *b"rn"), Some(Value::Int32(-1)));
+        assert!(tag(&ont, *b"du").is_none());
+        assert!(tag(&ont, *b"st").is_none());
+    }
+
+    /// `sa` coverage runs are re-encoded for the window, `sm`/`sx` are sliced
+    /// per base, and dorado's scalar `sm:f` is untouched.
+    #[test]
+    fn sa_coverage_is_resliced_and_sm_sx_are_per_base() {
+        let src = pacbio_hifi_record(HIFI);
+        // Per-base coverage [5,5,5,5,7,7,7,5,5,5]; window [2,7) keeps
+        // [5,5,7,7,7].
+        let out = reconstruct_record(&src, 2, 7, 1, 0, false);
+        assert_eq!(
+            tag(&out, *b"sa"),
+            Some(Value::Array(Array::UInt32(vec![2, 5, 3, 7])))
+        );
+        assert_eq!(u8_array(&out, *b"sm"), (2..7).collect::<Vec<u8>>());
+        assert_eq!(u8_array(&out, *b"sx"), (12..17).collect::<Vec<u8>>());
+        // Window [3,8) keeps [5,7,7,7,5]: equal coverage on either side of a
+        // run stays two runs.
+        let out = reconstruct_record(&src, 3, 8, 1, 0, false);
+        assert_eq!(
+            tag(&out, *b"sa"),
+            Some(Value::Array(Array::UInt32(vec![1, 5, 3, 7, 1, 5])))
+        );
+        let (_, s) = bam2fq(vec![src], &cfg_bam2fq(None, 2, FastqTags::All));
+        assert!(s.contains("\tsa:B:I,2,5,3,7,3,5\t"), "{s:?}");
+        assert!(s.contains("\tsm:B:C,2,3,4,5,6,7,8,9\t"), "{s:?}");
+
+        let mut ont = ont_record();
+        ont.data_mut()
+            .insert(Tag::new(b's', b'm'), Value::Float(1.5));
+        assert!(!has_malformed_perbase_tag(&ont, 6));
+        let out = reconstruct_record(&ont, 2, 6, 1, 0, false);
+        assert_eq!(tag(&out, *b"sm"), Some(Value::Float(1.5)));
+    }
+
+    /// An `sa` whose runs do not sum to the read length cannot be sliced: it
+    /// is left unchanged and the read is counted as carrying a malformed
+    /// per-base tag, on the decoded and the raw path alike.
+    #[test]
+    fn malformed_sa_is_left_unchanged_and_counted() {
+        let mut src = pacbio_hifi_record(HIFI);
+        src.data_mut().insert(
+            Tag::new(b's', b'a'),
+            Value::Array(Array::UInt32(vec![4, 5, 3, 7])),
+        );
+        assert!(has_malformed_perbase_tag(&src, 10));
+        let out = reconstruct_record(&src, 2, 7, 1, 0, false);
+        assert_eq!(
+            tag(&out, *b"sa"),
+            Some(Value::Array(Array::UInt32(vec![4, 5, 3, 7])))
+        );
+        let (_, malformed) = raw_full_window_metadata(&raw_record(&src)).unwrap();
+        assert!(malformed);
+        let (stats, _) = bam2fq(vec![src], &cfg_bam2fq(None, 2, FastqTags::All));
+        assert_eq!(stats.malformed_tag_reads, 1);
+
+        let mut odd = pacbio_hifi_record(HIFI);
+        odd.data_mut().insert(
+            Tag::new(b's', b'a'),
+            Value::Array(Array::UInt32(vec![10, 5, 3])),
+        );
+        assert!(has_malformed_perbase_tag(&odd, 10));
+
+        let ok = pacbio_hifi_record(HIFI);
+        assert!(!has_malformed_perbase_tag(&ok, 10));
+        let (_, malformed) = raw_full_window_metadata(&raw_record(&ok)).unwrap();
+        assert!(!malformed);
+    }
+
+    /// The undo blobs leave every output record of a trimmed read and the read
+    /// is counted once; an untrimmed read keeps them.
+    #[test]
+    fn undo_blobs_are_dropped_on_trim_and_counted_once_per_read() {
+        let src = pacbio_hifi_record(HIFI);
+        let out = reconstruct_record(&src, 2, 7, 1, 0, false);
+        assert!(tag(&out, *b"ds").is_none() && tag(&out, *b"ls").is_none());
+        let kept = reconstruct_record(&src, 0, 10, 1, 0, false);
+        assert!(tag(&kept, *b"ds").is_some() && tag(&kept, *b"ls").is_some());
+
+        // A cropped read with the blobs, one without, and a split read with
+        // them: two reads counted, no output record carries them.
+        let mut split = pacbio_hifi_record(b"m1/7/ccs");
+        let mut quals = vec![40; 10];
+        quals[5] = 1;
+        *split.quality_scores_mut() = quals.into();
+        let mut plain = pacbio_hifi_record(b"m1/8/ccs");
+        plain.data_mut().remove(&Tag::new(b'd', b's'));
+        plain.data_mut().remove(&Tag::new(b'l', b's'));
+        let mut cfg = split_cfg();
+        cfg.trim.head = 1;
+        let reads = vec![src.clone(), plain, split];
+        let (stats, recs) = bam2bam(reads.clone(), &cfg);
+        assert_eq!(stats.output_reads, 4);
+        assert_eq!(stats.undo_tags_dropped_reads, 2);
+        assert!(
+            recs.iter()
+                .all(|r| tag(r, *b"ds").is_none() && tag(r, *b"ls").is_none())
+        );
+        let (stats, s) = bam2fq(reads, &cfg);
+        assert_eq!(stats.undo_tags_dropped_reads, 2);
+        assert!(!s.contains("ds:B") && !s.contains("ls:B"), "{s:?}");
+
+        let (stats, recs) = bam2bam(vec![src], &cfg_bam2fq(None, 0, FastqTags::All));
+        assert_eq!(stats.undo_tags_dropped_reads, 0);
+        assert!(tag(&recs[0], *b"ds").is_some() && tag(&recs[0], *b"ls").is_some());
+    }
+
+    /// An ONT split carries the parent id, zero MinKNOW events and an unknown
+    /// end reason on every subread but the last, with or without
+    /// `--update-moves`; `sp` still needs the move table and `st`/`du` are
+    /// dropped without it.
+    #[test]
+    fn ont_split_marks_subreads_without_update_moves() {
+        let src = ont_record();
+        let first = reconstruct_record(&src, 0, 3, 2, 0, false);
+        assert_eq!(tag(&first, *b"pi"), string_value(b"r1"));
+        assert_eq!(tag(&first, *b"me"), Some(Value::Int32(0)));
+        assert_eq!(tag(&first, *b"er"), string_value(b"unknown"));
+        assert!(tag(&first, *b"sp").is_none());
+        assert!(tag(&first, *b"st").is_none() && tag(&first, *b"du").is_none());
+        let last = reconstruct_record(&src, 3, 6, 2, 1, false);
+        assert_eq!(tag(&last, *b"pi"), string_value(b"r1"));
+        assert_eq!(tag(&last, *b"me"), Some(Value::Int32(0)));
+        assert_eq!(tag(&last, *b"er"), string_value(b"signal_positive"));
+
+        // A crop is still the sequencer's read.
+        let crop = reconstruct_record(&src, 2, 6, 1, 0, false);
+        assert!(tag(&crop, *b"pi").is_none());
+        assert_eq!(tag(&crop, *b"me"), Some(Value::Int32(12)));
+        assert_eq!(tag(&crop, *b"er"), string_value(b"signal_positive"));
+
+        // A record without `me`/`er` gains neither; `pi` is always set.
+        let bare = reconstruct_record(&ubam_with_moves(), 0, 3, 2, 0, false);
+        assert!(tag(&bare, *b"me").is_none() && tag(&bare, *b"er").is_none());
+        assert_eq!(tag(&bare, *b"pi"), string_value(b"r1"));
+
+        let mut fq = src;
+        *fq.quality_scores_mut() = vec![40, 40, 1, 40, 40, 40].into();
+        let (stats, s) = bam2fq(vec![fq], &split_cfg());
+        assert_eq!(stats.output_reads, 2);
+        assert!(
+            s.contains("@r1_segment_1\tqs:f:") && s.contains("@r1_segment_2\tqs:f:"),
+            "{s:?}"
+        );
+        assert!(
+            s.contains("\tme:i:0\ter:Z:unknown\tpi:Z:r1\trn:i:-1\n"),
+            "{s:?}"
+        );
+        assert!(
+            s.contains("\tme:i:0\ter:Z:signal_positive\tpi:Z:r1\trn:i:-1\n"),
+            "{s:?}"
+        );
+        assert!(!s.contains("\tst:Z:") && !s.contains("\tdu:f:"), "{s:?}");
+    }
+
+    /// Under `--update-moves` a split recomputes `du` from the subread's
+    /// samples and `st` from its start sample, at the rate `ns`/`du` gives
+    /// (26 samples over 5 s), in the source's offset form.
+    #[test]
+    fn update_moves_split_recomputes_st_and_du() {
+        // Segment [0,3) spans samples [10,18): 8 samples at 5.2/s last 1.538 s
+        // and start 1.923 s into the read.
+        let first = reconstruct_record(&ont_record(), 0, 3, 2, 0, true);
+        match tag(&first, *b"du") {
+            Some(Value::Float(d)) => assert!((d - 1.538_461_5).abs() < 1e-5, "{d}"),
+            other => panic!("Unexpected du: {other:?}"),
+        }
+        assert_eq!(
+            tag(&first, *b"st"),
+            string_value(b"2024-06-21T10:00:01.923Z")
+        );
+        // Segment [3,6) spans [18,26): 3.462 s in.
+        let last = reconstruct_record(&ont_record(), 3, 6, 2, 1, true);
+        assert_eq!(
+            tag(&last, *b"st"),
+            string_value(b"2024-06-21T10:00:03.462Z")
+        );
+        assert_eq!(tag(&last, *b"sp"), Some(Value::Int32(18)));
+        // A crop keeps both.
+        let crop = reconstruct_record(&ont_record(), 2, 6, 1, 0, true);
+        assert_eq!(tag(&crop, *b"st"), string_value(b"2024-06-21T10:00:00Z"));
+        assert_eq!(tag(&crop, *b"du"), Some(Value::Float(5.0)));
+
+        let with_st = |st: &[u8]| {
+            let mut r = ont_record();
+            r.data_mut()
+                .insert(Tag::new(b's', b't'), Value::String(st.into()));
+            tag(&reconstruct_record(&r, 0, 3, 2, 0, true), *b"st")
+        };
+        assert_eq!(
+            with_st(b"2024-06-21T10:00:00.000+00:00"),
+            string_value(b"2024-06-21T10:00:01.923+00:00")
+        );
+        assert_eq!(
+            with_st(b"2024-06-21T12:00:00.500+02:00"),
+            string_value(b"2024-06-21T12:00:02.423+02:00")
+        );
+        assert_eq!(
+            with_st(b"2024-06-21T10:00:00"),
+            string_value(b"2024-06-21T10:00:01.923")
+        );
+        // An `st` that does not parse is left as is.
+        assert_eq!(with_st(b"yesterday"), string_value(b"yesterday"));
+    }
+
+    /// The recompute needs a positive float `du` and an `ns`; otherwise both
+    /// tags are copied unchanged rather than dropped or guessed.
+    #[test]
+    fn update_moves_split_leaves_st_and_du_when_the_rate_is_unknown() {
+        let variants: [(&[u8; 2], Option<Value>); 3] = [
+            (b"du", Some(Value::Float(0.0))),
+            (b"du", None),
+            (b"ns", None),
+        ];
+        for (t, v) in variants {
+            let mut r = ont_record();
+            let t = Tag::new(t[0], t[1]);
+            match v {
+                Some(v) => {
+                    r.data_mut().insert(t, v);
+                },
+                None => {
+                    r.data_mut().remove(&t);
+                },
+            }
+            let out = reconstruct_record(&r, 0, 3, 2, 0, true);
+            assert_eq!(tag(&out, *b"st"), tag(&r, *b"st"), "{t:?}");
+            assert_eq!(tag(&out, *b"du"), tag(&r, *b"du"), "{t:?}");
+        }
     }
 }

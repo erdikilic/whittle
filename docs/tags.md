@@ -44,24 +44,44 @@ WHITTLE_UBAM=/path/to/real.ubam cargo test --test bam_mods_oracle -- --ignored
 | Tag(s) | On a trimmed read |
 |---|---|
 | `MM` / `ML` / `MN` | Reconstructed for the output window; a group that loses every position is kept empty; a malformed block is removed and counted |
-| Per-base kinetics (`ip`/`pw`/`fi`/`fp`), and any read-length `B` array | Sliced in lockstep with the sequence |
+| Per-base kinetics (`ip`/`pw`/`fi`/`fp`), PacBio per-base match/mismatch counts (`sm`/`sx` as `B:C`), and any read-length `B` array | Sliced in lockstep with the sequence; dorado's scalar `sm:f` is not an array and is copied |
 | Reverse-strand kinetics (`ri`/`rp`) | Sliced from the other end, since the PacBio BAM spec stores them last base first |
+| `sa` (PacBio run-length subread coverage, `B:I`) | Decoded to per-base coverage, sliced, and re-encoded as `<length>,<coverage>` runs; runs that do not sum to the read length leave the tag unchanged and count as malformed |
 | Fixed-size PacBio arrays (`sn`/`ac`/`bc`) | Copied verbatim, never treated as per-base |
-| ONT signal (`mv`/`ts`/`ns`/`sp`/`pi`) | Dropped, or rewritten with `--update-moves` |
+| ONT signal (`mv`/`ts`/`ns`/`sp`) | Dropped, or rewritten with `--update-moves` |
+| `pi` (parent read id) | Set to the parent's name on every ONT split segment, with or without `--update-moves`; dropped on a crop without it |
 | Poly-A (`pa`/`pt`) | Kept/shifted with `--update-moves` if the tail survives, else dropped; `pa` positions are absolute POD5 sample indexes, the frame `ts` uses |
 | `bi` (barcode positions) | Dropped, since the positions shift under a crop |
-| `qs:f` (dorado mean qscore) | Recomputed from the trimmed quality; PacBio's `qs:i`/`qe:i` query coordinates are copied verbatim |
-| `rn` (read number) | Kept on a crop; `-1` on a split, with or without `--update-moves` |
-| `st`/`du` (start time / duration) | Kept on a crop, dropped on a split |
-| `RG`, `ch`, `mx`, `sm`/`sd`/`sv`, and other scalar tags | Copied verbatim |
+| `ds`/`ls` (PacBio undo blobs for `skera undo` and `lima-undo`) | Dropped from every output record of a trimmed read, since they describe the untrimmed read; counted once per read and reported |
+| `qs:f` (dorado mean qscore) | Recomputed from the trimmed quality |
+| `qs:i`/`qe:i` (PacBio query coordinates) | Rewritten as `qs + start` and `qs + end` of the window, since the PacBio BAM spec keeps them with respect to the original read; one without the other leaves both unchanged |
+| Read name | Kept on a crop. A split names ONT segments `{name}_segment_N`; PacBio segments (an integer `qs`, or a `{movie}/{zmw}/ccs[/fwd|/rev]` or `{movie}/{zmw}/{qStart}_{qEnd}` name) take the spec's `{stem}/{qStart}_{qEnd}` from the rewritten coordinates, with any existing interval replaced |
+| `rn` (read number) | Kept on a crop; `-1` on an ONT split (dorado's convention); PacBio's `rn` is a pass count and passes through |
+| `st`/`du` (start time / duration) | Kept on a crop. On a split, recomputed with `--update-moves` (below), else dropped; pbmarkdup's `du:Z` is not a duration and passes through |
+| `me`/`er` (MinKNOW event count / end reason) | On an ONT split, `me` is 0 on every segment and `er` is `unknown` on every segment but the last, which ends where the read did; both only when the source carries them |
+| `RG`, `ch`, `mx`, `sd`/`sv`, and other scalar tags | Copied verbatim |
+
+## Platform rules
+
+A record is treated as PacBio when it carries an integer `qs` (dorado's `qs` is
+a float) or its name follows a PacBio convention: `{movie}/{zmw}/ccs`, with an
+optional `/fwd` or `/rev` and an optional `/{qStart}_{qEnd}`, or the subread form
+`{movie}/{zmw}/{qStart}_{qEnd}`. Every other record is treated as ONT. The
+platform decides the split naming and the `rn`, `pi`, `me` and `er` rules above;
+the remaining rules are keyed on the tag's type.
 
 ## ONT signal tags under `--update-moves`
 
 With `--update-moves`, a crop slices `mv`, advances `ts` by the removed head
 signal, and sets `ns` to the end of the kept signal (unchanged under a head-only
 crop), while a split emits subreads in dorado's convention (`pi` parent id, `sp`
-parent-signal offset, `ns` subread span, `ts` 0) so the renamed segment stays
-locatable in POD5 for tools like Remora.
+offset from the parent's POD5 signal start, `ns` subread span, `ts` 0) so the
+renamed segment stays locatable in POD5 for tools like Remora. A split also
+recomputes `du` and `st` the way dorado does: the sample rate is the parent's
+`ns` over its `du`, the subread's `du` is its sample count at that rate, and its
+`st` is the parent's advanced by the subread's start sample, written at
+millisecond precision in the parent's offset form (`Z`, a numeric offset, or
+none). A missing or unusable `ns`, `du` or `st` leaves the tag unchanged.
 
 BAM-to-FASTQ always drops the signal tags on a trim, since a move table in a
 FASTQ header is impractical. A known per-base tag whose length does not match the

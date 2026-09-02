@@ -388,7 +388,7 @@ impl ProgressHandle {
         if stats.malformed_tag_reads > 0 {
             tracing::warn!(
                 reads = stats.malformed_tag_reads,
-                "Per-base kinetics tags (ip/pw/fi/fp/ri/rp) whose length did not match \
+                "Per-base tags (ip/pw/fi/fp/ri/rp/sm/sx or a malformed sa) whose length did not match \
                  the sequence were left unchanged"
             );
         }
