@@ -398,6 +398,12 @@ impl ProgressHandle {
                 "Malformed MM/ML/MN modification blocks were removed from the output"
             );
         }
+        if stats.undo_tags_dropped_reads > 0 {
+            tracing::warn!(
+                reads = stats.undo_tags_dropped_reads,
+                "PacBio undo blobs (ds/ls) were removed from trimmed reads"
+            );
+        }
 
         // Guardrail warnings: an empty input and an all-dropped run both exit
         // successfully, and both are reported at WARN so they are

@@ -401,8 +401,11 @@ impl Session {
                 else {
                     return Ok(());
                 };
-                let out_header =
-                    io::bam::provenance_header(header, cfg.threads <= 1 || cfg.ordered);
+                let out_header = io::bam::provenance_header(
+                    header,
+                    cfg.threads <= 1 || cfg.ordered,
+                    &command_line(std::env::args_os()),
+                );
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
                     &out_header,

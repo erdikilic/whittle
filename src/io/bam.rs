@@ -228,7 +228,11 @@ impl BamSink {
 /// `@PG ID:samtools PP:basecaller` without an `ID:basecaller` record), in which
 /// case the programs are left unchanged. The `@PG` line never blocks record
 /// output.
-pub(crate) fn provenance_header(mut header: sam::Header, order_kept: bool) -> sam::Header {
+pub(crate) fn provenance_header(
+    mut header: sam::Header,
+    order_kept: bool,
+    command_line: &str,
+) -> sam::Header {
     use sam::header::record::value::Map;
     use sam::header::record::value::map::Program;
     use sam::header::record::value::map::header::tag as header_tag;
@@ -248,10 +252,15 @@ pub(crate) fn provenance_header(mut header: sam::Header, order_kept: bool) -> sa
     let program = Map::<Program>::builder()
         .insert(tag::NAME, "whittle")
         .insert(tag::VERSION, env!("CARGO_PKG_VERSION"))
+        .insert(tag::COMMAND_LINE, command_line)
         .build();
 
-    if let Ok(program) = program {
-        let _ = header.programs_mut().add("whittle", program);
+    // `Programs::add` links `PP` to each chain leaf and suffixes the ID when
+    // `whittle` is already present.
+    if let Ok(program) = program
+        && let Err(e) = header.programs_mut().add("whittle", program)
+    {
+        tracing::warn!(error = %e, "The @PG provenance record was not added");
     }
 
     header
@@ -312,7 +321,7 @@ mod tests {
 
         assert!(has_dangling_program_chain(&header));
 
-        let out_header = provenance_header(header, true);
+        let out_header = provenance_header(header, true, "whittle");
 
         assert!(
             !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
@@ -346,7 +355,7 @@ mod tests {
 
         // Returning from `provenance_header` is the assertion: an unwalkable
         // chain must not loop.
-        let out_header = provenance_header(header, true);
+        let out_header = provenance_header(header, true, "whittle");
         assert!(
             !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
             "No @PG line should be added when the existing chain cannot be walked"
@@ -374,7 +383,7 @@ mod tests {
         let header = sam::Header::default();
         assert!(!has_dangling_program_chain(&header));
 
-        let out_header = provenance_header(header, true);
+        let out_header = provenance_header(header, true, "whittle");
 
         assert!(
             out_header
@@ -443,7 +452,7 @@ mod tests {
             .unwrap();
         let header = sam::Header::builder().set_header(hd).build();
 
-        let kept = provenance_header(header.clone(), true);
+        let kept = provenance_header(header.clone(), true, "whittle");
         let fields = kept.header().unwrap().other_fields();
         assert_eq!(
             fields.get(&tag::SORT_ORDER).map(|v| v.as_slice()),
@@ -451,12 +460,64 @@ mod tests {
         );
         assert!(fields.contains_key(&tag::GROUP_ORDER));
 
-        let unordered = provenance_header(header, false);
+        let unordered = provenance_header(header, false, "whittle");
         let fields = unordered.header().unwrap().other_fields();
         assert_eq!(
             fields.get(&tag::SORT_ORDER).map(|v| v.as_slice()),
             Some(&b"unsorted"[..])
         );
         assert!(!fields.contains_key(&tag::GROUP_ORDER));
+    }
+
+    /// The provenance record carries the command line and links to the chain
+    /// leaf; a second run gets a distinct ID.
+    #[test]
+    fn provenance_header_records_the_command_line_and_links_the_chain() {
+        use sam::header::record::value::Map;
+        use sam::header::record::value::map::Program;
+        use sam::header::record::value::map::program::tag;
+
+        let header = sam::Header::builder()
+            .add_program("dorado", Map::<Program>::default())
+            .build();
+        let once = provenance_header(header, true, "whittle -i a.bam -o b.bam");
+        let pg = once.programs().as_ref().get(&b"whittle"[..]).unwrap();
+        assert_eq!(
+            pg.other_fields()
+                .get(&tag::COMMAND_LINE)
+                .map(|v| v.as_slice()),
+            Some(&b"whittle -i a.bam -o b.bam"[..])
+        );
+        assert_eq!(
+            pg.other_fields()
+                .get(&tag::PREVIOUS_PROGRAM_ID)
+                .map(|v| v.as_slice()),
+            Some(&b"dorado"[..])
+        );
+
+        let twice = provenance_header(once, true, "whittle -i b.bam -o c.bam");
+        let ids: Vec<&[u8]> = twice
+            .programs()
+            .as_ref()
+            .keys()
+            .map(|k| k.as_ref())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            3,
+            "Two whittle records coexist with the dorado one: {ids:?}"
+        );
+        let second = twice
+            .programs()
+            .as_ref()
+            .get(&b"whittle-whittle"[..])
+            .unwrap();
+        assert_eq!(
+            second
+                .other_fields()
+                .get(&tag::PREVIOUS_PROGRAM_ID)
+                .map(|v| v.as_slice()),
+            Some(&b"whittle"[..])
+        );
     }
 }
