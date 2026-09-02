@@ -445,20 +445,24 @@ where
     let total = produced.len();
     let mut survived = 0usize;
     for (idx, &(s, e)) in produced.iter().enumerate() {
-        if let Some(reason) = crate::filter::check(&seq[s..e], &qual[s..e], filter_cfg) {
-            // The per-segment verdict attributes a missing read to a specific
-            // segment and reason, which no run-level counter can do.
-            tracing::trace!(
-                segment = idx + 1,
-                of = total,
-                start = s,
-                end = e,
-                len = e - s,
-                reason = reason.label(),
-                "Segment dropped"
-            );
-            counters.record_segment_drop(reason);
-            continue;
+        match crate::filter::check_with_quality(&seq[s..e], &qual[s..e], filter_cfg) {
+            Ok(_) => {},
+            Err(reason) => {
+                // The per-segment verdict attributes a missing read to a
+                // specific segment and reason, which no run-level counter
+                // can do.
+                tracing::trace!(
+                    segment = idx + 1,
+                    of = total,
+                    start = s,
+                    end = e,
+                    len = e - s,
+                    reason = reason.label(),
+                    "Segment dropped"
+                );
+                counters.record_segment_drop(reason);
+                continue;
+            },
         }
         tracing::trace!(
             segment = idx + 1,

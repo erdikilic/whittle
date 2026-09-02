@@ -15,7 +15,7 @@ use noodles_sam::{self as sam};
 
 use super::{BAM_BATCH, Counters, Rendered, Stats, process_read_segments, run_parallel};
 use crate::config::{Config, FastqTags};
-use crate::io::fastq::{format_aux_field, format_mods_aux, write_named_record};
+use crate::io::fastq::{push_aux_field, push_mods_aux, push_record_body};
 use crate::{mods, trim};
 
 /// Per-base `B` arrays, one value per SEQ base, sliced in lockstep with the
@@ -391,6 +391,80 @@ pub enum ModBlock {
     Malformed,
 }
 
+/// Returns the `ML` length `mm` declares (one byte per listed position per mod
+/// code, summed over groups), or `None` when `mm` does not conform to the
+/// group grammar `[A-Za-z][+-]([a-z]+|[0-9]+)[.?]?(,[0-9]+)*`. The verdict and
+/// the count agree with `mods::expected_ml_len`, which reads every delta digit
+/// by digit; here the delta tail of a group is validated in bulk and its
+/// positions are counted as commas, in passes the compiler vectorizes. `MM` is
+/// the largest text tag of a modification-calling record, and every record is
+/// classified.
+fn declared_ml_len(mm: &[u8]) -> Option<usize> {
+    let mut total = 0usize;
+    let mut next = 0usize;
+    for token in mm.split(|&b| b == b';') {
+        let start = next;
+        next += token.len() + 1;
+        if start >= mm.len() {
+            // The empty remainder after a final `;` is not a group.
+            break;
+        }
+        let (codes, tail) = split_group_head(token)?;
+        total += codes * delta_count(tail)?;
+    }
+    Some(total)
+}
+
+/// Splits a group token into its code count and its delta tail; `None` when
+/// the head is not `[A-Za-z][+-]([a-z]+|[0-9]+)[.?]?`. A ChEBI id is one code.
+fn split_group_head(token: &[u8]) -> Option<(usize, &[u8])> {
+    if !token.first()?.is_ascii_alphabetic() || !matches!(token.get(1)?, b'+' | b'-') {
+        return None;
+    }
+    let body = &token[2..];
+    let (codes, head_len) = if body.first().is_some_and(|b| b.is_ascii_digit()) {
+        (1, body.iter().take_while(|b| b.is_ascii_digit()).count())
+    } else {
+        let letters = body.iter().take_while(|b| b.is_ascii_alphabetic()).count();
+        (letters, letters)
+    };
+    if codes == 0 {
+        return None;
+    }
+    let mut tail = &body[head_len..];
+    if let Some((&(b'.' | b'?'), rest)) = tail.split_first() {
+        tail = rest;
+    }
+    Some((codes, tail))
+}
+
+/// Returns the number of positions a group's delta tail lists; `None` when the
+/// tail is not `(,[0-9]+)*`. A single trailing comma is accepted, as the
+/// digit-by-digit scan accepts it, and lists no position. The three passes
+/// (every byte a comma or digit, no comma after a comma, the comma count) run
+/// without an early exit so they vectorize.
+fn delta_count(tail: &[u8]) -> Option<usize> {
+    let Some((&first, _)) = tail.split_first() else {
+        return Some(0);
+    };
+    if first != b',' {
+        return None;
+    }
+    let well_formed = tail
+        .iter()
+        .fold(true, |ok, &b| ok & (b == b',' || b.is_ascii_digit()));
+    let doubled = tail
+        .iter()
+        .zip(&tail[1..])
+        .filter(|&(&a, &b)| a == b',' && b == b',')
+        .count();
+    if !well_formed || doubled != 0 {
+        return None;
+    }
+    let commas = tail.iter().filter(|&&b| b == b',').count();
+    Some(commas - usize::from(tail[tail.len() - 1] == b','))
+}
+
 /// Classifies a modification block from its parts. `ml` is `None` when the tag
 /// is absent and `Some(None)` when it is present with a subtype other than
 /// `B:C`; `mn` is `None` when absent and `Some(None)` when not an integer.
@@ -400,7 +474,13 @@ fn classify_mod_block(
     mn: Option<Option<i64>>,
     seq_len: usize,
 ) -> ModBlock {
-    let Ok(expected) = mods::expected_ml_len(mm) else {
+    let declared = declared_ml_len(mm);
+    debug_assert_eq!(
+        declared,
+        mods::expected_ml_len(mm).ok(),
+        "The bulk check must agree with the reference scan"
+    );
+    let Some(expected) = declared else {
         return ModBlock::Malformed;
     };
     match ml {
@@ -1572,12 +1652,12 @@ fn process_raw_full_window(
         let gc = (cfg.filter.min_gc.is_some() || cfg.filter.max_gc.is_some())
             .then(|| raw_gc_fraction(&record));
         match crate::filter::check_metrics(seq_len, qual, gc, &cfg.filter) {
-            Some(reason) => {
+            Err(reason) => {
                 counters.record_segment_drop(reason);
                 counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
                 true
             },
-            None => false,
+            Ok(_) => false,
         }
     };
     if dropped {
@@ -1762,21 +1842,22 @@ pub fn run_bam<R: InputRecord>(
     )
 }
 
-/// Assembles the TAB-prefixed aux-tag block for one window: carried non-mod
-/// tags in source order with the `window_tag_updates` rewrites applied in
-/// place and the removed ones skipped, per-base arrays sliced, then the rebuilt
-/// MM/ML/MN block, then the added tags. Empty when nothing is carried (the
-/// caller writes a plain FASTQ record). A `Malformed` block is omitted.
-fn build_fastq_tags(
+/// Appends the TAB-prefixed aux-tag block for one window to `tags`: carried
+/// non-mod tags in source order with the `window_tag_updates` rewrites applied
+/// in place and the removed ones skipped, per-base arrays sliced, then the
+/// rebuilt MM/ML/MN block, then the added tags. Nothing is appended when
+/// nothing is carried (the record then has a plain header). A `Malformed`
+/// block is omitted.
+fn push_fastq_tags(
+    tags: &mut Vec<u8>,
     src: &RecordBuf,
     seq: &[u8],
     window: Window,
     mod_block: ModBlock,
     sel: &FastqTags,
     platform: Platform,
-) -> Vec<u8> {
+) {
     let Window { start, end, .. } = window;
-    let mut tags = Vec::new();
     let orig_len = seq.len();
     let trimmed = start != 0 || end != orig_len;
     // BAM-to-FASTQ never rewrites the move table (a sliced one is impractical
@@ -1808,7 +1889,7 @@ fn build_fastq_tags(
             },
         };
         tags.push(b'\t');
-        tags.extend_from_slice(&format_aux_field(t, &value));
+        push_aux_field(tags, t, &value);
     }
     if sel.carries_mods()
         && matches!(mod_block, ModBlock::Consistent | ModBlock::MissingMn)
@@ -1816,7 +1897,7 @@ fn build_fastq_tags(
     {
         let (mm, ml) = rebuild_mods(mm, ml, seq, start, end);
         tags.push(b'\t');
-        tags.extend_from_slice(&format_mods_aux(&mm, ml.as_deref(), end - start));
+        push_mods_aux(tags, &mm, ml.as_deref(), end - start);
     }
     for (tag, value) in updates {
         let t = <[u8; 2]>::from(tag);
@@ -1824,31 +1905,36 @@ fn build_fastq_tags(
             && sel.carries(&t)
         {
             tags.push(b'\t');
-            tags.extend_from_slice(&format_aux_field(t, &v));
+            push_aux_field(tags, t, &v);
         }
     }
-    tags
 }
 
-/// Writes one surviving window of a decoded record as a FASTQ record: the
-/// platform's segment name (`segment_name`), the selected aux tags, then the
-/// sliced bases and qualities.
-fn write_fastq_window<W: Write>(
-    w: &mut W,
+/// Appends one surviving window of a decoded record to `out` as a FASTQ
+/// record: the platform's segment name (`segment_name`), the selected aux
+/// tags, then the sliced bases and qualities. The header is assembled in
+/// place, so the tag text is formatted once, into the output buffer.
+fn render_fastq_window(
+    out: &mut Vec<u8>,
     rec: &RecordBuf,
     window: Window,
     mod_block: ModBlock,
     platform: Platform,
     sel: &FastqTags,
-) -> io::Result<()> {
+) {
     let Window { start, end, .. } = window;
     let seq = rec.sequence().as_ref();
     let qual = rec.quality_scores().as_ref();
     let coords = query_span(rec).map(|(qs0, _)| window_coords(qs0, start, end));
-    let name = rec.name().map(|n| n.to_vec()).unwrap_or_default();
-    let name = segment_name(platform, &name, window, coords);
-    let tags = build_fastq_tags(rec, seq, window, mod_block, sel, platform);
-    write_named_record(w, &name, &seq[start..end], &qual[start..end], &tags)
+    let name = rec.name().map(|n| n.as_ref()).unwrap_or_default();
+    out.push(b'@');
+    if window.total > 1 {
+        out.extend_from_slice(&segment_name(platform, name, window, coords));
+    } else {
+        out.extend_from_slice(name);
+    }
+    push_fastq_tags(out, rec, seq, window, mod_block, sel, platform);
+    push_record_body(out, &seq[start..end], &qual[start..end]);
 }
 
 /// Runs the single-threaded uBAM-to-FASTQ workflow: refuses aligned reads,
@@ -1867,6 +1953,9 @@ where
     W: Write,
 {
     let mut malformed_tag_reads = 0u64;
+    // One record is rendered into this buffer and handed to the writer whole;
+    // the buffer keeps its capacity across records.
+    let mut rendered: Vec<u8> = Vec::new();
     for rec in records {
         let rec = rec?.decode()?;
         let (seq, qual, mod_block) = prepare_read(&rec, counters)?;
@@ -1897,7 +1986,16 @@ where
                     idx,
                     total,
                 };
-                write_fastq_window(writer, &rec, window, mod_block, platform, &cfg.fastq_tags)?;
+                rendered.clear();
+                render_fastq_window(
+                    &mut rendered,
+                    &rec,
+                    window,
+                    mod_block,
+                    platform,
+                    &cfg.fastq_tags,
+                );
+                writer.write_all(&rendered)?;
                 Ok(())
             },
         )?;
@@ -1951,14 +2049,14 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
                         total,
                     };
                     let mut buf = Vec::new();
-                    write_fastq_window(
+                    render_fastq_window(
                         &mut buf,
                         rec,
                         window,
                         mod_block,
                         platform,
                         &cfg.fastq_tags,
-                    )?;
+                    );
                     out.push(buf);
                     Ok(())
                 },
@@ -1974,6 +2072,55 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
 
 #[cfg(test)]
 mod tests {
+    /// The bulk `MM` check returns the reference scan's verdict and count on
+    /// well-formed strings, on every malformed shape, and on the accepted
+    /// oddities (a trailing comma, uppercase codes, an empty string).
+    #[test]
+    fn declared_ml_len_agrees_with_the_reference_scan() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b";",
+            b"C+m,0,5;",
+            b"C+m,0;A+a,1,2;",
+            b"C+mh,1,2;",
+            b"C+MH,1,2;",
+            b"C+12345,3;",
+            b"C+12345;",
+            b"C+m?,1;",
+            b"C+m.,1;",
+            b"C+m?.,1;",
+            b"C+m;",
+            b"C+m",
+            b"C+m,",
+            b"C+m,1,",
+            b"C+m,1,;A+a,2",
+            b"N-x,0",
+            b"C+m,,1;",
+            b"C+;",
+            b"C+",
+            b"+m,1;",
+            b"Cm,1;",
+            b"C*m,1;",
+            b"C+m,a;",
+            b"C+m,1 ;",
+            b"C+m,1;;C+h;",
+            b"C+m1;",
+            b"C+m,1;junk",
+            b"C+m,1;C+h,2,x",
+            b"C+m,-1;",
+            b"C+m,1.5;",
+            b"9+m,1;",
+        ];
+        for &mm in cases {
+            assert_eq!(
+                declared_ml_len(mm),
+                mods::expected_ml_len(mm).ok(),
+                "{}",
+                String::from_utf8_lossy(mm)
+            );
+        }
+    }
+
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::Flags;
     use noodles_sam::alignment::record::cigar::{Op, op::Kind};
