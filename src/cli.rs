@@ -7,7 +7,7 @@ use clap::Parser;
 
 use crate::config::{
     AdapterInfer, AdapterInferAction, AdapterInferPolicy, Advisory, Config, FastqTags, IoConfig,
-    ProgressMode,
+    ProgressMode, TagRemoval,
 };
 use crate::filter::FilterConfig;
 use crate::io::Format;
@@ -159,6 +159,15 @@ struct Cli {
     /// other trimming stage. BAM input only.
     #[arg(long, help_heading = "Trimming")]
     trim_barcodes: bool,
+
+    /// Remove this two-character aux tag from every output record. Repeatable.
+    /// BAM input only.
+    #[arg(long, value_name = "TAG", help_heading = "Tags")]
+    remove_tag: Vec<String>,
+    /// Remove the per-base kinetics and alignment-count arrays (ip pw fi fp ri
+    /// rp sa sm sx). BAM input only.
+    #[arg(long, help_heading = "Tags")]
+    strip_kinetics: bool,
 
     /// Adapter FASTA; each sequence must be at least 11 bp. Enables adapter
     /// trimming.
@@ -347,6 +356,7 @@ pub fn parse() -> anyhow::Result<Config> {
     let compression_level = compression_level_for(&c);
     let quality = quality_op_for(&c);
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
+    let remove_tags = TagRemoval::parse(&c.remove_tag, c.strip_kinetics)?;
 
     let mut advisories: Vec<Advisory> = Vec::new();
     let adapter_infer = resolve_infer(&c, &mut advisories)?;
@@ -404,6 +414,7 @@ pub fn parse() -> anyhow::Result<Config> {
         adapter_fasta: c.adapter_fasta,
         adapters_configured: None,
         trim_barcodes: c.trim_barcodes,
+        remove_tags,
     };
 
     // Only an explicit `--in-format` or a known extension decides the input
@@ -415,6 +426,7 @@ pub fn parse() -> anyhow::Result<Config> {
         .or_else(|| cfg.io.input.as_deref().and_then(crate::io::from_extension))
     {
         crate::guards::guard_barcode_input(&cfg, fmt)?;
+        crate::guards::guard_remove_tag_input(&cfg, fmt)?;
     }
     Ok(cfg)
 }
@@ -820,6 +832,7 @@ pub fn config_for_test_threads(
         threads_clamped: None,
         summary_json: None,
         trim_barcodes: false,
+        remove_tags: TagRemoval::default(),
         advisories: Vec::new(),
         adapter_fasta: None,
         progress: crate::config::ProgressMode::Auto,

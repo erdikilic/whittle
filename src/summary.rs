@@ -61,6 +61,13 @@ struct Params {
     update_moves: bool,
     trim_barcodes: bool,
     ordered: bool,
+    /// Aux tags removed from every output record, sorted. `--strip-kinetics`
+    /// is folded into the same set, so the nine per-base arrays appear here
+    /// when it was given.
+    remove_tags: Vec<String>,
+    /// Whether `--strip-kinetics` was given, which `remove_tags` alone does not
+    /// distinguish from the same nine tags named one at a time.
+    strip_kinetics: bool,
     /// `all`, `none`, or the comma-joined tag list.
     fastq_tags: String,
     /// `None` when adapter trimming is off.
@@ -258,6 +265,12 @@ impl Params {
             update_moves: cfg.update_moves,
             trim_barcodes: cfg.trim_barcodes,
             ordered: cfg.ordered,
+            remove_tags: cfg
+                .remove_tags
+                .tags()
+                .map(|t| String::from_utf8_lossy(t).into_owned())
+                .collect(),
+            strip_kinetics: cfg.remove_tags.strips_kinetics(),
             fastq_tags: match &cfg.fastq_tags {
                 FastqTags::All => "all".to_string(),
                 FastqTags::None => "none".to_string(),
@@ -355,6 +368,7 @@ mod tests {
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
             trim_barcodes: false,
+            remove_tags: crate::config::TagRemoval::default(),
         }
     }
 

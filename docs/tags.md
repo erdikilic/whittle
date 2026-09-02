@@ -62,6 +62,17 @@ WHITTLE_UBAM=/path/to/real.ubam cargo test --test bam_mods_oracle -- --ignored
 | `me`/`er` (MinKNOW event count / end reason) | On an ONT split, `me` is 0 on every segment and `er` is `unknown` on every segment but the last, which ends where the read did; both only when the source carries them |
 | `RG`, `ch`, `mx`, `sd`/`sv`, and other scalar tags | Copied verbatim |
 
+## Removing tags
+
+`--remove-tag <TAG>` removes a named aux tag from every output record, and
+`--strip-kinetics` removes the nine per-base arrays (`ip`, `pw`, `fi`, `fp`,
+`ri`, `rp`, `sa`, `sm`, `sx`) in one flag. Removal runs after the rewrites in
+the table above, so a removed tag is absent from the output record rather than
+left pointing at bases that are gone, and the tags that stay are still in
+register. It applies to BAM output and to the tags carried into a BAM-to-FASTQ
+header, and it is BAM input only. See
+[docs/cli.md](cli.md#removing-tags).
+
 ## Barcode positions under `--trim-barcodes`
 
 `--trim-barcodes` removes the barcode spans dorado recorded in `bi` rather than
