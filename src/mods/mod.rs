@@ -2,7 +2,7 @@ pub mod parse;
 pub mod reconstruct;
 pub mod serialize;
 
-pub use parse::parse;
+pub use parse::{MalformedMm, expected_ml_len, parse, parse_checked};
 pub use reconstruct::reconstruct;
 pub use serialize::serialize;
 

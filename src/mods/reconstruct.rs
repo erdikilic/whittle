@@ -1,5 +1,11 @@
 use super::{MmGroup, Mods, counting_base, counts};
 
+/// Restricts every group to the window `[start, end)`: skip-counts are
+/// renumbered against the window's own counting-base occurrences and each
+/// surviving position keeps its `ML` bytes. Every source group is emitted,
+/// with no positions when none survive, because a group declares how the
+/// bases it does not list are read (canonical under `.` or no status, no call
+/// under `?`) and removing it would change that reading for the whole window.
 pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
     let mut out = Vec::new();
     // MM deltas index occurrences of the canonical base, so reconstructing a
@@ -54,20 +60,14 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
             new_ml.extend_from_slice(&g.ml[ml_start..ml_end]);
         }
 
-        // Keep a group that has surviving positions, OR one that was already
-        // empty in the source (`g.deltas.is_empty()`, a valid "assessed, none
-        // found" record, often carrying a `?`/`.` status). A group that HAD
-        // positions but lost every one to the window is genuinely dropped.
-        if !new_deltas.is_empty() || g.deltas.is_empty() {
-            out.push(MmGroup {
-                base: g.base,
-                strand: g.strand,
-                codes: g.codes.clone(),
-                status: g.status,
-                deltas: new_deltas,
-                ml: new_ml,
-            });
-        }
+        out.push(MmGroup {
+            base: g.base,
+            strand: g.strand,
+            codes: g.codes.clone(),
+            status: g.status,
+            deltas: new_deltas,
+            ml: new_ml,
+        });
     }
 
     Mods { groups: out }
@@ -99,8 +99,7 @@ mod tests {
     #[test]
     fn preserves_originally_empty_group() {
         // An MM group with zero positions (e.g. `C+m?;`, "assessed, none
-        // found") is valid SAM and must survive windowing, distinct from
-        // a group whose positions all fell OUTSIDE the window (dropped).
+        // found") is valid SAM and survives windowing.
         let seq = b"ACAC"; // A at 0,2 ; C at 1,3
         // A+a has a modified A at occ 0 (pos 0, in window); C+m? is empty.
         let m = recon(b"A+a,0;C+m?;", &[9], seq, 0, 4);
@@ -115,11 +114,19 @@ mod tests {
         assert_eq!(cm.status, Some(b'?'));
     }
 
+    /// A group whose listed positions all fall outside the window is emitted
+    /// with no positions: under `.` (or no status) it still declares the
+    /// window's unlisted bases canonical, which its absence would not.
     #[test]
-    fn drops_group_with_no_survivors() {
+    fn keeps_group_with_no_survivors_as_empty() {
         let seq = b"CCCC";
-        let m = recon(b"C+m,0;", &[50], seq, 2, 4); // modified C at pos0, outside [2,4)
-        assert!(m.groups.is_empty());
+        let m = recon(b"C+m.,0;", &[50], seq, 2, 4); // modified C at pos0, outside [2,4)
+        assert_eq!(m.groups.len(), 1);
+        let g = &m.groups[0];
+        assert!(g.deltas.is_empty());
+        assert!(g.ml.is_empty());
+        assert_eq!(g.status, Some(b'.'));
+        assert_eq!((g.base, g.strand), (b'C', b'+'));
     }
 
     #[test]
@@ -278,13 +285,13 @@ mod tests {
                 }
             }
 
+            assert_eq!(out.groups.len(), 1, "seq={seq:?} window=[{start},{end})");
             if exp_ml.is_empty() {
                 assert!(
-                    out.groups.is_empty(),
-                    "no survivors in [{start},{end}) but a group was emitted: seq={seq:?}"
+                    out.groups[0].deltas.is_empty() && out.groups[0].ml.is_empty(),
+                    "no survivors in [{start},{end}) but positions were emitted: seq={seq:?}"
                 );
             } else {
-                assert_eq!(out.groups.len(), 1, "seq={seq:?} window=[{start},{end})");
                 let g = &out.groups[0];
                 // Single code -> exactly one ML byte per surviving delta. The invariant.
                 assert_eq!(
@@ -395,17 +402,17 @@ mod tests {
                 }
             }
 
+            assert_eq!(
+                out.groups.len(),
+                1,
+                "seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
+            );
             if exp_ml.is_empty() {
                 assert!(
-                    out.groups.is_empty(),
-                    "no survivors but a group was emitted: seq={seq:?} ncodes={ncodes}"
+                    out.groups[0].deltas.is_empty() && out.groups[0].ml.is_empty(),
+                    "no survivors but positions were emitted: seq={seq:?} ncodes={ncodes}"
                 );
             } else {
-                assert_eq!(
-                    out.groups.len(),
-                    1,
-                    "seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
-                );
                 let g = &out.groups[0];
                 assert_eq!(g.codes.len(), ncodes, "code count must be preserved");
                 assert_eq!(

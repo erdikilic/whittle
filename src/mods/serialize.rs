@@ -1,16 +1,14 @@
 use super::{ModCode, Mods};
 use crate::io::fastq::push_u64;
 
+/// Serializes groups back to an `MM:Z` string and the concatenated `ML` bytes.
 pub fn serialize(mods: &Mods) -> (Vec<u8>, Vec<u8>) {
     let mut mm = Vec::new();
     let mut ml = Vec::new();
 
     for g in &mods.groups {
-        // Empty-delta groups ARE emitted: `reconstruct` only ever keeps an
-        // empty group that was empty in the source (a valid "assessed, none
-        // found" record), and dropping it here would silently erase that
-        // information. A group that lost all its positions to the window is
-        // already excluded upstream, so it never reaches here.
+        // A group with no positions is emitted as `C+m;`: it declares how the
+        // unlisted bases of its kind are read, so it carries information.
         mm.push(g.base);
         mm.push(g.strand);
         for code in &g.codes {
