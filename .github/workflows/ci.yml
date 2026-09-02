@@ -100,6 +100,28 @@ jobs:
           diff -u man/whittle.1 "$RUNNER_TEMP/man/whittle.1" \
             || { echo "::error::man/whittle.1 is stale; run 'cargo run --example gen-man'"; exit 1; }
 
+  # Runs the release build's profile-guided flow once, for the host target, with
+  # the same script the release workflow calls, so a break in it fails a pull
+  # request instead of a tag build. The optimized binary then runs every training
+  # path again, which fails the job if the profile produced a binary that cannot
+  # do the work.
+  pgo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install HTSlib build deps
+        run: sudo apt-get update && sudo apt-get install -y
+             build-essential autoconf automake zlib1g-dev libbz2-dev
+             liblzma-dev libclang-dev clang
+      - run: rustup component add llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: Instrument, train, and rebuild
+        run: scripts/pgo-build.sh "$(rustc -vV | sed -n 's/^host: //p')"
+      - name: Optimized binary runs every training path
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          scripts/pgo-train.sh "target/$host/release/whittle" target/training-data
+
   # Verifies the crate builds on its declared MSRV (Cargo.toml `rust-version`).
   # RUSTUP_TOOLCHAIN overrides the pinned rust-toolchain.toml.
   msrv:
