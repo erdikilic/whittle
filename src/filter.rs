@@ -64,49 +64,64 @@ impl DropReason {
     }
 }
 
-/// Evaluates the bounds cheapest-first and stops at the first rejection. `None`
-/// indicates that the segment passes; empty segments are `TooShort` even when
-/// `min_length` is zero.
+/// Evaluates the bounds cheapest-first and stops at the first rejection.
+/// `Err` names the bound the segment fails; empty segments are `TooShort` even
+/// when `min_length` is zero. `Ok` carries the read quality when a quality
+/// bound was evaluated, so a caller that records it does not walk the quality
+/// string a second time, and `None` when no quality bound is active.
 ///
 /// Called once for each segment produced by trimming, so `seq` and `phred`
 /// describe that segment rather than necessarily the complete input read.
-pub fn check(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> Option<DropReason> {
+pub fn check_with_quality(
+    seq: &[u8],
+    phred: &[u8],
+    cfg: &FilterConfig,
+) -> Result<Option<f64>, DropReason> {
     let gc = (cfg.min_gc.is_some() || cfg.max_gc.is_some()).then(|| gc_fraction(seq));
     check_metrics(seq.len(), phred, gc, cfg)
 }
 
-/// Filters from precomputed sequence metrics. The raw BAM fast path obtains
-/// length and GC from packed sequence views without materializing a decoded
-/// sequence. `gc` is required whenever a GC bound is active; a missing value
-/// panics rather than filtering on a fabricated fraction.
+/// Evaluates the bounds as `check_with_quality` does and returns the verdict
+/// alone: `None` when the segment passes.
+pub fn check(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> Option<DropReason> {
+    check_with_quality(seq, phred, cfg).err()
+}
+
+/// Filters from precomputed sequence metrics, with the result of
+/// `check_with_quality`. The raw BAM fast path obtains length and GC from
+/// packed sequence views without materializing a decoded sequence. `gc` is
+/// required whenever a GC bound is active; a missing value panics rather than
+/// filtering on a fabricated fraction.
 pub(crate) fn check_metrics(
     len: usize,
     phred: &[u8],
     gc: Option<f64>,
     cfg: &FilterConfig,
-) -> Option<DropReason> {
+) -> Result<Option<f64>, DropReason> {
     if len == 0 || len < cfg.min_length {
-        return Some(DropReason::TooShort);
+        return Err(DropReason::TooShort);
     }
     if len > cfg.max_length {
-        return Some(DropReason::TooLong);
+        return Err(DropReason::TooLong);
     }
+    let mut quality = None;
     if cfg.min_qual > 0.0 || cfg.max_qual < 1000.0 {
         let q = read_quality(phred, cfg.qual_mode);
         if q < cfg.min_qual {
-            return Some(DropReason::LowQuality);
+            return Err(DropReason::LowQuality);
         }
         if q > cfg.max_qual {
-            return Some(DropReason::HighQuality);
+            return Err(DropReason::HighQuality);
         }
+        quality = Some(q);
     }
     if cfg.min_gc.is_some() || cfg.max_gc.is_some() {
         let gc = gc.expect("The GC fraction is computed whenever a GC bound is active");
         if gc < cfg.min_gc.unwrap_or(0.0) || gc > cfg.max_gc.unwrap_or(1.0) {
-            return Some(DropReason::Gc);
+            return Err(DropReason::Gc);
         }
     }
-    None
+    Ok(quality)
 }
 
 #[cfg(test)]
@@ -175,13 +190,13 @@ mod tests {
     fn check_metrics_uses_the_supplied_gc_when_a_bound_is_active() {
         let mut c = base();
         c.min_gc = Some(0.4);
-        assert_eq!(check_metrics(4, &[30; 4], Some(0.5), &c), None);
+        assert_eq!(check_metrics(4, &[30; 4], Some(0.5), &c), Ok(None));
         assert_eq!(
             check_metrics(4, &[30; 4], Some(0.1), &c),
-            Some(DropReason::Gc)
+            Err(DropReason::Gc)
         );
         // No bound active: a missing GC value is not consulted.
-        assert_eq!(check_metrics(4, &[30; 4], None, &base()), None);
+        assert_eq!(check_metrics(4, &[30; 4], None, &base()), Ok(None));
     }
 
     #[test]
@@ -189,7 +204,27 @@ mod tests {
     fn check_metrics_panics_without_gc_when_a_bound_is_active() {
         let mut c = base();
         c.max_gc = Some(0.6);
-        check_metrics(4, &[30; 4], None, &c);
+        let _ = check_metrics(4, &[30; 4], None, &c);
+    }
+
+    /// A passing segment carries the quality the bound was checked against,
+    /// and no quality when no bound was active.
+    #[test]
+    fn check_with_quality_returns_the_evaluated_quality() {
+        let mut c = base();
+        c.qual_mode = QualMode::Arithmetic;
+        c.min_qual = 5.0;
+        assert_eq!(check_with_quality(b"AT", &[10, 20], &c), Ok(Some(15.0)));
+        c.min_qual = 0.0;
+        c.max_qual = 100.0;
+        assert_eq!(check_with_quality(b"AT", &[10, 20], &c), Ok(Some(15.0)));
+        assert_eq!(check_with_quality(b"AT", &[10, 20], &base()), Ok(None));
+        // A length rejection precedes the quality evaluation.
+        c.min_length = 3;
+        assert_eq!(
+            check_with_quality(b"AT", &[10, 20], &c),
+            Err(DropReason::TooShort)
+        );
     }
 
     #[test]
