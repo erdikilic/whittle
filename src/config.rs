@@ -233,6 +233,10 @@ pub struct Config {
     /// only, see `workflow::bam`). When false, a trimmed read drops
     /// `mv`/`ts`/`ns`/`sp`/`pi`.
     pub update_moves: bool,
+    /// Whether the barcode spans dorado recorded in the `bi` aux tag are
+    /// removed, as the outermost trimming stage. BAM input only; `cli::parse`
+    /// and `guards::guard_barcode_input` reject any other input format.
+    pub trim_barcodes: bool,
     /// Whether multithreaded runs write records in input order. When false,
     /// records are written in completion order.
     pub ordered: bool,

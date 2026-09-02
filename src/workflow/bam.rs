@@ -71,10 +71,11 @@ pub(crate) const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b
 pub(crate) const POLYA_TAGS: [[u8; 2]; 2] = [*b"pa", *b"pt"];
 
 /// Tags dropped on any trimmed read: `bi` (barcode info) embeds front and rear
-/// sequence positions that shift under a crop and cannot be reconstructed from
-/// the BAM, and the PacBio undo blobs `ds`/`ls` describe the untrimmed read.
-/// The barcode call itself (`BC`/`bv`) is a per-read label and is copied
-/// unchanged.
+/// sequence positions that index the untrimmed read and cannot be reconstructed
+/// from the BAM, and the PacBio undo blobs `ds`/`ls` describe the untrimmed
+/// read. `--trim-barcodes` reads `bi` to place the trim (`barcode_window`)
+/// before it is dropped. The barcode call itself (`BC`/`bv`) is a per-read label
+/// and is copied unchanged.
 pub(crate) const DROP_ON_TRIM_TAGS: [[u8; 2]; 3] = [*b"bi", *b"ds", *b"ls"];
 
 /// Tags that describe the whole parent read, not a split subread: `st` (read
@@ -372,6 +373,96 @@ fn aux_integer(value: &Value) -> Option<i64> {
         Value::Int32(n) => i64::from(*n),
         _ => return None,
     })
+}
+
+/// Dorado's `bi` barcode-info tag: a `B:f` array of exactly seven floats,
+/// `[barcode_score, front_start_index, front_len, front_score, rear_end_index,
+/// rear_len, rear_score]` (`read_pipeline/base/messages.cpp`).
+const BARCODE_TAG: [u8; 2] = *b"bi";
+
+/// The window a record's `bi` barcode positions leave for the rest of the trim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarcodeSpan {
+    /// The record carries no `bi` tag, so the barcode stage keeps every base.
+    Absent,
+    /// Bases `[start, end)` remain once the recorded barcodes are removed.
+    Window(usize, usize),
+    /// The tag is not a seven-element float array, or its positions describe an
+    /// empty, inverted or out-of-range window. The read is left untrimmed by
+    /// this stage and counted in `Counters::barcode_tag_malformed_reads`.
+    Malformed,
+}
+
+/// Returns the integer a `bi` position holds. `f32` represents every base index
+/// a read can hold exactly and the cast saturates, so only a non-finite value
+/// is rejected.
+fn barcode_position(value: f32) -> Option<i64> {
+    value.is_finite().then_some(value as i64)
+}
+
+/// Returns the window `[start, end)` a `bi` position pair leaves over a
+/// `seq_len`-base read.
+///
+/// `front_start + front_len` is the last base of the front barcode and
+/// `rear_end - rear_len` is the first base of the rear one, so dorado's own
+/// trimmer keeps `[front_start + front_len + 1, rear_end - rear_len)`
+/// (`demux/Trimmer.cpp::determine_trim_interval`). Each end is guarded on its
+/// own raw position: a barcode dorado did not find is written as `-1`, which
+/// leaves that end at the read's boundary.
+fn barcode_interval(
+    front_start: f32,
+    front_len: f32,
+    rear_end: f32,
+    rear_len: f32,
+    seq_len: usize,
+) -> BarcodeSpan {
+    let (Some(front_start), Some(front_len), Some(rear_end), Some(rear_len)) = (
+        barcode_position(front_start),
+        barcode_position(front_len),
+        barcode_position(rear_end),
+        barcode_position(rear_len),
+    ) else {
+        return BarcodeSpan::Malformed;
+    };
+    let start = if front_start < 0 {
+        0
+    } else {
+        front_start.saturating_add(front_len).saturating_add(1)
+    };
+    let len = i64::try_from(seq_len).unwrap_or(i64::MAX);
+    let end = if rear_end < 0 {
+        len
+    } else {
+        rear_end.saturating_sub(rear_len)
+    };
+    if start < 0 || end > len || start >= end {
+        return BarcodeSpan::Malformed;
+    }
+    BarcodeSpan::Window(start as usize, end as usize)
+}
+
+/// Resolves a record's `bi` barcode positions into the window to keep over a
+/// `seq_len`-base sequence.
+pub fn barcode_window(rec: &RecordBuf, seq_len: usize) -> BarcodeSpan {
+    let Some(value) = rec.data().get(&Tag::new(BARCODE_TAG[0], BARCODE_TAG[1])) else {
+        return BarcodeSpan::Absent;
+    };
+    let Value::Array(Array::Float(values)) = value else {
+        return BarcodeSpan::Malformed;
+    };
+    let &[
+        _score,
+        front_start,
+        front_len,
+        _front_score,
+        rear_end,
+        rear_len,
+        _rear_score,
+    ] = values.as_slice()
+    else {
+        return BarcodeSpan::Malformed;
+    };
+    barcode_interval(front_start, front_len, rear_end, rear_len, seq_len)
 }
 
 /// The state of a record's `MM`/`ML`/`MN` block relative to its sequence.
@@ -1315,14 +1406,28 @@ fn rebuild_mods_windowed(
     (mm_new, ml.map(|_| ml_new))
 }
 
+/// The per-read state the decoded BAM workflows share.
+struct PreparedRead<'a> {
+    /// The record's bases.
+    seq: &'a [u8],
+    /// The record's per-base qualities.
+    qual: &'a [u8],
+    /// The state of the record's modification block.
+    mod_block: ModBlock,
+    /// The window the barcode stage leaves for the rest of the trim, `None`
+    /// when `--trim-barcodes` is off or the record carries no usable `bi`.
+    barcode: Option<(usize, usize)>,
+}
+
 /// Runs the per-read guards and bookkeeping shared by the decoded workflows:
-/// refuses aligned reads and legacy mod tags, requires full per-base quality, and
-/// classifies the modification block, counting a malformed one. Returns the
-/// record's bases, qualities and block.
+/// refuses aligned reads and legacy mod tags, requires full per-base quality,
+/// classifies the modification block, counting a malformed one, and resolves
+/// the barcode window under `--trim-barcodes`, counting an unusable `bi`.
 fn prepare_read<'a>(
     rec: &'a RecordBuf,
+    cfg: &Config,
     counters: &Counters,
-) -> anyhow::Result<(&'a [u8], &'a [u8], ModBlock)> {
+) -> anyhow::Result<PreparedRead<'a>> {
     crate::io::bam::ensure_unaligned(rec)?;
     crate::io::bam::ensure_modern_mod_tags(rec)?;
     let seq = rec.sequence().as_ref();
@@ -1343,7 +1448,26 @@ fn prepare_read<'a>(
     if mod_block == ModBlock::Malformed {
         counters.malformed_mod_reads.fetch_add(1, Ordering::Relaxed);
     }
-    Ok((seq, qual, mod_block))
+    let barcode = if cfg.trim_barcodes {
+        match barcode_window(rec, seq.len()) {
+            BarcodeSpan::Window(start, end) => Some((start, end)),
+            BarcodeSpan::Absent => None,
+            BarcodeSpan::Malformed => {
+                counters
+                    .barcode_tag_malformed_reads
+                    .fetch_add(1, Ordering::Relaxed);
+                None
+            },
+        }
+    } else {
+        None
+    };
+    Ok(PreparedRead {
+        seq,
+        qual,
+        mod_block,
+        barcode,
+    })
 }
 
 /// Runs the single-threaded uBAM workflow: refuses aligned reads, trims, filters
@@ -1358,7 +1482,12 @@ fn run_bam_seq<R: InputRecord>(
     let mut malformed_tag_reads = 0u64;
     for rec in records {
         let rec = rec?.decode()?;
-        let (seq, qual, mod_block) = prepare_read(&rec, counters)?;
+        let PreparedRead {
+            seq,
+            qual,
+            mod_block,
+            barcode,
+        } = prepare_read(&rec, cfg, counters)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
@@ -1369,7 +1498,7 @@ fn run_bam_seq<R: InputRecord>(
         let _read =
             crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
         let _read = _read.enter();
-        let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
+        let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
         let mut survivors: Vec<(usize, usize)> = Vec::new();
         process_read_segments(
             &produced,
@@ -1767,7 +1896,8 @@ pub fn run_raw_bam(
     let full_window = cfg.trim.head == 0
         && cfg.trim.tail == 0
         && cfg.trim.quality.is_none()
-        && cfg.adapters.is_none();
+        && cfg.adapters.is_none()
+        && !cfg.trim_barcodes;
     if !full_window {
         return run_bam(header, records, sink, cfg, counters);
     }
@@ -1800,11 +1930,16 @@ pub fn run_bam<R: InputRecord>(
         // Render: per-record guards and trim, then `process_read_segments` filters
         // per segment and reconstructs survivors into `Vec<RecordBuf>`.
         |rec, cfg| {
-            let (seq, qual, mod_block) = prepare_read(rec, counters)?;
+            let PreparedRead {
+                seq,
+                qual,
+                mod_block,
+                barcode,
+            } = prepare_read(rec, cfg, counters)?;
             let _read =
                 crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
             let _read = _read.enter();
-            let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
+            let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
             let mut items = Vec::with_capacity(produced.len());
             let mut survivors: Vec<(usize, usize)> = Vec::new();
             process_read_segments(
@@ -1958,7 +2093,12 @@ where
     let mut rendered: Vec<u8> = Vec::new();
     for rec in records {
         let rec = rec?.decode()?;
-        let (seq, qual, mod_block) = prepare_read(&rec, counters)?;
+        let PreparedRead {
+            seq,
+            qual,
+            mod_block,
+            barcode,
+        } = prepare_read(&rec, cfg, counters)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
@@ -1970,7 +2110,7 @@ where
         let _read =
             crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
         let _read = _read.enter();
-        let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
+        let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
         let mut survivors: Vec<(usize, usize)> = Vec::new();
         process_read_segments(
             &produced,
@@ -2026,12 +2166,17 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
         // Render: guards and trim, then `process_read_segments` filters per
         // segment into `Vec<Vec<u8>>` (rendered FASTQ segments, survivors only).
         |rec, cfg| {
-            let (seq, qual, mod_block) = prepare_read(rec, counters)?;
+            let PreparedRead {
+                seq,
+                qual,
+                mod_block,
+                barcode,
+            } = prepare_read(rec, cfg, counters)?;
             let platform = platform(rec);
             let _read =
                 crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
             let _read = _read.enter();
-            let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
+            let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
             let mut out = Vec::with_capacity(produced.len());
             let mut survivors: Vec<(usize, usize)> = Vec::new();
             process_read_segments(
@@ -2259,6 +2404,7 @@ mod tests {
             adapter_fasta: None,
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
+            trim_barcodes: false,
         };
 
         let result = run_bam(
@@ -2375,7 +2521,7 @@ mod tests {
     use crate::qual::QualMode;
     use crate::trim::{QualityOp, TrimPlan};
 
-    fn cfg_bam2fq(quality: Option<QualityOp>, head: usize, tags: FastqTags) -> Config {
+    pub(super) fn cfg_bam2fq(quality: Option<QualityOp>, head: usize, tags: FastqTags) -> Config {
         Config {
             io: IoConfig {
                 input: None,
@@ -2414,6 +2560,7 @@ mod tests {
             adapter_fasta: None,
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
+            trim_barcodes: false,
         }
     }
 
@@ -3367,6 +3514,7 @@ mod tests {
             adapter_fasta: None,
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
+            trim_barcodes: false,
         };
         // 300 reads with mods so reconstruction runs on every one.
         let recs: Vec<RecordBuf> = (0..300)
@@ -3482,6 +3630,7 @@ mod tests {
             adapter_fasta: None,
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
+            trim_barcodes: false,
         };
         let recs: Vec<anyhow::Result<RecordBuf>> = (0..3000)
             .map(|_| anyhow::Ok(RecordBuf::default()))
@@ -3563,6 +3712,7 @@ mod tests {
             adapter_fasta: None,
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
+            trim_barcodes: false,
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
             (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -3630,6 +3780,7 @@ mod tests {
             adapter_fasta: None,
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
+            trim_barcodes: false,
         };
         let recs: Vec<RecordBuf> = (0..300)
             .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))
@@ -4661,5 +4812,202 @@ mod tests {
             assert_eq!(tag(&out, *b"st"), tag(&r, *b"st"), "{t:?}");
             assert_eq!(tag(&out, *b"du"), tag(&r, *b"du"), "{t:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod barcode_tests {
+    use noodles_sam::alignment::RecordBuf;
+    use noodles_sam::alignment::record::Flags;
+    use noodles_sam::alignment::record::data::field::Tag;
+    use noodles_sam::alignment::record_buf::data::field::Value;
+    use noodles_sam::alignment::record_buf::data::field::value::Array;
+
+    use super::*;
+
+    /// A 20-base record carrying `bi` with the given seven floats.
+    fn record_with_bi(values: Vec<f32>) -> RecordBuf {
+        let mut rec = plain_record();
+        rec.data_mut()
+            .insert(Tag::new(b'b', b'i'), Value::Array(Array::Float(values)));
+        rec
+    }
+
+    /// A 20-base unmapped record with no barcode tag.
+    fn plain_record() -> RecordBuf {
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        *rec.name_mut() = Some(b"r1".into());
+        *rec.sequence_mut() = b"ACGTACGTACGTACGTACGT".to_vec().into();
+        *rec.quality_scores_mut() = vec![40; 20].into();
+        rec
+    }
+
+    /// Dorado's `bi` layout is `[barcode_score, front_start_index, front_len,
+    /// front_score, rear_end_index, rear_len, rear_score]`, and
+    /// `front_start_index + front_len` is the last base of the front barcode,
+    /// so the first kept base is one past it.
+    #[test]
+    fn window_follows_dorados_trim_interval() {
+        let rec = record_with_bi(vec![90.0, 0.0, 4.0, 88.0, 18.0, 3.0, 87.0]);
+        assert_eq!(barcode_window(&rec, 20), BarcodeSpan::Window(5, 15));
+    }
+
+    /// A front barcode that does not start at base 0 still ends at
+    /// `front_start_index + front_len`.
+    #[test]
+    fn window_honors_a_front_barcode_offset_from_the_read_start() {
+        let rec = record_with_bi(vec![90.0, 2.0, 4.0, 88.0, 18.0, 3.0, 87.0]);
+        assert_eq!(barcode_window(&rec, 20), BarcodeSpan::Window(7, 15));
+    }
+
+    /// Dorado writes `-1` positions for a barcode it did not find, which leaves
+    /// that end of the read where it was.
+    #[test]
+    fn a_missing_barcode_leaves_its_end_alone() {
+        let front_only = record_with_bi(vec![90.0, 0.0, 4.0, 88.0, -1.0, 0.0, -1.0]);
+        assert_eq!(barcode_window(&front_only, 20), BarcodeSpan::Window(5, 20));
+
+        let rear_only = record_with_bi(vec![90.0, -1.0, 0.0, -1.0, 18.0, 3.0, 87.0]);
+        assert_eq!(barcode_window(&rear_only, 20), BarcodeSpan::Window(0, 15));
+
+        let neither = record_with_bi(vec![0.0, -1.0, 0.0, -1.0, -1.0, 0.0, -1.0]);
+        assert_eq!(barcode_window(&neither, 20), BarcodeSpan::Window(0, 20));
+    }
+
+    #[test]
+    fn a_record_without_the_tag_is_absent() {
+        assert_eq!(barcode_window(&plain_record(), 20), BarcodeSpan::Absent);
+    }
+
+    /// A tag that is not a seven-element float array, or that describes a
+    /// window outside the read, cannot place the barcodes on the sequence.
+    #[test]
+    fn unusable_tags_are_malformed() {
+        let short = record_with_bi(vec![90.0, 0.0, 4.0, 88.0, 18.0, 3.0]);
+        assert_eq!(barcode_window(&short, 20), BarcodeSpan::Malformed);
+
+        let long = record_with_bi(vec![90.0, 0.0, 4.0, 88.0, 18.0, 3.0, 87.0, 1.0]);
+        assert_eq!(barcode_window(&long, 20), BarcodeSpan::Malformed);
+
+        let mut wrong_subtype = plain_record();
+        wrong_subtype.data_mut().insert(
+            Tag::new(b'b', b'i'),
+            Value::Array(Array::Int32(vec![90, 0, 4, 88, 18, 3, 87])),
+        );
+        assert_eq!(barcode_window(&wrong_subtype, 20), BarcodeSpan::Malformed);
+
+        let not_an_array = {
+            let mut rec = plain_record();
+            rec.data_mut().insert(Tag::new(b'b', b'i'), Value::Int32(7));
+            rec
+        };
+        assert_eq!(barcode_window(&not_an_array, 20), BarcodeSpan::Malformed);
+
+        // A rear barcode longer than its own end index puts the window end
+        // before base 0.
+        let negative_end = record_with_bi(vec![90.0, 0.0, 4.0, 88.0, 2.0, 5.0, 87.0]);
+        assert_eq!(barcode_window(&negative_end, 20), BarcodeSpan::Malformed);
+
+        // The front barcode ends past the rear one.
+        let inverted = record_with_bi(vec![90.0, 0.0, 16.0, 88.0, 12.0, 3.0, 87.0]);
+        assert_eq!(barcode_window(&inverted, 20), BarcodeSpan::Malformed);
+
+        // The rear position names a base the read does not have.
+        let past_end = record_with_bi(vec![90.0, 0.0, 4.0, 88.0, 40.0, 3.0, 87.0]);
+        assert_eq!(barcode_window(&past_end, 20), BarcodeSpan::Malformed);
+
+        // A window covering the whole read leaves nothing to keep.
+        let empty = record_with_bi(vec![90.0, 0.0, 19.0, 88.0, 19.0, 0.0, 87.0]);
+        assert_eq!(barcode_window(&empty, 20), BarcodeSpan::Malformed);
+    }
+
+    #[test]
+    fn a_non_finite_position_is_malformed() {
+        let nan = record_with_bi(vec![90.0, 0.0, f32::NAN, 88.0, 18.0, 3.0, 87.0]);
+        assert_eq!(barcode_window(&nan, 20), BarcodeSpan::Malformed);
+    }
+
+    /// Each read with an unusable `bi` is counted once and keeps every base for
+    /// the rest of the trim.
+    #[test]
+    fn a_malformed_tag_is_counted_once_and_leaves_the_read_untrimmed() {
+        let counters = Counters::default();
+        let mut cfg = cfg_barcodes();
+        cfg.trim_barcodes = true;
+        for values in [
+            vec![90.0, 0.0, 4.0, 88.0, 18.0, 3.0],
+            vec![90.0, 0.0, 4.0, 88.0, 2.0, 5.0, 87.0],
+            vec![90.0, 0.0, 16.0, 88.0, 12.0, 3.0, 87.0],
+            vec![90.0, 0.0, 4.0, 88.0, 40.0, 3.0, 87.0],
+        ] {
+            let rec = record_with_bi(values);
+            let prepared = prepare_read(&rec, &cfg, &counters).unwrap();
+            assert_eq!(prepared.barcode, None);
+        }
+        assert_eq!(
+            counters.barcode_tag_malformed_reads.load(Ordering::Relaxed),
+            4
+        );
+
+        // A record without the tag passes through without being counted.
+        let rec = plain_record();
+        assert_eq!(prepare_read(&rec, &cfg, &counters).unwrap().barcode, None);
+        assert_eq!(
+            counters.barcode_tag_malformed_reads.load(Ordering::Relaxed),
+            4
+        );
+    }
+
+    /// The tag is read only under `--trim-barcodes`.
+    #[test]
+    fn the_stage_is_off_without_the_flag() {
+        let counters = Counters::default();
+        let cfg = cfg_barcodes();
+        let rec = record_with_bi(vec![90.0, 0.0, 4.0, 88.0, 18.0, 3.0, 87.0]);
+        assert_eq!(prepare_read(&rec, &cfg, &counters).unwrap().barcode, None);
+        let mut on = cfg_barcodes();
+        on.trim_barcodes = true;
+        assert_eq!(
+            prepare_read(&rec, &on, &counters).unwrap().barcode,
+            Some((5, 15))
+        );
+    }
+
+    /// `bi` is dropped from a trimmed read, since its positions index the
+    /// untrimmed sequence; the barcode call itself is a per-read label and
+    /// stays.
+    #[test]
+    fn a_trimmed_read_drops_bi_and_keeps_the_barcode_call() {
+        let mut rec = record_with_bi(vec![90.0, 0.0, 4.0, 88.0, 18.0, 3.0, 87.0]);
+        rec.data_mut().insert(
+            Tag::new(b'B', b'C'),
+            Value::String(b"barcode07".as_slice().into()),
+        );
+        rec.data_mut()
+            .insert(Tag::new(b'b', b'v'), Value::String(b"v5".as_slice().into()));
+
+        let out = reconstruct_record(&rec, 5, 15, 1, 0, false);
+        assert!(out.data().get(&Tag::new(b'b', b'i')).is_none());
+        assert_eq!(
+            out.data().get(&Tag::new(b'B', b'C')),
+            Some(&Value::String(b"barcode07".as_slice().into()))
+        );
+        assert_eq!(
+            out.data().get(&Tag::new(b'b', b'v')),
+            Some(&Value::String(b"v5".as_slice().into()))
+        );
+
+        // An untrimmed read keeps all three.
+        let same = reconstruct_record(&rec, 0, 20, 1, 0, false);
+        assert!(same.data().get(&Tag::new(b'b', b'i')).is_some());
+    }
+
+    /// A base configuration for the decoded BAM workflows, with barcode
+    /// trimming off.
+    fn cfg_barcodes() -> Config {
+        let mut cfg = super::tests::cfg_bam2fq(None, 0, FastqTags::All);
+        cfg.trim_barcodes = false;
+        cfg
     }
 }

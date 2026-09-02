@@ -26,7 +26,7 @@ pub fn run_fastq_seq<W: Write>(
             .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
         let _read = super::read_span(&rec.name);
         let _read = _read.enter();
-        let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
+        let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref(), None);
         process_read_segments(
             &produced,
             &rec.seq,
@@ -56,7 +56,7 @@ pub fn run_fastq_seq<W: Write>(
 fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut Vec<u8>) {
     let _read = super::read_span(&rec.name);
     let _read = _read.enter();
-    let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref());
+    let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref(), None);
     process_read_segments(
         &produced,
         &rec.seq,

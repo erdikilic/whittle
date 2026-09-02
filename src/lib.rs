@@ -122,6 +122,9 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     // Hard error before any writer or output file is created: BAM or gzipped
     // bytes are refused on an interactive terminal.
     guards::guard_stdout_binary(cfg, out_fmt)?;
+    // Detection has classified the stream, so a piped or extensionless FASTQ
+    // reaches the same refusal `cli::parse` applies to a named one.
+    guards::guard_barcode_input(cfg, in_fmt)?;
 
     tracing::debug!(
         stage = "setup",
@@ -190,6 +193,7 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
     guards::guard_stdout_binary(cfg, out_fmt)?;
+    guards::guard_barcode_input(cfg, family_fmt)?;
 
     // A `.gz` member is BGZF when its first block header says so.
     let bgzf_input = family_fmt == Format::Bam
@@ -668,7 +672,7 @@ fn is_no_op(cfg: &Config, same_format: bool) -> bool {
         && cfg.filter.max_qual >= 1000.0
         && cfg.filter.min_gc.is_none()
         && cfg.filter.max_gc.is_none();
-    no_trim && pass_through_filter && cfg.adapters.is_none() && same_format
+    no_trim && pass_through_filter && cfg.adapters.is_none() && !cfg.trim_barcodes && same_format
 }
 
 /// Warning for a run that neither trims nor filters.
@@ -811,6 +815,7 @@ mod tests {
             adapter_fasta: None,
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
+            trim_barcodes: false,
         }
     }
 
