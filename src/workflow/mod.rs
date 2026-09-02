@@ -1,3 +1,5 @@
+//! Workflow drivers shared by the FASTQ and BAM paths: batching, the parallel driver, run counters and per-read segment filtering.
+
 pub(crate) mod bam;
 mod fastq;
 
@@ -48,6 +50,7 @@ pub(crate) struct Batches<I, F> {
 }
 
 impl<I, F> Batches<I, F> {
+    /// Wraps `records`, weighing each item with `weight`, under `policy`.
     pub(crate) fn new(records: I, weight: F, policy: BatchPolicy) -> Self {
         Self {
             records,
@@ -87,8 +90,8 @@ pub(crate) struct Rendered<T> {
     pub malformed_tags: bool,
 }
 
-/// The render-pool size for a run: the settled budget, or the thread count when
-/// no budget was settled.
+/// Returns the render-pool size for a run: the settled budget, or the thread
+/// count when no budget was settled.
 pub(crate) fn render_pool_size(cfg: &Config) -> usize {
     if cfg.render_workers >= 1 {
         cfg.render_workers
@@ -147,7 +150,7 @@ where
     }
 }
 
-/// The parallel driver shared by every multithreaded workflow. Records are
+/// Runs the parallel driver shared by every multithreaded workflow. Records are
 /// batched under `policy`, rendered on a rayon pool of `render_pool_size(cfg)`
 /// threads, and written by one thread. The record stream is fused on its first
 /// `Err` and stops being read once any render or write error is recorded, so a
@@ -297,13 +300,16 @@ where
 /// Live, thread-shared counters read by the progress ticker and finalized into `Stats`.
 #[derive(Default)]
 pub struct Counters {
+    /// Input reads consumed.
     pub input_reads: AtomicU64,
+    /// Output segments written (one per surviving segment).
     pub output_reads: AtomicU64,
+    /// Compressed bytes pulled from the input source.
     pub bytes_read: AtomicU64,
     /// Sum of SEQ lengths (bases) across every input read, regardless of
     /// whether it survives filtering/trimming.
     pub input_bases: AtomicU64,
-    /// Sum of surviving segment lengths (bases) actually written to output.
+    /// Sum of surviving segment lengths (bases) written to output.
     pub output_bases: AtomicU64,
     /// Input reads whose `MM`/`ML`/`MN` block was malformed (an `MN` that
     /// disagrees with the sequence length, an `ML` whose length disagrees with
@@ -313,36 +319,39 @@ pub struct Counters {
     /// Input reads that produced at least one surviving output segment,
     /// bumped once per input read (not once per segment, unlike
     /// `output_reads`, which a `--qual-split` read can bump several times).
-    /// Exists so `snapshot`'s `debug_assert_eq!` can check that every input
-    /// read is accounted for by exactly one of the three read-level outcomes
-    /// (the read-level third of the two-level counter model).
+    /// Exists so `snapshot` can check that every input read is accounted for
+    /// by exactly one of the three read-level outcomes.
     pub reads_with_output: AtomicU64,
-    /// Input reads that produced **zero** segments at all: `trim::apply`
-    /// returned no intervals to even run the per-segment filter over (an
-    /// empty read, a read fully consumed by adapter trimming, or an
-    /// over-crop). Read-level, paired with `reads_with_output` and
-    /// `reads_all_filtered` in the invariant below.
+    /// Input reads that produced zero segments: `trim::apply` returned no
+    /// intervals for the per-segment filter (an empty read, a read fully
+    /// consumed by adapter trimming, or an over-crop). Read-level, paired with
+    /// `reads_with_output` and `reads_all_filtered` in the invariant below.
     pub reads_trimmed_to_nothing: AtomicU64,
-    /// Input reads that produced **at least one** segment, but every one was
+    /// Input reads that produced at least one segment, but every one was
     /// rejected by post-trim `filter::check`. Read-level, paired with
     /// `reads_with_output` and `reads_trimmed_to_nothing` in the invariant
     /// below.
     pub reads_all_filtered: AtomicU64,
-    /// Segment-level drop counters: one bump per **segment** (not read) that
-    /// `filter::check` rejects, by reason, post-trim. A single input read can
-    /// contribute to more than one of these (e.g. a `--qual-split` read whose
-    /// several pieces are each judged independently). These are NOT part of
-    /// the read-level invariant.
+    /// Segments dropped as `TooShort`. This and the four counters below are
+    /// segment-level: one bump per segment (not read) that `filter::check`
+    /// rejects, by reason, post-trim. A single input read can contribute to
+    /// more than one of these (e.g. a `--qual-split` read whose several pieces
+    /// are each judged independently). They are not part of the read-level
+    /// invariant.
     pub segments_dropped_short: AtomicU64,
+    /// Segments dropped as `TooLong`.
     pub segments_dropped_long: AtomicU64,
+    /// Segments dropped as `LowQuality`.
     pub segments_dropped_low_qual: AtomicU64,
+    /// Segments dropped as `HighQuality`.
     pub segments_dropped_high_qual: AtomicU64,
+    /// Segments dropped as `Gc`.
     pub segments_dropped_gc: AtomicU64,
 }
 
 impl Counters {
-    /// Bump the segment-level counter matching a `filter::check` failure
-    /// reason. Called once per rejected **segment** (post-trim), not per read.
+    /// Bumps the segment-level counter matching a `filter::check` failure
+    /// reason. Called once per rejected segment (post-trim), not per read.
     pub fn record_segment_drop(&self, reason: DropReason) {
         let counter = match reason {
             DropReason::TooShort => &self.segments_dropped_short,
@@ -354,7 +363,7 @@ impl Counters {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Snapshot every counter into a `Stats` for end-of-run reporting.
+    /// Snapshots every counter into a `Stats` for end-of-run reporting.
     /// `malformed_tag_reads` is threaded through separately: only the BAM
     /// paths track it, and the parallel BAM path accumulates it in its own
     /// local atomic rather than in `Counters`.
@@ -372,12 +381,12 @@ impl Counters {
         // Every input read lands in exactly one of the three read-level buckets: it
         // produced surviving segments, produced none at all, or produced some and
         // lost them all to `filter::check`. Segment-level drops are excluded, since a
-        // read can shed segments and still survive. Catches a future early return
-        // that forgets to bump one of the three.
+        // read can shed segments and still survive. The assertion catches an early
+        // return that skips one of the three.
         debug_assert_eq!(
             reads_with_output + reads_trimmed_to_nothing + reads_all_filtered,
             input_reads,
-            "every input read must be exactly one of: produced output, trimmed to \
+            "Every input read must be exactly one of: produced output, trimmed to \
              nothing, or had every segment filtered"
         );
 
@@ -399,13 +408,9 @@ impl Counters {
     }
 }
 
-/// Filter produced segments and update segment- and read-level counters for all
-/// workflows. `seq` and `qual` contain the complete input read and `produced`
-/// contains the ranges to evaluate. For each surviving segment, `render`
-/// receives `(idx, total, start, end)`. A render error stops processing before
-/// the read-level outcome counter is updated.
-/// A trace-level span naming the read, so the segment decisions logged while
-/// processing it are attributable without repeating the name on every event.
+/// Returns a trace-level span naming the read, so the segment decisions logged
+/// while processing it are attributable without repeating the name on every
+/// event.
 ///
 /// Returns a disabled span when trace is off, which costs a level check rather
 /// than any formatting, keeping the hot path unaffected at the default level.
@@ -417,6 +422,11 @@ pub(crate) fn read_span(name: &[u8]) -> tracing::Span {
     }
 }
 
+/// Filters produced segments and updates segment- and read-level counters for
+/// all workflows. `seq` and `qual` contain the complete input read and
+/// `produced` contains the ranges to evaluate. For each surviving segment,
+/// `render` receives `(idx, total, start, end)`. A render error stops
+/// processing before the read-level outcome counter is updated.
 pub(crate) fn process_read_segments<Rn>(
     produced: &[(usize, usize)],
     seq: &[u8],
@@ -432,8 +442,8 @@ where
     let mut survived = 0usize;
     for (idx, &(s, e)) in produced.iter().enumerate() {
         if let Some(reason) = crate::filter::check(&seq[s..e], &qual[s..e], filter_cfg) {
-            // The per-segment verdict is the answer to "why is this read missing
-            // from my output", which no run-level counter can give.
+            // The per-segment verdict attributes a missing read to a specific
+            // segment and reason, which no run-level counter can do.
             tracing::trace!(
                 segment = idx + 1,
                 of = total,
@@ -475,17 +485,20 @@ where
     Ok(())
 }
 
+/// End-of-run counters, snapshotted from `Counters`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Stats {
+    /// Input reads consumed.
     pub input_reads: u64,
+    /// Output segments written.
     pub output_reads: u64,
     /// Sum of SEQ lengths (bases) across every input read.
     pub input_bases: u64,
-    /// Sum of surviving segment lengths (bases) actually written to output.
+    /// Sum of surviving segment lengths (bases) written to output.
     pub output_bases: u64,
-    /// Reads carrying a known per-base kinetics tag (ip/pw/...) whose array length
-    /// did not match the sequence length: malformed and left untouched. Surfaced
-    /// as a run-level advisory; not an error.
+    /// Reads carrying a known per-base kinetics tag (`ip`, `pw`, ...) whose
+    /// array length did not match the sequence length: malformed and left
+    /// untouched. Surfaced as a run-level advisory; not an error.
     pub malformed_tag_reads: u64,
     /// Input reads whose modification block was malformed and removed; see
     /// `Counters::malformed_mod_reads`.
@@ -548,16 +561,16 @@ mod tests {
         counters.output_reads.fetch_add(2, Ordering::Relaxed);
         counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
 
-        // (b) a read whose 2 produced segments are both filtered TooShort ->
-        // reads_all_filtered (segments were produced, but none survived).
+        // (b) a read whose 2 produced segments are both filtered `TooShort`:
+        // `reads_all_filtered` (segments were produced, but none survived).
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters.record_segment_drop(DropReason::TooShort);
         counters.record_segment_drop(DropReason::TooShort);
         counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
 
-        // (c) an empty input read: trim::apply produces no segments at all ->
-        // reads_trimmed_to_nothing (no segment-level drop is recorded, since
-        // the per-segment filter loop never runs).
+        // (c) an empty input read: `trim::apply` produces no segments, so
+        // `reads_trimmed_to_nothing` is bumped and no segment-level drop is
+        // recorded.
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .reads_trimmed_to_nothing
@@ -569,16 +582,15 @@ mod tests {
         assert_eq!(stats.output_reads, 2);
         assert_eq!(
             stats.reads_all_filtered, 1,
-            "read b produced segments, but every one was filtered"
+            "Read b produced segments, but every one was filtered"
         );
         assert_eq!(
             stats.reads_trimmed_to_nothing, 1,
-            "read c produced no segments at all"
+            "Read c produced no segments"
         );
         assert_eq!(counters.reads_with_output.load(Ordering::Relaxed), 1);
-        // reads_with_output + reads_trimmed_to_nothing + reads_all_filtered ==
-        // input_reads holds (also asserted internally by `snapshot`'s
-        // debug_assert_eq!).
+        // `reads_with_output + reads_trimmed_to_nothing + reads_all_filtered ==
+        // input_reads` holds (also asserted by `snapshot`).
         assert_eq!(
             counters.reads_with_output.load(Ordering::Relaxed)
                 + stats.reads_trimmed_to_nothing
@@ -592,7 +604,7 @@ mod tests {
         assert_eq!(stats.segments_dropped_gc, 0);
     }
 
-    /// Cover all read-level outcomes and the corresponding render arguments.
+    /// Covers all read-level outcomes and the corresponding render arguments.
     #[test]
     fn process_read_segments_dispatches_and_counts_all_three_outcomes() {
         let filter_cfg = FilterConfig {
@@ -605,8 +617,9 @@ mod tests {
             qual_mode: crate::qual::QualMode::Mean,
         };
 
-        // Trimmed to nothing: no produced intervals at all -> render never
-        // called, reads_trimmed_to_nothing bumped, no segment-level drop.
+        // Trimmed to nothing: no produced intervals, so `render` is never called,
+        // `reads_trimmed_to_nothing` is bumped and no segment-level drop is
+        // recorded.
         {
             let counters = Counters::default();
             let mut calls: Vec<(usize, usize, usize, usize)> = Vec::new();
@@ -622,8 +635,9 @@ mod tests {
             assert_eq!(counters.segments_dropped_short.load(Ordering::Relaxed), 0);
         }
 
-        // All filtered: one produced segment, too short to pass -> render
-        // never called for it, reads_all_filtered bumped, one segment drop.
+        // All filtered: one produced segment, too short to pass, so `render` is
+        // not called, `reads_all_filtered` is bumped and one segment drop is
+        // recorded.
         {
             let counters = Counters::default();
             let seq = b"AA";
@@ -648,8 +662,8 @@ mod tests {
             assert_eq!(counters.segments_dropped_short.load(Ordering::Relaxed), 1);
         }
 
-        // With output: two produced segments, both long enough -> render
-        // called once per survivor with the correct (idx, total, s, e).
+        // With output: two produced segments, both long enough, so `render` is
+        // called once per survivor with `(idx, total, s, e)`.
         {
             let counters = Counters::default();
             let seq = b"AAAAAA";
@@ -744,7 +758,7 @@ mod tests {
         impl Iterator for PoisonAfterError {
             type Item = anyhow::Result<usize>;
             fn next(&mut self) -> Option<Self::Item> {
-                assert!(!self.yielded_error, "source polled after it returned Err");
+                assert!(!self.yielded_error, "Source polled after it returned Err");
                 if self.n == 50 {
                     self.yielded_error = true;
                     return Some(Err(anyhow::anyhow!("incomplete stream")));
@@ -819,7 +833,7 @@ mod tests {
         assert!(res.is_err());
         assert!(
             rendered.load(Ordering::Relaxed) < 1_000,
-            "rendering continued long after the first error: {} records",
+            "Rendering continued long after the first error: {} records",
             rendered.load(Ordering::Relaxed)
         );
     }

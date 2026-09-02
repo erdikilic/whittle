@@ -1,8 +1,9 @@
 # Adapter trimming
 
-Off by default. Turn it on with `-a`/`--adapter-fasta <FILE>` (your own sequences,
-one per record, each at least 11 bp) and/or `--adapter-preset ont` (the built-in
-catalog). Either one alone is enough, and they combine.
+Adapter trimming is off by default. It is enabled by `-a`/`--adapter-fasta <FILE>`
+(user-supplied sequences, one per record, each at least 11 bp) and/or
+`--adapter-preset ont` (the built-in catalog). Either one alone is enough, and
+they combine.
 
 Adapter sequences may use the full IUPAC alphabet, so a degenerate primer is
 written the way it is designed: `ACGTACGTYCGTACGRACGT` matches reads carrying
@@ -10,15 +11,15 @@ either base at each wobble position. `U` is folded to `T`, since a DNA read
 stores `T`. A record holding anything outside the nucleotide alphabet is
 malformed rather than degenerate, and is skipped with a warning; so is one
 shorter than the 11-bp minimum. A pattern averaging two or more bases per
-position is still searched, since you asked for it, but it warns that something
-that degenerate matches almost anywhere.
+position is still searched, with a warning that a pattern that degenerate
+matches almost anywhere.
 
-An ambiguity code in a *read* is treated the other way round: as a mismatch, not
+An ambiguity code in a read is treated the other way round: as a mismatch, not
 a free match. An uncalled base is evidence of nothing, so it costs error budget.
 A stray `N` inside a real adapter still matches within `--adapter-error-rate`,
 while a run of them never looks like an adapter and is not excised.
 
-Every adapter is searched on both strands, so orientation doesn't matter, and
+Every adapter is searched on both strands, so orientation does not matter, and
 each read gets two treatments:
 
 - **Terminal trimming.** An adapter within `--adapter-end-size` bases of an end
@@ -36,9 +37,9 @@ every other trim, so `MM`/`ML`/`MN` and the per-base tags stay correct (see
 ## Presence detection
 
 A preset catalog holds far more adapters than any single run uses (the ONT one has
-over a hundred). `--adapter-sample <N>` (N >= 100) checks which adapters actually
-turn up in the first N reads, then trims the rest against only that set. It's
-faster, and it avoids spurious trims from catalog entries that aren't present.
+over a hundred). `--adapter-sample <N>` (N >= 100) checks which adapters occur in
+the first N reads, then trims the rest against only that set. This is faster and
+avoids spurious trims from absent catalog entries.
 
 Detection is off by default (`--adapter-sample 0`) and preset-only; a custom
 `--adapter-fasta` is always searched in full. If detection finds nothing (an
@@ -59,12 +60,12 @@ conserved marker-gene prefix can be statistically indistinguishable.
 
 `--adapter-infer report` prints the recommended anchor, its support, the assembled
 length, the uncertain-base count, and any catalog/FASTA cross-name, all as FASTA,
-then exits without touching record output. Add `-v` to log the full review-only
+then exits without touching record output. Add `-v` to log the full assembled
 consensus.
 
-`--adapter-infer-policy aggressive` restores full-consensus trimming and allows
-interior splitting unless `--adapter-ends-only` is also set; reach for it only
-once you've ruled out overtrimming conserved biological sequence. The default
+`--adapter-infer-policy aggressive` trims the full consensus and allows interior
+splitting unless `--adapter-ends-only` is also set; it is appropriate only after
+overtrimming of conserved biological sequence has been ruled out. The default
 policy is `conservative`.
 
 ## Built-in ONT catalog

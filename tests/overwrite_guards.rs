@@ -1,19 +1,21 @@
 //! Guards against whittle destroying a file it is also reading or writing.
 //!
-//! Each case here is a run that would otherwise exit 0 having replaced an input,
-//! an adapter FASTA, its own output, or another artifact with something else.
+//! Each case covers a file the run both reads and writes: an input, an adapter
+//! FASTA, its own output, or another artifact.
 
 use std::process::{Command as StdCommand, Stdio};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// The binary with `WHITTLE_LOG` cleared.
 fn whittle() -> Command {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
     cmd
 }
 
+/// One 20-bp Q40 read.
 const READS: &str = "@r1\nACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIII\n";
 
 #[test]
@@ -101,10 +103,9 @@ fn summary_json_may_not_overwrite_a_folder_member() {
     );
 }
 
-/// `whittle -o reads.fastq < reads.fastq` has no `-i` for the path comparison to
-/// use, but fd 0 still resolves to the file's inode. Without this check the
-/// output truncated the file mid-read and destroyed everything past the first
-/// buffer.
+/// `whittle -o reads.fastq < reads.fastq` has no `-i` for the path comparison,
+/// but fd 0 still resolves to the file's inode; without the descriptor check the
+/// output would truncate the file mid-read.
 #[test]
 fn stdin_redirect_may_not_overwrite_its_own_source() {
     let dir = tempfile::tempdir().unwrap();

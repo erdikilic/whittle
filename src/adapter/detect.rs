@@ -1,21 +1,28 @@
+//! Adapter presence detection over a sampled read prefix.
+//!
+//! Narrows a configured adapter set to the entries that would act on at least
+//! `presence_min` of the sampled reads, so a large catalog is not searched in
+//! full on every read.
+
 use super::search::{AmbiguousSearcher, hits, new_ambiguous_searcher};
 use super::{Adapter, Budget, MIN_PATTERN_LEN, Terminal, classify_terminal, normalized_read};
 use rayon::prelude::*;
 
-/// Below this many sampled reads, presence detection is unreliable; callers
-/// skip it and use the full adapter set.
+/// Sample size below which presence detection is unreliable; callers skip it
+/// and use the full adapter set.
 pub const MIN_SAMPLE_FOR_DETECTION: usize = 100;
 
-/// Minimum sampled-read count for an adapter to be kept: 0.2% of the sample,
-/// floored at 3 (so a single stray hit can't promote an adapter).
+/// Returns the minimum sampled-read count for an adapter to be kept: 0.2% of
+/// the sample, floored at 3 so that a single stray hit cannot promote an
+/// adapter.
 pub fn presence_min(sample_size: usize) -> usize {
     (sample_size / 500).max(3)
 }
 
-/// Whether `ad` would act on `window`: a terminal hit (trimmed) or, when
-/// `split`, an interior hit (`cost <= k_mid`, split). Searches the same
-/// normalized text with the same budgets as `adapter_segments`, so "present"
-/// equals "does something".
+/// Returns whether `ad` would act on `window`: a terminal hit (trimmed) or,
+/// when `split`, an interior hit (`cost <= k_mid`, split). Searches the same
+/// normalized text with the same budgets as `adapter_segments`, so presence is
+/// defined as having an effect on the read.
 fn adapter_present_in(
     searcher: &mut AmbiguousSearcher,
     window: &[u8],
@@ -44,7 +51,7 @@ fn adapter_present_in(
     false
 }
 
-/// Retain the adapters found (would-act) in at least `min_count` of the sampled
+/// Retains the adapters that would act on at least `min_count` of the sampled
 /// reads. Order is preserved.
 pub fn present(
     sample: &[&[u8]],
@@ -58,7 +65,7 @@ pub fn present(
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads.max(1))
         .build()
-        .expect("a positive Rayon worker count must build");
+        .expect("A positive Rayon worker count builds a pool");
     pool.install(|| {
         adapters
             .par_iter()
@@ -85,6 +92,7 @@ mod tests {
     use super::*;
     use crate::adapter::{AdapterConfig, End, adapter_segments};
 
+    /// Builds an adapter from its parts.
     fn ad(name: &str, seq: &[u8], end: End) -> Adapter {
         Adapter {
             name: name.into(),
@@ -93,8 +101,8 @@ mod tests {
         }
     }
 
-    /// Deterministic SplitMix64 bases, the same generator the inference
-    /// fixtures use.
+    /// Generates deterministic SplitMix64 bases with the same generator the
+    /// inference fixtures use.
     fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
         let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
         (0..len)
@@ -109,6 +117,7 @@ mod tests {
             .collect()
     }
 
+    /// The floor of 3 holds up to 1500 sampled reads; above that 0.2% applies.
     #[test]
     fn presence_min_boundaries() {
         assert_eq!(presence_min(0), 3);
@@ -116,10 +125,10 @@ mod tests {
         assert_eq!(presence_min(10000), 20);
     }
 
+    /// Over 200 reads that each start with adapter P and never contain adapter
+    /// Q, P is kept and Q is dropped.
     #[test]
     fn keeps_present_drops_absent() {
-        // Build 200 reads each starting with adapter P (present) and never
-        // containing adapter Q. Q must be dropped; P kept.
         let p = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp
         let q = b"ACGACGACGACGACGACGAC"; // 20bp, absent (and not P's revcomp)
         let mut reads: Vec<Vec<u8>> = Vec::new();
@@ -140,19 +149,21 @@ mod tests {
             2,
         );
         let names: Vec<&str> = kept.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["P"], "present kept, absent dropped");
+        assert_eq!(names, vec!["P"], "Present kept, absent dropped");
     }
 
+    /// A terminal hit counts, an absent adapter does not, and an interior hit
+    /// counts only when splitting is on.
     #[test]
     fn adapter_present_in_terminal_and_interior() {
         let mut s = new_ambiguous_searcher();
         let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", End::Both);
         let budget = Budget::new(a.seq.len(), 0.2);
-        // terminal: adapter at read start.
+        // Terminal: adapter at the read start.
         let mut term = a.seq.clone();
         term.extend_from_slice(&[b'A'; 60]);
         assert!(adapter_present_in(&mut s, &term, &a, budget, 150, false));
-        // absent: pure-A read.
+        // Absent: pure-A read.
         assert!(!adapter_present_in(
             &mut s,
             &[b'A'; 80],
@@ -161,23 +172,23 @@ mod tests {
             150,
             true
         ));
-        // interior (deep, split on): adapter in the middle of a long read.
+        // Interior (deep, split on): adapter in the middle of a long read.
         let mut inter = vec![b'A'; 300];
         inter.splice(150..150, a.seq.iter().copied());
         assert!(
             adapter_present_in(&mut s, &inter, &a, budget, 20, true),
-            "interior found when split"
+            "Interior found when split"
         );
         assert!(
             !adapter_present_in(&mut s, &inter, &a, budget, 20, false),
-            "interior ignored when ends-only"
+            "Interior ignored when ends-only"
         );
     }
 
+    /// Sixty `N`s then random bases: no adapter is present, and detection agrees
+    /// with the trimmer, which rewrites the run before searching.
     #[test]
     fn ambiguity_runs_in_reads_are_not_evidence() {
-        // Sixty `N`s then random bases: no adapter is present, and every read
-        // agrees with the trimmer, which rewrites the run before searching.
         let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", End::Both);
         let reads: Vec<Vec<u8>> = (0..200u64)
             .map(|i| {

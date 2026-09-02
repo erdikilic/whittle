@@ -1,3 +1,5 @@
+//! BAM reading and writing over noodles: raw-record readers, single- and multithreaded BGZF sinks, and record-level input guards.
+
 use std::fs::File;
 use std::io::{self, Write};
 use std::num::NonZero;
@@ -16,18 +18,17 @@ use noodles_sam::{self as sam};
 /// all structured decoding on the serial reader thread.
 pub type RawRecordIter = Box<dyn Iterator<Item = anyhow::Result<bam::Record>> + Send>;
 
-/// Worker count for a noodles BGZF reader or writer.
+/// Returns the worker count for a noodles BGZF reader or writer.
 ///
-/// noodles 0.51 builds a private Rayon pool per reader/writer from this count.
-/// Up to 0.48 the count was ignored and jobs went to Rayon's global registry,
-/// so a caller configured that registry instead; passing the count explicitly is
-/// what replaced it. Getting this wrong is silent: the type checks either way,
-/// the codec just runs single-threaded.
+/// noodles builds a private Rayon pool per reader or writer from this count;
+/// the global Rayon registry is not consulted. A count of zero is clamped to
+/// one. An incorrect count is not a type error: the codec runs single-threaded.
 fn workers_nonzero(workers: usize) -> NonZero<usize> {
     NonZero::new(workers.max(1)).unwrap_or(NonZero::<usize>::MIN)
 }
 
-/// Error (naming the read) if the record is aligned. uBAM only in v1.
+/// Errors (naming the read) if the record is aligned or flagged
+/// reverse-complemented; only unaligned BAM (uBAM) input is supported.
 pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
     let flags = rec.flags();
     let name = || {
@@ -37,7 +38,7 @@ pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
     };
     if !flags.is_unmapped() {
         anyhow::bail!(
-            "read {} is aligned (mapped); whittle v1 supports unaligned BAM (uBAM) only",
+            "read {} is aligned (mapped); only unaligned BAM (uBAM) input is supported",
             name()
         );
     }
@@ -46,8 +47,9 @@ pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
     // (`sam_mods.c`, the `BAM_FREVERSE` branches). whittle trims and renumbers
     // left to right, so it would crop the wrong ends and relocate every call.
     // Basecallers do not emit `0x4|0x10`, but the SAM spec does not forbid it and
-    // `samtools view -f 4` of an aligned file preserves it, so refuse rather than
-    // silently disagree with every other tool.
+    // `samtools view -f 4` of an aligned file preserves it, so such a record is
+    // refused rather than trimmed in the opposite orientation from every
+    // htslib-based consumer.
     if flags.is_reverse_complemented() {
         anyhow::bail!(
             "read {} is flagged reverse-complemented; whittle trims in read \
@@ -61,17 +63,17 @@ pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
 /// The pre-spec lowercase spellings of the base-modification tags.
 ///
 /// htslib still reads them (`sam_mods.c` falls back to `Mm` when `MM` is absent,
-/// and to `Ml` for `Ml`), so old guppy and megalodon output decodes fine
-/// elsewhere while whittle, which looks only for the uppercase tags, would copy
-/// them through untouched onto a trimmed sequence and silently relocate every
-/// call.
+/// and to `Ml` when `ML` is absent), so guppy and megalodon output decodes
+/// correctly in htslib-based tools, while whittle, which reads only the
+/// uppercase tags, would copy them through unchanged onto a trimmed sequence
+/// and relocate every call.
 pub(crate) const LEGACY_MOD_TAGS: [[u8; 2]; 2] = [*b"Mm", *b"Ml"];
 
-/// Error if the record carries legacy `Mm`/`Ml` rather than `MM`/`ML`.
+/// Errors if the record carries legacy `Mm`/`Ml` rather than `MM`/`ML`.
 ///
-/// Refused rather than rewritten: supporting both spellings means choosing which
-/// to emit, and quietly modernizing a tag is its own surprise. Loudly declining
-/// beats the silent corruption that copying them through produces.
+/// Refused rather than rewritten: supporting both spellings would require
+/// choosing which to emit, and rewriting the tag changes the record's schema.
+/// Refusing avoids the corruption that copying the tags through would produce.
 pub fn ensure_modern_mod_tags(rec: &RecordBuf) -> anyhow::Result<()> {
     for t in LEGACY_MOD_TAGS {
         if rec.data().get(&Tag::new(t[0], t[1])).is_some() {
@@ -89,8 +91,8 @@ pub fn ensure_modern_mod_tags(rec: &RecordBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Open a BAM reader; MT-bgzf when `workers > 1`. Returns the header and a Send
-/// owning raw-record iterator.
+/// Opens a BAM reader (multithreaded BGZF when `workers > 1`) and returns the
+/// header and a `Send` owning raw-record iterator.
 pub fn reader(
     input: Option<&Path>,
     workers: usize,
@@ -102,11 +104,11 @@ pub fn reader(
     reader_from(inner, workers)
 }
 
-/// Like `reader`, but over an already-open stream rather than a path/stdin. Used
-/// by the single-file dispatch so a stdin BAM whose first bytes were consumed for
-/// format sniffing (and chained back into `inner`) is read from the true start.
-/// Re-opening `io::stdin()` would drop those already-consumed bytes. MT-bgzf when
-/// `workers > 1`.
+/// Opens a BAM reader like `reader`, but over an already-open stream rather
+/// than a path or stdin. Used by the single-file dispatch so a stdin BAM whose
+/// first bytes were consumed for format sniffing (and chained back into
+/// `inner`) is read from the true start; reopening `io::stdin()` would drop
+/// those bytes. Multithreaded BGZF when `workers > 1`.
 pub fn reader_from(
     inner: Box<dyn io::Read + Send>,
     workers: usize,
@@ -139,15 +141,17 @@ impl<R: io::Read> Iterator for RawRecordIterImpl<R> {
     }
 }
 
-/// A BAM output sink: single-threaded bgzf (t1) or multithreaded bgzf (t>1).
+/// A BAM output sink: single-threaded BGZF (`-t 1`) or multithreaded BGZF.
 pub enum BamSink {
+    /// Single-threaded BGZF writer.
     Single(bam::io::Writer<bgzf::io::Writer<Box<dyn Write + Send>>>),
+    /// Multithreaded BGZF writer.
     Multi(bam::io::Writer<bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>>),
 }
 
-/// Build the sink (header written), MT-bgzf when `workers > 1`. `level` is the
-/// bgzf DEFLATE compression level (0-9 per the CLI, though libdeflate accepts up
-/// to 12); it is applied to both the single- and multi-threaded encoders.
+/// Builds the sink with the header written; multithreaded BGZF when
+/// `workers > 1`. `level` is the BGZF DEFLATE compression level (0-9 per the
+/// CLI, though libdeflate accepts up to 12) and is applied to both encoders.
 pub fn writer(
     output: Option<&Path>,
     header: &sam::Header,
@@ -169,9 +173,8 @@ pub fn writer(
         w.write_header(header)?;
         Ok(BamSink::Multi(w))
     } else {
-        // Build the single-threaded bgzf writer explicitly (rather than
-        // `bam::io::Writer::new`, which would force the default level) so `level`
-        // takes effect.
+        // The single-threaded BGZF writer is built explicitly rather than through
+        // `bam::io::Writer::new`, which would force the default level.
         let bgzf_w = bgzf::io::writer::Builder::default()
             .set_compression_level(clevel)
             .build_from_writer(inner);
@@ -182,6 +185,7 @@ pub fn writer(
 }
 
 impl BamSink {
+    /// Writes one decoded record under `header`.
     pub fn write_record(&mut self, header: &sam::Header, rec: &RecordBuf) -> io::Result<()> {
         match self {
             BamSink::Single(w) => w.write_alignment_record(header, rec),
@@ -189,6 +193,7 @@ impl BamSink {
         }
     }
 
+    /// Writes one raw record under `header` without decoding it.
     pub fn write_raw_record(&mut self, header: &sam::Header, rec: &bam::Record) -> io::Result<()> {
         match self {
             BamSink::Single(w) => w.write_record(header, rec),
@@ -196,8 +201,9 @@ impl BamSink {
         }
     }
 
-    /// Flush + finalize (bgzf EOF block). Single: `try_finish`; Multi:
-    /// `into_inner().finish()` (its `Drop` swallows errors, so this must be explicit).
+    /// Flushes and finalizes the stream, writing the BGZF EOF block. `Single`
+    /// uses `try_finish`; `Multi` uses `into_inner().finish()`, whose `Drop`
+    /// swallows errors, so the call must be explicit.
     pub fn finish(self) -> anyhow::Result<()> {
         match self {
             BamSink::Single(mut w) => {
@@ -212,7 +218,7 @@ impl BamSink {
     }
 }
 
-/// The output header: the input header with an `@PG` provenance record
+/// Returns the output header: the input header with an `@PG` provenance record
 /// (`ID:whittle`, program name and version) appended, and with `@HD SO:` set to
 /// `unsorted` (and `GO`/`SS` removed) when `order_kept` is false, since a
 /// multithreaded run without `--ordered` writes records in completion order.
@@ -251,14 +257,15 @@ pub(crate) fn provenance_header(mut header: sam::Header, order_kept: bool) -> sa
     header
 }
 
-/// True if the header's `@PG` chain is one `Programs::add` cannot walk safely.
+/// Returns true if the header's `@PG` chain is one `Programs::add` cannot walk
+/// safely.
 ///
 /// `Programs::add` calls `Programs::leaves`, which indexes the program map
 /// directly and panics when a `PP` names an absent ID, and which only terminates
 /// a cycle that returns to the node it started from. A rho-shaped chain
 /// (`pgA -> pgB -> pgC -> pgB`) has every ID present and never revisits `pgA`, so
-/// it loops forever. Both shapes are rejected here by walking each chain with a
-/// visited set.
+/// the walk does not terminate. Both shapes are rejected here by walking each
+/// chain with a visited set.
 fn has_dangling_program_chain(header: &sam::Header) -> bool {
     use std::collections::HashSet;
 
@@ -289,15 +296,15 @@ mod tests {
     use noodles_sam::header::record::value::map::Program;
     use noodles_sam::header::record::value::map::program::tag;
 
-    /// A dangling `@PG PP:` reference must leave the header unchanged because
-    /// Noodles requires every parent program ID to exist.
+    /// A dangling `@PG PP:` reference leaves the header unchanged because
+    /// noodles requires every parent program ID to exist.
     #[test]
     fn provenance_header_does_not_panic_on_dangling_pp_chain() {
         // `pg1` references a parent that is absent from the header.
         let dangling_program = Map::<Program>::builder()
             .insert(tag::PREVIOUS_PROGRAM_ID, "ghost")
             .build()
-            .expect("valid PP field");
+            .expect("Valid PP field");
 
         let header = sam::Header::builder()
             .add_program("pg1", dangling_program)
@@ -309,21 +316,21 @@ mod tests {
 
         assert!(
             !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
-            "expected no whittle @PG line to be added when the existing chain is dangling"
+            "Expected no whittle @PG line when the existing chain is dangling"
         );
     }
 
-    /// A rho-shaped chain (`pgA -> pgB -> pgC -> pgB`) has no absent ID, so the
-    /// old dangling-only check passed it through to `Programs::add`, whose
-    /// `leaves()` walk only terminates on a cycle that returns to its start node.
-    /// Walking from `pgA` never revisits `pgA`, so it looped forever at 100% CPU.
+    /// A rho-shaped chain (`pgA -> pgB -> pgC -> pgB`) has no absent ID, so a
+    /// dangling-only check would pass it to `Programs::add`, whose `leaves()`
+    /// walk terminates only on a cycle that returns to its start node. A walk
+    /// from `pgA` never revisits `pgA` and does not terminate.
     #[test]
     fn provenance_header_rejects_a_cycle_that_excludes_the_entry_node() {
         fn with_pp(previous: &str) -> Map<Program> {
             Map::<Program>::builder()
                 .insert(tag::PREVIOUS_PROGRAM_ID, previous)
                 .build()
-                .expect("valid PP field")
+                .expect("Valid PP field")
         }
 
         let header = sam::Header::builder()
@@ -334,14 +341,15 @@ mod tests {
 
         assert!(
             has_dangling_program_chain(&header),
-            "a rho-shaped chain must be rejected before `Programs::add` sees it"
+            "A rho-shaped chain must be rejected before `Programs::add` sees it"
         );
 
-        // Reaching this line at all is the assertion: the old code hung here.
+        // Returning from `provenance_header` is the assertion: an unwalkable
+        // chain must not loop.
         let out_header = provenance_header(header, true);
         assert!(
             !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
-            "no @PG line should be added when the existing chain cannot be walked"
+            "No @PG line should be added when the existing chain cannot be walked"
         );
     }
 
@@ -354,7 +362,7 @@ mod tests {
                 Map::<Program>::builder()
                     .insert(tag::PREVIOUS_PROGRAM_ID, "pgA")
                     .build()
-                    .expect("valid PP field"),
+                    .expect("Valid PP field"),
             )
             .build();
         assert!(has_dangling_program_chain(&header));
@@ -373,7 +381,7 @@ mod tests {
                 .programs()
                 .roots()
                 .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"whittle"),
-            "expected an @PG record with ID whittle in the output header, got {:?}",
+            "Expected an @PG record with ID whittle in the output header, got {:?}",
             out_header.programs()
         );
     }
@@ -401,7 +409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mt.bam");
 
-        // Write two unmapped records through a 4-worker MT BamSink.
+        // Two unmapped records go through a 4-worker multithreaded `BamSink`.
         let header = sam::Header::default();
         let mut sink = writer(Some(&path), &header, 4, 6).unwrap();
         for name in [b"r1".as_slice(), b"r2".as_slice()] {
@@ -414,7 +422,7 @@ mod tests {
         }
         sink.finish().unwrap();
 
-        // Read back through a 4-worker MT reader.
+        // The records are read back through a 4-worker multithreaded reader.
         let (_h, records) = reader(Some(&path), 4).unwrap();
         let names: Vec<Vec<u8>> = records
             .map(|r| r.unwrap().name().map(|n| n.to_vec()).unwrap_or_default())

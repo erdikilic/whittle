@@ -7,10 +7,9 @@ use std::path::Path;
 use crate::config::Config;
 use crate::io;
 
-/// True iff writing `fmt`'s bytes to stdout would dump binary (BAM) or gzip
-/// (FASTQ.gz) data into an interactive terminal: never useful output, and
-/// almost always a forgotten `-o`/redirect. Plain FASTQ text is always fine.
-/// Pure (no I/O) so it's trivial to unit-test without a real TTY.
+/// True iff writing `fmt`'s bytes to stdout would send binary (BAM) or gzip
+/// (FASTQ.gz, FASTQ.bgz) data to an interactive terminal. Plain FASTQ text is
+/// always allowed. Pure (no I/O), so it is unit-tested without a TTY.
 pub(crate) fn binary_to_terminal(
     output_is_stdout: bool,
     fmt: io::Format,
@@ -24,7 +23,7 @@ pub(crate) fn binary_to_terminal(
         )
 }
 
-/// Reject binary output to an interactive terminal before creating a writer.
+/// Rejects binary output to an interactive terminal before creating a writer.
 /// Report-only inference is exempt because it emits textual FASTA and exits
 /// before workflow dispatch.
 pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> {
@@ -37,10 +36,10 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
             io::Format::Bam => "bam",
             io::Format::FastqGz => "fastq.gz",
             io::Format::FastqBgzf => "fastq.bgz",
-            io::Format::Fastq => "fastq", // unreachable via binary_to_terminal, kept exhaustive
+            io::Format::Fastq => "fastq", // unreachable: binary_to_terminal excludes plain FASTQ
         };
         anyhow::bail!(
-            "refusing to write {} to a terminal; redirect to a file/pipe (e.g. `> out.{ext}`) \
+            "refusing to write {} to a terminal; redirect to a file or pipe (e.g. `> out.{ext}`) \
              or pass -o",
             out_fmt.label()
         );
@@ -48,7 +47,7 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
     Ok(())
 }
 
-/// Every file the run writes, checked against every file it reads and against
+/// Checks every file the run writes against every file it reads and against
 /// each other.
 ///
 /// `whittle` streams its input, so `File::create` truncating a file that is still
@@ -117,11 +116,11 @@ pub(crate) fn guard_output_collisions(
         }
     }
 
-    // Catch a mistyped path now rather than after the reads are written, which
-    // on a large BAM throws away hours of work. Probing the parent instead of
-    // creating the file leaves nothing behind on a run that ends up writing no
-    // artifact at all (`--adapter-infer report`). A permission failure still
-    // surfaces late; a wrong path, the common typo, does not.
+    // A mistyped artifact path is caught during setup rather than after the
+    // reads are written. Probing the parent directory instead of creating the
+    // file leaves nothing behind on a run that writes no artifact
+    // (`--adapter-infer report`). A permission failure still surfaces at write
+    // time; a nonexistent directory does not.
     for &(flag, path) in &targets {
         if path.is_dir() {
             anyhow::bail!("{flag} {} is a directory", path.display());
@@ -191,11 +190,11 @@ fn stdout_is(_path: &Path) -> bool {
 /// Whether two paths resolve to the same file. Canonicalizes both so symlinks
 /// and `./`-style aliasing are caught; the output usually does not exist yet, so
 /// it falls back to canonicalizing the parent directory and re-joining the file
-/// name. Conservative: any resolution failure yields `false` (don't block a run
-/// on a path that cannot be resolved).
+/// name. Conservative: any resolution failure yields `false`, so an unresolvable
+/// path never blocks a run.
 pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
-    // Only a regular file has contents to destroy. `/dev/null` as both endpoints,
-    // or a tty, is a deliberate discard, not a collision worth refusing.
+    // Only a regular file has contents to destroy. `/dev/null` or a tty as both
+    // endpoints is a discard, not a collision.
     for p in [a, b] {
         if let Ok(m) = std::fs::metadata(p)
             && !m.is_file()
@@ -204,7 +203,7 @@ pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
         }
     }
 
-    // When both paths already exist, an inode+device match is definitive, and it
+    // When both paths exist, an inode and device match is definitive, and it
     // also catches hard links to one inode, which path canonicalization misses.
     #[cfg(unix)]
     {
@@ -249,7 +248,7 @@ mod tests {
 
     #[test]
     fn binary_to_terminal_allows_plain_fastq() {
-        // Plain text FASTQ on a terminal is normal/expected output.
+        // Plain-text FASTQ on a terminal is expected output.
         assert!(!binary_to_terminal(true, io::Format::Fastq, true));
     }
 
@@ -261,7 +260,8 @@ mod tests {
 
     #[test]
     fn binary_to_terminal_allows_when_not_a_tty() {
-        // Redirected to a file/pipe: not a terminal, so it's fine.
+        // Redirected to a file or pipe: not a terminal, so binary output is
+        // allowed.
         assert!(!binary_to_terminal(true, io::Format::Bam, false));
         assert!(!binary_to_terminal(true, io::Format::FastqGz, false));
     }

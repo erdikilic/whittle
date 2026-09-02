@@ -1,7 +1,9 @@
+//! Phred-scale quality summaries for a read: error-probability mean, arithmetic mean and median.
+
 use std::sync::LazyLock;
 
-/// Precomputed 10^(-q/10) for every possible Phred byte. Sizing to the full u8
-/// range means any quality byte indexes safely.
+/// Precomputed `10^(-q/10)` for every Phred byte. The table covers the full
+/// `u8` range, so any quality byte indexes it safely.
 static PHRED_LUT: LazyLock<[f64; 256]> = LazyLock::new(|| {
     let mut lut = [0.0f64; 256];
     for (i, v) in lut.iter_mut().enumerate() {
@@ -10,13 +12,15 @@ static PHRED_LUT: LazyLock<[f64; 256]> = LazyLock::new(|| {
     lut
 });
 
+/// Returns the error probability `10^(-q/10)` for a raw Phred score, read from
+/// `PHRED_LUT`.
 #[inline(always)]
 pub fn phred_to_prob(q: u8) -> f64 {
     PHRED_LUT[q as usize]
 }
 
-/// Error-probability mean quality: the ONT-standard "read Q", the mean per-base
-/// error probability converted back to a Phred score.
+/// Returns the error-probability mean quality: the ONT read Q, the mean
+/// per-base error probability converted back to a Phred score.
 pub fn mean_prob_q(phred: &[u8]) -> f64 {
     if phred.is_empty() {
         return 0.0;
@@ -25,7 +29,7 @@ pub fn mean_prob_q(phred: &[u8]) -> f64 {
     (sum / phred.len() as f64).log10() * -10.0
 }
 
-/// Plain arithmetic mean of the Phred integers.
+/// Returns the arithmetic mean of the Phred integers.
 pub fn mean_arith_q(phred: &[u8]) -> f64 {
     if phred.is_empty() {
         return 0.0;
@@ -34,7 +38,8 @@ pub fn mean_arith_q(phred: &[u8]) -> f64 {
     sum as f64 / phred.len() as f64
 }
 
-/// Median Phred via a 256-bucket histogram (O(n), no sort/alloc of the input).
+/// Returns the median Phred score via a 256-bucket histogram, in O(n) without
+/// sorting or allocating.
 pub fn median_q(phred: &[u8]) -> f64 {
     if phred.is_empty() {
         return 0.0;
@@ -45,7 +50,7 @@ pub fn median_q(phred: &[u8]) -> f64 {
     }
     let n = phred.len();
     let mid = n / 2;
-    // Walk buckets accumulating counts; find value(s) at the median rank(s).
+    // The value at rank `target`, found by accumulating bucket counts.
     let value_at = |target: usize| -> usize {
         let mut cum = 0usize;
         for (v, &c) in hist.iter().enumerate() {
@@ -63,13 +68,18 @@ pub fn median_q(phred: &[u8]) -> f64 {
     }
 }
 
+/// The read-quality summary used by the quality filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QualMode {
+    /// Error-probability mean (the ONT read Q).
     Mean,
+    /// Arithmetic mean of the Phred integers.
     Arithmetic,
+    /// Median Phred score.
     Median,
 }
 
+/// Returns the read quality of `phred` under `mode`; `0.0` for an empty slice.
 pub fn read_quality(phred: &[u8], mode: QualMode) -> f64 {
     match mode {
         QualMode::Mean => mean_prob_q(phred),
@@ -88,7 +98,8 @@ mod tests {
         assert!((phred_to_prob(30) - 0.001).abs() < 1e-12);
     }
 
-    // Known-good values for the error-probability mean; inputs are RAW phred (no +33).
+    /// Known-good values for the error-probability mean; inputs are raw Phred
+    /// scores without the +33 offset.
     #[test]
     fn mean_prob_q_known_values() {
         assert!((mean_prob_q(&[10]) - 10.0).abs() < 1e-9);
@@ -107,7 +118,7 @@ mod tests {
     fn arithmetic_and_median() {
         assert!((mean_arith_q(&[10, 20, 30]) - 20.0).abs() < 1e-9);
         assert!((median_q(&[10, 20, 30]) - 20.0).abs() < 1e-9);
-        // even count -> average of the two middle values
+        // An even count averages the two middle values.
         assert!((median_q(&[10, 20, 30, 40]) - 25.0).abs() < 1e-9);
     }
 

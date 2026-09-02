@@ -1,3 +1,5 @@
+//! FASTQ reading and writing: streaming record iterators over plain, gzip and BGZF input, and segment writers with optional SAM-style header tags.
+
 use std::io::{self, BufWriter, Read, Write};
 
 use flate2::read::MultiGzDecoder;
@@ -11,9 +13,8 @@ use seq_io::fastq::{Reader, Record};
 use crate::config::Config;
 use crate::record::ReadRecord;
 
-/// Build a streaming FASTQ record iterator over an already-open source (e.g. a
-/// peeked-and-chained stdin stream), transparently decompressing gzip when
-/// `gz` is true.
+/// Builds a streaming FASTQ record iterator over an already-open source (e.g. a
+/// peeked-and-chained stdin stream), decompressing gzip when `gz` is true.
 pub fn reader_from(
     inner: Box<dyn Read + Send>,
     gz: bool,
@@ -26,9 +27,9 @@ pub fn reader_from(
     Box::new(RecordIter::new(inner))
 }
 
-/// Build a FASTQ iterator over BGZF-compressed input. Unlike ordinary gzip,
-/// BGZF is independently framed and can inflate blocks on the shared Rayon
-/// codec pool while the parser consumes completed blocks in order.
+/// Builds a FASTQ iterator over BGZF-compressed input. Unlike ordinary gzip,
+/// BGZF is independently framed, so blocks inflate on a private pool of
+/// `workers` threads while the parser consumes completed blocks in order.
 pub fn reader_from_bgzf(
     inner: Box<dyn Read + Send>,
     workers: usize,
@@ -94,7 +95,7 @@ fn invalid_quality(id: &[u8], qual: &[u8]) -> anyhow::Error {
         .iter()
         .enumerate()
         .find(|&(_, &b)| b.wrapping_sub(33) > MAX_PHRED33)
-        .expect("the caller found a quality byte outside the Phred+33 range");
+        .expect("The caller found a quality byte outside the Phred+33 range");
     anyhow::anyhow!(
         "record {}: quality byte 0x{byte:02x} at position {} is outside the Phred+33 range \
          (ASCII 33..=126)",
@@ -136,7 +137,7 @@ impl<R: Read> Iterator for RecordIter<R> {
     }
 }
 
-/// Write the `@`-prefixed header id for a segment (no trailing newline, no tags).
+/// Writes the `@`-prefixed header id for a segment (no trailing newline, no tags).
 /// On splits (`total_segments > 1`) the id gets a `_segment_N` suffix inserted
 /// before any space-separated description.
 fn write_head<W: Write>(
@@ -147,8 +148,8 @@ fn write_head<W: Write>(
 ) -> io::Result<()> {
     w.write_all(b"@")?;
     if total_segments > 1 {
-        // Insert the suffix after the read ID while preserving the original
-        // delimiter, description, and tab-delimited tags.
+        // The suffix follows the read ID, preserving the original delimiter,
+        // description, and tab-delimited tags.
         match name.iter().position(|&b| b == b' ' || b == b'\t') {
             Some(i) => {
                 w.write_all(&name[..i])?;
@@ -166,9 +167,9 @@ fn write_head<W: Write>(
     Ok(())
 }
 
-/// Write one output segment as a plain FASTQ record. `phred` is raw; ASCII is
+/// Writes one output segment as a plain FASTQ record. `phred` is raw; ASCII is
 /// emitted by adding 33. Thin wrapper over `write_segment_tagged` with no tags,
-/// so the record layout lives in exactly one place.
+/// so the record layout lives in one place.
 pub fn write_segment<W: Write>(
     w: &mut W,
     name: &[u8],
@@ -180,8 +181,9 @@ pub fn write_segment<W: Write>(
     write_segment_tagged(w, name, seq, phred, total_segments, segment_idx, b"")
 }
 
-/// Like `write_segment`, but inserts `tags` (already TAB-prefixed per field, or
-/// empty) between the header id and the newline: `@<id>[_segment_N]<tags>`.
+/// Writes one output segment like `write_segment`, inserting `tags` (already
+/// TAB-prefixed per field, or empty) between the header id and the newline:
+/// `@<id>[_segment_N]<tags>`.
 pub fn write_segment_tagged<W: Write>(
     w: &mut W,
     name: &[u8],
@@ -196,8 +198,8 @@ pub fn write_segment_tagged<W: Write>(
     w.write_all(b"\n")?;
     w.write_all(seq)?;
     w.write_all(b"\n+\n")?;
-    // Encode phred -> ASCII in fixed stack chunks, avoiding a per-segment heap
-    // allocation (this runs once per output segment).
+    // Phred to ASCII in fixed stack chunks, avoiding a per-segment heap
+    // allocation.
     let mut ascii = [0u8; 1024];
     for chunk in phred.chunks(ascii.len()) {
         for (dst, &q) in ascii.iter_mut().zip(chunk) {
@@ -208,12 +210,10 @@ pub fn write_segment_tagged<W: Write>(
     w.write_all(b"\n")
 }
 
-/// One SAM aux field as text `XX:T:VALUE` (no leading TAB). Integers of any
-/// source width serialize with SAM type code `i`; `B` arrays keep their subtype.
-/// Append `n` as ASCII decimal without invoking `core::fmt`. The aux `B` arrays
-/// (notably `ML` and the per-base kinetics tags) can each hold tens of thousands
-/// of integers per record; formatting them through a stack buffer and a digit
-/// loop avoids the per-call overhead of `write!` on a `Vec` at that volume.
+/// Appends `n` as ASCII decimal without invoking `core::fmt`. The aux `B` arrays
+/// (notably `ML` and the per-base kinetics tags) can hold tens of thousands of
+/// integers per record; a stack buffer and a digit loop avoid the per-call
+/// overhead of `write!` on a `Vec` at that volume.
 #[inline]
 pub(crate) fn push_u64(out: &mut Vec<u8>, mut n: u64) {
     let mut buf = [0u8; 20];
@@ -229,8 +229,9 @@ pub(crate) fn push_u64(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&buf[i..]);
 }
 
-/// Signed counterpart to [`push_u64`]. `unsigned_abs` yields the correct
-/// magnitude even for `i64::MIN`, where `-n` would overflow.
+/// Appends `n` as signed ASCII decimal, the counterpart of [`push_u64`].
+/// `unsigned_abs` yields the correct magnitude even for `i64::MIN`, where `-n`
+/// would overflow.
 #[inline]
 pub(crate) fn push_i64(out: &mut Vec<u8>, n: i64) {
     if n < 0 {
@@ -239,6 +240,9 @@ pub(crate) fn push_i64(out: &mut Vec<u8>, n: i64) {
     push_u64(out, n.unsigned_abs());
 }
 
+/// Formats one SAM aux field as text `XX:T:VALUE` (no leading TAB). Integers of
+/// any source width serialize with SAM type code `i`; `B` arrays keep their
+/// subtype.
 pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&tag);
@@ -342,10 +346,10 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
     }
 }
 
-/// The reconstructed MM/ML/MN block as SAM aux text (no leading TAB):
+/// Formats the reconstructed MM/ML/MN block as SAM aux text (no leading TAB):
 /// `MM:Z:<mm>\tML:B:C,<ml...>\tMN:i:<mn>`. `ml` is `None` for an MM-only source
 /// record (ML is optional per the SAM spec), in which case the `ML:B:C` field is
-/// omitted entirely rather than emitted empty.
+/// omitted rather than emitted empty.
 pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"MM:Z:");
@@ -362,8 +366,8 @@ pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
     out
 }
 
-/// FASTQ output writer: a plain buffered writer, or a `gzp` parallel gzip writer
-/// when the output format is explicitly `FastqGz`.
+/// FASTQ output writer: a plain buffered writer, a `gzp` parallel gzip writer
+/// for `FastqGz`, or a multithreaded BGZF writer for `FastqBgzf`.
 ///
 /// `gzp`'s `ParCompress` requires an explicit `finish()`: its `Write` impl hands
 /// only full chunks to the compressor threads, so the tail block and gzip footer
@@ -371,8 +375,11 @@ pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
 /// `.unwrap()`s the result, turning an I/O error into a panic; calling it
 /// explicitly keeps that failure an ordinary `Err`.
 pub(crate) enum FastqOut {
+    /// Plain buffered output.
     Plain(BufWriter<Box<dyn Write + Send>>),
+    /// Parallel gzip (`gzp` `Mgzip`) output.
     Gz(ParCompress<'static, Mgzip, Box<dyn Write + Send>>),
+    /// Multithreaded BGZF output.
     Bgzf(noodles_bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>),
 }
 
@@ -394,9 +401,10 @@ impl Write for FastqOut {
 }
 
 impl FastqOut {
-    /// Finalize: for gz, flush the final block + gzip footer via gzp's
-    /// `ZWriter::finish` (required, see the type's docs above); for plain,
-    /// flush the `BufWriter`. Must be called before returning success.
+    /// Finalizes the writer: `Gz` flushes the final block and gzip footer
+    /// through `ZWriter::finish`, `Bgzf` writes the BGZF EOF block through
+    /// `finish`, and `Plain` flushes the `BufWriter`. Must be called before
+    /// returning success.
     pub(crate) fn finish(self) -> anyhow::Result<()> {
         match self {
             FastqOut::Plain(mut w) => {
@@ -415,11 +423,11 @@ impl FastqOut {
     }
 }
 
-/// Build the FASTQ output writer: a file or stdout, wrapped in a parallel gzip
-/// encoder (`gzp`, using `gz_workers` worker threads, the caller's
-/// workload-aware ENCODE share of the `-t` budget) when the output format is
-/// `FastqGz`, else a plain buffered writer. Both compressed formats clamp
-/// `gz_workers` to at least one thread; plain output ignores it.
+/// Builds the FASTQ output writer over a file or stdout: a parallel gzip
+/// encoder (`gzp`) for `FastqGz`, a multithreaded BGZF writer for `FastqBgzf`,
+/// and a plain buffered writer otherwise. `gz_workers` is the caller's encode
+/// share of the `-t` budget; both compressed formats clamp it to at least one
+/// thread and plain output ignores it.
 pub(crate) fn writer(
     cfg: &Config,
     out_fmt: crate::io::Format,
@@ -475,12 +483,11 @@ mod tests {
         assert_eq!(out, b"@read1_segment_2 desc\nAC\n+\nII\n");
     }
 
+    /// A `samtools fastq -T`-style header carries SAM tags after a TAB. The
+    /// `_segment_N` suffix lands directly after the read id, keeping the TAB
+    /// and the tag value intact.
     #[test]
     fn split_segment_preserves_tab_delimited_tags() {
-        // A `samtools fastq -T`-style header carries SAM tags after a TAB. The
-        // `_segment_N` suffix must land right after the read id, keeping the TAB
-        // and the tag value intact, not append past the tag (which would mutate
-        // both the id and the RG value).
         let mut out = Vec::new();
         write_segment(&mut out, b"r1\tRG:Z:grp", b"AC", &[40, 40], 2, 0).unwrap();
         assert_eq!(out, b"@r1_segment_1\tRG:Z:grp\nAC\n+\nII\n");
@@ -512,12 +519,12 @@ mod tests {
             .unwrap()
             .unwrap_err()
             .to_string();
-        assert!(err.contains("record r1"), "names the record id: {err}");
+        assert!(err.contains("record r1"), "Names the record id: {err}");
         assert!(
             err.contains("0x20"),
-            "names the first offending byte: {err}"
+            "Names the first offending byte: {err}"
         );
-        assert!(err.contains("Phred+33"), "names the expected range: {err}");
+        assert!(err.contains("Phred+33"), "Names the expected range: {err}");
 
         let fq = b"@r2\nAC\n+\nI\x7f\n";
         let err = RecordIter::new(&fq[..])
@@ -567,7 +574,7 @@ mod tests {
                 Err(e) => break e,
             }
         };
-        let last_id = String::from_utf8(last_id.expect("records precede the error")).unwrap();
+        let last_id = String::from_utf8(last_id.expect("Records precede the error")).unwrap();
         assert_eq!(
             format!("{err:#}"),
             format!("reading FASTQ record after {last_id}: incomplete deflate stream")
@@ -683,13 +690,14 @@ mod tests {
             format_mods_aux(b"C+m,0;", Some(&[10, 20]), 6),
             b"MM:Z:C+m,0;\tML:B:C,10,20\tMN:i:6"
         );
-        // ML present but empty (e.g. all mods sliced away yet MM retained) -> zero-length B:C array
+        // ML present but empty (e.g. all mods sliced away yet MM retained) yields
+        // a zero-length `B:C` array.
         assert_eq!(
             format_mods_aux(b"C+m;", Some(&[]), 4),
             b"MM:Z:C+m;\tML:B:C\tMN:i:4"
         );
-        // ML absent (MM-only source record) -> the ML field is omitted entirely,
-        // never emitted empty, so the record stays valid.
+        // ML absent (MM-only source record): the ML field is omitted rather than
+        // emitted empty, so the record stays valid.
         assert_eq!(format_mods_aux(b"C+m,0;", None, 4), b"MM:Z:C+m,0;\tMN:i:4");
     }
 

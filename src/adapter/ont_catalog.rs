@@ -1,6 +1,6 @@
 //! The built-in ONT adapter, primer, and barcode catalog.
 //!
-//! Assembled for whittle on 2026-07-06 from primary sources, cross-verified:
+//! Assembled from primary sources and cross-verified:
 //! dorado `adapter_primer_kits.cpp` and `utils/barcode_kits.cpp` (kit-14
 //! authoritative), Porechop `porechop/adapters.py` (legacy plus the 96
 //! barcodes), and the qcat kit YAMLs. The sequences are ONT-published facts;
@@ -27,6 +27,8 @@ use super::End;
 /// `preset::tests::entries_meet_the_minimum_pattern_length` enforce.
 pub(super) type Entry = (&'static str, End, &'static [u8]);
 
+/// Every catalog entry in display order. `preset::build` collapses duplicate
+/// sequences.
 #[rustfmt::skip]
 pub(super) const CATALOG: &[Entry] = &[
 
@@ -78,19 +80,19 @@ pub(super) const CATALOG: &[Entry] = &[
     // barcode regardless of its number. Flanks shorter than `MIN_PATTERN_LEN`
     // (dorado's NB_1st_REAR, BC_1st_FRONT, RBK_FRONT and RLB_FRONT, 7 to 8 bp)
     // are omitted: a pattern that short is never searched standalone.
-    // native barcoding (NBD*) [dorado:barcode_kits.cpp(NB_1st_FRONT)]
+    // Native barcoding (NBD*) [dorado:barcode_kits.cpp(NB_1st_FRONT)]
     ("NB_front", End::Five, b"ATTGCTAAGGTTAA"),
     // PCR barcoding (PBC/BC*) [dorado:barcode_kits.cpp(BC_1st_REAR)]
     ("PBC_rear", End::Three, b"TTAACCTTTCTGTTGGTGCTGATATTGC"),
-    // rapid barcoding v4 / kit14 (RBK*) [dorado:barcode_kits.cpp(RBK4_FRONT)]
+    // Rapid barcoding v4 / kit 14 (RBK*) [dorado:barcode_kits.cpp(RBK4_FRONT)]
     ("RBK4_front", End::Five, b"GCTTGGGTGTTTAACC"),
-    // rapid lig barcoding (RLB) [dorado:barcode_kits.cpp(RLB_REAR)]
+    // Rapid ligation barcoding (RLB) [dorado:barcode_kits.cpp(RLB_REAR)]
     ("RLB_rear", End::Three, b"CGTTTTTCGTGCGCCGCTTC"),
     // 16S barcoding (RAB/16S) [dorado:barcode_kits.cpp(RAB_1st_REAR)]
     ("RAB_16S_rear1", End::Three, b"AGAGTTTGATCATGGCTCAG"),
     // 16S barcoding (RAB/16S) [dorado:barcode_kits.cpp(RAB_2nd_REAR)]
     ("RAB_16S_rear2", End::Three, b"CGGTTACCTTGTTACGACTT"),
-    // ligation/PCR barcoding (LWB) [dorado:barcode_kits.cpp(LWB_1st_REAR)]
+    // Ligation/PCR barcoding (LWB) [dorado:barcode_kits.cpp(LWB_1st_REAR)]
     ("LWB_rear1", End::Three, b"ACTTGCCTGTCGCTCTATCTTC"),
     // MAB [dorado:barcode_kits.cpp(MAB_REAR)]
     ("MAB_rear", End::Three, b"CCATATCCGTGTCGCCCTT"),

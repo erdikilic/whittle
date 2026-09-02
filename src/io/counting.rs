@@ -1,6 +1,4 @@
-//! A `Read` adapter that counts bytes pulled from the inner reader into the
-//! shared `Counters::bytes_read`, so the progress ticker can render a
-//! determinate bar (%/ETA/MB-s) once wired around the raw input reader.
+//! A `Read` adapter that counts the bytes pulled from its inner reader into `Counters::bytes_read`.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -8,14 +6,15 @@ use std::sync::atomic::Ordering;
 
 use crate::workflow::Counters;
 
-/// Wraps any `Read` and increments `counters.bytes_read` by the number of
-/// bytes actually pulled through on each `read()` call.
+/// A `Read` wrapper that adds the byte count of each `read` call to
+/// `counters.bytes_read`, which drives the progress bar.
 pub struct CountingReader<R> {
     inner: R,
     counters: Arc<Counters>,
 }
 
 impl<R: Read> CountingReader<R> {
+    /// Wraps `inner` so that every `read` adds its byte count to `counters.bytes_read`.
     pub fn new(inner: R, counters: Arc<Counters>) -> Self {
         Self { inner, counters }
     }

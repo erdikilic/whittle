@@ -14,20 +14,20 @@ It rewrites the position-indexed tags on every trim and split (`MM`/`ML` modific
 
 </div>
 
-whittle filters and trims long reads (ONT, PacBio) in FASTQ, gzip/BGZF-compressed FASTQ, and unaligned BAM. It handles the usual length/quality/GC filtering and head/tail/quality/adapter trimming. What most trimmers get wrong on uBAM is the tags: crop the sequence and the base-modification, kinetics, and signal tags now point at bases that are gone. whittle keeps them in sync, so every output read is still valid.
+whittle filters and trims long reads (ONT, PacBio) in FASTQ, gzip/BGZF-compressed FASTQ, and unaligned BAM. It handles the usual length/quality/GC filtering and head/tail/quality/adapter trimming. On uBAM the tags are the hard part: cropping the sequence leaves the base-modification, kinetics, and signal tags pointing at bases that are gone. whittle keeps them in register, so every output read stays valid.
 
 ## Highlights
 
 - **Correct modification tags.** `MM`/`ML`/`MN` are rebuilt for every trimmed or split uBAM read, and checked against an independent `htslib` decoder.
-- **Trim-aware tags.** Per-base kinetics (`ip`/`pw`/…) are sliced along with the sequence. ONT signal tags (`mv`/`ts`/`ns`/…) are dropped, or rewritten dorado-style with `--update-moves`.
-- **Adapter trimming.** Terminal trimming plus interior chimera splitting, driven by a built-in ONT catalog, your own FASTA (IUPAC codes included, so a degenerate primer matches every variant it covers), or ab-initio discovery.
-- **Formats.** FASTQ, gzip/BGZF-compressed FASTQ, and unaligned BAM, plus BAM→FASTQ conversion. Formats are auto-detected, including BGZF FASTQ or BAM piped over stdin.
+- **Trim-aware tags.** Per-base kinetics (`ip`/`pw` and the other per-base arrays) are sliced along with the sequence. ONT signal tags (`mv`/`ts`/`ns` and related) are dropped, or rewritten in dorado's subread convention with `--update-moves`.
+- **Adapter trimming.** Terminal trimming plus interior chimera splitting, driven by a built-in ONT catalog, a user-supplied FASTA (IUPAC codes included, so a degenerate primer matches every variant it covers), or ab-initio discovery.
+- **Formats.** FASTQ, gzip/BGZF-compressed FASTQ, and unaligned BAM, plus BAM-to-FASTQ conversion. Formats are auto-detected, including BGZF FASTQ or BAM piped over stdin.
 - **Pipeline-friendly.** `--summary-json` writes the run's counters and resolved settings as JSON, even under `--quiet`.
 - **Fast and self-contained.** Multithreaded throughout, with a thread budget that adapts to the workload, and no external `htslib` to build or run.
 
 ## Install
 
-**Prebuilt binaries.** Download one for your platform from the [Releases](https://github.com/erdikilic/whittle/releases) page and put it on your `PATH`. Builds cover Linux and macOS, x86-64 and arm64, glibc and static musl. Each tarball also carries the man page, which lives in [`man/`](man) here.
+**Prebuilt binaries.** Binaries for Linux and macOS (x86-64 and arm64, glibc and static musl) are on the [Releases](https://github.com/erdikilic/whittle/releases) page. Each tarball also carries the man page, which lives in [`man/`](man) in this repository.
 
 **From source.**
 
@@ -37,13 +37,13 @@ cd whittle
 cargo build --release   # -> target/release/whittle
 ```
 
-**From crates.io.** The adapter search ([`sassy`](https://crates.io/crates/sassy)) needs AVX2 on x86-64. A `cargo install` won't inherit this repo's build config, so pass the flag yourself:
+**From crates.io.** The adapter search ([`sassy`](https://crates.io/crates/sassy)) needs AVX2 on x86-64. `cargo install` does not read this repository's `.cargo/config.toml`, so the target flag has to be passed explicitly:
 
 ```bash
 RUSTFLAGS="-C target-cpu=x86-64-v3" cargo install whittle
 ```
 
-Building needs Rust 1.91 or newer. There's no external `htslib` dependency: BAM I/O goes through the `libdeflate` backend of `noodles-bgzf`, and the optional `rust-htslib` is a dev-only test dependency.
+Building needs Rust 1.91 or newer. There is no external `htslib` dependency: BAM I/O goes through the `libdeflate` backend of `noodles-bgzf`, and the optional `rust-htslib` is a dev-only test dependency.
 
 ## Quick start
 
@@ -78,16 +78,16 @@ When a read splits, each segment is filtered on its own and named `<read>_segmen
 
 ## Formats
 
-| input → | FASTQ | FASTQ.gz | FASTQ.bgz | BAM |
+| input \ output | FASTQ | FASTQ.gz | FASTQ.bgz | BAM |
 |---|:---:|:---:|:---:|:---:|
-| FASTQ / FASTQ.gz / FASTQ.bgz | ✅ | ✅ | ✅ | ❌ |
-| unaligned BAM | ✅ | ✅ | ✅ | ✅ |
+| FASTQ / FASTQ.gz / FASTQ.bgz | yes | yes | yes | no |
+| unaligned BAM | yes | yes | yes | yes |
 
-Formats come from the path extension, a stream sniff, or `--in-format`/`--out-format`. Output is never compressed unless you ask for it, and FASTQ→BAM isn't supported because there's no header to build a BAM record from.
+Formats come from the path extension, a stream sniff, or `--in-format`/`--out-format`. Output is compressed only when requested. FASTQ-to-BAM is not supported: a bare FASTQ read has no header to build a BAM record from.
 
 ## Documentation
 
-| Page | What's in it |
+| Page | Contents |
 |---|---|
 | [docs/cli.md](docs/cli.md) | Every flag, format selection, folder input, logging and progress |
 | [docs/tags.md](docs/tags.md) | How `MM`/`ML`/`MN`, kinetics, and ONT signal tags are kept in register |
@@ -96,8 +96,8 @@ Formats come from the path extension, a stream sniff, or `--in-format`/`--out-fo
 
 ## Limitations
 
-- **Unaligned BAM only.** Aligned records are refused, with whittle naming the offending read; there's no CIGAR/POS adjustment for mapped reads.
-- **No FASTQ→BAM.** There's no header to build a BAM record from a bare FASTQ read. The reverse, BAM→FASTQ, works.
+- **Unaligned BAM only.** Aligned records are refused, with whittle naming the offending read; there is no CIGAR/POS adjustment for mapped reads.
+- **No FASTQ-to-BAM.** A bare FASTQ read has no header to build a BAM record from. BAM-to-FASTQ is supported.
 - **`--min-length` is post-trim**, applied per output segment rather than to the whole raw read.
 - **One quality-trim strategy at a time.** `--qual-trim`, `--qual-best-segment`, and `--qual-split` are mutually exclusive; `-H`/`-T` compose with any of them.
 

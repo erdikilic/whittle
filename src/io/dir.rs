@@ -1,3 +1,5 @@
+//! Directory inputs: classification of a folder's read files and chained readers over them.
+
 use std::cmp::Ordering;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -10,13 +12,16 @@ use crate::io::{Format, from_extension};
 use crate::record::ReadRecord;
 use crate::workflow::Counters;
 
+/// The read-file family a directory holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
+    /// FASTQ, gzip FASTQ and BGZF FASTQ.
     Fastq,
+    /// BAM.
     Bam,
 }
 
-/// Classify a directory's immediate children into a single read-file family and a
+/// Classifies a directory's immediate children into a single read-file family and a
 /// path list in natural name order. Non-read files, hidden files (a leading `.`,
 /// which covers macOS `._` AppleDouble sidecars) and subdirectories are ignored.
 /// Errors if the folder mixes FASTQ and BAM, or holds no read files.
@@ -80,7 +85,7 @@ fn file_name_bytes(path: &Path) -> &[u8] {
     path.file_name().map_or(b"", |n| n.as_encoded_bytes())
 }
 
-/// True for a file name starting with `.`.
+/// Returns true for a file name starting with `.`.
 fn is_hidden(path: &Path) -> bool {
     file_name_bytes(path).starts_with(b".")
 }
@@ -127,8 +132,9 @@ fn trim_leading_zeros(run: &[u8]) -> &[u8] {
     &run[zeros..]
 }
 
-/// One chained record stream over all FASTQ-family files, opened lazily as the
-/// chain reaches each file (avoids exhausting file descriptors on large folders).
+/// Returns one chained record stream over all FASTQ-family files, opened lazily
+/// as the chain reaches each file (avoiding file descriptor exhaustion on large
+/// folders).
 /// A file-open error surfaces as an `Err` item rather than aborting construction.
 /// A `.gz` member is probed for BGZF framing so a bgzip-compressed file takes
 /// the block-parallel reader.
@@ -141,8 +147,8 @@ pub fn fastq_records(
     Box::new(paths.into_iter().flat_map(
         move |p| -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
             // Counting wraps the file itself, innermost, so compressed inputs are
-            // measured on disk. That matches the folder total, which sums file
-            // sizes, and it is what drives the progress bar.
+            // measured on disk, matching the folder total (summed file sizes)
+            // that drives the progress bar.
             let counted = std::fs::File::open(&p)
                 .map(|f| -> Box<dyn Read + Send> {
                     Box::new(crate::io::counting::CountingReader::new(
@@ -171,20 +177,18 @@ pub fn fastq_records(
     ))
 }
 
-/// A boxed, owning iterator over lazy raw BAM records (or per-record errors).
-/// Named to satisfy `clippy::type_complexity` on the `bam_reader` signature below.
-/// `Send` so it can feed `workflow::run_bam`'s parallel path.
+/// Alias of `crate::io::bam::RawRecordIter` used by `bam_reader`.
 type BamRecordIter = crate::io::bam::RawRecordIter;
 
-/// The first file's header plus one chained record stream over every BAM file,
-/// `samtools cat` semantics for homogeneous uBAM: headers past the first are
-/// read and discarded, records stream lazily under the first header. `Err` on
-/// empty `paths`; each file is opened exactly once.
+/// Returns the first file's header plus one chained record stream over every
+/// BAM file, with `samtools cat` semantics for homogeneous uBAM: headers past
+/// the first are read and discarded, records stream lazily under the first
+/// header. `Err` on empty `paths`; each file is opened exactly once.
 ///
-/// `workers` is the MT-bgzf decode worker count, passed to every per-file
-/// reader. Chaining N files does not oversubscribe: `Chain`/`FlatMap` open each
-/// reader lazily and drop the exhausted one first, so only one file's `workers`
-/// threads are ever live.
+/// `workers` is the multithreaded BGZF decode worker count, passed to every
+/// per-file reader. Chaining N files does not oversubscribe: `Chain`/`FlatMap`
+/// open each reader lazily and drop the exhausted one first, so only one
+/// file's `workers` threads are live at a time.
 pub fn bam_reader(
     paths: &[PathBuf],
     workers: usize,
@@ -192,7 +196,7 @@ pub fn bam_reader(
 ) -> anyhow::Result<(sam::Header, BamRecordIter)> {
     let (first, rest) = paths
         .split_first()
-        .ok_or_else(|| anyhow::anyhow!("bam_reader called with no BAM files"))?;
+        .ok_or_else(|| anyhow::anyhow!("no BAM files to read"))?;
     // See `fastq_records`: counting wraps the file, so BGZF bytes are measured
     // compressed, matching the summed file sizes the bar is scaled against.
     let counted = |p: &Path, counters: Arc<Counters>| -> anyhow::Result<Box<dyn Read + Send>> {
@@ -216,15 +220,17 @@ pub fn bam_reader(
     Ok((header, records))
 }
 
-/// The set of `@RG` ids declared in a BAM file's header (empty if none / unreadable).
+/// Returns the set of `@RG` ids declared in a BAM file's header: empty when the
+/// header declares none, `None` when the file cannot be opened or its header
+/// cannot be read.
 fn bam_read_group_ids(path: &Path) -> Option<std::collections::BTreeSet<Vec<u8>>> {
     let (header, _records) = crate::io::bam::reader(Some(path), 1).ok()?;
     Some(header.read_groups().keys().map(|k| k.to_vec()).collect())
 }
 
-/// Name the first BAM whose `@RG` id set differs from the first file's, if any.
-/// Best-effort: files that fail to open are skipped. Used to warn that folder
-/// merge keeps only the first header.
+/// Names the first BAM whose `@RG` id set differs from the first file's, if any.
+/// Best-effort: files that fail to open are skipped. Supports the warning that
+/// folder merge keeps only the first header.
 fn first_rg_mismatch(paths: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
     let mut iter = paths.iter();
     let first = iter.next()?;
@@ -239,17 +245,17 @@ fn first_rg_mismatch(paths: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-/// Warn once when folder BAM inputs do not share the same `@RG` set. Folder
+/// Warns once when folder BAM inputs do not share the same `@RG` set. Folder
 /// merge writes the first file's header, so later records can otherwise refer
 /// to read groups absent from the output header. This check reads headers only.
 pub fn warn_on_bam_header_mismatch(paths: &[PathBuf]) {
     if let Some((first, offender)) = first_rg_mismatch(paths) {
         tracing::warn!(
-            "The folder's BAM files have different @RG sets ({} vs {}); \
-             only the first file's header is written, so records from other files \
-             may reference read groups missing from the merged output header",
-            first.display(),
-            offender.display()
+            first = %first.display(),
+            other = %offender.display(),
+            "The folder's BAM files have different @RG sets; only the first file's \
+             header is written, so records from other files may reference read \
+             groups missing from the merged output header"
         );
     }
 }
@@ -296,7 +302,7 @@ mod tests {
         let only_hidden = tempfile::tempdir().unwrap();
         touch(only_hidden.path(), "._a.fastq");
         let err = classify(only_hidden.path(), None).unwrap_err().to_string();
-        assert!(err.contains("no FASTQ or BAM"), "got: {err}");
+        assert!(err.contains("no FASTQ or BAM"), "Got: {err}");
     }
 
     #[test]
@@ -361,11 +367,11 @@ mod tests {
         assert!(err.contains("mixes"));
     }
 
+    /// `-o` pointing at a read file inside the input directory (a real input or
+    /// a stale prior output, indistinguishable) is a hard error rather than a
+    /// silent exclude-and-overwrite.
     #[test]
     fn errors_when_output_is_a_read_file_inside_the_dir() {
-        // `-o` pointing at a read file inside the input dir (a real input, or a
-        // stale prior output, indistinguishable) must hard-error, not silently
-        // exclude+overwrite it.
         let d = tempfile::tempdir().unwrap();
         touch(d.path(), "a.fastq");
         touch(d.path(), "b.fastq");
@@ -373,7 +379,7 @@ mod tests {
         let err = classify(d.path(), Some(a.as_path()))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("refusing to overwrite"), "got: {err}");
+        assert!(err.contains("refusing to overwrite"), "Got: {err}");
 
         // A non-read output (or one outside the dir) does not trip it.
         let (fam, paths) = classify(d.path(), Some(d.path().join("notes.txt").as_path())).unwrap();
@@ -381,10 +387,10 @@ mod tests {
         assert_eq!(paths.len(), 2);
     }
 
+    /// A BAM folder with a stale `.fastq` output would otherwise look mixed; the
+    /// output-collision error fires first and names the overwrite.
     #[test]
     fn output_collision_errors_before_the_mixed_check() {
-        // A BAM folder with a stale `.fastq` output would otherwise look "mixed";
-        // the output-collision error must fire first (and name the overwrite).
         let d = tempfile::tempdir().unwrap();
         touch(d.path(), "a.bam");
         touch(d.path(), "merged.fastq");
@@ -394,7 +400,7 @@ mod tests {
             .to_string();
         assert!(
             err.contains("refusing to overwrite"),
-            "should not be the 'mixes' error: {err}"
+            "Should not be the 'mixes' error: {err}"
         );
     }
 

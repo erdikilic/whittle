@@ -1,6 +1,6 @@
-//! Render the man page from the live CLI definition, so the two never disagree
-//! about a flag's existence or its help text. Regenerate and commit after any
-//! flag change with `cargo run --example gen-man`.
+//! Renders the man page from the CLI definition, so the two agree on every flag
+//! and its help text. `cargo run --example gen-man` regenerates it after a flag
+//! change; the result is committed.
 //!
 //! Writes `man/whittle.1` at the repository root, or under a directory given as
 //! the first argument (the release workflow passes one). An example, not a

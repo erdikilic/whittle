@@ -4,10 +4,12 @@ on:
   push:
     # Bare version tags, e.g. 0.1.0 or 0.1.0-rc1, with no "v" prefix.
     tags: ["[0-9]+.[0-9]+.[0-9]+", "[0-9]+.[0-9]+.[0-9]+-*"]
-  workflow_dispatch: # manual runs build + checksum every target without publishing
+  # A manual run builds and checksums every target without publishing.
+  workflow_dispatch:
 
 permissions:
-  contents: write # attach binaries to the GitHub Release
+  # Attaches binaries to the GitHub Release.
+  contents: write
 
 jobs:
   release:
@@ -25,17 +27,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Linux: install the cross C toolchain + Rust target. This covers the
-      # aarch64 cross-compile and both musl targets, using native cross GCCs on
-      # the runner (cmake is present there for the zlib-ng C build) rather than
-      # a container. sassy's SIMD still resolves per arch: x86_64 gets AVX2 via
-      # .cargo/config.toml, aarch64 uses baseline NEON.
+      # Linux: installs the cross C toolchain and Rust target. This covers the
+      # aarch64 cross-compile and both musl targets, using the runner's native
+      # cross GCCs (cmake is present there for the zlib-ng C build) rather than
+      # a container. sassy's SIMD resolves per architecture: x86_64 gets AVX2
+      # via .cargo/config.toml, aarch64 uses baseline NEON.
       - uses: taiki-e/setup-cross-toolchain-action@v1
         if: runner.os == 'Linux'
         with:
           target: ${{ matrix.target }}
 
-      # macOS: native build, just add the Rust target for the active toolchain.
+      # macOS: native build; adds the Rust target for the active toolchain.
       - name: Add Rust target (macOS)
         if: runner.os == 'macOS'
         env:

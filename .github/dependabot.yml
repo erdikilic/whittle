@@ -5,7 +5,7 @@ updates:
     schedule:
       interval: weekly
     groups:
-      # One grouped PR for routine minor/patch bumps instead of a swarm.
+      # One grouped PR for routine minor and patch bumps.
       cargo-minor-patch:
         update-types: ["minor", "patch"]
 

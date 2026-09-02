@@ -1,5 +1,6 @@
-// End-to-end uBAM coverage through the compiled binary, including header,
-// reader, workflow, writer, and CLI integration.
+//! End-to-end uBAM coverage through the compiled binary, including header,
+//! reader, workflow, writer, and CLI integration.
+
 use assert_cmd::Command;
 use noodles_bam as bam;
 use noodles_sam::alignment::RecordBuf;
@@ -10,6 +11,7 @@ use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 
+/// Writes a two-read uBAM: a plain read and a read with `MM`/`ML`/`MN` mods.
 fn write_fixture(path: &std::path::Path) {
     let header = sam::Header::default();
     let file = std::fs::File::create(path).unwrap();
@@ -70,7 +72,7 @@ fn bam_to_bam_end_to_end() {
         .assert()
         .success();
 
-    // Read back the output BAM: check @PG provenance + reconstructed records.
+    // Read back the output BAM: check @PG provenance and reconstructed records.
     let mut reader = bam::io::Reader::new(std::fs::File::open(&out_path).unwrap());
     let header = reader.read_header().unwrap();
 
@@ -79,7 +81,7 @@ fn bam_to_bam_end_to_end() {
             .programs()
             .roots()
             .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"whittle"),
-        "expected an @PG record with ID whittle in the output header, got {:?}",
+        "Expected an @PG record with ID whittle in the output header, got {:?}",
         header.programs()
     );
 
@@ -94,11 +96,11 @@ fn bam_to_bam_end_to_end() {
     assert_eq!(
         out_records.len(),
         2,
-        "both reads should survive --head-crop 2 (len 10, 8 > min-length)"
+        "Both reads survive --head-crop 2 (lengths 10 and 8, above min-length)"
     );
 
-    // The default thread count (all CPUs) runs the BAM workflow unordered, so
-    // records are looked up by name instead of assuming input order.
+    // The BAM workflow emits records unordered at `threads > 1`, so records are
+    // looked up by name rather than by input order.
     let by_name: std::collections::HashMap<Vec<u8>, RecordBuf> = out_records
         .iter()
         .map(|r| (r.name().unwrap().to_vec(), r.clone()))
@@ -111,28 +113,28 @@ fn bam_to_bam_end_to_end() {
     assert!(o1.data().get(&Tag::BASE_MODIFICATIONS).is_none());
 
     // read2: "CCACCCAC" (C at seq idx 0,1,3,4,5,7) head-cropped by 2 -> "ACCCAC" (6 bases).
-    // MM "C+m,0,1,0" walks the C occurrences with skip-counts 0,1,0 -> occurrences
-    // 0,2,3 -> abs positions 0,3,4 (ML [10,20,30] one-per-position). Window [2,8)
+    // MM "C+m,0,1,0" walks the C occurrences with skip counts 0,1,0 -> occurrences
+    // 0,2,3 -> abs positions 0,3,4 (ML [10,20,30], one per position). Window [2,8)
     // keeps abs 3,4 (drops abs 0); renumbered against the window's C positions
-    // (3,4,5,7) that's occurrences 0,1 -> deltas [0,0], ML [20,30].
+    // (3,4,5,7) that is occurrences 0,1 -> deltas [0,0], ML [20,30].
     let o2 = &by_name[&b"read2".to_vec()];
     assert_eq!(o2.name().unwrap().to_vec(), b"read2");
     assert_eq!(AsRef::<[u8]>::as_ref(o2.sequence()), b"ACCCAC");
     let mm = match o2.data().get(&Tag::BASE_MODIFICATIONS) {
         Some(Value::String(s)) => s.to_vec(),
-        other => panic!("expected MM tag, got {other:?}"),
+        other => panic!("Expected MM tag, got {other:?}"),
     };
     assert_eq!(mm, b"C+m,0,0;");
     let ml = match o2.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
         Some(Value::Array(Array::UInt8(v))) => v.clone(),
-        other => panic!("expected ML tag, got {other:?}"),
+        other => panic!("Expected ML tag, got {other:?}"),
     };
     assert_eq!(ml, vec![20, 30]);
     let mn = match o2.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
         Some(Value::Int32(n)) => *n,
-        other => panic!("expected MN tag, got {other:?}"),
+        other => panic!("Expected MN tag, got {other:?}"),
     };
-    assert_eq!(mn, 6, "MN should equal the output segment length");
+    assert_eq!(mn, 6, "MN equals the output segment length");
 }
 
 #[test]
@@ -164,10 +166,10 @@ fn bam_raw_full_window_path_filters_without_rebuilding_records() {
     assert_eq!(records[0].quality_scores().as_ref(), &[40; 10]);
 }
 
-/// End-to-end: a PacBio-style uBAM with per-base kinetics (`ip`/`pw`, one value
-/// per base) must have those arrays sliced in lockstep with the sequence when the
-/// read is trimmed. Otherwise the output record is invalid (array length != SEQ
-/// length) and breaks kinetics/methylation callers.
+/// A PacBio-style uBAM with per-base kinetics (`ip`/`pw`, one value per base)
+/// has those arrays sliced in lockstep with the sequence when the read is
+/// trimmed. Otherwise the output record is invalid (array length differs from
+/// SEQ length) and breaks kinetics and methylation callers.
 #[test]
 fn bam_to_bam_slices_pacbio_kinetics() {
     let dir = tempfile::tempdir().unwrap();
@@ -213,7 +215,7 @@ fn bam_to_bam_slices_pacbio_kinetics() {
         .assert()
         .success();
 
-    // window [3,8): seq "TACGT"; ip -> [3,4,5,6,7]; pw -> [103,104,105,106,107].
+    // Window [3,8): seq "TACGT"; ip -> [3,4,5,6,7]; pw -> [103,104,105,106,107].
     let mut rdr = bam::io::Reader::new(std::fs::File::open(&out_path).unwrap());
     let hdr = rdr.read_header().unwrap();
     let mut buf = RecordBuf::default();
@@ -236,9 +238,9 @@ fn bam_to_bam_slices_pacbio_kinetics() {
     assert_eq!(pw, vec![103, 104, 105, 106, 107], "pw must be sliced too");
 }
 
-/// End-to-end: `--update-moves` slices the ONT `mv` move table and bumps `ts`
-/// through the actual binary, so a trimmed read stays signal-mappable for
-/// Remora/Clair3 v2 instead of dropping the move table.
+/// `--update-moves` slices the ONT `mv` move table and advances `ts` through
+/// the compiled binary, so a trimmed read stays signal-mappable for Remora and
+/// Clair3 v2 instead of dropping the move table.
 #[test]
 fn bam_update_moves_slices_move_table() {
     let dir = tempfile::tempdir().unwrap();
@@ -253,7 +255,7 @@ fn bam_update_moves_slices_move_table() {
     *r.name_mut() = Some(b"read1".into());
     *r.sequence_mut() = b"ACGTAC".to_vec().into(); // 6 bases
     *r.quality_scores_mut() = vec![40; 6].into();
-    // stride 2; 6 ones (one per base) at block indices 0,1,3,4,6,7.
+    // Stride 2; 6 ones (one per base) at block indices 0,1,3,4,6,7.
     r.data_mut().insert(
         Tag::new(b'm', b'v'),
         Value::Array(Array::Int8(vec![2, 1, 1, 0, 1, 1, 0, 1, 1])),
@@ -290,12 +292,13 @@ fn bam_update_moves_slices_move_table() {
     rdr.read_record_buf(&hdr, &mut buf).unwrap();
 
     assert_eq!(buf.sequence().as_ref(), b"GTAC");
-    // mv sliced to blocks [3,8): [stride] + [1,1,0,1,1].
+    // `mv` sliced to blocks [3,8): the stride, then [1,1,0,1,1].
     match buf.data().get(&Tag::new(b'm', b'v')) {
         Some(Value::Array(Array::Int8(v))) => assert_eq!(v, &[2, 1, 1, 0, 1, 1]),
         other => panic!("mv not sliced: {other:?}"),
     }
-    // ts bumped by block_first*stride = 3*2 = 6 -> 16 (any integer width).
+    // `ts` advances by block_first * stride = 3 * 2 = 6, to 16 (any integer
+    // width).
     let ts = match buf.data().get(&Tag::new(b't', b's')) {
         Some(Value::Int8(n)) => i64::from(*n),
         Some(Value::Int16(n)) => i64::from(*n),
@@ -332,15 +335,15 @@ fn bam_on_stdin_without_in_format_is_detected() {
         .assert()
         .success();
 
-    // Both fixture reads should convert to FASTQ (4 lines each).
+    // Both fixture reads convert to FASTQ (4 lines each).
     let out = std::fs::read_to_string(&out_path).unwrap();
     let lines = out.lines().count();
     assert_eq!(
         lines, 8,
-        "expected 2 FASTQ records (8 lines) from the piped BAM, got:\n{out}"
+        "Expected 2 FASTQ records (8 lines) from the piped BAM, got:\n{out}"
     );
     assert!(
         out.contains("@read1") && out.contains("@read2"),
-        "missing reads: {out}"
+        "Missing reads: {out}"
     );
 }

@@ -1,3 +1,5 @@
+//! Serialization of parsed modifications back to `MM` text and `ML` bytes.
+
 use super::{ModCode, Mods};
 use crate::io::fastq::push_u64;
 
@@ -51,10 +53,10 @@ mod tests {
         assert_eq!(ml, vec![1, 2, 3, 4, 5]);
     }
 
+    /// A zero-position group is valid SAM (assessed, none found) and is
+    /// re-emitted rather than dropped; it contributes no ML bytes.
     #[test]
     fn emits_empty_groups() {
-        // A zero-position group is valid SAM ("assessed, none found") and must
-        // be re-emitted, not dropped. Contributes no ML bytes.
         let mut mods = parse(b"C+m,0;", &[7]);
         mods.groups.push(crate::mods::MmGroup {
             base: b'A',
