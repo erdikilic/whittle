@@ -1,8 +1,8 @@
 //! FASTQ reading and writing: streaming record iterators over plain, gzip and BGZF input, and segment writers with optional SAM-style header tags.
 
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 
-use flate2::read::MultiGzDecoder;
+use flate2::bufread::MultiGzDecoder;
 use gzp::deflate::Mgzip;
 use gzp::par::compress::{ParCompress, ParCompressBuilder};
 use gzp::{Compression, ZWriter};
@@ -13,6 +13,15 @@ use seq_io::fastq::{Reader, Record};
 use crate::config::Config;
 use crate::record::ReadRecord;
 
+/// Capacity of the buffer between a compressed source and its decoder, which
+/// pulls the compressed stream through it in one `read` syscall per megabyte.
+///
+/// The parser's own buffer keeps the seq_io default: the parser fills it to
+/// capacity before yielding, so an I/O error during a fill discards every
+/// record in it, and a larger buffer would widen the span of records an error
+/// on damaged input cannot be attributed to.
+const INPUT_BUFFER_CAPACITY: usize = 1 << 20;
+
 /// Builds a streaming FASTQ record iterator over an already-open source (e.g. a
 /// peeked-and-chained stdin stream), decompressing gzip when `gz` is true.
 pub fn reader_from(
@@ -20,7 +29,12 @@ pub fn reader_from(
     gz: bool,
 ) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
     let inner: Box<dyn Read + Send> = if gz {
-        Box::new(MultiGzDecoder::new(inner))
+        // `bufread::MultiGzDecoder` over an explicit buffer; the `read` variant
+        // wraps its source in an 8 KiB `BufReader`.
+        Box::new(MultiGzDecoder::new(BufReader::with_capacity(
+            INPUT_BUFFER_CAPACITY,
+            inner,
+        )))
     } else {
         inner
     };
@@ -34,6 +48,9 @@ pub fn reader_from_bgzf(
     inner: Box<dyn Read + Send>,
     workers: usize,
 ) -> anyhow::Result<Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send>> {
+    // The block reader issues a `read` per frame part (header, payload,
+    // trailer); the buffer in front of the source coalesces them.
+    let inner = BufReader::with_capacity(INPUT_BUFFER_CAPACITY, inner);
     let inner: Box<dyn Read + Send> = if workers > 1 {
         Box::new(noodles_bgzf::io::MultithreadedReader::with_worker_count(
             std::num::NonZero::new(workers).unwrap_or(std::num::NonZero::<usize>::MIN),
@@ -213,6 +230,13 @@ pub fn write_named_record<W: Write>(
     write_body(w, seq, phred, tags)
 }
 
+/// Appends the rest of a record after its header id and tags to `out`: the
+/// newline, the sequence, the `+` line and the Phred+33 qualities. The `Vec`
+/// counterpart of `write_body` for callers that assemble the header in place.
+pub(crate) fn push_record_body(out: &mut Vec<u8>, seq: &[u8], phred: &[u8]) {
+    write_body(out, seq, phred, b"").expect("Writing to a Vec cannot fail");
+}
+
 /// Writes the rest of a record after its header id: the tags, the sequence,
 /// the `+` line and the Phred+33 qualities.
 fn write_body<W: Write>(w: &mut W, seq: &[u8], phred: &[u8], tags: &[u8]) -> io::Result<()> {
@@ -232,12 +256,119 @@ fn write_body<W: Write>(w: &mut W, seq: &[u8], phred: &[u8], tags: &[u8]) -> io:
     w.write_all(b"\n")
 }
 
+/// The decimal text of `0..=99` as digit pairs, for the two-digit fast path of
+/// [`push_u64`]: `MM` skip counts are mostly one or two digits.
+const DIGIT_PAIRS: [[u8; 2]; 100] = {
+    let mut t = [[0u8; 2]; 100];
+    let mut i = 0;
+    while i < 100 {
+        t[i] = [b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        i += 1;
+    }
+    t
+};
+
+/// One `B:C` array element as text: `,` and the decimal digits of the value,
+/// with the length of the used prefix. Indexed by value. `ML` and the
+/// per-base kinetics arrays hold tens of thousands of elements per record, so
+/// each element is a fixed-width table copy rather than a digit loop.
+const COMMA_U8: [([u8; 4], usize); 256] = {
+    let mut t = [([0u8; 4], 0usize); 256];
+    let mut i = 0;
+    while i < 256 {
+        let n = i as u8;
+        let mut b = [b',', 0, 0, 0];
+        let len = if n >= 100 {
+            b[1] = b'0' + n / 100;
+            b[2] = b'0' + (n / 10) % 10;
+            b[3] = b'0' + n % 10;
+            4
+        } else if n >= 10 {
+            b[1] = b'0' + n / 10;
+            b[2] = b'0' + n % 10;
+            3
+        } else {
+            b[1] = b'0' + n;
+            2
+        };
+        t[i] = (b, len);
+        i += 1;
+    }
+    t
+};
+
+/// One `B:c` array element as text, the signed counterpart of [`COMMA_U8`],
+/// indexed by the value's bit pattern (`x as u8`). The move table `mv` is a
+/// `B:c` array with one element per signal stride.
+const COMMA_I8: [([u8; 5], usize); 256] = {
+    let mut t = [([0u8; 5], 0usize); 256];
+    let mut i = 0;
+    while i < 256 {
+        let x = i as u8 as i8;
+        let m = x.unsigned_abs();
+        let mut b = [b',', 0, 0, 0, 0];
+        let mut len = 1;
+        if x < 0 {
+            b[len] = b'-';
+            len += 1;
+        }
+        if m >= 100 {
+            b[len] = b'0' + m / 100;
+            b[len + 1] = b'0' + (m / 10) % 10;
+            b[len + 2] = b'0' + m % 10;
+            len += 3;
+        } else if m >= 10 {
+            b[len] = b'0' + m / 10;
+            b[len + 1] = b'0' + m % 10;
+            len += 2;
+        } else {
+            b[len] = b'0' + m;
+            len += 1;
+        }
+        t[i] = (b, len);
+        i += 1;
+    }
+    t
+};
+
+/// Appends `,` and the decimal text of every element of a `B:C` array. The
+/// capacity is reserved once for the widest element, so each element is a
+/// fixed four-byte copy followed by a truncate rather than a variable-length
+/// copy.
+fn push_comma_u8s(out: &mut Vec<u8>, v: &[u8]) {
+    out.reserve(v.len() * 4);
+    for &x in v {
+        let (bytes, len) = COMMA_U8[usize::from(x)];
+        out.extend_from_slice(&bytes);
+        out.truncate(out.len() - (4 - len));
+    }
+}
+
+/// Appends `,` and the decimal text of every element of a `B:c` array; see
+/// [`push_comma_u8s`].
+fn push_comma_i8s(out: &mut Vec<u8>, v: &[i8]) {
+    out.reserve(v.len() * 5);
+    for &x in v {
+        let (bytes, len) = COMMA_I8[usize::from(x as u8)];
+        out.extend_from_slice(&bytes);
+        out.truncate(out.len() - (5 - len));
+    }
+}
+
 /// Appends `n` as ASCII decimal without invoking `core::fmt`. The aux `B` arrays
 /// (notably `ML` and the per-base kinetics tags) can hold tens of thousands of
 /// integers per record; a stack buffer and a digit loop avoid the per-call
 /// overhead of `write!` on a `Vec` at that volume.
 #[inline]
 pub(crate) fn push_u64(out: &mut Vec<u8>, mut n: u64) {
+    if n < 10 {
+        out.push(b'0' + n as u8);
+        return;
+    }
+    if n < 100 {
+        out.extend_from_slice(&DIGIT_PAIRS[n as usize]);
+        return;
+    }
     let mut buf = [0u8; 20];
     let mut i = buf.len();
     loop {
@@ -262,11 +393,10 @@ pub(crate) fn push_i64(out: &mut Vec<u8>, n: i64) {
     push_u64(out, n.unsigned_abs());
 }
 
-/// Formats one SAM aux field as text `XX:T:VALUE` (no leading TAB). Integers of
-/// any source width serialize with SAM type code `i`; `B` arrays keep their
-/// subtype.
-pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
-    let mut out = Vec::new();
+/// Appends one SAM aux field as text `XX:T:VALUE` (no leading TAB) to `out`.
+/// Integers of any source width serialize with SAM type code `i`; `B` arrays
+/// keep their subtype.
+pub fn push_aux_field(out: &mut Vec<u8>, tag: [u8; 2], value: &Value) {
     out.extend_from_slice(&tag);
     out.push(b':');
     match value {
@@ -276,27 +406,27 @@ pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
         },
         Value::Int8(n) => {
             out.extend_from_slice(b"i:");
-            push_i64(&mut out, i64::from(*n));
+            push_i64(out, i64::from(*n));
         },
         Value::UInt8(n) => {
             out.extend_from_slice(b"i:");
-            push_u64(&mut out, u64::from(*n));
+            push_u64(out, u64::from(*n));
         },
         Value::Int16(n) => {
             out.extend_from_slice(b"i:");
-            push_i64(&mut out, i64::from(*n));
+            push_i64(out, i64::from(*n));
         },
         Value::UInt16(n) => {
             out.extend_from_slice(b"i:");
-            push_u64(&mut out, u64::from(*n));
+            push_u64(out, u64::from(*n));
         },
         Value::Int32(n) => {
             out.extend_from_slice(b"i:");
-            push_i64(&mut out, i64::from(*n));
+            push_i64(out, i64::from(*n));
         },
         Value::UInt32(n) => {
             out.extend_from_slice(b"i:");
-            push_u64(&mut out, u64::from(*n));
+            push_u64(out, u64::from(*n));
         },
         Value::Float(x) => write!(out, "f:{x}").unwrap(),
         Value::String(s) => {
@@ -309,30 +439,35 @@ pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
         },
         Value::Array(a) => {
             out.extend_from_slice(b"B:");
-            write_array(&mut out, a);
+            write_array(out, a);
         },
     }
+}
+
+/// Formats one SAM aux field as text `XX:T:VALUE` (no leading TAB) into a new
+/// buffer; see [`push_aux_field`].
+pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_aux_field(&mut out, tag, value);
     out
 }
 
+/// Appends a `B` array's subtype code and comma-prefixed elements. The
+/// capacity for the wider element types is reserved at two bytes per element,
+/// the shortest text an element can take.
 fn write_array(out: &mut Vec<u8>, a: &Array) {
     match a {
         Array::Int8(v) => {
             out.push(b'c');
-            for &x in v {
-                out.push(b',');
-                push_i64(out, i64::from(x));
-            }
+            push_comma_i8s(out, v);
         },
         Array::UInt8(v) => {
             out.push(b'C');
-            for &x in v {
-                out.push(b',');
-                push_u64(out, u64::from(x));
-            }
+            push_comma_u8s(out, v);
         },
         Array::Int16(v) => {
             out.push(b's');
+            out.reserve(v.len() * 2);
             for &x in v {
                 out.push(b',');
                 push_i64(out, i64::from(x));
@@ -340,6 +475,7 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
         },
         Array::UInt16(v) => {
             out.push(b'S');
+            out.reserve(v.len() * 2);
             for &x in v {
                 out.push(b',');
                 push_u64(out, u64::from(x));
@@ -347,6 +483,7 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
         },
         Array::Int32(v) => {
             out.push(b'i');
+            out.reserve(v.len() * 2);
             for &x in v {
                 out.push(b',');
                 push_i64(out, i64::from(x));
@@ -354,6 +491,7 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
         },
         Array::UInt32(v) => {
             out.push(b'I');
+            out.reserve(v.len() * 2);
             for &x in v {
                 out.push(b',');
                 push_u64(out, u64::from(x));
@@ -361,6 +499,7 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
         },
         Array::Float(v) => {
             out.push(b'f');
+            out.reserve(v.len() * 2);
             for x in v {
                 write!(out, ",{x}").unwrap();
             }
@@ -368,25 +507,37 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
     }
 }
 
-/// Formats the reconstructed MM/ML/MN block as SAM aux text (no leading TAB):
-/// `MM:Z:<mm>\tML:B:C,<ml...>\tMN:i:<mn>`. `ml` is `None` for an MM-only source
-/// record (ML is optional per the SAM spec), in which case the `ML:B:C` field is
-/// omitted rather than emitted empty.
-pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
-    let mut out = Vec::new();
+/// Appends the reconstructed MM/ML/MN block as SAM aux text (no leading TAB)
+/// to `out`: `MM:Z:<mm>\tML:B:C,<ml...>\tMN:i:<mn>`. `ml` is `None` for an
+/// MM-only source record (ML is optional per the SAM spec), in which case the
+/// `ML:B:C` field is omitted rather than emitted empty.
+pub fn push_mods_aux(out: &mut Vec<u8>, mm: &[u8], ml: Option<&[u8]>, mn: usize) {
+    out.reserve(mm.len() + 40);
     out.extend_from_slice(b"MM:Z:");
     out.extend_from_slice(mm);
     if let Some(ml) = ml {
         out.extend_from_slice(b"\tML:B:C");
-        for &b in ml {
-            out.push(b',');
-            push_u64(&mut out, u64::from(b));
-        }
+        push_comma_u8s(out, ml);
     }
     out.extend_from_slice(b"\tMN:i:");
-    push_u64(&mut out, mn as u64);
+    push_u64(out, mn as u64);
+}
+
+/// Formats the reconstructed MM/ML/MN block as SAM aux text into a new buffer;
+/// see [`push_mods_aux`].
+pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_mods_aux(&mut out, mm, ml, mn);
     out
 }
+
+/// Capacity of the buffer in front of the output file or stdout. Plain output
+/// is written record by record and the compressed encoders emit one write per
+/// block; the buffer coalesces either into one `write` syscall per megabyte.
+const OUTPUT_BUFFER_CAPACITY: usize = 1 << 20;
+
+/// The buffered destination of a FASTQ writer.
+type BufferedOutput = BufWriter<Box<dyn Write + Send>>;
 
 /// FASTQ output writer: a plain buffered writer, a `gzp` parallel gzip writer
 /// for `FastqGz`, or a multithreaded BGZF writer for `FastqBgzf`.
@@ -398,11 +549,11 @@ pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
 /// explicitly keeps that failure an ordinary `Err`.
 pub(crate) enum FastqOut {
     /// Plain buffered output.
-    Plain(BufWriter<Box<dyn Write + Send>>),
+    Plain(BufferedOutput),
     /// Parallel gzip (`gzp` `Mgzip`) output.
-    Gz(ParCompress<'static, Mgzip, Box<dyn Write + Send>>),
+    Gz(ParCompress<'static, Mgzip, BufferedOutput>),
     /// Multithreaded BGZF output.
-    Bgzf(noodles_bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>),
+    Bgzf(noodles_bgzf::io::MultithreadedWriter<BufferedOutput>),
 }
 
 impl Write for FastqOut {
@@ -425,23 +576,16 @@ impl Write for FastqOut {
 impl FastqOut {
     /// Finalizes the writer: `Gz` flushes the final block and gzip footer
     /// through `ZWriter::finish`, `Bgzf` writes the BGZF EOF block through
-    /// `finish`, and `Plain` flushes the `BufWriter`. Must be called before
-    /// returning success.
+    /// `finish`, and every variant then flushes the output buffer, whose write
+    /// error surfaces here. Must be called before returning success.
     pub(crate) fn finish(self) -> anyhow::Result<()> {
-        match self {
-            FastqOut::Plain(mut w) => {
-                w.flush()?;
-                Ok(())
-            },
-            FastqOut::Gz(mut w) => {
-                w.finish()?;
-                Ok(())
-            },
-            FastqOut::Bgzf(mut w) => {
-                w.finish()?;
-                Ok(())
-            },
-        }
+        let mut inner = match self {
+            FastqOut::Plain(w) => w,
+            FastqOut::Gz(mut w) => w.finish()?,
+            FastqOut::Bgzf(mut w) => w.finish()?,
+        };
+        inner.flush()?;
+        Ok(())
     }
 }
 
@@ -459,6 +603,7 @@ pub(crate) fn writer(
         Some(p) => Box::new(std::fs::File::create(p)?),
         None => Box::new(std::io::stdout()),
     };
+    let base = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, base);
     let workers = std::num::NonZero::new(gz_workers).unwrap_or(std::num::NonZero::<usize>::MIN);
     match out_fmt {
         crate::io::Format::FastqGz => {
@@ -481,9 +626,7 @@ pub(crate) fn writer(
                 .build_from_writer(base);
             Ok(FastqOut::Bgzf(w))
         },
-        crate::io::Format::Fastq | crate::io::Format::Bam => {
-            Ok(FastqOut::Plain(BufWriter::new(base)))
-        },
+        crate::io::Format::Fastq | crate::io::Format::Bam => Ok(FastqOut::Plain(base)),
     }
 }
 
@@ -704,6 +847,44 @@ mod tests {
             format_aux_field(*b"a7", &Value::Array(Array::Float(vec![1.5]))),
             b"a7:B:f,1.5"
         );
+    }
+
+    /// The table-driven element text agrees with the digit loop across every
+    /// `u8` and `i8` value, including the three-digit and negative ends.
+    #[test]
+    fn comma_element_tables_match_the_digit_loop() {
+        let all: Vec<u8> = (0..=255).collect();
+        let mut fast = Vec::new();
+        push_comma_u8s(&mut fast, &all);
+        let mut slow = Vec::new();
+        for &x in &all {
+            slow.push(b',');
+            push_u64(&mut slow, u64::from(x));
+        }
+        assert_eq!(fast, slow);
+
+        let all: Vec<i8> = (-128..=127).collect();
+        let mut fast = Vec::new();
+        push_comma_i8s(&mut fast, &all);
+        let mut slow = Vec::new();
+        for &x in &all {
+            slow.push(b',');
+            push_i64(&mut slow, i64::from(x));
+        }
+        assert_eq!(fast, slow);
+    }
+
+    /// `push_u64` agrees with `core::fmt` across the fast paths and the loop.
+    #[test]
+    fn push_u64_matches_fmt() {
+        for n in (0..1200).chain([9_999, 10_000, u64::from(u32::MAX), u64::MAX]) {
+            let mut out = Vec::new();
+            push_u64(&mut out, n);
+            assert_eq!(out, n.to_string().as_bytes(), "{n}");
+        }
+        let mut out = Vec::new();
+        push_i64(&mut out, i64::MIN);
+        assert_eq!(out, i64::MIN.to_string().as_bytes());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! BAM reading and writing over noodles: raw-record readers, single- and multithreaded BGZF sinks, and record-level input guards.
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::num::NonZero;
 use std::path::Path;
 
@@ -113,6 +113,9 @@ pub fn reader_from(
     inner: Box<dyn io::Read + Send>,
     workers: usize,
 ) -> anyhow::Result<(sam::Header, RawRecordIter)> {
+    // The block reader issues a `read` per frame part (header, payload,
+    // trailer); the buffer in front of the source coalesces them.
+    let inner = BufReader::with_capacity(INPUT_BUFFER_CAPACITY, inner);
     if workers > 1 {
         let mt = bgzf::io::MultithreadedReader::with_worker_count(workers_nonzero(workers), inner);
         let mut r = bam::io::Reader::from(mt);
@@ -141,12 +144,23 @@ impl<R: io::Read> Iterator for RawRecordIterImpl<R> {
     }
 }
 
+/// Capacity of the buffer between a BGZF block reader and its file or stdin.
+const INPUT_BUFFER_CAPACITY: usize = 1 << 20;
+
+/// Capacity of the buffer between a BGZF encoder and its file or stdout.
+/// The encoder emits each block frame as several small writes (header, payload,
+/// trailer); the buffer coalesces them into one `write` syscall per megabyte.
+const OUTPUT_BUFFER_CAPACITY: usize = 1 << 20;
+
+/// The buffered destination of a BAM sink.
+type BufferedOutput = BufWriter<Box<dyn Write + Send>>;
+
 /// A BAM output sink: single-threaded BGZF (`-t 1`) or multithreaded BGZF.
 pub enum BamSink {
     /// Single-threaded BGZF writer.
-    Single(bam::io::Writer<bgzf::io::Writer<Box<dyn Write + Send>>>),
+    Single(bam::io::Writer<bgzf::io::Writer<BufferedOutput>>),
     /// Multithreaded BGZF writer.
-    Multi(bam::io::Writer<bgzf::io::MultithreadedWriter<Box<dyn Write + Send>>>),
+    Multi(bam::io::Writer<bgzf::io::MultithreadedWriter<BufferedOutput>>),
 }
 
 /// Builds the sink with the header written; multithreaded BGZF when
@@ -164,6 +178,7 @@ pub fn writer(
         Some(p) => Box::new(File::create(p)?),
         None => Box::new(io::stdout()),
     };
+    let inner = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, inner);
     if workers > 1 {
         let mt = bgzf::io::multithreaded_writer::Builder::default()
             .set_compression_level(clevel)
@@ -201,20 +216,18 @@ impl BamSink {
         }
     }
 
-    /// Flushes and finalizes the stream, writing the BGZF EOF block. `Single`
-    /// uses `try_finish`; `Multi` uses `into_inner().finish()`, whose `Drop`
-    /// swallows errors, so the call must be explicit.
+    /// Finalizes the stream: the BGZF encoder flushes its last block and
+    /// writes the EOF block, then the output buffer is flushed to the file.
+    /// Both encoders hand back the buffer from `finish`, so the flush error
+    /// surfaces here; the encoders' `Drop` impls swallow errors, so the call
+    /// must be explicit.
     pub fn finish(self) -> anyhow::Result<()> {
-        match self {
-            BamSink::Single(mut w) => {
-                w.try_finish()?;
-                Ok(())
-            },
-            BamSink::Multi(w) => {
-                w.into_inner().finish()?;
-                Ok(())
-            },
-        }
+        let mut inner = match self {
+            BamSink::Single(w) => w.into_inner().finish()?,
+            BamSink::Multi(w) => w.into_inner().finish()?,
+        };
+        inner.flush()?;
+        Ok(())
     }
 }
 
