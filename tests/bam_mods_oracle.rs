@@ -46,6 +46,11 @@ fn write_fixture(path: &Path) {
     w.write_alignment_record(&header, &rec).unwrap();
 }
 
+/// The ASCII base an htslib base-modification code stands for.
+fn base_char(code: i32) -> char {
+    char::from(u8::try_from(code).expect("htslib base codes are ASCII"))
+}
+
 /// Decode (0-based read pos, canonical, modified, strand, qual) with htslib.
 fn hts_mods(path: &Path) -> Vec<(usize, char, char, i32, i32)> {
     let mut reader = hts::Reader::from_path(path).unwrap();
@@ -56,8 +61,8 @@ fn hts_mods(path: &Path) -> Vec<(usize, char, char, i32, i32)> {
             for (pos, m) in iter.flatten() {
                 out.push((
                     pos as usize,
-                    m.canonical_base as u8 as char,
-                    m.modified_base as u8 as char,
+                    base_char(m.canonical_base),
+                    base_char(m.modified_base),
                     m.strand,
                     m.qual,
                 ));
@@ -87,9 +92,8 @@ fn trimmed_output_mods_match_oracle() {
         .map(|&(pos, cb, mb, st, q)| (pos - start, cb, mb, st, q))
         .collect();
 
-    let got = hts_mods(&output);
-    let mut a = expected.clone();
-    let mut b = got.clone();
+    let mut a = expected;
+    let mut b = hts_mods(&output);
     a.sort();
     b.sort();
     assert_eq!(
@@ -149,9 +153,8 @@ fn trimmed_output_multimod_mods_match_oracle() {
         .map(|&(pos, cb, mb, st, q)| (pos - head, cb, mb, st, q))
         .collect();
 
-    let got = hts_mods(&output);
-    let mut a = expected.clone();
-    let mut b = got.clone();
+    let mut a = expected;
+    let mut b = hts_mods(&output);
     a.sort();
     b.sort();
     assert_eq!(
@@ -190,9 +193,8 @@ fn trimmed_output_multimod_mods_match_oracle_t8() {
         .map(|&(pos, cb, mb, st, q)| (pos - head, cb, mb, st, q))
         .collect();
 
-    let got = hts_mods(&output);
-    let mut a = expected.clone();
-    let mut b = got.clone();
+    let mut a = expected;
+    let mut b = hts_mods(&output);
     a.sort();
     b.sort();
     assert_eq!(
@@ -225,9 +227,10 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
         );
         // Distinct ML payload per read: shift the base bytes by `i` so read
         // `i`'s decoded quals are unique (see doc comment above).
+        let shift = u8::try_from(i).expect("fixture index fits in a byte");
         let ml: Vec<u8> = [200u8, 150, 100, 55, 66, 240, 10]
             .into_iter()
-            .map(|b| b.wrapping_add(i as u8))
+            .map(|b| b.wrapping_add(shift))
             .collect();
         data.insert(
             Tag::BASE_MODIFICATION_PROBABILITIES,
@@ -266,6 +269,14 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
 
 // Optional real-data sweep enabled by `WHITTLE_UBAM`.
 
+/// The real uBAM the ignored sweeps run against. Running them without the
+/// variable is a misconfigured invocation, so it fails rather than passing on
+/// no data.
+fn real_ubam_path() -> std::ffi::OsString {
+    std::env::var_os("WHITTLE_UBAM")
+        .expect("WHITTLE_UBAM must name a real uBAM to run the ignored oracle sweeps")
+}
+
 /// One decoded base-modification call: (0-based read pos, canonical base,
 /// modified base, strand, qual), the same tuple shape `hts_mods` above
 /// produces, just keyed per read instead of flattened across a whole file.
@@ -287,8 +298,8 @@ fn hts_mods_by_read(path: &Path) -> HashMap<String, (usize, Vec<ModCall>)> {
             for (pos, m) in iter.flatten() {
                 mods.push((
                     pos as usize,
-                    m.canonical_base as u8 as char,
-                    m.modified_base as u8 as char,
+                    base_char(m.canonical_base),
+                    base_char(m.modified_base),
                     m.strand,
                     m.qual,
                 ));
@@ -317,15 +328,12 @@ fn filter_offset(mods: &[ModCall], head: usize, orig_len: usize) -> Vec<ModCall>
         .collect()
 }
 
-// Runs only when a real uBAM is provided, e.g.:
-//   WHITTLE_UBAM=data/short_eqread/short_eqread.bam \
-//     cargo test --test bam_mods_oracle -- --ignored
+/// Real-data sweep over the uBAM named by `WHITTLE_UBAM`:
+///   WHITTLE_UBAM=/path/to/real.ubam cargo test --test bam_mods_oracle -- --ignored
 #[test]
-#[ignore]
+#[ignore = "needs WHITTLE_UBAM=<real uBAM>"]
 fn real_ubam_oracle_sweep() {
-    let Some(path) = std::env::var_os("WHITTLE_UBAM") else {
-        return;
-    };
+    let path = real_ubam_path();
     let input = std::path::PathBuf::from(path);
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.ubam");
@@ -359,14 +367,10 @@ fn real_ubam_oracle_sweep() {
 /// head=10/tail=10 crop, through the parallel BAM dispatch. Reads are matched by
 /// name, since that path is unordered. A real-scale check that `-t 8` produces
 /// byte-valid, mod-correct output on genuine ONT/dorado data.
-//   WHITTLE_UBAM=data/short_eqread/short_eqread.bam \
-//     cargo test --test bam_mods_oracle -- --ignored
 #[test]
-#[ignore]
+#[ignore = "needs WHITTLE_UBAM=<real uBAM>"]
 fn real_ubam_oracle_sweep_t8() {
-    let Some(path) = std::env::var_os("WHITTLE_UBAM") else {
-        return;
-    };
+    let path = real_ubam_path();
     let input = std::path::PathBuf::from(path);
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.ubam");
@@ -478,7 +482,10 @@ fn mm_segment(canonical: u8, code: char, occ_indices: &[usize], ml_seed: u8) -> 
     );
     // Distinct ML values make record/payload mismatches observable.
     let ml: Vec<u8> = (0..occ_indices.len())
-        .map(|k| 100u8.wrapping_add(ml_seed).wrapping_add(k as u8 * 7))
+        .map(|k| {
+            let k = u8::try_from(k).expect("occurrence index fits in a byte");
+            100u8.wrapping_add(ml_seed).wrapping_add(k.wrapping_mul(7))
+        })
         .collect();
     (mm, ml)
 }
@@ -500,7 +507,8 @@ fn write_infer_mm_ml_fixture(path: &Path, n: usize) {
             "read {i}: fixture must have >=1 C past position {INFER_MM_ML_MOD_MIN_ABS} \
              for a meaningful mod tag"
         );
-        let (mm, ml) = mm_segment(b'C', 'm', &occ, i as u8);
+        let ml_seed = u8::try_from(i).expect("fixture index fits in a byte");
+        let (mm, ml) = mm_segment(b'C', 'm', &occ, ml_seed);
 
         let mut rec = RecordBuf::default();
         *rec.flags_mut() = Flags::UNMAPPED;

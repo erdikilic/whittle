@@ -48,12 +48,13 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
     Ok(())
 }
 
-/// Every file the run writes, checked against every file it reads.
+/// Every file the run writes, checked against every file it reads and against
+/// each other.
 ///
 /// `whittle` streams its input, so `File::create` truncating a file that is still
 /// being read destroys it: a plain FASTQ run would emit an empty file and exit 0.
-/// The same applies to `--summary-json`, which is written last and would replace
-/// an input, the just-written output, or a folder member with JSON.
+/// The summary JSON is written after the reads, so it would replace an input,
+/// the output written by the same run, or a folder member.
 ///
 /// `extra_inputs` carries the folder-mode member files, which are not reachable
 /// from `cfg` alone.
@@ -61,7 +62,7 @@ pub(crate) fn guard_output_collisions(
     cfg: &Config,
     extra_inputs: &[std::path::PathBuf],
 ) -> anyhow::Result<()> {
-    let mut reads: Vec<(&str, &std::path::Path)> = Vec::new();
+    let mut reads: Vec<(&str, &Path)> = Vec::new();
     if let Some(p) = cfg.io.input.as_deref() {
         reads.push(("the input", p));
     }
@@ -72,11 +73,8 @@ pub(crate) fn guard_output_collisions(
         reads.push(("an input file in the directory", p.as_path()));
     }
 
-    for (what, dest) in [
-        ("the output", cfg.io.output.as_deref()),
-        ("--summary-json", cfg.summary_json.as_deref()),
-    ] {
-        let Some(dest) = dest else { continue };
+    let targets: Vec<(&str, &Path)> = cfg.write_targets().collect();
+    for &(what, dest) in &targets {
         for (label, src) in &reads {
             if same_path(src, dest) {
                 anyhow::bail!(
@@ -98,40 +96,44 @@ pub(crate) fn guard_output_collisions(
         }
     }
 
-    // The summary is written after the reads, so it would clobber them. With no
-    // `-o` the reads go to stdout, which a shell redirect can point at the very
-    // file `--summary-json` names, leaving no path for `same_path` to compare.
-    if let Some(sum) = cfg.summary_json.as_deref() {
-        let collides = match cfg.io.output.as_deref() {
-            Some(out) => same_path(out, sum),
-            None => stdout_is(sum),
-        };
-        if collides {
+    // Two artifacts on one path leave only the one written last. With no `-o`
+    // the reads go to stdout, which a shell redirect can point at the very file
+    // an artifact names, leaving no path for `same_path` to compare.
+    for (i, &(later, dest)) in targets.iter().enumerate() {
+        for &(earlier, other) in &targets[..i] {
+            if same_path(other, dest) {
+                anyhow::bail!(
+                    "{later} ({}) and {earlier} are the same file; write each to its own path",
+                    dest.display()
+                );
+            }
+        }
+        if cfg.io.output.is_none() && stdout_is(dest) {
             anyhow::bail!(
-                "--summary-json ({}) and the output are the same file; the summary would \
-                 replace the trimmed reads with JSON",
-                sum.display()
+                "{later} ({}) and the output on stdout are the same file; the file would \
+                 replace the trimmed reads",
+                dest.display()
             );
         }
     }
 
-    // Catch a mistyped summary path now rather than after the reads are written,
-    // which on a large BAM throws away hours of work. Probing the parent instead
-    // of creating the file leaves nothing behind on a run that ends up writing no
-    // summary at all (`--adapter-infer report`). A permission failure still
+    // Catch a mistyped path now rather than after the reads are written, which
+    // on a large BAM throws away hours of work. Probing the parent instead of
+    // creating the file leaves nothing behind on a run that ends up writing no
+    // artifact at all (`--adapter-infer report`). A permission failure still
     // surfaces late; a wrong path, the common typo, does not.
-    if let Some(sum) = cfg.summary_json.as_deref() {
-        if sum.is_dir() {
-            anyhow::bail!("--summary-json {} is a directory", sum.display());
+    for &(flag, path) in &targets {
+        if path.is_dir() {
+            anyhow::bail!("{flag} {} is a directory", path.display());
         }
-        let parent = sum
+        let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         if !parent.is_dir() {
             anyhow::bail!(
-                "--summary-json {}: the directory {} does not exist",
-                sum.display(),
+                "{flag} {}: the directory {} does not exist",
+                path.display(),
                 parent.display()
             );
         }

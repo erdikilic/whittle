@@ -97,8 +97,8 @@ fn bam_to_bam_end_to_end() {
         "both reads should survive --head-crop 2 (len 10, 8 > min-length)"
     );
 
-    // Default threads (4) run the BAM workflow unordered, so look records up by
-    // name instead of assuming input order is preserved on output.
+    // The default thread count (all CPUs) runs the BAM workflow unordered, so
+    // records are looked up by name instead of assuming input order.
     let by_name: std::collections::HashMap<Vec<u8>, RecordBuf> = out_records
         .iter()
         .map(|r| (r.name().unwrap().to_vec(), r.clone()))

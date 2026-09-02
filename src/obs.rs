@@ -2,7 +2,7 @@
 
 use tracing::level_filters::LevelFilter;
 
-use crate::config::ProgressMode;
+use crate::config::{Advisory, Config, ProgressMode};
 use tracing_subscriber::fmt::FormattedFields;
 
 /// Map the CLI verbosity/quiet flags to a tracing level. `WHITTLE_LOG`, when set, is
@@ -335,7 +335,10 @@ impl ProgressHandle {
     fn stop_ticker(&mut self) {
         if let Some((stop, handle)) = self.ticker.take() {
             stop.store(true, Ordering::Relaxed);
-            let _ = handle.join();
+            // The default panic hook has already printed a ticker panic; the
+            // assertion documents that a clean join is the only expected outcome.
+            let joined = handle.join();
+            debug_assert!(joined.is_ok(), "Progress ticker thread panicked");
         }
         if let Some(pb) = self.bar.take() {
             pb.finish_and_clear();
@@ -343,13 +346,14 @@ impl ProgressHandle {
     }
 
     /// Stop the ticker, clear the bar, then log the end-of-run summary. Clearing
-    /// happens first so no stale bar frame is left behind the summary. `output` is
-    /// the path (or `<stdout>`) shown in the closing `Completed` line, which is
-    /// always logged last and is omitted when `elapsed` is unknown.
+    /// happens first so no stale bar frame is left behind the summary. The
+    /// closing `Completed` line is separate (`complete`), so the caller can write
+    /// its artifacts between the two and a failed write is never reported after
+    /// a success line.
     ///
     /// Returns the elapsed it reported, so a caller writing its own summary
     /// (`summary::Summary`) quotes the same number.
-    pub fn finish(&mut self, stats: &Stats, output: &str) -> Option<Duration> {
+    pub fn finish(&mut self, stats: &Stats) -> Option<Duration> {
         // Snapshot elapsed before `stop_ticker()`: that call joins the ticker
         // thread, which only wakes from its 250ms sleep to notice the stop flag, so
         // measuring afterward would charge up to a full tick of join-wait to a fast
@@ -402,11 +406,16 @@ impl ProgressHandle {
             );
         }
 
+        elapsed
+    }
+
+    /// Log the closing `Completed` line, the true last line of a run. `output`
+    /// is the path (or `<stdout>`) the reads went to; `elapsed` is what `finish`
+    /// returned, and the line is omitted when it is unknown.
+    pub fn complete(&self, elapsed: Option<Duration>, output: &str) {
         if let Some(d) = elapsed {
             tracing::info!("{}", completed_line(d, output));
         }
-
-        elapsed
     }
 }
 
@@ -437,19 +446,47 @@ fn select_mode(
     if quiet {
         return Mode::Off;
     }
+    // Debug output and a live bar cannot share a terminal, so verbosity and a
+    // `WHITTLE_LOG` filter both fall back to periodic lines, under an explicit
+    // `--progress bar` as well as under `auto`. `auto` additionally needs a
+    // terminal to redraw on.
+    let bar_fits = verbosity == 0 && !whittle_log_set;
     match progress {
         ProgressMode::None => Mode::Silent,
-        ProgressMode::Bar => Mode::Bar,
-        ProgressMode::Plain => Mode::Line,
-        // A bar needs a terminal to redraw on. Debug output and a live bar cannot
-        // share one, so verbosity and a `WHITTLE_LOG` filter both fall back to
-        // periodic lines.
-        ProgressMode::Auto => {
-            if tty && verbosity == 0 && !whittle_log_set {
-                Mode::Bar
-            } else {
-                Mode::Line
-            }
+        ProgressMode::Bar if bar_fits => Mode::Bar,
+        ProgressMode::Auto if bar_fits && tty => Mode::Bar,
+        ProgressMode::Bar | ProgressMode::Auto | ProgressMode::Plain => Mode::Line,
+    }
+}
+
+/// Resolve the level filter from `--quiet`, `WHITTLE_LOG`, and the verbosity.
+///
+/// `--quiet` always wins (WARN); otherwise a non-empty `WHITTLE_LOG` overrides
+/// `-v`/`-vv`; otherwise the level follows `verbosity`. A `WHITTLE_LOG` that does
+/// not parse falls back to the verbosity level and returns an advisory naming it,
+/// since a lossy parse would enable nothing and hide even the ERROR line of a
+/// failing run. The returned flag says whether `WHITTLE_LOG` took effect, which
+/// `select_mode` uses to keep its lines off a bar.
+fn log_filter(
+    whittle_log: Option<&str>,
+    verbosity: u8,
+    quiet: bool,
+) -> (EnvFilter, bool, Option<Advisory>) {
+    let fallback = || EnvFilter::new(level_from(verbosity, quiet).to_string());
+    if quiet {
+        return (fallback(), false, None);
+    }
+    let Some(spec) = whittle_log else {
+        return (fallback(), false, None);
+    };
+    match EnvFilter::builder().parse(spec) {
+        Ok(filter) => (filter, true, None),
+        Err(e) => {
+            let level = level_from(verbosity, false);
+            let advisory = Advisory::warn(format!(
+                "WHITTLE_LOG={spec:?} is not a valid log filter ({e}); using the {level} level"
+            ));
+            (fallback(), false, Some(advisory))
         },
     }
 }
@@ -457,25 +494,20 @@ fn select_mode(
 /// Install the global subscriber and return the progress handle. Call once, in
 /// the binary.
 ///
-/// Level precedence: `--quiet` always wins (WARN); otherwise a non-empty
-/// `WHITTLE_LOG` overrides `-v`/`-vv`; otherwise the level follows `verbosity`.
+/// The level follows `log_filter`; a rejected `WHITTLE_LOG` lands in
+/// `cfg.advisories`, which `run` prints once the banner is up.
 ///
 /// Mode is never both bar and line log: `quiet` gives `Off`, a default-verbosity
 /// TTY with no `WHITTLE_LOG` gives `Bar`, everything else gives `Line`.
 /// `WHITTLE_LOG` forces `Line` so its debug lines cannot interleave with a bar.
-pub fn init(verbosity: u8, quiet: bool, progress: ProgressMode) -> ProgressHandle {
+pub fn init(cfg: &mut Config) -> ProgressHandle {
+    let (verbosity, quiet, progress) = (cfg.verbosity, cfg.quiet, cfg.progress);
     let whittle_log = std::env::var("WHITTLE_LOG").ok().filter(|s| !s.is_empty());
-    let filter = if quiet {
-        EnvFilter::new(level_from(verbosity, true).to_string())
-    } else {
-        match &whittle_log {
-            Some(s) => EnvFilter::new(s.clone()),
-            None => EnvFilter::new(level_from(verbosity, false).to_string()),
-        }
-    };
+    let (filter, whittle_log_set, advisory) = log_filter(whittle_log.as_deref(), verbosity, quiet);
+    cfg.advisories.extend(advisory);
     let multi = MultiProgress::new();
     let tty = io::stderr().is_terminal();
-    let mode = select_mode(quiet, tty, verbosity, whittle_log.is_some(), progress);
+    let mode = select_mode(quiet, tty, verbosity, whittle_log_set, progress);
     tracing_subscriber::registry()
         .with(filter)
         .with(
@@ -701,8 +733,9 @@ fn fmt_hms(d: Duration) -> String {
 /// Bar-mode message: `145k reads, 53 MB/s`. Covers only the data fields, since the
 /// bar template already draws elapsed, `%`, and ETA. Shows the processed read
 /// count with no invented "of <total>", because only total bytes are known up
-/// front, never total reads. `bytes == 0` (folder-merge mode, where byte counting
-/// isn't wired up) drops the MB/s field rather than render a misleading rate.
+/// front, never total reads. `bytes == 0` (nothing read yet, or a library caller
+/// with no byte counting) drops the MB/s field rather than render a misleading
+/// rate.
 fn bar_message(input_reads: u64, output_reads: u64, bytes: u64, elapsed: Duration) -> String {
     // Reads consumed and segments emitted, so a filter discarding everything shows
     // up while the run is going rather than only in the summary. Labelled "out"
@@ -943,6 +976,61 @@ mod tests {
         );
     }
 
+    /// An explicit bar gives way to lines under `-v` or `WHITTLE_LOG`: bar mode
+    /// hides the multi-line banner that a verbose run is asking for, and debug
+    /// lines would interleave with the bar.
+    #[test]
+    fn select_mode_explicit_bar_downgrades_to_line_when_verbose() {
+        assert_eq!(
+            select_mode(false, true, 1, false, ProgressMode::Bar),
+            Mode::Line
+        );
+        assert_eq!(
+            select_mode(false, false, 2, false, ProgressMode::Bar),
+            Mode::Line
+        );
+        assert_eq!(
+            select_mode(false, true, 0, true, ProgressMode::Bar),
+            Mode::Line
+        );
+        assert_eq!(
+            select_mode(false, false, 0, false, ProgressMode::Bar),
+            Mode::Bar
+        );
+    }
+
+    /// An unparseable `WHITTLE_LOG` must not disable logging: the filter falls
+    /// back to the verbosity level and the bad directive is reported.
+    #[test]
+    fn log_filter_falls_back_and_warns_on_an_invalid_whittle_log() {
+        let (filter, applied, advisory) = log_filter(Some("garbage=nope=1"), 0, false);
+        assert!(
+            !applied,
+            "An invalid filter must not count as WHITTLE_LOG set"
+        );
+        assert_eq!(filter.to_string(), "info");
+        let advisory = advisory.expect("An invalid WHITTLE_LOG raises an advisory");
+        assert!(advisory.warn);
+        assert!(
+            advisory.message.contains("garbage=nope=1"),
+            "The advisory names the directive: {}",
+            advisory.message
+        );
+    }
+
+    #[test]
+    fn log_filter_applies_a_valid_whittle_log_unless_quiet() {
+        let (filter, applied, advisory) = log_filter(Some("debug"), 0, false);
+        assert!(applied);
+        assert!(advisory.is_none());
+        assert_eq!(filter.to_string(), "debug");
+
+        let (filter, applied, advisory) = log_filter(Some("debug"), 0, true);
+        assert!(!applied, "Quiet outranks WHITTLE_LOG");
+        assert!(advisory.is_none());
+        assert_eq!(filter.to_string(), "warn");
+    }
+
     #[test]
     fn human_count_formats_magnitudes() {
         assert_eq!(human_count(999), "999");
@@ -1176,7 +1264,7 @@ mod tests {
         assert!(!s.contains("ETA"));
         assert!(
             !s.contains("MB/s"),
-            "bytes=0 (untracked, e.g. folder-merge mode) must not render a misleading MB/s field: {s}"
+            "Zero bytes must not render a misleading MB/s field: {s}"
         );
         assert!(
             !s.contains("->") && !s.contains('\u{b7}'),

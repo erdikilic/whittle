@@ -68,6 +68,10 @@ git merge --no-ff feature-branch -m "perf: integrate throughput improvements"
 - Comments explain why, not what. A comment that restates the line below it should
   be deleted.
 - Third person, not first: "the caller drops the tag", not "we drop the tag".
+- `anyhow!`/`bail!` messages start lowercase and name the flag or path involved:
+  `--summary-json x is a directory`, `opening input reads.fastq`. `main` prints
+  them after `Failed after 12ms: ` (or bare, for a parse error), so a capital
+  would land mid-sentence. Flags spelled with a leading dash keep their spelling.
 
 ## Log messages
 

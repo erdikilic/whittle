@@ -1,7 +1,7 @@
-//! Guards against whittle destroying a file it is also reading.
+//! Guards against whittle destroying a file it is also reading or writing.
 //!
-//! Each case here was a real defect: the run exited 0 having replaced an input,
-//! an adapter FASTA, or its own output with something else.
+//! Each case here is a run that would otherwise exit 0 having replaced an input,
+//! an adapter FASTA, its own output, or another artifact with something else.
 
 use std::process::{Command as StdCommand, Stdio};
 
@@ -33,7 +33,7 @@ fn summary_json_may_not_overwrite_the_input() {
     assert_eq!(
         std::fs::read_to_string(&input).unwrap(),
         READS,
-        "the input must be untouched"
+        "The input must be untouched"
     );
 }
 
@@ -73,7 +73,7 @@ fn output_may_not_overwrite_the_adapter_fasta() {
     assert_eq!(
         std::fs::read_to_string(&fasta).unwrap(),
         fasta_text,
-        "the adapter FASTA must be untouched"
+        "The adapter FASTA must be untouched"
     );
 }
 
@@ -91,12 +91,13 @@ fn summary_json_may_not_overwrite_a_folder_member() {
         .args(["-o", dir.path().join("merged.fastq").to_str().unwrap()])
         .args(["--summary-json", member.to_str().unwrap()])
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicate::str::contains("--summary-json"));
 
     assert_eq!(
         std::fs::read_to_string(&member).unwrap(),
         READS,
-        "the folder member must be untouched"
+        "The folder member must be untouched"
     );
 }
 
@@ -113,6 +114,7 @@ fn stdin_redirect_may_not_overwrite_its_own_source() {
     let before = std::fs::metadata(&path).unwrap().len();
 
     let out = StdCommand::new(assert_cmd::cargo::cargo_bin("whittle"))
+        .env_remove("WHITTLE_LOG")
         .args(["-o", path.to_str().unwrap()])
         .stdin(Stdio::from(std::fs::File::open(&path).unwrap()))
         .stdout(Stdio::null())
@@ -120,11 +122,11 @@ fn stdin_redirect_may_not_overwrite_its_own_source() {
         .output()
         .unwrap();
 
-    assert!(!out.status.success(), "the run must be refused");
+    assert!(!out.status.success(), "The run must be refused");
     assert_eq!(
         std::fs::metadata(&path).unwrap().len(),
         before,
-        "the source file must not be truncated"
+        "The source file must not be truncated"
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
 }

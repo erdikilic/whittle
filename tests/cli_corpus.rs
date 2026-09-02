@@ -740,7 +740,7 @@ fn qual_split_cfg() -> ExpectCfg {
     }
 }
 
-fn update_moves_cfg() -> ExpectCfg {
+fn head5_tail7_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 5,
         tail: 7,
@@ -1020,7 +1020,7 @@ fn bam_corpus_to_fastq_tags_match_expected() {
     assert_same(
         "BAM to FASTQ selected tags",
         &read_fastq(&out),
-        &expected_fastq_from_bam_with_tags(&reads, update_moves_cfg()),
+        &expected_fastq_from_bam_with_tags(&reads, head5_tail7_cfg()),
     );
 }
 
@@ -1056,7 +1056,7 @@ fn bam_corpus_update_moves_matches_expected() {
         .into_iter()
         .map(|r| (r.name.clone(), r))
         .collect();
-    let expected_by_name: BTreeMap<_, _> = expected_bam(&reads, update_moves_cfg(), true)
+    let expected_by_name: BTreeMap<_, _> = expected_bam(&reads, head5_tail7_cfg(), true)
         .into_iter()
         .map(|r| (r.name.clone(), r))
         .collect();
