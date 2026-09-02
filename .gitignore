@@ -1,11 +1,11 @@
-# Rust build artifacts (for the trimmer code, once it lands)
+# Rust build artifacts
 /target/
 **/target/
 
 # Release staging directory (see .github/workflows/release.yml)
 /dist/
 
-# OS / editor cruft
+# OS and editor files
 .DS_Store
 *.swp
 *~

@@ -2,8 +2,8 @@
 
 ## Reporting a Vulnerability
 
-Please report security issues privately, either through GitHub's
+Security issues are reported privately, either through GitHub's
 "Report a vulnerability" flow (the repository's **Security** tab) or by email to
-**erdican266@gmail.com**. We aim to respond within 7 days.
+**erdican266@gmail.com**. Reports receive a response within 7 days.
 
-Please do not open public issues for security-sensitive reports.
+Security-sensitive reports are not opened as public issues.

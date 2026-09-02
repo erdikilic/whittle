@@ -10,22 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `--progress {auto,bar,plain,none}` selects how progress is reported,
   independently of the log level. `--progress none` keeps the banner and the run
-  summary while reporting nothing in flight, which a pipeline log wants;
-  `--quiet` still drops the summary as well and outranks it.
+  summary while reporting nothing in flight, which suits a pipeline log;
+  `--quiet` drops the summary as well and outranks it.
 - Adapter and primer sequences may use the full IUPAC alphabet. A degenerate
   primer now matches every variant its wobble positions cover, instead of being
   skipped as "non-ACGT". `U` folds to `T`; non-nucleotide characters are still
   skipped with a warning, and a pattern averaging two or more bases per position
-  is searched but flagged as near-wildcard. An ambiguity code in a *read* is
+  is searched but flagged as near-wildcard. An ambiguity code in a read is
   treated as a mismatch instead, so it costs error budget rather than matching
   for free: a stray `N` in a real adapter still matches, a run of them is not
   excised as one.
 - `--summary-json <PATH>`: writes a machine-readable JSON summary of the run,
   covering the resolved settings (`params`) and the read, base, and per-reason
   segment-drop counters. Written on every dispatch path, folder merges included,
-  and regardless of `--quiet` or the log level, so a workflow manager always gets
-  the file it asked for. `schema_version` is bumped only when an existing field
-  changes meaning or disappears.
+  and regardless of `--quiet` or the log level. `schema_version` is bumped only
+  when an existing field changes meaning or disappears.
 - A `whittle.1` man page, checked into `man/` and shipped in every release
   tarball. It is rendered from the live CLI definition by
   `cargo run --example gen-man`; `clap_mangen` is a dev-dependency, so the
@@ -38,18 +37,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sideways as it passes 9% and 99%, and the first frame carries the same fields
   as every later one. Still ASCII, so it renders the same over SSH, `screen` and
   a non-UTF-8 console.
-- `-vv` now reports the per-read decisions it always claimed to: which adapter
-  matched where and at what cost, what that made whittle do, and why each segment
-  was kept or dropped, each line attributed to the read that produced it. There
-  were previously no trace-level events at all, so `-vv` was indistinguishable
-  from `-v`. `-v` gains the resolved thread budget and the run counters. Log
-  events carry structured fields rather than preformatted prose. Measured at no
-  cost to throughput at the default level.
+- `-vv` reports the per-read decisions: which adapter matched where and at what
+  cost, the resulting action, and why each segment was kept or dropped, each
+  line attributed to its read. There were previously no trace-level events at
+  all, so `-vv` was indistinguishable from `-v`. `-v` gains the resolved thread
+  budget and the run counters. Log events carry structured fields rather than
+  preformatted prose. Measured at no cost to throughput at the default level.
 - BAM to FASTQ no longer re-parses and re-serializes `MM`/`ML` for a record whose
   window is not being trimmed. Over the full window the reconstruction is the
   identity, so the source bytes are reused after an allocation-free `ML` length
   check. About 29% less CPU on an untrimmed conversion, with byte-identical
   output.
+- `--summary-json` reports both adapter counts: `params.adapters.configured` is
+  the set asked for, `params.adapters.count` the set trimmed against after
+  presence detection or inference. The startup banner prints the former, so the
+  two figures no longer look like a contradiction.
+- Release tarballs now contain a versioned directory holding the binary, `man/`,
+  and the README, CHANGELOG, and LICENSE, instead of a bare `whittle`
+  executable.
+- Documentation split: the README keeps the overview, install, and quick start;
+  the full flag reference moved to `docs/cli.md`, the tag machinery to
+  `docs/tags.md`, adapter trimming to `docs/adapters.md`, and the contributor
+  policy to `CONTRIBUTING.md`.
+- Comments, doc comments, and user-facing strings standardized to American
+  English prose without em or en dashes.
+- `noodles-bam`, `noodles-sam`, and `noodles-bgzf` updated to 0.95, 0.90, and
+  0.51; `clap`, `anyhow`, `thiserror`, `crossbeam-channel`, `gzp`, `bstr`,
+  `aho-corasick`, and `jiff` to their latest patch releases.
 
 ### Fixed
 - `--summary-json` wrote its `command` field with the banner's `Command: ` label
@@ -80,7 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and relocated every call.
 - Records carrying the legacy lowercase `Mm`/`Ml` tags (old guppy, megalodon)
   are refused rather than copied through untouched onto a trimmed sequence.
-  htslib still reads that spelling, so the calls decoded fine elsewhere while
+  htslib still reads that spelling, so the calls decoded correctly elsewhere while
   pointing at the wrong bases.
 - `--summary-json` could destroy the run's own output when reads went to a
   redirected stdout (`whittle --summary-json out.fastq > out.fastq`): the
@@ -119,24 +133,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Argument-parsing diagnostics bypassed the log level filter, printing even
   under `--quiet` without the standard prefix and ahead of the version line.
 
-### Changed
-- `--summary-json` reports both adapter counts: `params.adapters.configured` is
-  the set asked for, `params.adapters.count` the set actually trimmed against
-  after presence detection or inference. The startup banner prints the former,
-  so the two figures no longer look like a contradiction.
-- Release tarballs now contain a versioned directory holding the binary, `man/`,
-  and the README, CHANGELOG, and LICENSE, instead of a bare `whittle`
-  executable.
-- Documentation split: the README keeps the overview, install, and quick start;
-  the full flag reference moved to `docs/cli.md`, the tag machinery to
-  `docs/tags.md`, adapter trimming to `docs/adapters.md`, and the contributor
-  policy to `CONTRIBUTING.md`.
-- Comments, doc comments, and user-facing strings standardized to American
-  English prose without em or en dashes.
-- `noodles-bam`, `noodles-sam`, and `noodles-bgzf` updated to 0.95, 0.90, and
-  0.51; `clap`, `anyhow`, `thiserror`, `crossbeam-channel`, `gzp`, `bstr`,
-  `aho-corasick`, and `jiff` to their latest patch releases.
-
 ## [0.1.1] - 2026-07-14
 
 ### Added
@@ -154,7 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Length / quality / GC filtering, applied per surviving segment after trimming.
 - Trim-aware rewriting of base-modification (`MM`/`ML`/`MN`) and per-base
   kinetics/signal tags, so every trim and split keeps its tags valid.
-- BAM→FASTQ conversion with selectable aux-tag carry-through.
+- BAM-to-FASTQ conversion with selectable aux-tag carry-through.
 - Folder-merge mode, parallel processing with a workload-aware thread budget,
   and a progress/summary UI.
 

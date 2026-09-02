@@ -1,16 +1,16 @@
 # Trim-aware tags
 
-Long-read records carry tags that are indexed by base position. Crop the sequence
-without touching them and they now point at bases that are gone. whittle keeps
-every one of them in register, on both BAM→BAM and BAM→FASTQ.
+Long-read records carry tags that are indexed by base position. Cropping the
+sequence without touching them leaves them pointing at bases that are gone.
+whittle keeps every one of them in register, on both BAM-to-BAM and BAM-to-FASTQ.
 
 ## Base-modification tags
 
 Modification calls (5mC, 6mA, and so on) live per read in two tags: `MM`, which
 says which bases are modified as skip-counts over the sequence, and `ML`, which
-holds their probabilities. Trim `SEQ`/`QUAL` without touching these and the result
-decodes to nonsense, because the skip-counts still index the original sequence
-rather than the trimmed one.
+holds their probabilities. Trimming `SEQ`/`QUAL` without touching these leaves a
+block that decodes to nonsense, because the skip-counts index the original
+sequence rather than the trimmed one.
 
 whittle rebuilds them as part of trimming. For every output uBAM read, whether
 cropped, quality-trimmed, or split, `MM` and `ML` are reconstructed against the
@@ -19,7 +19,7 @@ updated to match (or added when the input had none). A group whose listed
 positions all fall outside the window is kept with no positions (`C+m;`): a
 group with `.` or no status declares its unlisted bases canonical, and removing
 it would turn them into no-calls. Groups absent from the input stay absent.
-Everything else in the record rides through unchanged.
+Everything else in the record is copied unchanged.
 
 A block that cannot be placed on the sequence is removed from the output record
 rather than repaired: an `MN` that disagrees with the sequence length (the
@@ -33,7 +33,7 @@ This is covered by decode-equivalence tests. They re-decode whittle's output wit
 `rust-htslib`'s `basemods_iter()`, a different `MM`/`ML` implementation from the
 one whittle writes with, and compare against the original calls restricted to the
 surviving window. One test always runs on a synthetic fixture; another sweeps a
-real uBAM when you point it at one:
+real uBAM when `WHITTLE_UBAM` names one:
 
 ```bash
 WHITTLE_UBAM=/path/to/real.ubam cargo test --test bam_mods_oracle -- --ignored
@@ -53,17 +53,18 @@ WHITTLE_UBAM=/path/to/real.ubam cargo test --test bam_mods_oracle -- --ignored
 | `qs:f` (dorado mean qscore) | Recomputed from the trimmed quality; PacBio's `qs:i`/`qe:i` query coordinates are copied verbatim |
 | `rn` (read number) | Kept on a crop; `-1` on a split, with or without `--update-moves` |
 | `st`/`du` (start time / duration) | Kept on a crop, dropped on a split |
-| `RG`, `ch`, `mx`, `sm`/`sd`/`sv`, … | Copied verbatim |
+| `RG`, `ch`, `mx`, `sm`/`sd`/`sv`, and other scalar tags | Copied verbatim |
 
 ## ONT signal tags under `--update-moves`
 
-With `--update-moves`, a crop slices `mv` and advances `ts` (a head-only crop
-leaves `ns` unchanged), while a split emits dorado-style subreads (`pi` parent
-id, `sp` parent-signal offset, `ns` subread span, `ts` 0) so the renamed segment
-stays locatable in POD5 for tools like Remora.
+With `--update-moves`, a crop slices `mv`, advances `ts` by the removed head
+signal, and sets `ns` to the end of the kept signal (unchanged under a head-only
+crop), while a split emits subreads in dorado's convention (`pi` parent id, `sp`
+parent-signal offset, `ns` subread span, `ts` 0) so the renamed segment stays
+locatable in POD5 for tools like Remora.
 
-BAM→FASTQ always drops the signal tags on a trim, since a move table in a
-FASTQ header is impractical. If a known per-base tag's length doesn't match the
-sequence (malformed input), whittle leaves it untouched and prints a one-line
-advisory. A malformed modification block is removed from the record and reported
-the same way.
+BAM-to-FASTQ always drops the signal tags on a trim, since a move table in a
+FASTQ header is impractical. A known per-base tag whose length does not match the
+sequence (malformed input) is left untouched and reported in a one-line advisory.
+A malformed modification block is removed from the record and reported the same
+way.
