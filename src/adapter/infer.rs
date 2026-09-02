@@ -4,8 +4,8 @@
 //! peeling, boundary drop-trim, and presence-fraction confidence. Implemented
 //! from the paper (not translated from GPL source). Pure and format-neutral.
 
-use crate::adapter::search::{AmbiguousSearcher, hits, new_ambiguous_searcher};
-use crate::adapter::{Adapter, AdapterConfig, End, MIN_PATTERN_LEN};
+use crate::adapter::search::{AmbiguousSearcher, hits, is_plain_acgt, new_ambiguous_searcher};
+use crate::adapter::{Adapter, AdapterConfig, End, MIN_PATTERN_LEN, edit_budget};
 
 /// k-mer length used for end-window counting and assembly graph nodes.
 const KMER_K: usize = 16;
@@ -49,6 +49,12 @@ const DROP_WINDOW: usize = 7;
 /// to form `drop_trim`'s cut threshold.
 const CUT_RATIO: f64 = 0.075;
 
+/// Minimum percent identity for a catalog entry to be reported as the match
+/// of an inferred adapter. A 16 to 32 bp anchor searched against every catalog
+/// entry on both strands names something spurious well above the 60 percent
+/// that its trimming budget alone would allow.
+const NAME_IDENTITY_MIN: f32 = 85.0;
+
 /// Maximum length of the end-facing anchor used by conservative inference.
 /// Two independent 16-mers are long enough to be specific in ordinary long
 /// reads while avoiding the unidentifiable insert-facing tail of a recurrent
@@ -60,11 +66,14 @@ const CONSERVATIVE_ANCHOR_LEN: usize = 2 * KMER_K;
 /// (dropping `support`/`name_hits`) only when building the trim config.
 #[derive(Debug, Clone)]
 pub struct InferredAdapter {
-    /// Sequence actually used for trimming (or printed as the recommendation).
+    /// Sequence used for trimming (or printed as the recommendation), named
+    /// `inferred_N` by presentation order.
     pub adapter: Adapter,
     /// Complete recurrent consensus assembled before conservative anchoring.
     pub assembled_seq: Vec<u8>,
     pub support: f64,
+    /// Catalog entries within `NAME_IDENTITY_MIN` of the consensus, best
+    /// first, as `(name, percent identity)`. An annotation, not the name.
     pub name_hits: Vec<(String, f32)>,
 }
 
@@ -116,7 +125,9 @@ fn decode_kmer(mut code: u64, k: usize) -> Vec<u8> {
 
 /// Slices the first/last `w` bytes of each read into 5' and 3' window lists.
 /// Returns `.0` = 5' windows (`&read[..min(w,len)]`), `.1` = 3' windows
-/// (`&read[len-min(w,len)..]`). Empty reads are skipped.
+/// (`&read[len-min(w,len)..]`). Empty reads are skipped, and so is any window
+/// holding a byte outside ACGT: an uncalled base is evidence of nothing, and on
+/// the IUPAC profile it would match every k-mer for free.
 fn end_windows<'a>(sample: &[&'a [u8]], w: usize) -> (Vec<&'a [u8]>, Vec<&'a [u8]>) {
     let mut five = Vec::new();
     let mut three = Vec::new();
@@ -126,8 +137,14 @@ fn end_windows<'a>(sample: &[&'a [u8]], w: usize) -> (Vec<&'a [u8]>, Vec<&'a [u8
             continue;
         }
         let take = w.min(n);
-        five.push(&read[..take]);
-        three.push(&read[n - take..]);
+        let head = &read[..take];
+        let tail = &read[n - take..];
+        if is_plain_acgt(head) {
+            five.push(head);
+        }
+        if is_plain_acgt(tail) {
+            three.push(tail);
+        }
     }
     (five, three)
 }
@@ -173,19 +190,19 @@ fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
 }
 
 /// Number of distinct `windows` with >=1 forward approximate occurrence of
-/// `kmer` (edit distance <= `max_edits`). Each window counts at most once,
-/// even if `kmer` occurs in it multiple times. `searcher` must be
+/// `pattern` (edit distance <= `max_edits`). Each window counts at most once,
+/// even if `pattern` occurs in it multiple times. `searcher` must be
 /// forward-only (see `new_searcher_fwd`) so reverse-complement occurrences do
 /// not inflate the count. Callers provide an already bounded window sample.
-fn two_error_freq(
+fn windows_containing(
     searcher: &mut AmbiguousSearcher,
-    kmer: &[u8],
+    pattern: &[u8],
     windows: &[&[u8]],
     max_edits: usize,
 ) -> u32 {
     let mut present = 0u32;
     for &wnd in windows {
-        if !hits(searcher, kmer, wnd, max_edits).is_empty() {
+        if !hits(searcher, pattern, wnd, max_edits).is_empty() {
             present += 1; // per-window presence, counted once
         }
     }
@@ -323,14 +340,10 @@ fn drop_trim(consensus: &[u8], profile: &[u32]) -> (Vec<u8>, Vec<u32>) {
         .collect();
     let thresh = median_f64(&diffs) + CUT_RATIO * maxp;
 
-    // left boundary: advance while a sharp drop-in from the edge is seen within
-    // the first DROP_WINDOW positions.
+    // left boundary: advance over low-support positions within the first
+    // DROP_WINDOW positions.
     let mut lo = 0usize;
     while lo + 1 < n && lo < DROP_WINDOW {
-        if (profile[lo] as f64) < maxp - thresh && (profile[lo + 1] as f64) >= maxp - thresh {
-            lo += 1;
-            break;
-        }
         if (profile[lo] as f64) < maxp - thresh {
             lo += 1;
         } else {
@@ -389,7 +402,7 @@ fn same_adapter(a: &[u8], b: &[u8], error_rate: f64) -> bool {
     if short.len() < MIN_PATTERN_LEN {
         return short == long;
     }
-    let k = (error_rate * short.len() as f64).floor() as usize;
+    let k = edit_budget(error_rate, short.len());
     let mut s = new_ambiguous_searcher();
     !hits(&mut s, short, long, k).is_empty()
 }
@@ -451,8 +464,8 @@ fn conservative_terminal_anchor(seq: &[u8], end: End) -> Vec<u8> {
 }
 
 /// Best catalog matches for `seq` as `(name, percent_identity)`, sorted desc,
-/// top 3, only >= 60%. Used to give an inferred adapter a human-readable name
-/// when it corresponds to a known catalog entry.
+/// top 3, only at or above `NAME_IDENTITY_MIN`. Annotates an inferred adapter
+/// with the catalog entry it corresponds to.
 fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f32)> {
     let mut s = new_ambiguous_searcher();
     let mut named: Vec<(String, f32)> = Vec::new();
@@ -465,13 +478,13 @@ fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f
         if short.len() < MIN_PATTERN_LEN {
             continue;
         }
-        let k = (error_rate * short.len() as f64).ceil() as usize;
+        let k = edit_budget(error_rate, short.len());
         if let Some(h) = hits(&mut s, short, long, k)
             .into_iter()
             .min_by_key(|h| h.cost)
         {
             let pct = 100.0 * (1.0 - h.cost as f32 / short.len() as f32);
-            if pct >= 60.0 {
+            if pct >= NAME_IDENTITY_MIN {
                 named.push((r.name.clone(), pct));
             }
         }
@@ -517,7 +530,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
             let kmer = decode_kmer(code, KMER_K);
             (
                 code,
-                two_error_freq(&mut fwd, &kmer, &recount, RECOUNT_EDITS),
+                windows_containing(&mut fwd, &kmer, &recount, RECOUNT_EDITS),
             )
         })
         .filter(|&(_, w)| w > 0)
@@ -530,22 +543,23 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
         }
         // Whole-consensus presence: what fraction of the recount sample contains
         // this trimmed consensus within a length-scaled error budget, reusing the
-        // same searcher and per-window counter (`two_error_freq`) that reweighted
-        // individual k-mers above. Unlike a per-position statistic, an internal
-        // low-weight pocket cannot drag down an otherwise-correct reconstruction.
-        let k_cons = (base.error_rate * trimmed.len() as f64).floor() as usize;
-        let present = two_error_freq(&mut fwd, &trimmed, &recount, k_cons);
+        // same searcher and per-window counter (`windows_containing`) that
+        // reweighted individual k-mers above. Unlike a per-position statistic, an
+        // internal low-weight pocket cannot drag down an otherwise-correct
+        // reconstruction.
+        let k_cons = edit_budget(base.error_rate, trimmed.len());
+        let present = windows_containing(&mut fwd, &trimmed, &recount, k_cons);
         let support = present as f64 / n_recount as f64;
         out.push((trimmed, support));
     }
     out
 }
 
-/// Full ab-initio discovery: per-end `assemble`, fold shared 5'/3' discoveries
-/// into `End::Both` via `merge_both_ends`, drop anything too short or too weakly
-/// supported, then name each survivor against the ONT catalog plus
-/// `base.adapters` (extra naming refs, e.g. a `--adapter-fasta` under report
-/// mode). Deterministic order: support desc, then sequence asc.
+/// Full ab-initio discovery under the conservative policy: per-end `assemble`,
+/// fold shared 5'/3' discoveries into `End::Both` via `merge_both_ends`, drop
+/// anything too short or too weakly supported, then annotate each survivor with
+/// its catalog matches. The run path calls `discover_with_policy` directly;
+/// this is the library entry point for callers without a policy of their own.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
     discover_with_policy(sample, base, false)
 }
@@ -553,7 +567,11 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
 /// Discover adapters with an explicit boundary policy. Conservative mode
 /// (the default exposed by [`discover`]) trims with a short physical-end-facing
 /// anchor and never asserts that the complete recurrent consensus is
-/// technical. Aggressive mode preserves the historical full-consensus output.
+/// technical. Aggressive mode trims the full consensus. Survivors are named
+/// `inferred_N` in presentation order (support desc, then sequence asc) and
+/// carry their catalog matches from the ONT catalog plus `base.adapters`
+/// (extra naming refs, e.g. a `--adapter-fasta` under report mode) as
+/// `name_hits`.
 pub fn discover_with_policy(
     sample: &[&[u8]],
     base: &AdapterConfig,
@@ -606,15 +624,12 @@ pub fn discover_with_policy(
     }
     // Stable presentation order: support descending, then sequence ascending.
     candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap().then(a.0.cmp(&b.0)));
-    // Assign fallback names after sorting so names match presentation order.
+    // Names follow presentation order, so logs, FASTA and report agree.
     candidates
         .into_iter()
         .enumerate()
         .map(|(i, (assembled_seq, end, support, name_hits))| {
-            let name = name_hits
-                .first()
-                .map(|(n, _)| n.clone())
-                .unwrap_or_else(|| format!("inferred_{}", i + 1));
+            let name = format!("inferred_{}", i + 1);
             let seq = if aggressive {
                 assembled_seq.clone()
             } else {
@@ -659,6 +674,16 @@ mod tests {
     }
 
     #[test]
+    fn end_windows_drop_windows_holding_ambiguity_codes() {
+        let r1: &[u8] = b"AAAANCCCGGGGTTTTACGTACGT"; // `N` in the 5' window only
+        let r2: &[u8] = b"acgtacgtacgtacgtacgtacgn"; // `n` in the 3' window only
+        let sample: Vec<&[u8]> = vec![r1, r2];
+        let (five, three) = end_windows(&sample, 8);
+        assert_eq!(five, vec![&r2[..8]]);
+        assert_eq!(three, vec![&r1[16..]]);
+    }
+
+    #[test]
     fn top_kmers_ranks_planted_over_background() {
         // A planted 16-mer appears in every window; each window also has unique
         // filler. The planted k-mer must rank first.
@@ -688,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn two_error_freq_counts_windows_once_and_ignores_rc() {
+    fn windows_containing_counts_windows_once_and_ignores_rc() {
         use crate::adapter::search::new_searcher_fwd;
         // kmer chosen NOT self-reverse-complementary so the RC case is meaningful:
         // revcomp(AAAACCCCGGGGTATG) = CATACCCCGGGGTTTT (distinct from the kmer).
@@ -701,7 +726,7 @@ mod tests {
         let windows: Vec<&[u8]> = vec![&w0v, &w1v, &w2v, &w3v];
         let mut s = new_searcher_fwd();
         // w0 (exact) + w1 (1 edit) + w2 (twice -> once) = 3; w3 (RC only) excluded.
-        assert_eq!(two_error_freq(&mut s, kmer, &windows, 2), 3);
+        assert_eq!(windows_containing(&mut s, kmer, &windows, 2), 3);
     }
 
     #[test]
@@ -843,6 +868,104 @@ mod tests {
         let hits = name_against(b"ACGTACGTACGTACGT", &refs, 0.2);
         assert_eq!(hits[0].0, "SQK-TEST");
         assert!((hits[0].1 - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn name_against_requires_high_identity() {
+        // 20 bp reference, budget floor(0.2 * 20) = 4 edits. Two substitutions
+        // (90 percent) name it; three (85 percent) still do; four (80) do not.
+        let reference = b"GGGGTTTTGGGGTTTTGGGG";
+        let refs = vec![Adapter {
+            name: "REF".into(),
+            seq: reference.to_vec(),
+            end: End::Both,
+        }];
+        let mutate = |count: usize| -> Vec<u8> {
+            let mut seq = reference.to_vec();
+            for i in 0..count {
+                seq[3 + 5 * i] = b'C';
+            }
+            seq
+        };
+        assert_eq!(name_against(&mutate(2), &refs, 0.2).len(), 1);
+        assert_eq!(name_against(&mutate(3), &refs, 0.2).len(), 1);
+        assert!(
+            name_against(&mutate(4), &refs, 0.2).is_empty(),
+            "80 percent identity is below the naming floor"
+        );
+    }
+
+    #[test]
+    fn discovered_adapters_are_named_by_order_with_catalog_annotation() {
+        // Reads start with an exact catalog adapter (LSK109_front): the adapter
+        // keeps its `inferred_1` name and carries the catalog match separately.
+        let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT";
+        let mut owned: Vec<Vec<u8>> = Vec::new();
+        for i in 0..300usize {
+            let mut read = adapter.to_vec();
+            let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+            for _ in 0..120usize {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+            }
+            owned.push(read);
+        }
+        let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let base = AdapterConfig {
+            adapters: vec![],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+            candidate_index: std::sync::OnceLock::new(),
+        };
+        let found = discover(&sample, &base);
+        assert!(!found.is_empty(), "The planted adapter is discovered");
+        for (i, d) in found.iter().enumerate() {
+            assert_eq!(d.adapter.name, format!("inferred_{}", i + 1));
+        }
+        assert_eq!(
+            found[0].name_hits.first().map(|(name, _)| name.as_str()),
+            Some("LSK109_front"),
+            "The catalog match is an annotation: {:?}",
+            found[0].name_hits
+        );
+    }
+
+    #[test]
+    fn discover_finds_nothing_in_ambiguity_runs() {
+        // Sixty `N`s then random bases. Windows holding the run are dropped,
+        // so no poly-A-leading consensus can be assembled from them.
+        let mut owned: Vec<Vec<u8>> = Vec::new();
+        for i in 0..200usize {
+            let mut read = vec![b'N'; 60];
+            let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+            for _ in 0..100usize {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
+            }
+            owned.push(read);
+        }
+        let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+        let base = AdapterConfig {
+            adapters: vec![],
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+            candidate_index: std::sync::OnceLock::new(),
+        };
+        let found = discover(&sample, &base);
+        assert!(
+            found.is_empty(),
+            "An N run is not adapter evidence (got {found:?})"
+        );
     }
 
     #[test]

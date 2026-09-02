@@ -71,9 +71,10 @@ policy is `conservative`.
 
 `--adapter-preset ont` loads a catalog assembled for whittle from ONT-published
 sources: dorado's `adapter_primer_kits.cpp`, Porechop's `adapters.py`, and qcat's
-kit definitions. It has 124 sequences: ligation adapters (kit-14 and legacy), the
+kit definitions. It has 120 sequences: ligation adapters (kit-14 and legacy), the
 rapid and direct-RNA adapters, PCR/cDNA and 10X primers, barcode flanks, and all
 96 barcodes.
 
-Reverse-complement search covers both orientations, and fragments under 11 bp are
-never searched on their own, since a pattern that short matches almost anywhere.
+Reverse-complement search covers both orientations. Flanks under 11 bp are left
+out of the catalog, since a pattern that short matches almost anywhere and is
+never searched on its own.

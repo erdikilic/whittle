@@ -22,7 +22,9 @@
 use super::End;
 
 /// One catalog entry: display name, the end it is expected at, and the sequence.
-/// Sequences are uppercase ACGT only, which `entries_are_uppercase_acgt` enforces.
+/// Sequences are uppercase nucleotide codes of at least `MIN_PATTERN_LEN`
+/// bases, which `preset::tests::entries_are_valid_nucleotide_sequences` and
+/// `preset::tests::entries_meet_the_minimum_pattern_length` enforce.
 pub(super) type Entry = (&'static str, End, &'static [u8]);
 
 #[rustfmt::skip]
@@ -73,21 +75,15 @@ pub(super) const CATALOG: &[Entry] = &[
     ("cDNA_SSP", End::Five, b"TTTCTGTTGGTGCTGATATTGCTGCCATTACGGCCGGG"),
 
     // Barcode flanks (dorado kit-14 constants). Trimming through a flank removes the
-    // barcode regardless of its number.
+    // barcode regardless of its number. Flanks shorter than `MIN_PATTERN_LEN`
+    // (dorado's NB_1st_REAR, BC_1st_FRONT, RBK_FRONT and RLB_FRONT, 7 to 8 bp)
+    // are omitted: a pattern that short is never searched standalone.
     // native barcoding (NBD*) [dorado:barcode_kits.cpp(NB_1st_FRONT)]
     ("NB_front", End::Five, b"ATTGCTAAGGTTAA"),
-    // native barcoding (NBD*) [dorado:barcode_kits.cpp(NB_1st_REAR)]
-    ("NB_rear", End::Three, b"CAGCACCT"),
-    // PCR barcoding (PBC/BC*) [dorado:barcode_kits.cpp(BC_1st_FRONT)]
-    ("PBC_front", End::Five, b"GGTGCTG"),
     // PCR barcoding (PBC/BC*) [dorado:barcode_kits.cpp(BC_1st_REAR)]
     ("PBC_rear", End::Three, b"TTAACCTTTCTGTTGGTGCTGATATTGC"),
     // rapid barcoding v4 / kit14 (RBK*) [dorado:barcode_kits.cpp(RBK4_FRONT)]
     ("RBK4_front", End::Five, b"GCTTGGGTGTTTAACC"),
-    // rapid barcoding (RBK001) [dorado:barcode_kits.cpp(RBK_FRONT)]
-    ("RBK_front_legacy", End::Five, b"TATTGCT"),
-    // rapid lig barcoding (RLB/RAB/LWB) [dorado:barcode_kits.cpp(RLB_FRONT)]
-    ("RLB_front", End::Five, b"CCGTGAC"),
     // rapid lig barcoding (RLB) [dorado:barcode_kits.cpp(RLB_REAR)]
     ("RLB_rear", End::Three, b"CGTTTTTCGTGCGCCGCTTC"),
     // 16S barcoding (RAB/16S) [dorado:barcode_kits.cpp(RAB_1st_REAR)]
