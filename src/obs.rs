@@ -377,9 +377,15 @@ impl ProgressHandle {
 
         if stats.malformed_tag_reads > 0 {
             tracing::warn!(
-                "{} read(s) carried a per-base kinetics tag (ip/pw/fi/fp/ri/rp) whose \
-                 length did not match the sequence; left unchanged",
-                stats.malformed_tag_reads
+                reads = stats.malformed_tag_reads,
+                "Per-base kinetics tags (ip/pw/fi/fp/ri/rp) whose length did not match \
+                 the sequence were left unchanged"
+            );
+        }
+        if stats.malformed_mod_reads > 0 {
+            tracing::warn!(
+                reads = stats.malformed_mod_reads,
+                "Malformed MM/ML/MN modification blocks were removed from the output"
             );
         }
 

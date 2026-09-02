@@ -56,6 +56,7 @@ tell a real input from a stale prior output, and merging over either loses data.
 | `-c, --compression-level <0-9>` | DEFLATE level for compressed output (default 4 for gzip FASTQ, 6 for BGZF and BAM); ignored for plain FASTQ |
 | `--summary-json <PATH>` | Write a machine-readable run summary to PATH (see below) |
 | `-t, --threads <N>` | Worker threads (default: all detected CPUs, clamped to that max) |
+| `--ordered` | Write records in input order under `-t > 1`; without it output is in completion order (faster, not reproducible) |
 | `-l, --min-length <N>` | Minimum length to keep, per output segment (default 1) |
 | `-L, --max-length <N>` | Maximum length to keep |
 | `-q, --min-qual <F>` | Minimum read quality (default 0) |

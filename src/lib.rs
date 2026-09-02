@@ -208,14 +208,15 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
                 return Ok(());
             };
             // Append the invocation's @PG provenance line before writing.
-            let out_header = io::bam::provenance_header(header);
+            let out_header = io::bam::provenance_header(header, cfg.threads <= 1 || cfg.ordered);
             let mut sink = io::bam::writer(
                 cfg.io.output.as_deref(),
                 &out_header,
                 budget.encode,
                 cfg.compression_level,
             )?;
-            let stats = workflow::run_raw_bam(&out_header, records, &mut sink, &cfg, &counters)?;
+            let stats =
+                workflow::run_raw_bam(&out_header, records, &mut sink, &cfg, &counters)?;
             // Explicitly finish (final bgzf block + EOF marker) instead of relying
             // on `Drop`, whose `try_finish` error is silently discarded. An I/O
             // failure on final flush (e.g. ENOSPC) would otherwise yield a
@@ -257,9 +258,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
         Format::FastqBgzf => io::fastq::reader_from_bgzf(source, budget.decode)?,
         Format::Bam => unreachable!("BAM dispatch returned above"),
     };
-    let Some(records) = settle(records, &mut cfg, budget, |r| {
-        Cow::Borrowed(r.seq.as_slice())
-    })?
+    let Some(records) = settle(records, &mut cfg, budget, |r| Cow::Borrowed(r.seq.as_slice()))?
     else {
         return Ok(());
     };
@@ -579,14 +578,15 @@ fn run_folder(
                 let Some(records) = settle(records, cfg, budget, adapter::resolve::bam_seq)? else {
                     return Ok(());
                 };
-                let out_header = io::bam::provenance_header(header);
+                let out_header = io::bam::provenance_header(header, cfg.threads <= 1 || cfg.ordered);
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
                     &out_header,
                     budget.encode,
                     cfg.compression_level,
                 )?;
-                let stats = workflow::run_raw_bam(&out_header, records, &mut sink, cfg, &counters)?;
+                let stats =
+                    workflow::run_raw_bam(&out_header, records, &mut sink, cfg, &counters)?;
                 sink.finish()?;
                 finish_run(obs, &stats, &out_desc, cfg, t0)?;
                 Ok(())
@@ -686,9 +686,7 @@ mod tests {
         };
 
         let records = vec![Ok(a_read())].into_iter();
-        let got = settle(records, &mut cfg, budget, |r| {
-            Cow::Borrowed(r.seq.as_slice())
-        })
+        let got = settle(records, &mut cfg, budget, |r| Cow::Borrowed(r.seq.as_slice()))
         .expect("settle succeeds")
         .expect("records are returned when not in report mode");
 
@@ -711,11 +709,9 @@ mod tests {
             encode: 1,
         };
         let records = (0..7).map(|_| Ok(a_read()));
-        let got = settle(records, &mut cfg, budget, |r| {
-            Cow::Borrowed(r.seq.as_slice())
-        })
-        .unwrap()
-        .unwrap();
+        let got = settle(records, &mut cfg, budget, |r| Cow::Borrowed(r.seq.as_slice()))
+            .unwrap()
+            .unwrap();
         assert_eq!(got.count(), 7);
     }
 
@@ -737,6 +733,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,

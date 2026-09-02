@@ -86,6 +86,12 @@ pub enum AdapterInfer {
 }
 
 impl AdapterInfer {
+    /// Whether ab-initio inference ran, so the adapter set was discovered
+    /// rather than configured.
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled { .. })
+    }
+
     pub fn is_report(self) -> bool {
         matches!(
             self,
@@ -196,6 +202,9 @@ pub struct Config {
     /// (BAM→BAM only, see `workflow::bam`). Default false drops `mv`/`ts`/`ns`/
     /// `sp`/`pi` on any trimmed read.
     pub update_moves: bool,
+    /// Whether multithreaded runs write records in input order. When false,
+    /// records are written in completion order.
+    pub ordered: bool,
     pub verbosity: u8,
     pub quiet: bool,
     /// `Some((requested, ncpu))` when `-t` was clamped down; drives a warning in `run`.

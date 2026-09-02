@@ -212,20 +212,29 @@ impl BamSink {
     }
 }
 
-/// Append an `@PG` provenance record (`ID:whittle`, program name + version) to a
-/// cloned header before writing. Best-effort: `Programs::add` can fail (e.g. on a
-/// duplicate ID), in which case the header is written unchanged. The `@PG` line
-/// is cosmetic and must never block record output.
-pub(crate) fn provenance_header(mut header: sam::Header) -> sam::Header {
+/// The output header: the input header with an `@PG` provenance record
+/// (`ID:whittle`, program name and version) appended, and with `@HD SO:` set to
+/// `unsorted` (and `GO`/`SS` removed) when `order_kept` is false, since a
+/// multithreaded run without `--ordered` writes records in completion order.
+///
+/// The `@PG` record is best-effort: `Programs::add` fails on a duplicate ID and
+/// cannot walk a dangling `PP` chain (`samtools reset` leaves
+/// `@PG ID:samtools PP:basecaller` without an `ID:basecaller` record), in which
+/// case the programs are left unchanged. The `@PG` line never blocks record
+/// output.
+pub(crate) fn provenance_header(mut header: sam::Header, order_kept: bool) -> sam::Header {
     use sam::header::record::value::Map;
     use sam::header::record::value::map::Program;
+    use sam::header::record::value::map::header::tag as header_tag;
     use sam::header::record::value::map::program::tag;
 
-    // `Programs::add` walks the `@PG` chain via `Programs::leaves`, which indexes
-    // the program map directly and panics when a `PP` names an ID no longer in the
-    // header. Real uBAMs hit this: a dorado file through `samtools reset` can keep
-    // `@PG ID:samtools PP:basecaller` with no `ID:basecaller` record. The `@PG`
-    // line is cosmetic, so skip it rather than crash on an untidy header.
+    if let (false, Some(hd)) = (order_kept, header.header_mut()) {
+        let fields = hd.other_fields_mut();
+        fields.insert(header_tag::SORT_ORDER, "unsorted".into());
+        fields.shift_remove(&header_tag::GROUP_ORDER);
+        fields.shift_remove(&header_tag::SUBSORT_ORDER);
+    }
+
     if has_dangling_program_chain(&header) {
         return header;
     }
@@ -296,7 +305,7 @@ mod tests {
 
         assert!(has_dangling_program_chain(&header));
 
-        let out_header = provenance_header(header);
+        let out_header = provenance_header(header, true);
 
         assert!(
             !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
@@ -329,7 +338,7 @@ mod tests {
         );
 
         // Reaching this line at all is the assertion: the old code hung here.
-        let out_header = provenance_header(header);
+        let out_header = provenance_header(header, true);
         assert!(
             !out_header.programs().as_ref().contains_key(&b"whittle"[..]),
             "no @PG line should be added when the existing chain cannot be walked"
@@ -357,7 +366,7 @@ mod tests {
         let header = sam::Header::default();
         assert!(!has_dangling_program_chain(&header));
 
-        let out_header = provenance_header(header);
+        let out_header = provenance_header(header, true);
 
         assert!(
             out_header
@@ -412,5 +421,28 @@ mod tests {
             .collect();
         assert_eq!(names.len(), 2);
         assert!(names.contains(&b"r1".to_vec()) && names.contains(&b"r2".to_vec()));
+    }
+
+    #[test]
+    fn provenance_header_marks_unordered_output_unsorted() {
+        use sam::header::record::value::Map;
+        use sam::header::record::value::map::header::tag;
+
+        let hd = Map::<sam::header::record::value::map::Header>::builder()
+            .insert(tag::SORT_ORDER, "queryname")
+            .insert(tag::GROUP_ORDER, "query")
+            .build()
+            .unwrap();
+        let header = sam::Header::builder().set_header(hd).build();
+
+        let kept = provenance_header(header.clone(), true);
+        let fields = kept.header().unwrap().other_fields();
+        assert_eq!(fields.get(&tag::SORT_ORDER).map(|v| v.as_slice()), Some(&b"queryname"[..]));
+        assert!(fields.contains_key(&tag::GROUP_ORDER));
+
+        let unordered = provenance_header(header, false);
+        let fields = unordered.header().unwrap().other_fields();
+        assert_eq!(fields.get(&tag::SORT_ORDER).map(|v| v.as_slice()), Some(&b"unsorted"[..]));
+        assert!(!fields.contains_key(&tag::GROUP_ORDER));
     }
 }

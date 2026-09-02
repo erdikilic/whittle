@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 use noodles_bam as bam;
 use noodles_sam::alignment::RecordBuf;
@@ -9,9 +9,8 @@ use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
-use rayon::prelude::*;
 
-use super::{Batches, Counters, Stats, process_read_segments};
+use super::{BAM_BATCH, Counters, Rendered, Stats, process_read_segments, run_parallel};
 use crate::config::{Config, FastqTags};
 use crate::io::fastq::{format_aux_field, format_mods_aux, write_segment, write_segment_tagged};
 use crate::{mods, trim};
@@ -22,26 +21,27 @@ use crate::{mods, trim};
 /// reverse codec-V1 kinetics. Any *other* `B` array whose length equals the read
 /// length is also treated as per-base (structural rule) so new/custom tags are
 /// handled without a code change.
-const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] = [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp"];
+pub(crate) const KNOWN_PERBASE_TAGS: [[u8; 2]; 6] =
+    [*b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp"];
 
 /// ONT signal-mapping tags: the `mv` move table plus the `ts`/`ns` sample counts
 /// and the `sp`/`pi` split linkage. On a trimmed read these are either rewritten
 /// (`--update-moves`) or dropped (default), never left stale. Handled by
 /// `signal_tag_updates`, not the per-base pass.
-const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
+pub(crate) const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 
 /// Poly-A tail tags handled together with the move table: `pa` (signal boundaries,
 /// stored in original-signal coordinates) and `pt` (tail length in bases). Under
 /// `--update-moves` they are kept/shifted when the poly-A tail survives the trim
 /// and dropped when it's cut; without it (or a malformed move table) they are
 /// dropped, since signal cannot be related to sequence.
-const POLYA_TAGS: [[u8; 2]; 2] = [*b"pa", *b"pt"];
+pub(crate) const POLYA_TAGS: [[u8; 2]; 2] = [*b"pa", *b"pt"];
 
 /// `bi` (barcode info) embeds front/rear SEQUENCE positions that shift under a
 /// crop and can't be reconstructed from the BAM, so it is dropped on any trimmed
 /// read. The barcode call itself (`BC`/`bv`) is a per-read label and rides
 /// through unchanged.
-const DROP_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"bi"];
+pub(crate) const DROP_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"bi"];
 
 /// Tags dropped only when a read is SPLIT (not on a plain crop): `st` (read start
 /// time) and `du` (duration) describe the whole parent read, but a split subread
@@ -49,7 +49,7 @@ const DROP_ON_TRIM_TAGS: [[u8; 2]; 1] = [*b"bi"];
 /// the sample rate, which isn't carried in the BAM, so they are dropped rather than
 /// ship a stale timestamp/duration. A head/tail crop keeps the same read identity,
 /// so they stay valid there.
-const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
+pub(crate) const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
 
 /// Input accepted by the BAM workflows. Production readers yield lazy raw
 /// `bam::Record`s, so structured field/tag decoding happens on a render worker;
@@ -159,7 +159,7 @@ impl InputRecord for RecordBuf {
     }
 }
 
-fn array_len(a: &Array) -> usize {
+pub(crate) fn array_len(a: &Array) -> usize {
     match a {
         Array::Int8(v) => v.len(),
         Array::UInt8(v) => v.len(),
@@ -231,7 +231,7 @@ fn full_window_mods_already_consistent(src: &RecordBuf, seq_len: usize) -> bool 
 /// `B:c` (Int8) array with a positive stride. `moves` excludes the stride prefix;
 /// each entry corresponds to `stride` signal samples (1 = a base emitted here, so
 /// the count of 1s equals the sequence length).
-fn parse_move_table(value: &Value) -> Option<(i8, &[i8])> {
+pub(crate) fn parse_move_table(value: &Value) -> Option<(i8, &[i8])> {
     match value {
         Value::Array(Array::Int8(a)) => {
             let (stride, moves) = a.split_first()?;
@@ -794,6 +794,7 @@ fn run_bam_seq<R: InputRecord>(
             crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
         let _read = _read.enter();
         let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
+        let mut survivors: Vec<(usize, usize)> = Vec::new();
         process_read_segments(
             &produced,
             seq,
@@ -801,6 +802,7 @@ fn run_bam_seq<R: InputRecord>(
             &cfg.filter,
             counters,
             |idx, total, s, e| {
+                survivors.push((s, e));
                 let out = reconstruct_record_with_bases(
                     &rec,
                     seq,
@@ -819,11 +821,10 @@ fn run_bam_seq<R: InputRecord>(
     Ok(counters.snapshot(malformed_tag_reads))
 }
 
-/// Shared parallel driver: lazy raw reader -> rayon pool (decode + render) ->
-/// bounded channel -> writer thread. Unordered. Mirrors `run_fastq`'s error seam:
-/// the first render error and the first write error each land in a
-/// `Mutex<Option<_>>`, and the writer keeps draining `rx` after an error so
-/// producers blocked on `tx.send` can never deadlock.
+/// BAM adapter over `workflow::run_parallel`: decodes each raw record on the
+/// pool, notes a malformed per-base tag, and hands the decoded record to
+/// `render`. `render` returns the surviving segments only; the per-segment
+/// filter and counters are updated inside it by `process_read_segments`.
 fn run_bam_parallel<R, T, S, Render, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
     cfg: &Config,
@@ -833,124 +834,31 @@ fn run_bam_parallel<R, T, S, Render, WriteOne>(
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
 where
-    R: InputRecord,
+    R: InputRecord + Send,
     T: Send,
     S: Send,
-    // `Render` returns the surviving segments only: per-segment filter/counting
-    // (output_reads/output_bases and the read-level counters) is the shared
-    // `process_read_segments` helper's job, called from inside `render` itself,
-    // so this driver does not re-derive or re-bump anything from the
-    // returned `Vec<T>`.
     Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
     WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
 {
-    let render_workers = if cfg.render_workers >= 1 {
-        cfg.render_workers
-    } else {
-        cfg.threads.max(1)
-    };
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(render_workers)
-        .build()?;
-    let queue_batches = (render_workers / 2).max(2);
-    let (tx, rx) = crossbeam_channel::bounded::<Vec<T>>(queue_batches);
-    let malformed = AtomicU64::new(0);
-    let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
-    let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
-
-    // Writer on a plain scoped OS thread; render on the budget-sized LOCAL rayon
-    // pool via `pool.install` so the nested `par_bridge` uses THAT pool (not
-    // rayon's global num_cpus pool), which is what makes `-t` bound the render
-    // threads. The writer keeps draining on a write error (never `break`) so
-    // bounded-channel producers can't deadlock.
-    std::thread::scope(|s| {
-        let write_err_ref = &write_err;
-        s.spawn(move || {
-            let mut errored = false;
-            for batch in rx.iter() {
-                if errored {
-                    continue; // keep draining so bounded-channel producers never block
-                }
-                for item in batch {
-                    if let Err(e) = write_one(sink, &item) {
-                        *write_err_ref.lock().unwrap() = Some(e);
-                        errored = true;
-                        break;
-                    }
-                }
-            }
-        });
-
-        pool.install(|| {
-            let batches = Batches::bam(records, |rec: &anyhow::Result<R>| {
-                rec.as_ref().map_or(0, InputRecord::sequence_len)
-            });
-            batches.par_bridge().for_each(|batch| {
-                let mut rendered = Vec::with_capacity(batch.len());
-                let mut input_reads = 0u64;
-                let mut input_bases = 0u64;
-                let mut malformed_reads = 0u64;
-                for rec in batch {
-                    let rec = match rec {
-                        Ok(r) => match r.decode() {
-                            Ok(r) => r,
-                            Err(e) => {
-                                let mut g = proc_err.lock().unwrap();
-                                if g.is_none() {
-                                    *g = Some(e.into());
-                                }
-                                continue;
-                            },
-                        },
-                        Err(e) => {
-                            let mut g = proc_err.lock().unwrap();
-                            if g.is_none() {
-                                *g = Some(e);
-                            }
-                            continue;
-                        },
-                    };
-                    let seq_len = rec.sequence().as_ref().len();
-                    input_reads += 1;
-                    input_bases += seq_len as u64;
-                    malformed_reads += u64::from(has_malformed_perbase_tag(&rec, seq_len));
-                    match render(&rec, cfg) {
-                        Ok(items) => {
-                            // output_reads/output_bases and the read-level counters were
-                            // already bumped inside `render`, per segment, by the shared
-                            // `process_read_segments` helper.
-                            rendered.extend(items);
-                        },
-                        Err(e) => {
-                            let mut g = proc_err.lock().unwrap();
-                            if g.is_none() {
-                                *g = Some(e);
-                            }
-                        },
-                    }
-                }
-                counters
-                    .input_reads
-                    .fetch_add(input_reads, Ordering::Relaxed);
-                counters
-                    .input_bases
-                    .fetch_add(input_bases, Ordering::Relaxed);
-                malformed.fetch_add(malformed_reads, Ordering::Relaxed);
-                if !rendered.is_empty() {
-                    let _ = tx.send(rendered);
-                }
-            });
-        });
-        drop(tx);
-    });
-
-    if let Some(e) = proc_err.lock().unwrap().take() {
-        return Err(e);
-    }
-    if let Some(e) = write_err.lock().unwrap().take() {
-        return Err(e.into());
-    }
-    Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
+    run_parallel(
+        records,
+        BAM_BATCH,
+        InputRecord::sequence_len,
+        cfg,
+        sink,
+        |rec, cfg| {
+            let rec = rec.decode()?;
+            let seq_len = rec.sequence().as_ref().len();
+            let malformed_tags = has_malformed_perbase_tag(&rec, seq_len);
+            let items = render(&rec, cfg)?;
+            Ok(Rendered {
+                items,
+                malformed_tags,
+            })
+        },
+        write_one,
+        counters,
+    )
 }
 
 enum BamOutputRecord {
@@ -1101,6 +1009,7 @@ fn process_raw_full_window(
         return Ok((None, malformed_perbase));
     }
 
+    // The window spans the whole record, so a survivor's output is its input.
     counters.output_reads.fetch_add(1, Ordering::Relaxed);
     counters
         .output_bases
@@ -1157,104 +1066,26 @@ fn run_raw_bam_full_window_parallel(
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
-    let render_workers = cfg.render_workers.max(1);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(render_workers)
-        .build()?;
-    let (tx, rx) = crossbeam_channel::bounded::<Vec<BamOutputRecord>>((render_workers / 2).max(2));
-    let malformed = AtomicU64::new(0);
-    let proc_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
-    let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
-
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut errored = false;
-            for batch in rx.iter() {
-                if errored {
-                    continue;
-                }
-                for output in batch {
-                    let result = match output {
-                        BamOutputRecord::Raw(record) => sink.write_raw_record(header, &record),
-                        BamOutputRecord::Decoded(record) => sink.write_record(header, &record),
-                    };
-                    if let Err(e) = result {
-                        *write_err.lock().unwrap() = Some(e);
-                        errored = true;
-                        break;
-                    }
-                }
-            }
-        });
-
-        pool.install(|| {
-            Batches::bam(records, |record: &anyhow::Result<bam::Record>| {
-                record.as_ref().map_or(0, |record| record.sequence().len())
+    run_parallel(
+        records,
+        BAM_BATCH,
+        |record: &bam::Record| record.sequence().len(),
+        cfg,
+        sink,
+        |record, cfg| {
+            ensure_raw_unaligned(&record)?;
+            let (output, malformed_tags) = process_raw_full_window(record, cfg, counters)?;
+            Ok(Rendered {
+                items: output.into_iter().collect(),
+                malformed_tags,
             })
-            .par_bridge()
-            .for_each(|batch| {
-                let mut output = Vec::with_capacity(batch.len());
-                let mut input_reads = 0u64;
-                let mut input_bases = 0u64;
-                let mut malformed_reads = 0u64;
-                for result in batch {
-                    let record = match result {
-                        Ok(record) => record,
-                        Err(e) => {
-                            let mut error = proc_err.lock().unwrap();
-                            if error.is_none() {
-                                *error = Some(e);
-                            }
-                            continue;
-                        },
-                    };
-                    input_reads += 1;
-                    input_bases += record.sequence().len() as u64;
-                    if let Err(e) = ensure_raw_unaligned(&record) {
-                        let mut error = proc_err.lock().unwrap();
-                        if error.is_none() {
-                            *error = Some(e);
-                        }
-                        continue;
-                    }
-                    match process_raw_full_window(record, cfg, counters) {
-                        Ok((Some(record), is_malformed)) => {
-                            output.push(record);
-                            malformed_reads += u64::from(is_malformed);
-                        },
-                        Ok((None, is_malformed)) => {
-                            malformed_reads += u64::from(is_malformed);
-                        },
-                        Err(e) => {
-                            let mut error = proc_err.lock().unwrap();
-                            if error.is_none() {
-                                *error = Some(e);
-                            }
-                        },
-                    }
-                }
-                counters
-                    .input_reads
-                    .fetch_add(input_reads, Ordering::Relaxed);
-                counters
-                    .input_bases
-                    .fetch_add(input_bases, Ordering::Relaxed);
-                malformed.fetch_add(malformed_reads, Ordering::Relaxed);
-                if !output.is_empty() {
-                    let _ = tx.send(output);
-                }
-            });
-        });
-        drop(tx);
-    });
-
-    if let Some(e) = proc_err.lock().unwrap().take() {
-        return Err(e);
-    }
-    if let Some(e) = write_err.lock().unwrap().take() {
-        return Err(e.into());
-    }
-    Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
+        },
+        |sink, output| match output {
+            BamOutputRecord::Raw(record) => sink.write_raw_record(header, record),
+            BamOutputRecord::Decoded(record) => sink.write_record(header, record),
+        },
+        counters,
+    )
 }
 
 /// Raw-record entry point used by production BAM readers. Full-window runs can
@@ -1324,6 +1155,7 @@ pub fn run_bam<R: InputRecord>(
             let _read = _read.enter();
             let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
             let mut items = Vec::with_capacity(produced.len());
+            let mut survivors: Vec<(usize, usize)> = Vec::new();
             process_read_segments(
                 &produced,
                 seq,
@@ -1331,6 +1163,7 @@ pub fn run_bam<R: InputRecord>(
                 &cfg.filter,
                 counters,
                 |idx, total, s, e| {
+                    survivors.push((s, e));
                     items.push(reconstruct_record_with_bases(
                         rec,
                         seq,
@@ -1459,6 +1292,7 @@ where
             crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
         let _read = _read.enter();
         let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
+        let mut survivors: Vec<(usize, usize)> = Vec::new();
         process_read_segments(
             &produced,
             seq,
@@ -1466,6 +1300,7 @@ where
             &cfg.filter,
             counters,
             |idx, total, s, e| {
+                survivors.push((s, e));
                 let seg_seq = &seq[s..e];
                 let seg_qual = &qual[s..e];
                 let tags = build_fastq_tags(&rec, seq, s, e, total, &cfg.fastq_tags);
@@ -1525,6 +1360,7 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
             let _read = _read.enter();
             let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref());
             let mut out = Vec::with_capacity(produced.len());
+            let mut survivors: Vec<(usize, usize)> = Vec::new();
             process_read_segments(
                 &produced,
                 seq,
@@ -1532,6 +1368,7 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
                 &cfg.filter,
                 counters,
                 |idx, total, s, e| {
+                    survivors.push((s, e));
                     let seg_seq = &seq[s..e];
                     let seg_qual = &qual[s..e];
                     let tags = build_fastq_tags(rec, seq, s, e, total, &cfg.fastq_tags);
@@ -1683,6 +1520,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -1811,6 +1649,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -2656,6 +2495,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -2769,6 +2609,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -2849,6 +2690,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -2915,6 +2757,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,

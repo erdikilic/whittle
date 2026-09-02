@@ -309,6 +309,17 @@ fn trace_hit(name: &str, start: usize, end: usize, cost: i64, terminal: Terminal
     );
 }
 
+/// What the trimmer did with an accepted adapter hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitAction {
+    /// Terminal hit at the 5' end: the keep-boundary moved inward past it.
+    TrimFivePrime,
+    /// Terminal hit at the 3' end.
+    TrimThreePrime,
+    /// Interior hit: the span is cut out and both flanks are kept.
+    Excise,
+}
+
 /// Classify a hit at window coords `[start, end)` in a length-`n` window.
 ///
 /// A hit eligible for BOTH ends means the end-zones overlap (`n <= 2*end_size`),
@@ -421,8 +432,12 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
                                 terminal,
                             );
                             match terminal {
-                                Terminal::Five => lo = lo.max(h.text_end),
-                                Terminal::Excise => interior.push((h.text_start, h.text_end)),
+                                Terminal::Five => {
+                                    lo = lo.max(h.text_end);
+                                },
+                                Terminal::Excise => {
+                                    interior.push((h.text_start, h.text_end));
+                                },
                                 Terminal::Three | Terminal::None => {},
                             }
                         }
@@ -443,8 +458,12 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
                             };
                             trace_hit(&ad.name, start, end, i64::from(h.cost), terminal);
                             match terminal {
-                                Terminal::Three => hi = hi.min(start),
-                                Terminal::Excise => interior.push((start, end)),
+                                Terminal::Three => {
+                                    hi = hi.min(start);
+                                },
+                                Terminal::Excise => {
+                                    interior.push((start, end));
+                                },
                                 Terminal::Five | Terminal::None => {},
                             }
                         }
@@ -464,8 +483,12 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
                 for h in search(searcher, ambiguous, &ad.seq, &window[..head_end], k_end) {
                     if cfg.split {
                         match classify_terminal(h.start, h.end, n, end_size, ad.end) {
-                            Terminal::Five => lo = lo.max(h.end),
-                            Terminal::Excise => interior.push((h.start, h.end)),
+                            Terminal::Five => {
+                                lo = lo.max(h.end);
+                            },
+                            Terminal::Excise => {
+                                interior.push((h.start, h.end));
+                            },
                             Terminal::Three | Terminal::None => {},
                         }
                     } else if ends_only_terminal(h.start, h.end, n, end_size, ad.end)
@@ -479,8 +502,12 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
                     let (s, e) = (tail_start + h.start, tail_start + h.end);
                     if cfg.split {
                         match classify_terminal(s, e, n, end_size, ad.end) {
-                            Terminal::Three => hi = hi.min(s),
-                            Terminal::Excise => interior.push((s, e)),
+                            Terminal::Three => {
+                                hi = hi.min(s);
+                            },
+                            Terminal::Excise => {
+                                interior.push((s, e));
+                            },
                             Terminal::Five | Terminal::None => {},
                         }
                     } else if ends_only_terminal(s, e, n, end_size, ad.end) == Terminal::Three {
