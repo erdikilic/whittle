@@ -4,8 +4,8 @@
 //! profile accepts ambiguity codes and is the only one with a batched pattern
 //! search. Each entry point states which profile it uses and why.
 
-use sassy::profiles::{Dna, Iupac};
-use sassy::{CachedRev, Searcher};
+use sassy::profiles::{Dna, Iupac, Profile};
+use sassy::{CachedRev, EncodedPatterns, RcSearchAble, Searcher};
 
 /// The fast searcher: sassy's DNA profile, for all-ACGT patterns against
 /// all-ACGT text.
@@ -24,6 +24,27 @@ pub type AmbiguousSearcher = Searcher<Iupac>;
 /// The batched, pattern-parallel searcher. Sassy implements `search_patterns`
 /// only for IUPAC, so the batched path is always ambiguity-safe.
 pub type BatchedAdapterSearcher = Searcher<Iupac>;
+
+/// Equal-length patterns encoded once for the tiled search, one encoding per
+/// strand. Built by `encode_patterns`, searched by `encoded_pattern_hits`.
+///
+/// The reverse strand is searched as sassy's own two-strand search does it:
+/// the complemented patterns over the reversed text, rather than the
+/// reverse-complemented patterns over the forward text. The two are the same
+/// alignments, but the local-minimum rule picks the rightmost end position of
+/// a flat cost run and the traceback then fixes the start, so searching the
+/// reversed text puts the tie on the same read position as `pattern_hits` and
+/// `hits` and keeps every span identical.
+#[derive(Debug, Clone)]
+pub struct EncodedAdapterBatch {
+    /// The patterns as given, for the forward text.
+    forward: EncodedPatterns<Iupac>,
+    /// The complemented patterns, for the reversed text.
+    complement: EncodedPatterns<Iupac>,
+}
+
+/// Longest pattern the tiled search encodes: one pattern per 64-bit limb.
+pub const MAX_TILED_PATTERN_LEN: usize = 64;
 
 /// Returns whether every byte is an uppercase or lowercase A/C/G/T, so that
 /// `PlainSearcher` can be used without its traceback panic.
@@ -64,6 +85,27 @@ pub fn iupac_degeneracy(code: u8) -> Option<u8> {
     iupac_bases(code).map(|bases| bases.len() as u8)
 }
 
+/// A text window with its reversal, both borrowed from per-read buffers, so a
+/// two-strand search copies nothing. `reversed[i]` is
+/// `forward[forward.len() - 1 - i]`.
+#[derive(Debug, Clone, Copy)]
+pub struct Strands<'a> {
+    /// The window as read.
+    pub forward: &'a [u8],
+    /// The window reversed.
+    pub reversed: &'a [u8],
+}
+
+impl RcSearchAble for Strands<'_> {
+    fn text(&self) -> impl AsRef<[u8]> {
+        self.forward
+    }
+
+    fn rev_text(&self) -> impl AsRef<[u8]> {
+        self.reversed
+    }
+}
+
 /// One approximate match of a pattern in the text. Strand is not exposed: a
 /// reverse-complement hit occupies the same text span, which is all the trimmer
 /// needs.
@@ -100,6 +142,53 @@ pub fn new_batched_searcher() -> BatchedAdapterSearcher {
     Searcher::<Iupac>::new_rc()
 }
 
+/// Encodes equal-length patterns for `encoded_pattern_hits`, or returns `None`
+/// past `MAX_TILED_PATTERN_LEN`, where the caller keeps `pattern_hits`. The
+/// encoding holds the bit profiles of every pattern on both strands, which
+/// `pattern_hits` rebuilds on each call.
+pub fn encode_patterns(patterns: &[Vec<u8>]) -> Option<EncodedAdapterBatch> {
+    let len = patterns.first().map_or(0, Vec::len);
+    if !(1..=MAX_TILED_PATTERN_LEN).contains(&len) {
+        return None;
+    }
+    // A forward-only searcher encodes the given strand alone; the reverse
+    // strand is its own encoding.
+    let mut encoder = Searcher::<Iupac>::new_fwd();
+    let complements: Vec<Vec<u8>> = patterns.iter().map(|p| Iupac::complement(p)).collect();
+    Some(EncodedAdapterBatch {
+        forward: encoder.encode_patterns(patterns),
+        complement: encoder.encode_patterns(&complements),
+    })
+}
+
+/// Searches a pre-encoded batch over both strands of `text`, one pattern per
+/// SIMD lane, and calls `accept` with each hit's pattern index, text span and
+/// cost. `reversed` is `text` reversed, which the caller keeps per read so the
+/// reverse strand needs no copy. Hits are the rightmost local minima within
+/// `k`, exactly as `pattern_hits` returns them.
+pub fn encoded_pattern_hits(
+    searcher: &mut BatchedAdapterSearcher,
+    encoded: &EncodedAdapterBatch,
+    text: &[u8],
+    reversed: &[u8],
+    k: usize,
+    mut accept: impl FnMut(usize, usize, usize, usize),
+) {
+    debug_assert_eq!(text.len(), reversed.len());
+    for m in searcher.search_encoded_patterns(&encoded.forward, text, k) {
+        accept(m.pattern_idx, m.text_start, m.text_end, m.cost as usize);
+    }
+    let n = text.len();
+    for m in searcher.search_encoded_patterns(&encoded.complement, reversed, k) {
+        accept(
+            m.pattern_idx,
+            n - m.text_end,
+            n - m.text_start,
+            m.cost as usize,
+        );
+    }
+}
+
 /// Searches equal-length patterns together, packing them across SIMD lanes.
 /// This retains `search`'s reverse-text semantics while avoiding the repeated
 /// short-text setup of calling `search` once per pattern.
@@ -115,28 +204,42 @@ pub fn pattern_hits(
     searcher.search_patterns(patterns, &cached_text, k)
 }
 
-/// Returns all matches of `pattern` in `text` within `k` edits, as text spans.
-/// The strands searched depend on how `searcher` was built: `new_searcher`
-/// matches both strands, `new_searcher_fwd` the forward strand only. Reuses
-/// `searcher`'s internal buffers across calls.
-pub fn hits<P: sassy::profiles::Profile>(
+/// Calls `accept` with every match of `pattern` in `text` within `k` edits,
+/// as a text span. The strands searched depend on how `searcher` was built:
+/// `new_searcher` matches both strands, `new_searcher_fwd` the forward strand
+/// only. A plain slice reverses itself on each call; `Strands` borrows a
+/// reversal the caller keeps. Reuses `searcher`'s internal buffers across
+/// calls.
+pub fn for_each_hit<P: Profile, T: RcSearchAble + ?Sized>(
     searcher: &mut Searcher<P>,
     pattern: &[u8],
-    text: &[u8],
+    text: &T,
     k: usize,
-) -> Vec<Hit> {
-    searcher
-        .search(pattern, text, k)
-        .into_iter()
-        .map(|m| Hit {
+    mut accept: impl FnMut(Hit),
+) {
+    for m in searcher.search(pattern, text, k) {
+        accept(Hit {
             start: m.text_start,
             end: m.text_end,
             // Sassy's `Match::cost` is `pa_types::Cost`, an `i32` signed for other
             // algorithms in that crate; a returned match is within the
             // non-negative `k` budget, so the cast is lossless.
             cost: m.cost as usize,
-        })
-        .collect()
+        });
+    }
+}
+
+/// Returns all matches of `pattern` in `text` within `k` edits, as text spans.
+/// See `for_each_hit`.
+pub fn hits<P: Profile>(
+    searcher: &mut Searcher<P>,
+    pattern: &[u8],
+    text: &[u8],
+    k: usize,
+) -> Vec<Hit> {
+    let mut out = Vec::new();
+    for_each_hit(searcher, pattern, text, k, |hit| out.push(hit));
+    out
 }
 
 #[cfg(test)]
