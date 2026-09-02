@@ -2,9 +2,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use rayon::prelude::*;
-
-use super::{Batches, Counters, Stats, process_read_segments};
+use super::{Counters, FASTQ_BATCH, Rendered, Stats, process_read_segments, run_parallel};
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
@@ -79,14 +77,9 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut 
     .expect("writing FASTQ segments into an in-memory Vec<u8> cannot fail");
 }
 
-/// Threads-aware FASTQ workflow entry point. Sequential and output-order
-/// deterministic when `cfg.threads <= 1`; otherwise records render on a rayon
-/// pool and drain through a bounded channel to a writer task, in arrival order.
-///
-/// Both paths surface record-parse errors as an `Err` from this function. The
-/// sequential path aborts at once; the parallel path stashes the first error and
-/// keeps draining, so producers never block on the bounded channel, then reports
-/// it when the scope joins.
+/// Threads-aware FASTQ workflow entry point. Sequential when `cfg.threads <= 1`;
+/// otherwise records render on a rayon pool and drain through `run_parallel`,
+/// in input order under `cfg.ordered` and in completion order otherwise.
 pub fn run_fastq<W, I>(
     records: I,
     writer: &mut W,
@@ -100,90 +93,23 @@ where
     if cfg.threads <= 1 {
         return run_fastq_seq(records, writer, cfg, counters);
     }
-
-    let render_workers = if cfg.render_workers >= 1 {
-        cfg.render_workers
-    } else {
-        cfg.threads.max(1)
-    };
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(render_workers)
-        .build()?;
-    let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(render_workers * 4);
-
-    let write_err: std::sync::Mutex<Option<std::io::Error>> = std::sync::Mutex::new(None);
-    let parse_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
-
-    // Writer on a plain scoped OS thread; render on the budget-sized LOCAL rayon
-    // pool via `pool.install` so the nested `par_bridge` uses THAT pool (not
-    // rayon's global num_cpus pool), which is what makes `-t` bound the render
-    // threads. The writer keeps draining on a write error (never `break`) so
-    // bounded-channel producers can't deadlock.
-    std::thread::scope(|s| {
-        let write_err_ref = &write_err;
-        s.spawn(move || {
-            let mut errored = false;
-            for buf in rx.iter() {
-                if errored {
-                    continue; // keep draining so bounded-channel producers never block
-                }
-                if let Err(e) = writer.write_all(&buf) {
-                    *write_err_ref.lock().unwrap() = Some(e);
-                    errored = true;
-                }
-            }
-        });
-
-        pool.install(|| {
-            let batches = Batches::new(records, |rec: &anyhow::Result<ReadRecord>| {
-                rec.as_ref().map_or(0, |r| r.seq.len())
-            });
-            batches.par_bridge().for_each(|batch| {
-                let estimated_bytes = batch
-                    .iter()
-                    .filter_map(|rec| rec.as_ref().ok())
-                    .map(|rec| rec.seq.len().saturating_mul(2) + rec.name.len() + 6)
-                    .sum();
-                let mut buf = Vec::with_capacity(estimated_bytes);
-                let mut input_reads = 0u64;
-                let mut input_bases = 0u64;
-                for rec in batch {
-                    let rec = match rec {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let mut g = parse_err.lock().unwrap();
-                            if g.is_none() {
-                                *g = Some(e);
-                            }
-                            continue;
-                        },
-                    };
-                    input_reads += 1;
-                    input_bases += rec.seq.len() as u64;
-                    render_record(&rec, cfg, counters, &mut buf);
-                }
-                counters
-                    .input_reads
-                    .fetch_add(input_reads, Ordering::Relaxed);
-                counters
-                    .input_bases
-                    .fetch_add(input_bases, Ordering::Relaxed);
-                if !buf.is_empty() {
-                    let _ = tx.send(buf);
-                }
-            });
-        });
-        drop(tx);
-    });
-
-    if let Some(e) = parse_err.lock().unwrap().take() {
-        return Err(e);
-    }
-    if let Some(e) = write_err.lock().unwrap().take() {
-        return Err(e.into());
-    }
-    // FASTQ input carries no BAM per-base tags.
-    Ok(counters.snapshot(0))
+    run_parallel(
+        records,
+        FASTQ_BATCH,
+        |rec: &ReadRecord| rec.seq.len(),
+        cfg,
+        writer,
+        |rec, cfg| {
+            let mut buf = Vec::with_capacity(rec.seq.len().saturating_mul(2) + rec.name.len() + 6);
+            render_record(&rec, cfg, counters, &mut buf);
+            Ok(Rendered {
+                items: if buf.is_empty() { Vec::new() } else { vec![buf] },
+                malformed_tags: false,
+            })
+        },
+        |writer, buf: &Vec<u8>| writer.write_all(buf),
+        counters,
+    )
 }
 
 #[cfg(test)]
@@ -240,6 +166,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -291,6 +218,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -339,6 +267,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -391,6 +320,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -440,6 +370,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -488,6 +419,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -539,6 +471,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -624,6 +557,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -689,6 +623,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -738,6 +673,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -828,6 +764,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,
@@ -882,6 +819,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: true,
             threads_clamped: None,

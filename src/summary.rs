@@ -58,6 +58,7 @@ struct Params {
     /// `None` when no quality-trimming strategy was selected.
     quality_op: Option<QualityOpParams>,
     update_moves: bool,
+    ordered: bool,
     /// `all`, `none`, or the comma-joined tag list.
     fastq_tags: String,
     /// `None` when adapter trimming is off.
@@ -133,6 +134,7 @@ struct Warnings {
     /// Reads whose per-base kinetics tag length disagreed with the sequence and
     /// was left untouched.
     malformed_tag_reads: u64,
+    malformed_mod_reads: u64,
 }
 
 impl Summary {
@@ -182,6 +184,7 @@ impl Summary {
             },
             warnings: Warnings {
                 malformed_tag_reads: stats.malformed_tag_reads,
+                malformed_mod_reads: stats.malformed_mod_reads,
             },
         }
     }
@@ -239,6 +242,7 @@ impl Params {
                 },
             }),
             update_moves: cfg.update_moves,
+            ordered: cfg.ordered,
             fastq_tags: match &cfg.fastq_tags {
                 FastqTags::All => "all".to_string(),
                 FastqTags::None => "none".to_string(),
@@ -326,6 +330,7 @@ mod tests {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
+            ordered: false,
             verbosity: 0,
             quiet: false,
             threads_clamped: None,
@@ -344,6 +349,7 @@ mod tests {
             input_bases: 10_000,
             output_bases: 9_000,
             malformed_tag_reads: 2,
+            malformed_mod_reads: 0,
             reads_trimmed_to_nothing: 5,
             reads_all_filtered: 3,
             segments_dropped_short: 7,

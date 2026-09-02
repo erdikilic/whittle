@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Tag\-aware long\-read trimmer
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-in\-format\fR] [\fB\-\-out\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-qual\fR] [\fB\-Q\fR|\fB\-\-max\-qual\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-qual\-mode\fR] [\fB\-H\fR|\fB\-\-head\-crop\fR] [\fB\-T\fR|\fB\-\-tail\-crop\fR] [\fB\-\-qual\-trim\fR] [\fB\-\-qual\-best\-segment\fR] [\fB\-\-qual\-split\fR] [\fB\-\-qual\-split\-window\fR] [\fB\-\-update\-moves\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-size\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\fR] [\fB\-\-adapter\-infer\fR] [\fB\-\-adapter\-infer\-policy\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-in\-format\fR] [\fB\-\-out\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-ordered\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-qual\fR] [\fB\-Q\fR|\fB\-\-max\-qual\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-qual\-mode\fR] [\fB\-H\fR|\fB\-\-head\-crop\fR] [\fB\-T\fR|\fB\-\-tail\-crop\fR] [\fB\-\-qual\-trim\fR] [\fB\-\-qual\-best\-segment\fR] [\fB\-\-qual\-split\fR] [\fB\-\-qual\-split\-window\fR] [\fB\-\-update\-moves\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-size\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\fR] [\fB\-\-adapter\-infer\fR] [\fB\-\-adapter\-infer\-policy\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Tag\-aware long\-read trimmer
 .SH OPTIONS
@@ -58,6 +58,9 @@ bam
 .TP
 \fB\-t\fR, \fB\-\-threads\fR \fI<THREADS>\fR
 Worker threads (default: all detected CPUs; values above the CPU count are clamped)
+.TP
+\fB\-\-ordered\fR
+Write records in input order when running with more than one thread. Without it, records are written as they finish, which is faster and uses less memory but is not reproducible between runs
 .TP
 \fB\-\-fastq\-tags\fR \fI<FASTQ_TAGS>\fR [default: all]
 BAM auxiliary tags copied into BAM\-to\-FASTQ headers: all, none, or a list such as MM,ML,RG

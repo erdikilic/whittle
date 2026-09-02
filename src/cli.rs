@@ -37,6 +37,11 @@ struct Cli {
     /// Worker threads (default: all detected CPUs; values above the CPU count are clamped).
     #[arg(short = 't', long, help_heading = "Setup")]
     threads: Option<usize>,
+    /// Write records in input order when running with more than one thread.
+    /// Without it, records are written as they finish, which is faster and uses
+    /// less memory but is not reproducible between runs.
+    #[arg(long, help_heading = "Setup")]
+    ordered: bool,
     /// BAM auxiliary tags copied into BAM-to-FASTQ headers: all, none, or a list such as MM,ML,RG.
     #[arg(long, default_value = "all", help_heading = "Setup")]
     fastq_tags: String,
@@ -556,6 +561,7 @@ pub fn parse() -> anyhow::Result<Config> {
         adapter_sample,
         compression_level,
         update_moves: c.update_moves,
+        ordered: c.ordered,
         verbosity: c.verbose,
         quiet: c.quiet,
         threads_clamped,
@@ -693,6 +699,7 @@ pub fn config_for_test_threads(
         adapter_sample: 0,
         compression_level: 6,
         update_moves: false,
+        ordered: false,
         verbosity: 0,
         quiet: true,
         threads_clamped: None,

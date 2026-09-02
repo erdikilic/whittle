@@ -16,11 +16,11 @@ pub struct TrimPlan {
     pub quality: Option<QualityOp>,
 }
 
-/// Fixed crop first (positional), then the adapter stage on the cropped window
-/// (when configured), then the chosen quality op within each adapter segment,
-/// offsetting intervals back to original coordinates. Emits crop->adapter->quality
-/// segments only, including short ones; the caller filters (length/quality/GC)
-/// per segment. `apply` never applies a length filter itself.
+/// Applies `plan` to one read and returns the kept intervals in read
+/// coordinates: the fixed crop first, then the adapter stage on the cropped
+/// window (when configured), then the quality operation within each adapter
+/// segment. Every segment is returned, including short ones; the caller filters
+/// each by length, quality and GC.
 pub fn apply(
     seq: &[u8],
     phred: &[u8],
@@ -62,7 +62,9 @@ pub fn apply(
     // straight to the quality op with no intermediate segment vector.
     let mut out = Vec::new();
     match adapters {
-        None => quality_in(start, end, &mut out),
+        None => {
+            quality_in(start, end, &mut out);
+        },
         Some(cfg) => {
             for (s, e) in crate::adapter::adapter_segments(&seq[start..end], cfg) {
                 quality_in(s + start, e + start, &mut out);
