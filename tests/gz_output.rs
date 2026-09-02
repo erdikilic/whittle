@@ -10,18 +10,22 @@ use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use predicates::prelude::*;
 
+/// The binary with `WHITTLE_LOG` cleared.
 fn whittle() -> Command {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
     cmd
 }
 
+/// `bytes` as a single-member gzip stream.
 fn gzip(bytes: &[u8]) -> Vec<u8> {
     let mut enc = GzEncoder::new(Vec::new(), Compression::default());
     enc.write_all(bytes).unwrap();
     enc.finish().unwrap()
 }
 
+/// A truncated gzip input fails with one error line that names the last record
+/// read.
 #[test]
 fn truncated_gz_input_fails_once_with_record_context() {
     // Enough records that several parser buffers of records precede the
@@ -48,12 +52,12 @@ fn truncated_gz_input_fails_once_with_record_context() {
     let failed = stderr
         .lines()
         .find(|l| l.contains("Failed after"))
-        .unwrap_or_else(|| panic!("no failure line in: {stderr}"));
+        .unwrap_or_else(|| panic!("No failure line in: {stderr}"));
     let cause = failed.rsplit(": ").next().unwrap();
     assert_eq!(
         failed.matches(cause).count(),
         1,
-        "the cause must be printed once: {failed}"
+        "The cause is printed once: {failed}"
     );
 }
 
@@ -98,11 +102,11 @@ fn plain_output_by_default_even_with_gz_input() {
     assert_ne!(
         &stdout[..2.min(stdout.len())],
         &[0x1f, 0x8b][..],
-        "stdout must be plain FASTQ, not gzip, when no output format is requested"
+        "Stdout is plain FASTQ, not gzip, when no output format is requested"
     );
     assert!(
         stdout.starts_with(b"@"),
-        "expected plain FASTQ starting with '@', got {stdout:?}"
+        "Expected plain FASTQ starting with '@', got {stdout:?}"
     );
     // ACGTACGTAC (10 bases), head-crop 2 + tail-crop 2 -> [2,8) = "GTACGT".
     assert_eq!(stdout, b"@r1\nGTACGT\n+\nIIIIII\n");
@@ -115,8 +119,8 @@ fn explicit_gz_output_roundtrips_through_parallel_encoder() {
     std::fs::write(&input, "@r1\nACGTACGTAC\n+\nIIIIIIIIII\n").unwrap();
     let out = dir.path().join("out.fastq.gz");
 
-    // -t 4: exercise gzp's multi-threaded encoder, not just the trivial
-    // single-thread case.
+    // -t 4 exercises gzp's multi-threaded encoder rather than the single-thread
+    // case.
     whittle()
         .arg("-i")
         .arg(&input)
@@ -126,8 +130,8 @@ fn explicit_gz_output_roundtrips_through_parallel_encoder() {
         .assert()
         .success();
 
-    // A missing `finish()` would leave this truncated/corrupt; decoding must
-    // succeed and match the expected trimmed record exactly.
+    // A missing `finish()` would leave the file truncated; decoding succeeds and
+    // matches the trimmed record.
     let mut gz = MultiGzDecoder::new(std::fs::File::open(&out).unwrap());
     let mut s = String::new();
     gz.read_to_string(&mut s).unwrap();

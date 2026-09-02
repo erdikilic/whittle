@@ -2,18 +2,16 @@
 //!
 //! Every line whittle prints before processing starts is built here, as a pure
 //! `String` from resolved config, so each one is unit-testable without a run.
-//! `obs` owns the end-of-run counterparts; the two bookend on the same
-//! `output_desc` text.
+//! `obs` owns the end-of-run counterparts; both use the same `output_desc`
+//! text.
 
 use crate::config::{AdapterInfer, AdapterInferAction, AdapterInferPolicy};
 use crate::{config, filter, io, qual, trim};
 
-/// The startup banner's operation line (LINE mode's item 3 / BAR mode's own
-/// one-liner build on the same wording): `Trimming FASTQ` when input and output
-/// share a `Format::family` (including a `FASTQ` -> `FASTQ.gz` run, which is a
-/// compression change, not a format conversion), else `Converting {in_label} to
-/// {out_label}` (e.g. `Converting BAM to FASTQ`) for a genuine cross-family
-/// conversion.
+/// The startup banner's operation line, also the wording of bar mode's single
+/// start line: `Trimming FASTQ` when input and output share a `Format::family`
+/// (a FASTQ to FASTQ.gz run is a compression change, not a conversion), else
+/// `Converting {in_label} to {out_label}` for a cross-family conversion.
 pub(crate) fn operation_line(in_fmt: io::Format, out_fmt: io::Format) -> String {
     if in_fmt.family() == out_fmt.family() {
         format!("Trimming {}", in_fmt.family())
@@ -80,12 +78,11 @@ pub(crate) fn qual_mode_label(mode: qual::QualMode) -> &'static str {
     }
 }
 
-/// The startup banner's `Filters: ...; trim: ...` line. Pure, so it is
-/// unit-testable directly. Shows only active clauses, so a fresh-defaults run
-/// reads `Filters: none; trim: none` rather than spelling out every no-op
-/// threshold. A bound appears only when it differs from its default: length from
-/// `min_length > 1` / `max_length != usize::MAX`, quality from `min_qual > 0.0` /
-/// `max_qual < 1000.0`, GC from either bound being set.
+/// The startup banner's `Filters: ...; trim: ...` line. Only active clauses
+/// appear, so an all-defaults run reads `Filters: none; trim: none` rather than
+/// every no-op threshold. A bound appears only when it differs from its default:
+/// length from `min_length > 1` or `max_length != usize::MAX`, quality from
+/// `min_qual > 0.0` or `max_qual < 1000.0`, GC from either bound being set.
 pub(crate) fn filters_and_trim_line(
     filter: &filter::FilterConfig,
     trim: &trim::TrimPlan,
@@ -153,12 +150,12 @@ pub(crate) fn filters_and_trim_line(
     format!("Filters: {filters_str}; trim: {trim_str}")
 }
 
-/// The startup banner's `Adapters: ...` line: adapter count, `trim + split` vs
-/// `ends-only`, error rate, end-zone size, and whether presence detection will
-/// sample. `None` when adapter trimming is off, so the caller skips the line.
+/// The startup banner's `Adapters: ...` line: adapter count, `trim + split` or
+/// `ends-only`, error rate, end-zone size, and whether presence detection
+/// samples. `None` when adapter trimming is off, so the caller skips the line.
 ///
-/// Under inference the count is forced to `0` rather than read off `a.adapters`:
-/// in report mode that field may hold the user's FASTA purely as naming refs for
+/// Under inference the count is `0` rather than `a.adapters.len()`: in report
+/// mode that field may hold a FASTA only as naming references for
 /// `infer::discover`, never as a trimming set.
 pub(crate) fn adapter_banner_line(
     adapters: Option<&crate::adapter::AdapterConfig>,
@@ -202,12 +199,11 @@ pub(crate) fn adapter_banner_line(
     ))
 }
 
-/// Shell-quote a single argument the way Python's `shlex.quote` does: bare when
-/// non-empty and every character is in the POSIX-shell-safe set
-/// (`[A-Za-z0-9_@%+=:,./-]`); otherwise wrapped in single quotes, with any
-/// embedded single quote escaped as `'\''` (close the quote, an escaped literal
-/// quote, reopen the quote). An empty argument is never safe bare (it would
-/// vanish when re-run), so it renders as `''`.
+/// Shell-quotes a single argument: bare when non-empty and every character is
+/// in the POSIX-shell-safe set (`[A-Za-z0-9_@%+=:,./-]`); otherwise wrapped in
+/// single quotes, with an embedded single quote escaped as `'\''` (close the
+/// quote, an escaped literal quote, reopen the quote). An empty argument renders
+/// as `''`, since a bare empty argument would vanish on re-run.
 pub(crate) fn shell_quote(arg: &str) -> String {
     let is_safe = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
     if !arg.is_empty() && arg.chars().all(is_safe) {
@@ -217,11 +213,11 @@ pub(crate) fn shell_quote(arg: &str) -> String {
     }
 }
 
-/// The real process argv, space-joined and shell-quoted so it can be copied back
-/// out and re-run. Takes `OsStr`-like items (`args_os()`, not `args()`, which
-/// panics on non-UTF-8 argv) and converts lossily here, at the one seam that must
-/// never panic on a malformed argv. Generic over the iterator so it is
-/// unit-testable without the real argv.
+/// Joins the process argv into one shell-quoted line that can be copied and
+/// re-run. Takes `OsStr`-like items (`args_os()`, not `args()`, which panics on
+/// non-UTF-8 argv) and converts them lossily here, the one seam that must not
+/// panic on a malformed argv. Generic over the iterator so tests supply their
+/// own argv.
 ///
 /// The value carries no label: the banner prefixes its own `Command: `, while
 /// `--summary-json` stores the bare line under its `command` key.
@@ -237,8 +233,7 @@ where
 }
 
 /// The output path (or `<stdout>`) shown in both the startup banner's `Output:`
-/// line and the end-of-run `Completed`/closer line; the two bookend on the same
-/// text so a reader can match them up at a glance.
+/// line and the end-of-run `Completed` line; the two use the same text.
 pub(crate) fn output_desc(output: Option<&std::path::Path>) -> String {
     match output {
         Some(p) => p.display().to_string(),
@@ -276,9 +271,9 @@ mod tests {
             operation_line(io::Format::Fastq, io::Format::Fastq),
             "Trimming FASTQ"
         );
-        // FASTQ -> FASTQ.gz shares the FASTQ family (a compression change, not
-        // a format conversion), so it collapses too rather than reading as an
-        // "X to X" conversion.
+        // FASTQ to FASTQ.gz shares the FASTQ family (a compression change, not
+        // a format conversion), so it collapses as well rather than reading as
+        // an `X to X` conversion.
         assert_eq!(
             operation_line(io::Format::Fastq, io::Format::FastqGz),
             "Trimming FASTQ"
@@ -355,16 +350,16 @@ mod tests {
 
     #[test]
     fn threads_banner_line_sequential_for_one_or_fewer() {
-        // A single-threaded run collapses to a plain "sequential" label rather
-        // than a "(read 1, trim 1, write 1)" split.
+        // A single-threaded run collapses to a plain `sequential` label rather
+        // than a `(read 1, trim 1, write 1)` split.
         let b = config::thread_budget(1, true, false, config::EncodeKind::Bgzf);
         assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");
     }
 
     #[test]
     fn filters_and_trim_line_defaults() {
-        // All-default filter/trim: no active clause, so it reads "none" rather
-        // than spelling out no-op thresholds like "mean quality >=0".
+        // All-default filter and trim: no active clause, so it reads `none`
+        // rather than no-op thresholds such as `mean quality >=0`.
         assert_eq!(
             filters_and_trim_line(&base_filter(), &base_trim()),
             "Filters: none; trim: none"
@@ -445,7 +440,7 @@ mod tests {
         });
         assert!(filters_and_trim_line(&f, &t).ends_with("trim: split quality <15"));
 
-        // head/tail-only (no quality op): no trailing quality-op clause.
+        // Head and tail only (no quality op): no trailing quality-op clause.
         t.quality = None;
         t.head = 3;
         t.tail = 0;
@@ -495,7 +490,7 @@ mod tests {
         assert!(line.contains("error 0.20"));
         assert!(line.contains("end-zone 150 bp"));
         assert!(line.contains("sample 10000"));
-        assert!(!line.contains("infer"), "no infer suffix when off: {line}");
+        assert!(!line.contains("infer"), "No infer suffix when off: {line}");
 
         let off_line = adapter_banner_line(Some(&cfg), 0, AdapterInfer::Off).unwrap();
         assert!(off_line.contains("sample off"));
@@ -600,7 +595,7 @@ mod tests {
 
     #[test]
     fn shell_quote_wraps_empty_string() {
-        // Bare would vanish entirely when the line is re-run.
+        // A bare empty argument would vanish when the line is re-run.
         assert_eq!(shell_quote(""), "''");
     }
 

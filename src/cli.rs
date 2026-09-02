@@ -1,3 +1,6 @@
+//! Command-line parsing: the clap definition, cross-flag validation, and
+//! construction of the resolved `Config`.
+
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -23,12 +26,12 @@ struct Cli {
     /// Print version information and exit.
     #[arg(long, action = clap::ArgAction::Version, help_heading = "Setup")]
     version: Option<bool>,
-    /// Input FASTQ-family file, unaligned BAM, or directory. Reads stdin when
-    /// omitted or given as -.
+    /// Input FASTQ-family file, unaligned BAM, or directory; - means stdin.
+    /// Defaults to stdin.
     #[arg(short = 'i', long, help_heading = "Setup")]
     input: Option<PathBuf>,
-    /// Output file; the path extension selects its format. Writes stdout when
-    /// omitted or given as -.
+    /// Output file, whose extension selects the format; - means stdout.
+    /// Defaults to stdout.
     #[arg(short = 'o', long, help_heading = "Setup")]
     output: Option<PathBuf>,
     /// Force the input format instead of detecting it from the path or stream.
@@ -51,8 +54,9 @@ struct Cli {
     #[arg(long, default_value = "all", help_heading = "Setup")]
     fastq_tags: String,
     /// DEFLATE compression level (0-9) for compressed output: bgzf for BAM and
-    /// .bgz, gzip for FASTQ.gz. Lower is faster and larger. Ignored for plain
-    /// FASTQ. Defaults to 4 for gzip FASTQ and 6 for BGZF.
+    /// .bgz, gzip for FASTQ.gz. Lower levels are faster and produce larger
+    /// files. Ignored for plain FASTQ. Defaults to 4 for gzip FASTQ and 6 for
+    /// BGZF.
     #[arg(short = 'c', long, help_heading = "Setup")]
     compression_level: Option<u8>,
     /// Write a machine-readable JSON run summary (counters plus the resolved
@@ -68,10 +72,10 @@ struct Cli {
     /// Conflicts with -v and --progress.
     #[arg(long, conflicts_with = "verbose", help_heading = "Logging")]
     quiet: bool,
-    /// How to report progress, independently of the log level: a bar on a
-    /// terminal and periodic lines otherwise (auto), always one or the other,
-    /// or none at all while keeping the banner and summary. A bar falls back to
-    /// lines under -v or WHITTLE_LOG. Defaults to auto.
+    /// Progress reporting, independent of the log level: auto selects a bar on
+    /// a terminal and periodic lines otherwise; bar and plain force one form;
+    /// none disables progress and keeps the banner and summary. A bar falls
+    /// back to lines under -v or WHITTLE_LOG. Defaults to auto.
     #[arg(
         long,
         value_enum,
@@ -136,12 +140,12 @@ struct Cli {
     qual_split_window: usize,
     /// Keep ONT signal tags consistent through trimming (slice mv, update ts,
     /// ns, sp and pi) for signal-aware tools such as Remora and Clair3 v2,
-    /// instead of dropping them. BAM to BAM only.
+    /// instead of dropping them. BAM-to-BAM only.
     #[arg(long, help_heading = "Trimming")]
     update_moves: bool,
 
-    /// Adapter FASTA (each sequence at least the 11 bp minimum match length).
-    /// Enables adapter trimming.
+    /// Adapter FASTA; each sequence must be at least 11 bp. Enables adapter
+    /// trimming.
     #[arg(short = 'a', long, help_heading = "Adapter trimming")]
     adapter_fasta: Option<PathBuf>,
     /// Built-in ONT adapter catalog. Enables adapter trimming. Defaults to none.
@@ -179,10 +183,11 @@ struct Cli {
     #[arg(
         long,
         value_enum,
+        default_value_t = AdapterInferPolicyArg::Conservative,
         requires = "adapter_infer",
         help_heading = "Adapter trimming"
     )]
-    adapter_infer_policy: Option<AdapterInferPolicyArg>,
+    adapter_infer_policy: AdapterInferPolicyArg,
 }
 
 /// The default `--adapter-error-rate`.
@@ -192,9 +197,8 @@ const DEFAULT_ADAPTER_END_SIZE: usize = 150;
 /// The default `--adapter-sample` under `--adapter-infer`.
 const DEFAULT_INFER_SAMPLE: usize = 40_000;
 
-/// The parsed clap `Command`, for generating the man page (see
-/// `examples/gen-man.rs`). Kept here so the page is always rendered from the one
-/// CLI definition rather than a hand-maintained copy.
+/// Returns the clap `Command` for the CLI. `examples/gen-man.rs` renders the
+/// man page from it, so the page and the parser share one definition.
 pub fn command() -> clap::Command {
     <Cli as clap::CommandFactory>::command()
 }
@@ -258,10 +262,14 @@ impl From<AdapterInferPolicyArg> for AdapterInferPolicy {
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
 enum FormatArg {
+    /// Plain FASTQ.
     Fastq,
+    /// gzip-compressed FASTQ.
     FastqGz,
+    /// BGZF-compressed FASTQ.
     #[value(name = "fastq-bgz", alias = "fastq-bgzf")]
     FastqBgzf,
+    /// Unaligned BAM.
     Bam,
 }
 
@@ -311,8 +319,8 @@ enum AdapterPresetArg {
 /// `run` emits them once it does. See `Advisory`.
 pub fn parse() -> anyhow::Result<Config> {
     let mut c = Cli::parse();
-    // `-` is the pipeline spelling of stdin and stdout; a file literally named
-    // `-` is never what a caller means.
+    // `-` is the pipeline spelling of stdin and stdout, so it is never treated
+    // as a file name.
     c.input = c.input.filter(|p| p.as_os_str() != "-");
     c.output = c.output.filter(|p| p.as_os_str() != "-");
 
@@ -382,8 +390,8 @@ pub fn parse() -> anyhow::Result<Config> {
     })
 }
 
-/// Rejects contradictory or out-of-domain trim and filter settings up front,
-/// rather than silently keeping zero reads and exiting successfully.
+/// Rejects contradictory or out-of-domain trim and filter settings before the
+/// run, which would otherwise keep zero reads and exit successfully.
 fn validate_filters(c: &Cli) -> anyhow::Result<()> {
     let n_quality = [
         c.qual_trim.is_some(),
@@ -444,10 +452,10 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolves the compression level: an explicit `-c` wins; otherwise gzip
-/// FASTQ output, usually a transient pipeline hand-off where libdeflate level 4
-/// runs markedly faster than 6 for a ~2% larger file, gets 4, and BGZF (BAM and
-/// .bgz, archival and random-access) keeps the samtools-parity 6.
+/// Resolves the compression level. An explicit `-c` wins; otherwise gzip FASTQ
+/// output uses level 4, where libdeflate runs markedly faster than level 6 for
+/// about 2% more output, and BGZF (BAM and `.bgz`) uses level 6, the BGZF
+/// writer default.
 fn compression_level_for(c: &Cli) -> u8 {
     let out_is_gz = match c.out_format {
         Some(FormatArg::FastqGz) => true,
@@ -457,8 +465,8 @@ fn compression_level_for(c: &Cli) -> u8 {
     c.compression_level.unwrap_or(if out_is_gz { 4 } else { 6 })
 }
 
-/// The quality trimming operation selected, if any. `validate_filters` has
-/// rejected more than one.
+/// Returns the selected quality-trimming operation, if any; `validate_filters`
+/// has already rejected a combination.
 fn quality_op_for(c: &Cli) -> Option<QualityOp> {
     if let Some(q) = c.qual_trim {
         return Some(QualityOp::TrimQual(q));
@@ -479,14 +487,11 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
         .adapter_infer
         .map_or(AdapterInfer::Off, |action| AdapterInfer::Enabled {
             action: action.into(),
-            policy: c
-                .adapter_infer_policy
-                .unwrap_or(AdapterInferPolicyArg::Conservative)
-                .into(),
+            policy: c.adapter_infer_policy.into(),
         });
 
-    // Trim mode excludes an explicit FASTA; report-only allows one so the
-    // discoveries can be cross-named against it.
+    // Trim mode excludes an explicit FASTA; report mode allows one so the
+    // discoveries can be named against it.
     if matches!(
         adapter_infer,
         AdapterInfer::Enabled {
@@ -497,25 +502,25 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
     {
         anyhow::bail!(
             "--adapter-infer and --adapter-fasta are mutually exclusive (one discovers \
-             the set, the other supplies it). To trim with your FASTA and also see what \
-             inference finds, run --adapter-infer report --adapter-fasta <file> first."
+             the set, the other supplies it); --adapter-infer report --adapter-fasta <file> \
+             names discovered adapters against a supplied FASTA"
         );
     }
-    // The preset is redundant for trimming under infer, which builds its own
-    // set; it is kept only so its names can be cross-referenced.
+    // Under inference the preset is not searched for trimming, since inference
+    // builds its own set; it is retained only to name discovered adapters.
     if adapter_infer != AdapterInfer::Off && c.adapter_preset != AdapterPresetArg::None {
         advisories.push(Advisory::warn(
             "--adapter-preset is ignored for trimming under --adapter-infer \
              (used only for naming discovered adapters)",
         ));
     }
-    // Report mode names discovered adapters against the built-in ONT catalog
-    // plus the user's FASTA (see `infer::discover`), so the user's own adapter
-    // names surface too, not only catalog matches.
+    // Report mode names discovered adapters against the union of the built-in
+    // ONT catalog and the supplied FASTA (see `infer::discover`), so FASTA entry
+    // names appear alongside catalog names.
     if adapter_infer.is_report() && c.adapter_fasta.is_some() {
         advisories.push(Advisory::info(
             "--adapter-infer report with --adapter-fasta: discovered adapters are named \
-             against the built-in ONT catalog plus your FASTA's adapters",
+             against the built-in ONT catalog and the supplied FASTA",
         ));
     }
     Ok(adapter_infer)
@@ -535,9 +540,8 @@ fn resolve_adapters(
     if c.adapter_preset == AdapterPresetArg::Ont {
         adapter_seqs.extend(crate::adapter::preset::preset_ont());
     }
-    // Only the user's own FASTA entries are carried onward as extra naming
-    // refs under inference; the preset is already covered by
-    // `infer::discover`'s own built-in catalog lookup.
+    // Only the FASTA entries are carried onward as naming references under
+    // inference; `infer::discover` looks up the built-in catalog itself.
     let mut fasta_adapters: Vec<crate::adapter::Adapter> = Vec::new();
     if let Some(path) = &c.adapter_fasta {
         let from_fasta = read_adapter_fasta(path, advisories)?;
@@ -571,11 +575,11 @@ fn resolve_adapters(
     if end_size == 0 {
         anyhow::bail!("--adapter-end-size must be >= 1");
     }
-    // Under infer the trimming set is discovered later, so the preset sequences
-    // are dropped here. A report-only FASTA rides along purely as naming refs
-    // for `infer::discover`: discovery replaces this field before any dispatch,
-    // and report-only exits first, so it is never trimmed against. Under `Trim`
-    // a FASTA is rejected by `resolve_infer`.
+    // Under inference the trimming set is discovered later, so the preset
+    // sequences are dropped here. A report-only FASTA is carried in this field
+    // only as naming references for `infer::discover`: discovery replaces the
+    // field before dispatch and report mode exits first, so the FASTA is never
+    // trimmed against. Under `Trim` a FASTA is rejected by `resolve_infer`.
     let trim_adapters = if adapter_infer == AdapterInfer::Off {
         adapter_seqs
     } else {
@@ -616,12 +620,13 @@ fn require_adapter_source(c: &Cli) -> anyhow::Result<()> {
 
 /// Resolves the sample size for presence detection or inference.
 ///
-/// Omitted means the mode default: 0 (detection off) normally, 40000 under
-/// inference. An explicit value must be 0 or at least the detection floor, and
-/// 0 is rejected under inference, which cannot run on an empty sample. Presence
-/// detection is preset-only: a user-supplied FASTA is a curated set that is
-/// searched in full, since sampling could wrongly drop a rare custom adapter, so
-/// detection is disabled whenever a FASTA is given and inference is off.
+/// An omitted value means the mode default: 0 (detection off) with inference
+/// off, 40000 with inference on. An explicit value must be 0 or at least
+/// `MIN_SAMPLE_FOR_DETECTION`, and 0 is rejected under inference, which needs a
+/// sample. Presence detection is preset-only: a user-supplied FASTA is a curated
+/// set that is searched in full, since sampling could drop a rare custom
+/// adapter, so detection is disabled whenever a FASTA is given and inference is
+/// off.
 fn resolve_sample(
     c: &Cli,
     adapter_infer: AdapterInfer,
@@ -659,12 +664,12 @@ fn resolve_sample(
     Ok(0)
 }
 
-/// Read adapter sequences from a FASTA. Lowercase acgt is uppercased and
-/// accepted; entries with any other non-ACGT byte (e.g. IUPAC ambiguity
-/// codes) are skipped with a warning, matching the built-in catalog's
-/// ACGT-only rule. Entries shorter than `adapter::MIN_PATTERN_LEN` (the
-/// matcher's minimum pattern length) are also skipped with a warning, since a
-/// shorter pattern would never be matched anyway.
+/// Reads adapter sequences from a FASTA. Whitespace is removed, lowercase is
+/// uppercased, and `U` is folded to `T`. IUPAC ambiguity codes are kept and
+/// searched as the bases they stand for; an entry containing any other byte is
+/// skipped with a warning advisory, as is an entry shorter than
+/// `adapter::MIN_PATTERN_LEN`, the matcher's minimum pattern length. An entry
+/// averaging two or more bases per position is kept with a warning advisory.
 fn read_adapter_fasta(
     path: &std::path::Path,
     advisories: &mut Vec<crate::config::Advisory>,
@@ -681,17 +686,17 @@ fn read_adapter_fasta(
             .filter(|b| !b.is_ascii_whitespace())
             .map(u8::to_ascii_uppercase)
             .collect();
-        // RNA primers are written with U; a DNA read stores T, and sassy would
-        // treat U as a fifth base matching nothing, so fold it here.
+        // `U` is folded to `T`: RNA primers are written with `U`, DNA reads
+        // store `T`, and sassy treats `U` as a fifth base that matches nothing.
         let seq: Vec<u8> = seq
             .into_iter()
             .map(|b| if b == b'U' { b'T' } else { b })
             .collect();
         let name = String::from_utf8_lossy(rec.head()).into_owned();
 
-        // IUPAC ambiguity codes are searched as the bases they stand for, which
-        // is what a degenerate primer means. Anything outside the nucleotide
-        // alphabet is a malformed record, not a degenerate one.
+        // IUPAC ambiguity codes are searched as the bases they stand for, as a
+        // degenerate primer requires. A byte outside the nucleotide alphabet
+        // marks a malformed record.
         let Some(degeneracy) = seq
             .iter()
             .map(|&b| crate::adapter::search::iupac_degeneracy(b).map(u32::from))
@@ -703,25 +708,27 @@ fn read_adapter_fasta(
                 .map(|&b| b as char)
                 .collect();
             advisories.push(crate::config::Advisory::warn(format!(
-                "Adapter {name:?} contains non-nucleotide characters ({bad}); skipped"
+                "Adapter entry skipped, contains non-nucleotide characters: \
+                 name={name:?}, chars={bad}"
             )));
             continue;
         };
         if seq.len() < crate::adapter::MIN_PATTERN_LEN {
             advisories.push(crate::config::Advisory::warn(format!(
-                "Adapter {name:?} is {} bp; shorter than the {}-bp minimum match length, skipped",
+                "Adapter entry skipped, shorter than the minimum match length: \
+                 name={name:?}, len={}, min={}",
                 seq.len(),
                 crate::adapter::MIN_PATTERN_LEN
             )));
             continue;
         }
-        // A fully-degenerate stretch matches anywhere, so a pattern with more
-        // ambiguity than specificity will trim real insert. Searched anyway, since
-        // the user asked for it, but not silently.
+        // A fully degenerate stretch matches anywhere, so a pattern with more
+        // ambiguity than specificity trims real insert. The pattern is still
+        // searched; a warning advisory records the risk.
         if degeneracy as usize >= seq.len() * 2 {
             advisories.push(crate::config::Advisory::warn(format!(
-                "Adapter {name:?} averages {:.1} bases per position; a pattern this degenerate \
-                 matches almost anywhere and may trim real sequence",
+                "Adapter entry is highly degenerate and matches almost anywhere, which may \
+                 trim real sequence: name={name:?}, bases_per_position={:.1}",
                 f64::from(degeneracy) / seq.len() as f64
             )));
         }
@@ -735,7 +742,8 @@ fn read_adapter_fasta(
     Ok(out)
 }
 
-/// Build a Config directly (used by integration tests). head/tail are fixed crops.
+/// Builds a `Config` directly for integration tests. `head_crop` and
+/// `tail_crop` are fixed crops.
 #[doc(hidden)]
 pub fn config_for_test(
     input: &std::path::Path,
@@ -746,8 +754,8 @@ pub fn config_for_test(
     config_for_test_threads(input, output, head_crop, tail_crop, 1)
 }
 
-/// Same as `config_for_test`, but with an explicit thread count (used by tests
-/// that need to exercise the parallel BAM dispatch, e.g. a `t8` oracle run).
+/// Builds a `Config` as `config_for_test` does, with an explicit thread count
+/// for tests that exercise the parallel BAM dispatch.
 #[doc(hidden)]
 pub fn config_for_test_threads(
     input: &std::path::Path,
@@ -802,7 +810,33 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    // FASTA loading and adapter search must enforce the same minimum length.
+    /// Help text quotes the matcher's minimum pattern length and the detection
+    /// sample floor; the numbers stay in step with the constants.
+    #[test]
+    fn help_text_matches_the_adapter_constants() {
+        let cmd = command();
+        let help_for = |id: &str| {
+            cmd.get_arguments()
+                .find(|a| a.get_id().as_str() == id)
+                .unwrap_or_else(|| panic!("Argument {id} exists"))
+                .get_help()
+                .expect("Argument has help text")
+                .to_string()
+        };
+        assert!(
+            help_for("adapter_fasta").contains(&format!("{} bp", crate::adapter::MIN_PATTERN_LEN)),
+            "--adapter-fasta help quotes MIN_PATTERN_LEN"
+        );
+        assert!(
+            help_for("adapter_sample").contains(&format!(
+                "at least {}",
+                crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
+            )),
+            "--adapter-sample help quotes MIN_SAMPLE_FOR_DETECTION"
+        );
+    }
+
+    /// FASTA loading and adapter search enforce the same minimum pattern length.
     #[test]
     fn read_adapter_fasta_skips_entries_below_min_pattern_len() {
         let dir = tempfile::tempdir().unwrap();
@@ -811,7 +845,7 @@ mod tests {
         writeln!(f, ">kept_20bp").unwrap();
         writeln!(f, "ACGTACGTACGTACGTACGT").unwrap(); // 20 bp
         writeln!(f, ">skipped_8bp").unwrap();
-        writeln!(f, "ACGTACGT").unwrap(); // 8 bp, below the 11bp MIN_PATTERN_LEN
+        writeln!(f, "ACGTACGT").unwrap(); // 8 bp, below the 11-bp `MIN_PATTERN_LEN`
         drop(f);
 
         let mut advisories = Vec::new();
@@ -821,9 +855,9 @@ mod tests {
         assert_eq!(adapters[0].seq, b"ACGTACGTACGTACGTACGT".to_vec());
     }
 
-    /// Degenerate primers are the point of the IUPAC alphabet, so ambiguity codes
-    /// are kept and searched as the bases they stand for. Only characters outside
-    /// the nucleotide alphabet are a malformed record.
+    /// IUPAC ambiguity codes are kept and searched as the bases they stand for,
+    /// since degenerate primers are written with them. Only characters outside
+    /// the nucleotide alphabet mark a malformed record.
     #[test]
     fn read_adapter_fasta_keeps_iupac_and_rejects_non_nucleotides() {
         let dir = tempfile::tempdir().unwrap();
@@ -845,19 +879,19 @@ mod tests {
         let names: Vec<&str> = adapters.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["plain_20bp", "degenerate_20bp", "rna_20bp"]);
         assert_eq!(adapters[1].seq, b"ACGTACGTYCGTACGTACGN".to_vec());
-        // U folds to T: a DNA read stores T, and sassy would treat U as a fifth
-        // base that matches nothing.
+        // `U` folds to `T`: a DNA read stores `T`, and sassy treats `U` as a
+        // fifth base that matches nothing.
         assert_eq!(adapters[2].seq, b"ACGTACGTACGTACGTACGT".to_vec());
         assert!(
             advisories
                 .iter()
                 .any(|a| a.message.contains("non-nucleotide")),
-            "the protein-alphabet entry should be reported"
+            "The protein-alphabet entry is reported"
         );
     }
 
     /// A pattern with more ambiguity than specificity matches almost anywhere.
-    /// It is still searched, but the user is told.
+    /// It is still searched, and a warning advisory is recorded.
     #[test]
     fn read_adapter_fasta_warns_about_a_very_degenerate_pattern() {
         let dir = tempfile::tempdir().unwrap();
@@ -869,10 +903,10 @@ mod tests {
 
         let mut advisories = Vec::new();
         let adapters = read_adapter_fasta(&path, &mut advisories).unwrap();
-        assert_eq!(adapters.len(), 1, "still searched");
+        assert_eq!(adapters.len(), 1, "Still searched");
         assert!(
             advisories.iter().any(|a| a.message.contains("degenerate")),
-            "a near-wildcard pattern should warn"
+            "A near-wildcard pattern warns"
         );
     }
 }

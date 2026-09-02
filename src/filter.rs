@@ -1,16 +1,28 @@
+//! Post-trim segment filtering by length, quality and GC fraction.
+
 use crate::qual::{QualMode, read_quality};
 
+/// Bounds applied to every produced segment.
 #[derive(Debug, Clone)]
 pub struct FilterConfig {
+    /// Minimum segment length, inclusive.
     pub min_length: usize,
+    /// Maximum segment length, inclusive.
     pub max_length: usize,
+    /// Minimum read quality, inclusive.
     pub min_qual: f64,
+    /// Maximum read quality, inclusive.
     pub max_qual: f64,
+    /// Minimum GC fraction, inclusive, when set.
     pub min_gc: Option<f64>,
+    /// Maximum GC fraction, inclusive, when set.
     pub max_gc: Option<f64>,
+    /// Quality summary used for the quality bounds.
     pub qual_mode: QualMode,
 }
 
+/// Returns the fraction of `G`/`C` bases (either case) in `seq`; `0.0` for an
+/// empty slice.
 pub fn gc_fraction(seq: &[u8]) -> f64 {
     if seq.is_empty() {
         return 0.0;
@@ -22,19 +34,24 @@ pub fn gc_fraction(seq: &[u8]) -> f64 {
     gc as f64 / seq.len() as f64
 }
 
-/// Why `check` dropped a segment. Both GC bounds (too low / too high) collapse
-/// into `Gc`: the summary reports "GC out of range", not which side.
+/// The reason `check` dropped a segment. Both GC bounds collapse into `Gc`:
+/// the summary reports "GC out of range", not which side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropReason {
+    /// Shorter than `min_length`, or empty.
     TooShort,
+    /// Longer than `max_length`.
     TooLong,
+    /// Quality below `min_qual`.
     LowQuality,
+    /// Quality above `max_qual`.
     HighQuality,
+    /// GC fraction outside `[min_gc, max_gc]`.
     Gc,
 }
 
 impl DropReason {
-    /// The wording used for this reason wherever it is reported, so the
+    /// Returns the wording used for this reason wherever it is reported, so the
     /// end-of-run summary and a per-segment trace line name it identically.
     pub fn label(self) -> &'static str {
         match self {
@@ -47,7 +64,7 @@ impl DropReason {
     }
 }
 
-/// Evaluate bounds cheapest-first and stop at the first rejection. `None`
+/// Evaluates the bounds cheapest-first and stops at the first rejection. `None`
 /// indicates that the segment passes; empty segments are `TooShort` even when
 /// `min_length` is zero.
 ///
@@ -58,11 +75,10 @@ pub fn check(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> Option<DropReason>
     check_metrics(seq.len(), phred, gc, cfg)
 }
 
-/// Filter from precomputed sequence metrics. The raw BAM fast path can obtain
-/// length and GC directly from packed sequence views without materializing an
-/// owned decoded sequence. `gc` is required whenever a GC bound is active;
-/// a missing value there is a caller bug and panics rather than filtering on
-/// a fabricated fraction.
+/// Filters from precomputed sequence metrics. The raw BAM fast path obtains
+/// length and GC from packed sequence views without materializing a decoded
+/// sequence. `gc` is required whenever a GC bound is active; a missing value
+/// panics rather than filtering on a fabricated fraction.
 pub(crate) fn check_metrics(
     len: usize,
     phred: &[u8],
@@ -85,7 +101,7 @@ pub(crate) fn check_metrics(
         }
     }
     if cfg.min_gc.is_some() || cfg.max_gc.is_some() {
-        let gc = gc.expect("the GC fraction is computed whenever a GC bound is active");
+        let gc = gc.expect("The GC fraction is computed whenever a GC bound is active");
         if gc < cfg.min_gc.unwrap_or(0.0) || gc > cfg.max_gc.unwrap_or(1.0) {
             return Some(DropReason::Gc);
         }
@@ -130,10 +146,10 @@ mod tests {
     fn quality_bound_uses_mode() {
         let mut c = base();
         c.min_qual = 15.0;
-        // arithmetic mean of [10,20] = 15.0 -> passes at threshold
+        // The arithmetic mean of [10, 20] is 15.0, which passes at the threshold.
         c.qual_mode = QualMode::Arithmetic;
         assert!(passes(b"AT", &[10, 20], &c));
-        // prob-mean of [10,20] < 15 -> fails
+        // The probability mean of [10, 20] is below 15, which fails.
         c.qual_mode = QualMode::Mean;
         assert!(!passes(b"AT", &[10, 20], &c));
     }
@@ -181,7 +197,7 @@ mod tests {
         let mut c = base();
         c.min_length = 4;
         assert_eq!(check(b"ATG", &[30, 30, 30], &c), Some(DropReason::TooShort));
-        // Empty reads are TooShort regardless of min_length.
+        // Empty reads are `TooShort` regardless of `min_length`.
         let c0 = base();
         assert_eq!(check(b"", &[], &c0), Some(DropReason::TooShort));
     }

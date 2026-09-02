@@ -1,3 +1,5 @@
+//! FASTQ workflows: sequential and parallel trim, filter and write drivers.
+
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -8,8 +10,8 @@ use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
 use crate::trim;
 
-/// Single-threaded FASTQ workflow: trim -> filter each produced segment -> write
-/// survivors.
+/// Runs the single-threaded FASTQ workflow: trims, filters each produced segment
+/// and writes the survivors.
 pub fn run_fastq_seq<W: Write>(
     records: impl Iterator<Item = anyhow::Result<ReadRecord>>,
     writer: &mut W,
@@ -73,12 +75,12 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut 
             Ok(())
         },
     )
-    .expect("writing FASTQ segments into an in-memory Vec<u8> cannot fail");
+    .expect("Writing FASTQ segments into an in-memory Vec<u8> cannot fail");
 }
 
-/// Threads-aware FASTQ workflow entry point. Sequential when `cfg.threads <= 1`;
-/// otherwise records render on a rayon pool and drain through `run_parallel`,
-/// in input order under `cfg.ordered` and in completion order otherwise.
+/// Runs the FASTQ workflow: sequential when `cfg.threads <= 1`; otherwise
+/// records render on a rayon pool and drain through `run_parallel`, in input
+/// order under `cfg.ordered` and in completion order otherwise.
 pub fn run_fastq<W, I>(
     records: I,
     writer: &mut W,
@@ -196,7 +198,8 @@ mod tests {
             cutoff: 10,
             window: 1,
         });
-        // good(3) bad(1) good(3): I I I # I I I  -> two segments (0,3),(4,7)
+        // Three good, one bad, three good (`III#III`) gives two segments, (0,3)
+        // and (4,7).
         let phred: Vec<u8> = b"III#III".iter().map(|&b| b - 33).collect();
         let recs = vec![Ok(rec("r1", b"AAATAAA", phred))];
         let mut out = Vec::new();
@@ -231,10 +234,10 @@ mod tests {
         assert_eq!((stats.input_reads, stats.output_reads), (1, 0));
     }
 
+    /// One produced segment rejected by length counts as all-filtered, not
+    /// trimmed-to-nothing.
     #[test]
     fn too_short_segment_bumps_segments_dropped_short_counter() {
-        // One produced segment rejected by length counts as all-filtered, not
-        // trimmed-to-nothing.
         let mut cfg = test_cfg(1);
         cfg.filter.min_length = 10;
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
@@ -252,9 +255,9 @@ mod tests {
         );
     }
 
+    /// A crop that removes the complete read produces no segments.
     #[test]
     fn trimmed_to_nothing_bumps_reads_trimmed_to_nothing_counter() {
-        // A crop that removes the complete read produces no segments.
         let mut cfg = test_cfg(1);
         cfg.trim.head = 10;
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40; 4]))];
@@ -284,7 +287,7 @@ mod tests {
         phred.extend(std::iter::repeat_n(40u8, 6));
         assert!(
             filter::check(b"AAAAAAAAAA", &phred, &cfg.filter).is_some(),
-            "the complete input read must fail the quality filter"
+            "The complete input read must fail the quality filter"
         );
         let recs = vec![Ok(rec("r1", b"AAAAAAAAAA", phred))];
         let mut out = Vec::new();
@@ -303,20 +306,19 @@ mod tests {
         assert_eq!(stats.segments_dropped_low_qual, 0);
     }
 
-    /// An interior adapter splits a read
-    /// into a long insert (survives length filtering) and a short insert
-    /// (rejected `TooShort`). The survivor keeps its PRODUCED index: it
-    /// is named `_segment_1` (not renamed to look unsplit), even
-    /// though its sibling `_segment_2` never made it to output. A lone
-    /// suffix with a gap correctly signals "this read was split".
+    /// An interior adapter splits a read into a long insert (survives length
+    /// filtering) and a short insert (rejected `TooShort`). The survivor keeps
+    /// its produced index: it is named `_segment_1`, not renamed to look
+    /// unsplit, although its sibling `_segment_2` is not written. A lone suffix
+    /// with a gap signals that the read was split.
     #[test]
     fn split_produces_long_survivor_and_short_segment_drop() {
         use crate::adapter::{Adapter, AdapterConfig, End};
 
-        let adapter = b"GGGGTTTTGGGGTTTT"; // 16 bp, no A/C so it can't match the flanks
-        let mut seq = vec![b'A'; 24]; // long flank -> survives length filter
+        let adapter = b"GGGGTTTTGGGGTTTT"; // 16 bp, no A/C, so it cannot match the flanks
+        let mut seq = vec![b'A'; 24]; // long flank, survives the length filter
         seq.extend_from_slice(adapter);
-        seq.extend_from_slice(&[b'C'; 4]); // short flank -> TooShort
+        seq.extend_from_slice(&[b'C'; 4]); // short flank, TooShort
         let phred = vec![40u8; seq.len()];
 
         let mut cfg = test_cfg(1);
@@ -328,9 +330,9 @@ mod tests {
                 end: End::Both,
             }],
             error_rate: 0.1,
-            // end_size=1: both flanks (distance 24 and 4 from the match)
-            // sit outside end_size, so the adapter classifies as interior
-            // and the read splits rather than being terminal-trimmed.
+            // With `end_size` 1, both flanks (24 and 4 bases from the match)
+            // sit outside the end zone, so the adapter is interior and the
+            // read splits rather than being terminal-trimmed.
             end_size: 1,
             split: true,
             candidate_index: std::sync::OnceLock::new(),
@@ -340,10 +342,10 @@ mod tests {
         let counters = Arc::new(Counters::default());
         let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg, &counters).unwrap();
 
-        assert_eq!(stats.output_reads, 1, "only the long flank survives");
+        assert_eq!(stats.output_reads, 1, "Only the long flank survives");
         assert_eq!(
             stats.segments_dropped_short, 1,
-            "the short flank is dropped"
+            "The short flank is dropped"
         );
         assert_eq!(
             counters
@@ -356,18 +358,17 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(
             s.starts_with("@r1_segment_1\n"),
-            "survivor keeps its PRODUCED index (1 of 2), not renamed unsplit: {s:?}"
+            "Survivor keeps its produced index (1 of 2): {s:?}"
         );
         assert!(
             !s.contains("_segment_2"),
-            "the dropped short segment must not appear in output: {s:?}"
+            "The dropped short segment must not appear in output: {s:?}"
         );
     }
 
-    /// An empty input read produces no trim
-    /// intervals at all, so it bumps the read-level `reads_trimmed_to_nothing`
-    /// counter with NO segment-level drop (the per-segment filter loop never
-    /// runs, since there is nothing to iterate).
+    /// An empty input read produces no trim intervals, so it bumps the
+    /// read-level `reads_trimmed_to_nothing` counter with no segment-level
+    /// drop: the per-segment filter loop never runs.
     #[test]
     fn empty_read_bumps_reads_trimmed_to_nothing_with_no_segment_drop() {
         let cfg = test_cfg(1);
@@ -394,9 +395,10 @@ mod tests {
             cfg.trim.quality = Some(QualityOp::TrimQual(20));
             cfg
         };
-        // Owned records (ReadRecord: Clone); wrap in Ok at iteration time so each run
-        // gets a fresh Send iterator. anyhow::Error is not Clone, so a
-        // Vec<Result<..>> cannot be cloned; clone the Vec<ReadRecord> and re-wrap instead.
+        // Owned records (`ReadRecord: Clone`), wrapped in `Ok` at iteration time
+        // so each run gets a fresh `Send` iterator. `anyhow::Error` is not
+        // `Clone`, so a `Vec<Result<..>>` cannot be cloned; the `Vec<ReadRecord>`
+        // is cloned and re-wrapped instead.
         let recs: Vec<ReadRecord> = (0..500)
             .map(|i| rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10]))
             .collect();
@@ -453,7 +455,8 @@ mod tests {
         }
 
         let cfg = test_cfg(4);
-        // Exceed the bounded channel capacity before the writer fails.
+        // Enough records to exceed the bounded channel capacity before the
+        // writer fails.
         let recs: Vec<ReadRecord> = (0..2000)
             .map(|i| rec(&format!("r{i}"), b"ACGTACGTAC", vec![40; 10]))
             .collect();
@@ -469,7 +472,7 @@ mod tests {
         );
         assert!(
             res.is_err(),
-            "write error must surface as Err, and must not hang"
+            "Write error must surface as Err and must not hang"
         );
     }
 
@@ -487,7 +490,7 @@ mod tests {
         let res = run_fastq(recs, &mut out, &cfg, &Arc::new(Counters::default()));
         assert!(
             res.is_err(),
-            "a malformed record must not be silently dropped on the parallel path"
+            "A malformed record must not be dropped on the parallel path"
         );
     }
 }

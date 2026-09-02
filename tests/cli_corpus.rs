@@ -1,3 +1,7 @@
+//! Corpus-level CLI checks: a synthetic read set carrying mods, kinetics, moves,
+//! and adapters, run through every input and output format combination and
+//! compared against an independent model of the expected output.
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
@@ -14,83 +18,134 @@ use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 
+/// Number of reads in the corpus.
 const READS: usize = 1024;
+/// The 16-bp G/T-only adapter planted at read ends and interiors.
 const ADAPTER: &[u8] = b"GGGGTTTTGGGGTTTT";
 
+/// One synthetic input read with its optional tags and planted adapter.
 #[derive(Debug, Clone)]
 struct SourceRead {
+    /// Read name.
     id: String,
+    /// Bases, including any planted adapter.
     seq: Vec<u8>,
+    /// Raw Phred qualities, one per base.
     qual: Vec<u8>,
+    /// Read group, when tagged.
     rg: Option<String>,
+    /// `C+m` calls, when tagged.
     mods: Option<ModFixture>,
+    /// Per-base `ip` kinetics, when tagged.
     ip: Option<Vec<u8>>,
+    /// Whether the read carries `mv`, `ts`, and `ns`.
     moves: bool,
+    /// The `ts` value when `moves` is set.
     ts: i32,
+    /// Where the adapter was planted, if at all.
     adapter: Option<AdapterCase>,
 }
 
+/// `C+m` calls at absolute positions with their ML probabilities.
 #[derive(Debug, Clone)]
 struct ModFixture {
+    /// Absolute read positions of the modified C bases.
     abs: Vec<usize>,
+    /// ML byte per call.
     probs: Vec<u8>,
 }
 
+/// Where `ADAPTER` was planted in a read.
 #[derive(Debug, Clone, Copy)]
 enum AdapterCase {
+    /// Prepended to the read.
     FivePrime,
+    /// Appended to the read.
     ThreePrime,
+    /// Spliced in at `start`.
     Interior { start: usize },
 }
 
+/// The quality-trimming operation a run applies.
 #[derive(Debug, Clone, Copy)]
 enum QualityOp {
+    /// No quality trimming.
     None,
+    /// `--qual-trim` at the cutoff.
     Trim(u8),
+    /// `--qual-split` at the cutoff with the window.
     Split { cutoff: u8, window: usize },
 }
 
+/// The run settings the expected-output model reproduces.
 #[derive(Debug, Clone, Copy)]
 struct ExpectCfg {
+    /// `--head-crop`.
     head: usize,
+    /// `--tail-crop`.
     tail: usize,
+    /// `--min-length`.
     min_len: usize,
+    /// `--max-length`, or `usize::MAX`.
     max_len: usize,
+    /// `--min-qual`.
     min_qual: f64,
+    /// `--min-gc`.
     min_gc: Option<f64>,
+    /// `--max-gc`.
     max_gc: Option<f64>,
+    /// The quality-trimming operation.
     quality: QualityOp,
+    /// Whether `ADAPTER` is trimmed.
     adapters: bool,
 }
 
+/// One FASTQ record as read back, with the full header line.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct FastqRecord {
+    /// Header without the leading `@`, including any tab-separated tags.
     head: String,
+    /// Bases.
     seq: Vec<u8>,
+    /// Raw Phred qualities.
     qual: Vec<u8>,
 }
 
+/// One BAM record as read back, with the tags under test.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct BamRecord {
+    /// Read name.
     name: String,
+    /// Bases.
     seq: Vec<u8>,
+    /// Raw Phred qualities.
     qual: Vec<u8>,
+    /// `RG` tag.
     rg: Option<String>,
+    /// `MM` tag text.
     mm: Option<String>,
+    /// `ML` tag bytes.
     ml: Option<Vec<u8>>,
+    /// `MN` tag.
     mn: Option<i32>,
+    /// `ip` tag bytes.
     ip: Option<Vec<u8>>,
+    /// `mv` move table.
     mv: Option<Vec<i8>>,
+    /// `ts` tag.
     ts: Option<i64>,
+    /// `ns` tag.
     ns: Option<i64>,
 }
 
+/// The binary with `WHITTLE_LOG` cleared.
 fn whittle() -> Command {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
     cmd
 }
 
+/// A deterministic base for position `pos` of read `read_idx` (splitmix64 mix).
 fn splitmix_base(read_idx: usize, pos: usize) -> u8 {
     let mut z = 0x9E37_79B9_7F4A_7C15u64
         .wrapping_add(read_idx as u64)
@@ -101,6 +156,8 @@ fn splitmix_base(read_idx: usize, pos: usize) -> u8 {
     b"ACGT"[(z & 0b11) as usize]
 }
 
+/// The bases of read `i`: two periodic low-complexity patterns and otherwise a
+/// splitmix64 background.
 fn build_seq(i: usize, len: usize) -> Vec<u8> {
     match i % 16 {
         0 => (0..len)
@@ -113,6 +170,7 @@ fn build_seq(i: usize, len: usize) -> Vec<u8> {
     }
 }
 
+/// Plants `ADAPTER` at the 5' end, 3' end, or interior of every 32nd read.
 fn plant_adapter(i: usize, mut seq: Vec<u8>) -> (Vec<u8>, Option<AdapterCase>) {
     match i % 32 {
         8 => {
@@ -133,6 +191,8 @@ fn plant_adapter(i: usize, mut seq: Vec<u8>) -> (Vec<u8>, Option<AdapterCase>) {
     }
 }
 
+/// The qualities of read `i`: Q35 throughout, with low-quality reads, ends, or
+/// interior runs on a fixed cycle.
 fn build_qual(i: usize, len: usize) -> Vec<u8> {
     let mut qual = vec![35u8; len];
     match i % 16 {
@@ -158,6 +218,7 @@ fn build_qual(i: usize, len: usize) -> Vec<u8> {
     qual
 }
 
+/// Absolute positions of every C in `seq`.
 fn c_positions(seq: &[u8]) -> Vec<usize> {
     seq.iter()
         .enumerate()
@@ -166,6 +227,8 @@ fn c_positions(seq: &[u8]) -> Vec<usize> {
         .collect()
 }
 
+/// Three `C+m` calls (first, middle, last C) on every third read with enough C
+/// bases.
 fn build_mod_fixture(i: usize, seq: &[u8]) -> Option<ModFixture> {
     if !i.is_multiple_of(3) {
         return None;
@@ -185,6 +248,7 @@ fn build_mod_fixture(i: usize, seq: &[u8]) -> Option<ModFixture> {
     })
 }
 
+/// The full synthetic corpus.
 fn corpus() -> Vec<SourceRead> {
     (0..READS)
         .map(|i| {
@@ -208,6 +272,7 @@ fn corpus() -> Vec<SourceRead> {
         .collect()
 }
 
+/// The delta-encoded `MM` text for a source read's calls, if any.
 fn mod_mm_for_source(read: &SourceRead) -> Option<String> {
     let mods = read.mods.as_ref()?;
     let cs = c_positions(&read.seq);
@@ -217,7 +282,7 @@ fn mod_mm_for_source(read: &SourceRead) -> Option<String> {
         let occ = cs
             .iter()
             .position(|&p| p == abs)
-            .expect("fixture mod must land on a C") as isize;
+            .expect("Fixture mod lands on a C") as isize;
         let delta = occ - prev - 1;
         mm.push_str(&format!(",{delta}"));
         prev = occ;
@@ -226,6 +291,7 @@ fn mod_mm_for_source(read: &SourceRead) -> Option<String> {
     Some(mm)
 }
 
+/// Writes the corpus as gzip FASTQ.
 fn write_fastq_gz(path: &Path, reads: &[SourceRead]) {
     let mut enc = GzEncoder::new(std::fs::File::create(path).unwrap(), Compression::default());
     for read in reads {
@@ -241,6 +307,7 @@ fn write_fastq_gz(path: &Path, reads: &[SourceRead]) {
     enc.finish().unwrap();
 }
 
+/// Writes the corpus as an unaligned BAM with every tagged field populated.
 fn write_bam(path: &Path, reads: &[SourceRead]) {
     let header = sam::Header::default();
     let mut writer = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -294,6 +361,8 @@ fn write_bam(path: &Path, reads: &[SourceRead]) {
     writer.try_finish().unwrap();
 }
 
+/// The `--qual-trim` model: the window left after trimming both ends below
+/// `cutoff`, or nothing.
 fn trim_edge(qual: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     let mut start = 0usize;
     while start < qual.len() && qual[start] < cutoff {
@@ -310,6 +379,8 @@ fn trim_edge(qual: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     }
 }
 
+/// The `--qual-split` model: segments separated by low-quality runs of at least
+/// `window` bases.
 fn split_low_quality(qual: &[u8], cutoff: u8, window: usize) -> Vec<(usize, usize)> {
     let window = window.max(1);
     let mut out = Vec::new();
@@ -343,6 +414,8 @@ fn split_low_quality(qual: &[u8], cutoff: u8, window: usize) -> Vec<(usize, usiz
     out
 }
 
+/// The adapter-trimming model: the windows left in `[start, end)` after the
+/// planted adapter is removed.
 fn adapter_windows(read: &SourceRead, start: usize, end: usize) -> Vec<(usize, usize)> {
     let Some(adapter) = read.adapter else {
         return vec![(start, end)];
@@ -367,6 +440,7 @@ fn adapter_windows(read: &SourceRead, start: usize, end: usize) -> Vec<(usize, u
     }
 }
 
+/// Every segment a run under `cfg` produces for `read`, before filtering.
 fn produced_windows(read: &SourceRead, cfg: ExpectCfg) -> Vec<(usize, usize)> {
     let start = cfg.head.min(read.seq.len());
     let end = read.seq.len().saturating_sub(cfg.tail).max(start);
@@ -398,6 +472,7 @@ fn produced_windows(read: &SourceRead, cfg: ExpectCfg) -> Vec<(usize, usize)> {
     out
 }
 
+/// The error-probability mean quality of `qual`.
 fn mean_prob_q(qual: &[u8]) -> f64 {
     if qual.is_empty() {
         return 0.0;
@@ -409,6 +484,7 @@ fn mean_prob_q(qual: &[u8]) -> f64 {
     (sum / qual.len() as f64).log10() * -10.0
 }
 
+/// The GC fraction of `seq`.
 fn gc_fraction(seq: &[u8]) -> f64 {
     if seq.is_empty() {
         return 0.0;
@@ -420,6 +496,7 @@ fn gc_fraction(seq: &[u8]) -> f64 {
     gc as f64 / seq.len() as f64
 }
 
+/// The post-trim filter model for one segment.
 fn passes(seq: &[u8], qual: &[u8], cfg: ExpectCfg) -> bool {
     if seq.is_empty() || seq.len() < cfg.min_len || seq.len() > cfg.max_len {
         return false;
@@ -440,6 +517,8 @@ fn passes(seq: &[u8], qual: &[u8], cfg: ExpectCfg) -> bool {
     true
 }
 
+/// The output record name: `{id}_segment_{n}` when the read produced several
+/// segments, else `id`.
 fn output_name(id: &str, total: usize, idx: usize) -> String {
     if total > 1 {
         format!("{id}_segment_{}", idx + 1)
@@ -448,6 +527,8 @@ fn output_name(id: &str, total: usize, idx: usize) -> String {
     }
 }
 
+/// The (`MM`, `ML`, `MN`) a segment `[start, end)` of `read` carries, or `None`
+/// when no call survives.
 fn expected_mods(read: &SourceRead, start: usize, end: usize) -> Option<(String, Vec<u8>, i32)> {
     let mods = read.mods.as_ref()?;
     let window_cs: Vec<_> = c_positions(&read.seq)
@@ -464,8 +545,7 @@ fn expected_mods(read: &SourceRead, start: usize, end: usize) -> Option<(String,
         let widx = window_cs
             .iter()
             .position(|&p| p == abs)
-            .expect("surviving mod must land on a C in the output window")
-            as isize;
+            .expect("Surviving mod lands on a C in the output window") as isize;
         deltas.push((widx - prev - 1) as usize);
         probs.push(prob);
         prev = widx;
@@ -481,6 +561,7 @@ fn expected_mods(read: &SourceRead, start: usize, end: usize) -> Option<(String,
     Some((mm, probs, (end - start) as i32))
 }
 
+/// The sorted plain-FASTQ output expected for `reads` under `cfg`.
 fn expected_fastq(reads: &[SourceRead], cfg: ExpectCfg) -> Vec<FastqRecord> {
     let mut out = Vec::new();
     for read in reads {
@@ -500,6 +581,7 @@ fn expected_fastq(reads: &[SourceRead], cfg: ExpectCfg) -> Vec<FastqRecord> {
     out
 }
 
+/// The sorted BAM-to-FASTQ output expected under `--fastq-tags MM,ML,RG`.
 fn expected_fastq_from_bam_with_tags(reads: &[SourceRead], cfg: ExpectCfg) -> Vec<FastqRecord> {
     let mut out = Vec::new();
     for read in reads {
@@ -531,6 +613,8 @@ fn expected_fastq_from_bam_with_tags(reads: &[SourceRead], cfg: ExpectCfg) -> Ve
     out
 }
 
+/// The sorted BAM output expected for `reads` under `cfg`, with or without
+/// `--update-moves`.
 fn expected_bam(reads: &[SourceRead], cfg: ExpectCfg, update_moves: bool) -> Vec<BamRecord> {
     let mut out = Vec::new();
     for read in reads {
@@ -591,6 +675,7 @@ fn expected_bam(reads: &[SourceRead], cfg: ExpectCfg, update_moves: bool) -> Vec
     out
 }
 
+/// Reads a plain FASTQ file back as sorted records.
 fn read_fastq(path: &Path) -> Vec<FastqRecord> {
     let text = std::fs::read_to_string(path).unwrap();
     let mut lines = text.lines();
@@ -614,6 +699,7 @@ fn read_fastq(path: &Path) -> Vec<FastqRecord> {
     out
 }
 
+/// A string-typed aux tag, if present.
 fn aux_string(rec: &RecordBuf, tag: Tag) -> Option<String> {
     match rec.data().get(&tag) {
         Some(Value::String(s)) => Some(String::from_utf8(s.to_vec()).unwrap()),
@@ -621,6 +707,7 @@ fn aux_string(rec: &RecordBuf, tag: Tag) -> Option<String> {
     }
 }
 
+/// An integer aux tag of any width, if present.
 fn aux_i64(rec: &RecordBuf, tag: Tag) -> Option<i64> {
     match rec.data().get(&tag) {
         Some(Value::Int8(n)) => Some(i64::from(*n)),
@@ -633,6 +720,7 @@ fn aux_i64(rec: &RecordBuf, tag: Tag) -> Option<i64> {
     }
 }
 
+/// Reads a BAM file back as sorted records with the tags under test.
 fn read_bam(path: &Path) -> Vec<BamRecord> {
     let mut reader = bam::io::Reader::new(std::fs::File::open(path).unwrap());
     let header = reader.read_header().unwrap();
@@ -674,6 +762,7 @@ fn read_bam(path: &Path) -> Vec<BamRecord> {
     out
 }
 
+/// Asserts record-list equality, reporting the first mismatch and both counts.
 fn assert_same<T>(label: &str, actual: &[T], expected: &[T])
 where
     T: std::fmt::Debug + PartialEq,
@@ -695,6 +784,7 @@ where
     );
 }
 
+/// Fixed crops with length, quality, and GC filters.
 fn fixed_crop_filter_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 5,
@@ -709,6 +799,7 @@ fn fixed_crop_filter_cfg() -> ExpectCfg {
     }
 }
 
+/// `--qual-trim 20 -l 50`.
 fn qual_trim_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 0,
@@ -723,6 +814,7 @@ fn qual_trim_cfg() -> ExpectCfg {
     }
 }
 
+/// `--qual-split 20 --qual-split-window 3 -l 20`.
 fn qual_split_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 0,
@@ -740,6 +832,7 @@ fn qual_split_cfg() -> ExpectCfg {
     }
 }
 
+/// `-H 5 -T 7` with no filters.
 fn head5_tail7_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 5,
@@ -754,6 +847,7 @@ fn head5_tail7_cfg() -> ExpectCfg {
     }
 }
 
+/// Exact adapter trimming with `-l 20`.
 fn adapter_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 0,
@@ -768,6 +862,7 @@ fn adapter_cfg() -> ExpectCfg {
     }
 }
 
+/// Writes the corpus as both gzip FASTQ and BAM and returns it with both paths.
 fn write_inputs(dir: &Path) -> (Vec<SourceRead>, std::path::PathBuf, std::path::PathBuf) {
     let reads = corpus();
     let fastq_gz = dir.join("reads.fastq.gz");
@@ -777,6 +872,7 @@ fn write_inputs(dir: &Path) -> (Vec<SourceRead>, std::path::PathBuf, std::path::
     (reads, fastq_gz, bam)
 }
 
+/// Writes `ADAPTER` as a one-entry FASTA and returns its path.
 fn write_adapter_fasta(dir: &Path) -> std::path::PathBuf {
     let path = dir.join("adapter.fa");
     std::fs::write(
@@ -898,7 +994,7 @@ fn fastq_gz_corpus_adapter_trim_and_split_matches_expected() {
     let expected = expected_fastq(&reads, adapter_cfg());
     assert!(
         actual.iter().any(|r| r.head.ends_with("_segment_2")),
-        "adapter fixture must exercise interior split suffixes"
+        "Adapter fixture exercises interior split suffixes"
     );
     assert_same("FASTQ.gz adapter trim/split", &actual, &expected);
 }
@@ -983,7 +1079,7 @@ fn bam_corpus_adapter_trim_and_split_matches_expected() {
     let expected = expected_bam(&reads, adapter_cfg(), false);
     assert!(
         actual.iter().any(|r| r.name.ends_with("_segment_2")),
-        "adapter fixture must exercise interior split suffixes"
+        "Adapter fixture exercises interior split suffixes"
     );
     assert_same("BAM adapter trim/split", &actual, &expected);
 }
@@ -1065,7 +1161,7 @@ fn bam_corpus_update_moves_matches_expected() {
     for (name, expected) in expected_by_name {
         let actual = actual_by_name
             .get(&name)
-            .unwrap_or_else(|| panic!("missing update-moves output record {name}"));
+            .unwrap_or_else(|| panic!("Missing update-moves output record {name}"));
         assert_eq!(
             (&actual.seq, &actual.qual, &actual.mv, actual.ts, actual.ns),
             (
@@ -1075,7 +1171,7 @@ fn bam_corpus_update_moves_matches_expected() {
                 expected.ts,
                 expected.ns
             ),
-            "signal tags mismatch for {name}"
+            "Signal tags mismatch for {name}"
         );
     }
 }

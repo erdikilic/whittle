@@ -1,3 +1,5 @@
+//! Base-modification (`MM`/`ML`) parsing, windowing and serialization.
+
 pub mod parse;
 pub mod reconstruct;
 pub mod serialize;
@@ -6,33 +8,46 @@ pub use parse::{MalformedMm, expected_ml_len, parse, parse_checked};
 pub use reconstruct::reconstruct;
 pub use serialize::serialize;
 
+/// One modification code in an `MM` group: a single-letter code or a numeric
+/// ChEBI id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModCode {
+    /// Single-letter code, e.g. `m`.
     Char(u8),
+    /// Numeric ChEBI identifier.
     Chebi(u32),
 }
 
-/// One MM group, e.g. `C+m?,5,12` with its slice of ML bytes.
-/// `ml.len() == deltas.len() * codes.len()` (position-major, see plan header).
+/// One `MM` group, e.g. `C+m?,5,12`, with its slice of `ML` bytes.
+/// `ml.len() == deltas.len() * codes.len()`: ML bytes are position-major, one
+/// byte per code for each modified position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MmGroup {
+    /// Fundamental base as written in `MM` (`C`, `A`, `N`, ...).
     pub base: u8,
+    /// Strand character, `+` or `-`.
     pub strand: u8,
+    /// Modification codes for this group.
     pub codes: Vec<ModCode>,
+    /// Optional status flag, `?` or `.`.
     pub status: Option<u8>,
+    /// Skip-counts between successive modified occurrences of the counting base.
     pub deltas: Vec<usize>,
+    /// `ML` probability bytes for this group, position-major.
     pub ml: Vec<u8>,
 }
 
+/// The parsed `MM`/`ML` content of one record.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Mods {
+    /// Groups in source order.
     pub groups: Vec<MmGroup>,
 }
 
-/// The SEQ base whose occurrences an MM group's skip-counts index: the
-/// fundamental base as written in MM, with `U` folded to `T`.
+/// Returns the SEQ base whose occurrences an `MM` group's skip-counts index:
+/// the fundamental base as written in `MM`, with `U` folded to `T`.
 ///
-/// The strand is deliberately NOT applied. htslib counts the literal base for
+/// The strand is not applied. htslib counts the literal base for
 /// both `+` and `-` groups: in `sam_mods.c` the parsed base goes into
 /// `canonical[]` while the strand is stored separately, and the only
 /// complementing (`seqi_rc`) is gated on the record's `BAM_FREVERSE` flag, which
@@ -45,8 +60,8 @@ pub fn counting_base(base: u8) -> u8 {
     }
 }
 
-/// Whether `seq_base` is one of the bases a group with counting base `cbase`
-/// indexes. `N` in MM means "any base", matching every position in SEQ.
+/// Reports whether `seq_base` is a base that a group with counting base `cbase`
+/// indexes. `N` in `MM` means any base and matches every position in SEQ.
 pub fn counts(seq_base: u8, cbase: u8) -> bool {
     cbase == b'N' || seq_base.to_ascii_uppercase() == cbase
 }
@@ -56,7 +71,7 @@ mod tests {
     use super::*;
 
     /// Pinned against htslib: `MM:Z:G-m,0,2;` decodes to G positions, not C.
-    /// Complementing here silently relocated every reverse-strand call.
+    /// Complementing the base would relocate every reverse-strand call.
     #[test]
     fn minus_strand_counts_the_literal_base() {
         assert_eq!(counting_base(b'G'), b'G');

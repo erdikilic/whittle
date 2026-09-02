@@ -1,8 +1,10 @@
-// End-to-end BAM→FASTQ/.gz conversion over the compiled binary. Builds a small
-// uBAM fixture (a plain read, and a read with RG + MM/ML/MN mods), converts it,
-// and checks header tags. The load-bearing correctness check is `cross_check`:
-// the FASTQ-header MM/ML/MN must equal what the BAM→BAM path writes (which is
-// itself htslib-oracle-verified by tests/bam_mods_oracle.rs).
+//! End-to-end BAM-to-FASTQ and BAM-to-FASTQ.gz conversion over the compiled
+//! binary. Builds a small uBAM fixture (a plain read, and a read with `RG` and
+//! `MM`/`ML`/`MN` mods), converts it, and checks header tags. The load-bearing
+//! check is `cross_check_fastq_header_mods_equal_bam_path`: the FASTQ-header
+//! `MM`/`ML`/`MN` equals what the BAM-to-BAM path writes, which
+//! `tests/bam_mods_oracle.rs` verifies against htslib.
+
 use std::io::Read;
 use std::path::Path;
 
@@ -16,6 +18,7 @@ use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 
+/// Writes the two-read uBAM fixture: `read1` plain, `read2` with `RG` and mods.
 fn write_fixture(path: &Path) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -29,7 +32,7 @@ fn write_fixture(path: &Path) {
     *r1.quality_scores_mut() = vec![40; 10].into();
     w.write_alignment_record(&header, &r1).unwrap();
 
-    // read2: RG + mods. C at seq idx 0,1,3,4,5,7; MM occ 0,2,3 -> abs 0,3,4; ML [10,20,30].
+    // read2: RG and mods. C at seq idx 0,1,3,4,5,7; MM occ 0,2,3 -> abs 0,3,4; ML [10,20,30].
     let mut r2 = RecordBuf::default();
     *r2.flags_mut() = Flags::UNMAPPED;
     *r2.name_mut() = Some(b"read2".into());
@@ -51,6 +54,7 @@ fn write_fixture(path: &Path) {
     w.try_finish().unwrap();
 }
 
+/// Runs the binary with `args` plus `-i input -o output` and asserts success.
 fn run(args: &[&str], input: &Path, output: &Path) {
     Command::cargo_bin("whittle")
         .unwrap()
@@ -64,11 +68,12 @@ fn run(args: &[&str], input: &Path, output: &Path) {
         .success();
 }
 
+/// The `@read2` header line of a FASTQ text.
 fn read2_header_line(fastq: &str) -> &str {
     fastq
         .lines()
         .find(|l| l.starts_with("@read2"))
-        .expect("no read2 header in output")
+        .expect("No read2 header in output")
 }
 
 #[test]
@@ -83,7 +88,7 @@ fn bam_to_fastq_all_carries_rg_and_mods() {
     let s = std::fs::read_to_string(&out).unwrap();
     // read1: plain, no tags.
     assert!(s.contains("@read1\nGTACGTAC\n+\n"), "read1 wrong: {s:?}");
-    // read2: RG verbatim + reconstructed mod block; window [2,8) -> "C+m,0,0;" ML 20,30 MN 6.
+    // read2: RG verbatim and the reconstructed mod block; window [2,8) -> "C+m,0,0;" ML 20,30 MN 6.
     assert_eq!(
         read2_header_line(&s),
         "@read2\tRG:Z:grp1\tMM:Z:C+m,0,0;\tML:B:C,20,30\tMN:i:6"
@@ -112,10 +117,7 @@ fn bam_to_fastq_none_is_plain() {
 
     let s = std::fs::read_to_string(&out).unwrap();
     assert_eq!(read2_header_line(&s), "@read2"); // no tags
-    assert!(
-        !s.contains("MM:Z"),
-        "mods must be dropped under none: {s:?}"
-    );
+    assert!(!s.contains("MM:Z"), "Mods are dropped under none: {s:?}");
 }
 
 #[test]
@@ -158,7 +160,7 @@ fn bam_to_fastq_gz_roundtrips() {
         &out,
     );
 
-    // decode the gz and compare to the plain conversion.
+    // Decode the gz output and compare it to the plain conversion.
     let mut gz = flate2::read::MultiGzDecoder::new(std::fs::File::open(&out).unwrap());
     let mut decoded = String::new();
     gz.read_to_string(&mut decoded).unwrap();
@@ -168,10 +170,11 @@ fn bam_to_fastq_gz_roundtrips() {
     );
 }
 
+/// The FASTQ-header `MM`/`ML`/`MN` is byte-identical to the BAM-to-BAM
+/// output's, transitively inheriting the htslib oracle guarantee from
+/// `tests/bam_mods_oracle.rs`.
 #[test]
 fn cross_check_fastq_header_mods_equal_bam_path() {
-    // The FASTQ-header MM/ML/MN must be byte-identical to the BAM→BAM output's,
-    // transitively inheriting the htslib oracle guarantee from bam_mods_oracle.rs.
     let dir = tempfile::tempdir().unwrap();
     let inp = dir.path().join("in.bam");
     let fq = dir.path().join("out.fastq");
@@ -190,15 +193,15 @@ fn cross_check_fastq_header_mods_equal_bam_path() {
         if AsRef::<[u8]>::as_ref(buf.name().unwrap()) == b"read2" {
             let mm = match buf.data().get(&Tag::BASE_MODIFICATIONS) {
                 Some(Value::String(s)) => s.to_vec(),
-                other => panic!("no MM in bam: {other:?}"),
+                other => panic!("No MM in the BAM output: {other:?}"),
             };
             let ml = match buf.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES) {
                 Some(Value::Array(Array::UInt8(v))) => v.clone(),
-                other => panic!("no ML in bam: {other:?}"),
+                other => panic!("No ML in the BAM output: {other:?}"),
             };
             let mn = match buf.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH) {
                 Some(Value::Int32(n)) => *n,
-                other => panic!("no MN in bam: {other:?}"),
+                other => panic!("No MN in the BAM output: {other:?}"),
             };
             // Render the same SAM-text block the FASTQ path would.
             let mut expect = format!("MM:Z:{}", String::from_utf8(mm).unwrap());
@@ -210,21 +213,20 @@ fn cross_check_fastq_header_mods_equal_bam_path() {
             mm_bam = Some(expect);
         }
     }
-    let mm_bam = mm_bam.expect("read2 missing from bam output");
+    let mm_bam = mm_bam.expect("Read2 missing from the BAM output");
 
     let s = std::fs::read_to_string(&fq).unwrap();
     let header_line = read2_header_line(&s);
     assert!(
         header_line.ends_with(&mm_bam),
-        "fastq header mods {header_line:?} must end with bam-path mods {mm_bam:?}"
+        "FASTQ header mods {header_line:?} end with the BAM-path mods {mm_bam:?}"
     );
 }
 
+/// The single-file BAM-to-FASTQ path is covered above; this test exercises
+/// `run_folder`'s BAM-family-to-FASTQ arm by pointing `-i` at a directory.
 #[test]
 fn folder_dispatch_bam_to_fastq() {
-    // The single-file BAM->FASTQ path is covered above; this exercises the
-    // FOLDER dispatch arm (`run_folder`'s Bam-family -> FASTQ branch in
-    // src/lib.rs) by pointing `-i` at a directory instead of a file.
     let dir = tempfile::tempdir().unwrap();
     let sub = dir.path().join("barcode01");
     std::fs::create_dir_all(&sub).unwrap();

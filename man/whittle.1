@@ -17,10 +17,10 @@ Print help (see a summary with \*(Aq\-h\*(Aq)
 Print version information and exit
 .TP
 \fB\-i\fR, \fB\-\-input\fR \fI<INPUT>\fR
-Input FASTQ\-family file, unaligned BAM, or directory. Reads stdin when omitted or given as \-
+Input FASTQ\-family file, unaligned BAM, or directory; \- means stdin. Defaults to stdin
 .TP
 \fB\-o\fR, \fB\-\-output\fR \fI<OUTPUT>\fR
-Output file; the path extension selects its format. Writes stdout when omitted or given as \-
+Output file, whose extension selects the format; \- means stdout. Defaults to stdout
 .TP
 \fB\-\-in\-format\fR \fI<IN_FORMAT>\fR
 Force the input format instead of detecting it from the path or stream
@@ -30,13 +30,13 @@ Force the input format instead of detecting it from the path or stream
 \fIPossible values:\fR
 .RS 14
 .IP \(bu 2
-fastq
+fastq: Plain FASTQ
 .IP \(bu 2
-fastq\-gz
+fastq\-gz: gzip\-compressed FASTQ
 .IP \(bu 2
-fastq\-bgz
+fastq\-bgz: BGZF\-compressed FASTQ
 .IP \(bu 2
-bam
+bam: Unaligned BAM
 .RE
 .TP
 \fB\-\-out\-format\fR \fI<OUT_FORMAT>\fR
@@ -47,13 +47,13 @@ Force the output format instead of selecting it from the output path
 \fIPossible values:\fR
 .RS 14
 .IP \(bu 2
-fastq
+fastq: Plain FASTQ
 .IP \(bu 2
-fastq\-gz
+fastq\-gz: gzip\-compressed FASTQ
 .IP \(bu 2
-fastq\-bgz
+fastq\-bgz: BGZF\-compressed FASTQ
 .IP \(bu 2
-bam
+bam: Unaligned BAM
 .RE
 .TP
 \fB\-t\fR, \fB\-\-threads\fR \fI<THREADS>\fR
@@ -66,7 +66,7 @@ Write records in input order when running with more than one thread. Without it,
 BAM auxiliary tags copied into BAM\-to\-FASTQ headers: all, none, or a list such as MM,ML,RG. Defaults to all
 .TP
 \fB\-c\fR, \fB\-\-compression\-level\fR \fI<COMPRESSION_LEVEL>\fR
-DEFLATE compression level (0\-9) for compressed output: bgzf for BAM and .bgz, gzip for FASTQ.gz. Lower is faster and larger. Ignored for plain FASTQ. Defaults to 4 for gzip FASTQ and 6 for BGZF
+DEFLATE compression level (0\-9) for compressed output: bgzf for BAM and .bgz, gzip for FASTQ.gz. Lower levels are faster and produce larger files. Ignored for plain FASTQ. Defaults to 4 for gzip FASTQ and 6 for BGZF
 .TP
 \fB\-\-summary\-json\fR \fI<PATH>\fR
 Write a machine\-readable JSON run summary (counters plus the resolved settings) to this path. Written even under \-\-quiet
@@ -79,7 +79,7 @@ Increase logging detail: \-v is debug, \-vv is trace (at most two). Overridden b
 Silence progress and info output; warnings and errors still print. Conflicts with \-v and \-\-progress
 .TP
 \fB\-\-progress\fR \fI<PROGRESS>\fR [default: auto]
-How to report progress, independently of the log level: a bar on a terminal and periodic lines otherwise (auto), always one or the other, or none at all while keeping the banner and summary. A bar falls back to lines under \-v or WHITTLE_LOG. Defaults to auto
+Progress reporting, independent of the log level: auto selects a bar on a terminal and periodic lines otherwise; bar and plain force one form; none disables progress and keeps the banner and summary. A bar falls back to lines under \-v or WHITTLE_LOG. Defaults to auto
 .br
 
 .br
@@ -149,11 +149,11 @@ Split at low\-quality runs below Q and keep the surviving segments
 Tolerate low\-quality runs shorter than this many bases when splitting. Requires \-\-qual\-split. Defaults to 1
 .TP
 \fB\-\-update\-moves\fR
-Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp and pi) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM to BAM only
+Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp and pi) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM\-to\-BAM only
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<ADAPTER_FASTA>\fR
-Adapter FASTA (each sequence at least the 11 bp minimum match length). Enables adapter trimming
+Adapter FASTA; each sequence must be at least 11 bp. Enables adapter trimming
 .TP
 \fB\-\-adapter\-preset\fR \fI<ADAPTER_PRESET>\fR [default: none]
 Built\-in ONT adapter catalog. Enables adapter trimming. Defaults to none
@@ -193,7 +193,7 @@ trim: Trim reads with the inferred sequences
 report: Print inferred FASTA to stdout and do not write read output
 .RE
 .TP
-\fB\-\-adapter\-infer\-policy\fR \fI<ADAPTER_INFER_POLICY>\fR
+\fB\-\-adapter\-infer\-policy\fR \fI<ADAPTER_INFER_POLICY>\fR [default: conservative]
 Trust policy for inferred consensuses. Aggressive uses the complete consensus and permits splitting unless ends\-only is set. Defaults to conservative
 .br
 

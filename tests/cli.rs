@@ -1,3 +1,6 @@
+//! CLI behavior over the compiled binary: argument validation, logging modes,
+//! guardrail warnings, and the failure path.
+
 use std::io::Read as _;
 use std::path::Path;
 use std::process::Stdio;
@@ -5,12 +8,15 @@ use std::process::Stdio;
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// The binary with `WHITTLE_LOG` cleared, so the environment does not change
+/// the log mode.
 fn whittle() -> Command {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
     cmd
 }
 
+/// One 20-bp Q40 read.
 const READS: &str = "@r1\nACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIII\n";
 
 #[test]
@@ -82,8 +88,8 @@ fn min_length_filters() {
         .stdout(""); // filtered out
 }
 
-/// Streaming the input while truncating it on `File::create` destroys the data.
-/// The run must fail up front with one `Failed after` line and leave the input
+/// Streaming the input while `File::create` truncates it destroys the data. The
+/// run fails up front with one `Failed after` line and leaves the input
 /// untouched.
 #[test]
 fn same_input_output_file_is_rejected_and_preserves_input() {
@@ -144,10 +150,10 @@ fn out_of_range_gc_bound_errors() {
         .stderr(predicate::str::contains("min-gc"));
 }
 
+/// NaN slips past `min > max` (every NaN comparison is false) and would disable
+/// quality filtering, so it is rejected explicitly.
 #[test]
 fn nan_quality_bound_errors() {
-    // NaN slips past `min > max` (every NaN comparison is false) and would silently
-    // disable quality filtering; it must be rejected explicitly.
     whittle()
         .args(["--min-qual", "nan", "--in-format", "fastq"])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
@@ -164,8 +170,8 @@ enum Expect {
     Warns,
 }
 
-/// Every validation and advisory names the flag it concerns, so a pipeline
-/// author can find the offending argument without reading the source.
+/// Every validation and advisory names the flag it concerns, so the offending
+/// argument is identifiable from the message alone.
 #[test]
 fn every_validation_names_its_flag() {
     use std::io::Write as _;
@@ -334,7 +340,7 @@ fn every_validation_names_its_flag() {
                 p(&dir.path().join("out.bam")),
             ],
             Expect::Fails,
-            "cross-format FASTQ to BAM conversion is not supported",
+            "FASTQ-to-BAM conversion is not supported",
         ),
         (
             vec![
@@ -391,8 +397,9 @@ fn missing_input_error_names_the_path() {
         .stderr(predicate::str::contains("nonexistent.fastq"));
 }
 
-/// An unparseable `WHITTLE_LOG` must not go dark: the level falls back to the
-/// default, the failure line still prints, and the bad directive is named.
+/// An unparseable `WHITTLE_LOG` does not disable logging: the level falls back
+/// to the default, the failure line still prints, and the rejected directive is
+/// named.
 #[test]
 fn invalid_whittle_log_falls_back_and_still_reports_the_failure() {
     let dir = tempfile::tempdir().unwrap();
@@ -465,11 +472,11 @@ fn downstream_closing_the_pipe_exits_quietly() {
     }
 }
 
+/// Two hard links to one inode canonicalize to distinct paths, so only the inode
+/// and device check catches this; otherwise `File::create` truncates the input.
 #[test]
 #[cfg(unix)]
 fn hard_linked_input_output_is_rejected_and_preserves_input() {
-    // Two hard links to one inode canonicalize to distinct paths, so only the
-    // inode+device check catches this. Otherwise File::create truncates the input.
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.fastq");
     let output = dir.path().join("out.fastq");
@@ -493,9 +500,10 @@ fn hard_linked_input_output_is_rejected_and_preserves_input() {
     );
 }
 
+/// A default run prints the `Summary:` line to stderr; `--quiet` drops it and
+/// keeps the reads on stdout.
 #[test]
 fn quiet_suppresses_summary_but_keeps_stdout() {
-    // A minimal FASTQ over stdin; default run prints the "Summary:" line to stderr.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .arg("--quiet")
@@ -535,7 +543,7 @@ fn verbose_shows_phase_timing() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Processing started")); // phase timing line appears at DEBUG
+        .stderr(predicate::str::contains("Processing started")); // the phase timing line appears at DEBUG
 }
 
 #[test]
@@ -548,9 +556,9 @@ fn default_hides_debug() {
         .stderr(predicate::str::contains("Processing started").not());
 }
 
+/// `--quiet` wins even when `WHITTLE_LOG` asks for verbose output.
 #[test]
 fn quiet_beats_whittle_log() {
-    // --quiet must win even when WHITTLE_LOG asks for verbose output.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .env("WHITTLE_LOG", "debug")
@@ -562,9 +570,9 @@ fn quiet_beats_whittle_log() {
         .stderr(predicate::str::contains("Summary:").not());
 }
 
+/// Without `--quiet`, `WHITTLE_LOG` raises the level above the CLI default.
 #[test]
 fn whittle_log_overrides_verbosity_when_not_quiet() {
-    // Without --quiet, WHITTLE_LOG still raises the level above the CLI's default.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .env("WHITTLE_LOG", "debug")
@@ -574,11 +582,11 @@ fn whittle_log_overrides_verbosity_when_not_quiet() {
         .stderr(predicate::str::contains("Processing started"));
 }
 
+/// assert_cmd captures stderr to a pipe (non-TTY), so the run is in line mode
+/// regardless of verbosity. The full startup banner and the `Completed` closer
+/// appear in order.
 #[test]
 fn line_mode_banner_and_closer_appear_in_order() {
-    // assert_cmd captures stderr to a pipe (non-tty), so this always runs in
-    // line mode regardless of verbosity. The full startup banner plus the
-    // Completed closer should appear, in order.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle().write_stdin(input).assert().success().stderr(
         predicate::str::contains("whittle ")
@@ -593,24 +601,25 @@ fn line_mode_banner_and_closer_appear_in_order() {
     );
 }
 
+/// The version and command lines precede the resolved configuration and the
+/// diagnostics.
 #[test]
 fn banner_version_and_command_come_first_in_line_mode() {
-    // Version and command precede resolved configuration and diagnostics.
     let input = "@r1\nACGT\n+\nIIII\n";
     let assert = whittle().write_stdin(input).assert().success();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    let version_pos = stderr.find("whittle ").expect("version line missing");
-    let command_pos = stderr.find("Command:").expect("command line missing");
-    let operation_pos = stderr.find("Trimming").expect("operation line missing");
+    let version_pos = stderr.find("whittle ").expect("Version line present");
+    let command_pos = stderr.find("Command:").expect("Command line present");
+    let operation_pos = stderr.find("Trimming").expect("Operation line present");
     assert!(
         version_pos < command_pos && command_pos < operation_pos,
         "Expected version, then Command:, then the operation line, in order: {stderr:?}"
     );
 }
 
+/// Captured stderr is non-interactive and contains no ANSI escapes.
 #[test]
 fn non_tty_stderr_has_no_ansi_escapes() {
-    // Captured stderr is non-interactive and must contain no ANSI escapes.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .write_stdin(input)
@@ -619,11 +628,11 @@ fn non_tty_stderr_has_no_ansi_escapes() {
         .stderr(predicate::str::contains("\u{1b}").not());
 }
 
+/// Every read fails an unreachable min-qual bound: nothing survives, and the run
+/// succeeds. The all-dropped guardrail WARN fires so the run is distinguishable
+/// from a clean empty-output run.
 #[test]
 fn all_dropped_run_warns() {
-    // Every read fails an unreachable min-qual bound: nothing survives, but
-    // the run itself still succeeds. The all-dropped guardrail WARN must
-    // fire so this doesn't silently look like a clean empty-output run.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .args(["-q", "50", "--in-format", "fastq"])
@@ -632,14 +641,14 @@ fn all_dropped_run_warns() {
         .success()
         .stderr(
             predicate::str::contains("No reads survived")
-                .and(predicate::str::contains("input reads were dropped")),
+                .and(predicate::str::contains("every input read was dropped")),
         );
 }
 
+/// Zero input reads is not an error, and the empty-input guardrail WARN still
+/// fires.
 #[test]
 fn empty_input_warns() {
-    // Zero input reads (not an error) must still surface the empty-input
-    // guardrail WARN rather than a silent, unremarkable "0 in, 0 out" summary.
     whittle()
         .args(["--in-format", "fastq"])
         .write_stdin("")
@@ -671,8 +680,7 @@ fn bam_to_fastq_conversion_phrasing() {
     let inp = dir.path().join("in.bam");
     let out = dir.path().join("o.fastq");
 
-    // Build a minimal one-read uBAM in the tempdir so the test is hermetic
-    // (it must not depend on a fixture outside the repository).
+    // A minimal one-read uBAM built in the tempdir keeps the test hermetic.
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(&inp).unwrap());
     w.write_header(&header).unwrap();

@@ -1,6 +1,7 @@
-// Decode-equivalence tests compare synthetic uBAM input and trimmed output with
-// rust-htslib's independent MM/ML decoder. Comparisons use decoded modification
-// calls because MM permits multiple equivalent encodings.
+//! Decode-equivalence tests compare synthetic uBAM input and trimmed output with
+//! rust-htslib's independent MM/ML decoder. Comparisons use decoded modification
+//! calls because MM permits multiple equivalent encodings.
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -15,12 +16,9 @@ use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use rust_htslib::bam::{self as hts, Read as _};
 
-/// Build a one-read uBAM: seq with C's, C+m mods at chosen positions, ML bytes.
-///
-/// noodles-sam 0.85's `Header::builder()` has no bare `set_header` step that
-/// takes `Default::default()` for the whole header; `Header::default()` (as
-/// already used in `tests/bam_smoke.rs`) is sufficient since the htslib reader
-/// only needs a valid, if minimal, header.
+/// Builds a one-read uBAM: a sequence with C bases, `C+m` calls at chosen
+/// positions, and ML bytes. `Header::default()` is a valid minimal header for
+/// the htslib reader.
 fn write_fixture(path: &Path) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -33,7 +31,7 @@ fn write_fixture(path: &Path) {
     *rec.sequence_mut() = b"ACGGCGGCGGCG".to_vec().into();
     *rec.quality_scores_mut() = vec![40u8; 12].into();
     let data = rec.data_mut();
-    // modify C occurrences 0,2,3 -> deltas 0,1,0 ; ML 3 bytes.
+    // Modified C occurrences 0,2,3 -> deltas 0,1,0; ML has 3 bytes.
     data.insert(
         Tag::BASE_MODIFICATIONS,
         Value::String(b"C+m,0,1,0;".to_vec().into()),
@@ -51,7 +49,8 @@ fn base_char(code: i32) -> char {
     char::from(u8::try_from(code).expect("htslib base codes are ASCII"))
 }
 
-/// Decode (0-based read pos, canonical, modified, strand, qual) with htslib.
+/// Decodes every call as (0-based read position, canonical, modified, strand,
+/// qual) with htslib.
 fn hts_mods(path: &Path) -> Vec<(usize, char, char, i32, i32)> {
     let mut reader = hts::Reader::from_path(path).unwrap();
     let mut out = Vec::new();
@@ -79,7 +78,7 @@ fn trimmed_output_mods_match_oracle() {
     let output = dir.path().join("out.ubam");
     write_fixture(&input);
 
-    // Trim the first 3 bases (head-crop 3) via the library run().
+    // Trim the first 3 bases (head-crop 3) through the library `run`.
     let cfg = whittle::cli::config_for_test(&input, &output, 3, 0);
     let mut h = whittle::obs::ProgressHandle::disabled();
     whittle::run(cfg, &mut h).unwrap();
@@ -98,14 +97,14 @@ fn trimmed_output_mods_match_oracle() {
     b.sort();
     assert_eq!(
         a, b,
-        "trimmed mod set must equal original filtered to [3, len) offset by 3"
+        "Trimmed mod set equals the original filtered to [3, len) and offset by 3"
     );
 }
 
-/// Multi-mod fixture: one read carrying THREE mod groups (`C+m`, `C+h`, `A+a`,
-/// the real dorado shape), with the C at abs 3 modified by BOTH `m` and `h`,
-/// to exercise multiple groups, multiple fundamental bases, AND a same-position
-/// double mod all reconstructed through a head+tail crop.
+/// Multi-mod fixture: one read carrying three mod groups (`C+m`, `C+h`, `A+a`,
+/// the dorado shape), with the C at abs 3 modified by both `m` and `h`, to
+/// exercise multiple groups, multiple fundamental bases, and a same-position
+/// double mod, all reconstructed through a head and tail crop.
 fn write_fixture_multimod(path: &Path) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -114,12 +113,13 @@ fn write_fixture_multimod(path: &Path) {
     let mut rec = RecordBuf::default();
     *rec.flags_mut() = Flags::UNMAPPED;
     *rec.name_mut() = Some(b"read1".into());
-    // seq: C at 0,1,3,4,7,9 ; A at 2,6,8.
+    // C at 0,1,3,4,7,9; A at 2,6,8.
     *rec.sequence_mut() = b"CCACCGACAC".to_vec().into();
     *rec.quality_scores_mut() = vec![40u8; 10].into();
     let data = rec.data_mut();
-    // C+m at C-occ 0,2,5 -> abs 0,3,9 ; C+h at C-occ 2,4 -> abs 3,7 (abs3 shared) ;
-    // A+a at A-occ 0,2 -> abs 2,8. ML concatenated in MM-group order.
+    // C+m at C occurrences 0,2,5 -> abs 0,3,9; C+h at C occurrences 2,4 -> abs
+    // 3,7 (abs 3 shared); A+a at A occurrences 0,2 -> abs 2,8. ML is
+    // concatenated in MM group order.
     data.insert(
         Tag::BASE_MODIFICATIONS,
         Value::String(b"C+m,0,1,2;C+h,2,1;A+a,0,1;".to_vec().into()),
@@ -139,7 +139,7 @@ fn trimmed_output_multimod_mods_match_oracle() {
     let output = dir.path().join("out.ubam");
     write_fixture_multimod(&input);
 
-    // head-crop 2, tail-crop 2 -> surviving window [2, 8) on the length-10 read.
+    // Head-crop 2 and tail-crop 2 leave the window [2, 8) on the length-10 read.
     let cfg = whittle::cli::config_for_test(&input, &output, 2, 2);
     let mut h = whittle::obs::ProgressHandle::disabled();
     whittle::run(cfg, &mut h).unwrap();
@@ -159,19 +159,19 @@ fn trimmed_output_multimod_mods_match_oracle() {
     b.sort();
     assert_eq!(
         a, b,
-        "multi-mod trimmed set must equal original filtered to [2,8) offset by 2"
+        "Multi-mod trimmed set equals the original filtered to [2,8) and offset by 2"
     );
 
-    // Guard against a trivial pass: the surviving set must genuinely be multi-mod
-    // (>1 distinct mod code) and non-empty, so this exercises real reconstruction.
+    // Guard against a trivial pass: the surviving set contains more than one
+    // distinct mod code and is non-empty.
     let codes: std::collections::HashSet<char> = b.iter().map(|t| t.2).collect();
     assert!(
         b.len() >= 3 && codes.len() >= 2,
-        "expected a non-trivial multi-mod survivor set, got {b:?}"
+        "Expected a non-trivial multi-mod survivor set, got {b:?}"
     );
 }
 
-/// Validate MM/ML reconstruction through the parallel render, channel, and
+/// Validates MM/ML reconstruction through the parallel render, channel, and
 /// BGZF writer path. Sorting makes the comparison independent of output order.
 #[test]
 fn trimmed_output_multimod_mods_match_oracle_t8() {
@@ -197,14 +197,11 @@ fn trimmed_output_multimod_mods_match_oracle_t8() {
     let mut b = hts_mods(&output);
     a.sort();
     b.sort();
-    assert_eq!(
-        a, b,
-        "multi-mod mods must survive parallel (t8) reconstruction"
-    );
+    assert_eq!(a, b, "Multi-mod calls survive parallel (t8) reconstruction");
 }
 
-/// Compare many parallel records by name using distinct per-read ML payloads,
-/// so record/payload mismatches are observable despite unordered output.
+/// Compares many parallel records by name using distinct per-read ML payloads,
+/// so a record and payload mismatch is observable despite unordered output.
 #[test]
 fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -225,9 +222,9 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
             Tag::BASE_MODIFICATIONS,
             Value::String(b"C+m,0,1,2;C+h,2,1;A+a,0,1;".to_vec().into()),
         );
-        // Distinct ML payload per read: shift the base bytes by `i` so read
-        // `i`'s decoded quals are unique (see doc comment above).
-        let shift = u8::try_from(i).expect("fixture index fits in a byte");
+        // Distinct ML payload per read: the base bytes are shifted by `i` so
+        // read `i`'s decoded quals are unique.
+        let shift = u8::try_from(i).expect("Fixture index fits in a byte");
         let ml: Vec<u8> = [200u8, 150, 100, 55, 66, 240, 10]
             .into_iter()
             .map(|b| b.wrapping_add(shift))
@@ -248,21 +245,17 @@ fn trimmed_output_multimod_mods_match_oracle_t8_many_reads() {
     let (head, orig_len) = (2usize, 10usize);
     let orig = hts_mods_by_read(&input);
     let out = hts_mods_by_read(&output);
-    assert_eq!(
-        out.len(),
-        200,
-        "all 200 reads must survive the t8 parallel run"
-    );
+    assert_eq!(out.len(), 200, "All 200 reads survive the t8 parallel run");
 
     for (name, (_, got_mods)) in &out {
         let (_, orig_mods) = orig
             .get(name)
-            .unwrap_or_else(|| panic!("output read {name} has no matching original read"));
+            .unwrap_or_else(|| panic!("Output read {name} has no matching original read"));
         let expected = filter_offset(orig_mods, head, orig_len);
         assert_eq!(
             sorted(&expected),
             sorted(got_mods),
-            "t8 mod mismatch for read {name}"
+            "Mod mismatch for read {name} at t8"
         );
     }
 }
@@ -277,15 +270,14 @@ fn real_ubam_path() -> std::ffi::OsString {
         .expect("WHITTLE_UBAM must name a real uBAM to run the ignored oracle sweeps")
 }
 
-/// One decoded base-modification call: (0-based read pos, canonical base,
-/// modified base, strand, qual), the same tuple shape `hts_mods` above
-/// produces, just keyed per read instead of flattened across a whole file.
+/// One decoded base-modification call: (0-based read position, canonical base,
+/// modified base, strand, qual), the tuple shape `hts_mods` produces, keyed per
+/// read rather than flattened across a whole file.
 type ModCall = (usize, char, char, i32, i32);
 
-/// Decode every read in a BAM/uBAM, keyed by read name, into its (SEQ length,
-/// mod calls), the same `basemods_iter()` decode as `hts_mods`, but split
-/// per read so a multi-read real file can be compared read-by-read instead of
-/// as one flattened bag.
+/// Decodes every read in a BAM, keyed by read name, into its (SEQ length, mod
+/// calls): the same `basemods_iter()` decode as `hts_mods`, split per read so a
+/// multi-read file is compared read by read rather than as one flattened bag.
 fn hts_mods_by_read(path: &Path) -> HashMap<String, (usize, Vec<ModCall>)> {
     let mut reader = hts::Reader::from_path(path).unwrap();
     let mut out = HashMap::new();
@@ -310,16 +302,16 @@ fn hts_mods_by_read(path: &Path) -> HashMap<String, (usize, Vec<ModCall>)> {
     out
 }
 
-/// Sort a mod-call vector for order-independent comparison.
+/// Sorts a mod-call vector for order-independent comparison.
 fn sorted(mods: &[ModCall]) -> Vec<ModCall> {
     let mut v = mods.to_vec();
     v.sort();
     v
 }
 
-/// Filter an original read's mod calls to the surviving window of a fixed
-/// head/tail crop (`[head, orig_len - head)`, since head == tail == 10 here)
-/// and offset positions back to the trimmed read's own coordinate frame.
+/// Filters an original read's mod calls to the surviving window of a fixed
+/// head and tail crop (`[head, orig_len - head)`, since `head == tail` here)
+/// and offsets positions into the trimmed read's coordinate frame.
 fn filter_offset(mods: &[ModCall], head: usize, orig_len: usize) -> Vec<ModCall> {
     let tail_start = orig_len.saturating_sub(head);
     mods.iter()
@@ -346,27 +338,26 @@ fn real_ubam_oracle_sweep() {
     let out = hts_mods_by_read(&output);
     assert!(
         !out.is_empty(),
-        "no output reads decoded from {}",
+        "No output reads decoded from {}",
         output.display()
     );
 
     for (name, (_, got_mods)) in &out {
         let (orig_len, orig_mods) = orig
             .get(name)
-            .unwrap_or_else(|| panic!("output read {name} has no matching original read"));
+            .unwrap_or_else(|| panic!("Output read {name} has no matching original read"));
         let expected = filter_offset(orig_mods, 10, *orig_len);
         assert_eq!(
             sorted(&expected),
             sorted(got_mods),
-            "mod mismatch for read {name}"
+            "Mod mismatch for read {name}"
         );
     }
 }
 
-/// Threaded (t=8) companion to `real_ubam_oracle_sweep`: same real-data sweep and
-/// head=10/tail=10 crop, through the parallel BAM dispatch. Reads are matched by
-/// name, since that path is unordered. A real-scale check that `-t 8` produces
-/// byte-valid, mod-correct output on genuine ONT/dorado data.
+/// Threaded (`-t 8`) companion to `real_ubam_oracle_sweep`: the same real-data
+/// sweep and head 10, tail 10 crop through the parallel BAM dispatch. Reads are
+/// matched by name, since that path is unordered.
 #[test]
 #[ignore = "needs WHITTLE_UBAM=<real uBAM>"]
 fn real_ubam_oracle_sweep_t8() {
@@ -383,34 +374,34 @@ fn real_ubam_oracle_sweep_t8() {
     let out = hts_mods_by_read(&output);
     assert!(
         !out.is_empty(),
-        "no output reads decoded from {}",
+        "No output reads decoded from {}",
         output.display()
     );
     assert_eq!(
         out.len(),
         orig.len(),
-        "t8 run must not drop or duplicate reads"
+        "A t8 run neither drops nor duplicates reads"
     );
 
     for (name, (_, got_mods)) in &out {
         let (orig_len, orig_mods) = orig
             .get(name)
-            .unwrap_or_else(|| panic!("output read {name} has no matching original read"));
+            .unwrap_or_else(|| panic!("Output read {name} has no matching original read"));
         let expected = filter_offset(orig_mods, 10, *orig_len);
         assert_eq!(
             sorted(&expected),
             sorted(got_mods),
-            "t8 mod mismatch for read {name}"
+            "Mod mismatch for read {name} at t8"
         );
     }
 }
 
-// Adapter inference on uBAM must preserve MM/ML coordinates after trimming.
+// Adapter inference on uBAM preserves MM/ML coordinates after trimming.
 
-/// The 28bp adapter planted at the 5' end of every fixture read below -- the
-/// same SQK-NSK007/LSK109-neighborhood sequence `tests/adapter_cli.rs` plants
-/// (`PLANTED_ADAPTER` there), duplicated here since each integration-test file
-/// compiles as its own standalone binary and can't share helpers across files.
+/// The 28-bp adapter planted at the 5' end of every fixture read below: the same
+/// SQK-NSK007/LSK109-neighborhood sequence `tests/adapter_cli.rs` plants as
+/// `PLANTED_ADAPTER`. Duplicated because each integration-test file compiles as
+/// its own binary.
 const INFER_MM_ML_ADAPTER: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT";
 
 /// Length of the per-read genomic tail appended after `INFER_MM_ML_ADAPTER`.
@@ -419,11 +410,10 @@ const INFER_MM_ML_TAIL_LEN: usize = 150;
 /// Minimum modification offset, beyond the accepted inferred-adapter cut range.
 const INFER_MM_ML_MOD_MIN_ABS: usize = 70;
 
-/// Same splitmix64 bit-mixer as `tests/adapter_cli.rs`'s `splitmix_tail`:
-/// deterministic, per-read, non-periodic ACGT background so the discoverer
-/// never mistakes the (otherwise-identical-looking) tail region itself for a
-/// second conserved "adapter". See that file's comment for why a naive
-/// periodic generator breaks discovery tests like this one.
+/// The same splitmix64 bit mixer as `tests/adapter_cli.rs`'s `splitmix_tail`: a
+/// deterministic, per-read, non-periodic ACGT background, so the tail region
+/// carries no cross-read k-mer signal that discovery could report as a second
+/// adapter.
 fn splitmix_tail_infer(i: usize, len: usize) -> Vec<u8> {
     let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
     let mut out = Vec::with_capacity(len);
@@ -438,12 +428,11 @@ fn splitmix_tail_infer(i: usize, len: usize) -> Vec<u8> {
     out
 }
 
-/// 0-based occurrence indices (in read order, i.e. "the Nth `canonical` base
-/// in this read") of `canonical` bases whose absolute position is >=
-/// `min_abs`, up to `want` of them. MM encodes modified bases by occurrence
-/// count of the canonical base across the WHOLE read (SAM spec: deltas count
-/// skipped occurrences from the read start), so this is what a real MM string
-/// needs -- not raw absolute positions.
+/// 0-based occurrence indices (the Nth `canonical` base in read order) of
+/// `canonical` bases at absolute position `>= min_abs`, up to `want` of them.
+/// MM counts modified bases by occurrence of the canonical base across the whole
+/// read (SAM spec: deltas count skipped occurrences from the read start), so an
+/// MM string encodes occurrence indices, not absolute positions.
 fn occurrence_indices_after(seq: &[u8], canonical: u8, min_abs: usize, want: usize) -> Vec<usize> {
     let mut occ = 0usize;
     let mut out = Vec::new();
@@ -458,7 +447,7 @@ fn occurrence_indices_after(seq: &[u8], canonical: u8, min_abs: usize, want: usi
     out
 }
 
-/// Build a delta-encoded MM segment (`"{canonical}+{code},{d0,d1,...};"`) and
+/// Builds a delta-encoded MM segment (`"{canonical}+{code},{d0,d1,...};"`) and
 /// matching ML bytes for the given 0-based occurrence indices.
 fn mm_segment(canonical: u8, code: char, occ_indices: &[usize], ml_seed: u8) -> (String, Vec<u8>) {
     let mut deltas = Vec::with_capacity(occ_indices.len());
@@ -483,16 +472,16 @@ fn mm_segment(canonical: u8, code: char, occ_indices: &[usize], ml_seed: u8) -> 
     // Distinct ML values make record/payload mismatches observable.
     let ml: Vec<u8> = (0..occ_indices.len())
         .map(|k| {
-            let k = u8::try_from(k).expect("occurrence index fits in a byte");
+            let k = u8::try_from(k).expect("Occurrence index fits in a byte");
             100u8.wrapping_add(ml_seed).wrapping_add(k.wrapping_mul(7))
         })
         .collect();
     (mm, ml)
 }
 
-/// Write `n` uBAM records named `r0..r{n-1}`: each `INFER_MM_ML_ADAPTER`
-/// followed by a per-read splitmix64 tail, carrying a real `C+m` MM/ML tag
-/// anchored at occurrence positions >= `INFER_MM_ML_MOD_MIN_ABS`.
+/// Writes `n` uBAM records named `r0..r{n-1}`: each `INFER_MM_ML_ADAPTER`
+/// followed by a per-read splitmix64 tail, carrying a `C+m` MM/ML tag anchored
+/// at occurrence positions `>= INFER_MM_ML_MOD_MIN_ABS`.
 fn write_infer_mm_ml_fixture(path: &Path, n: usize) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -504,10 +493,10 @@ fn write_infer_mm_ml_fixture(path: &Path, n: usize) {
         let occ = occurrence_indices_after(&seq, b'C', INFER_MM_ML_MOD_MIN_ABS, 3);
         assert!(
             !occ.is_empty(),
-            "read {i}: fixture must have >=1 C past position {INFER_MM_ML_MOD_MIN_ABS} \
-             for a meaningful mod tag"
+            "Read {i}: the fixture has at least one C past position \
+             {INFER_MM_ML_MOD_MIN_ABS} for a meaningful mod tag"
         );
-        let ml_seed = u8::try_from(i).expect("fixture index fits in a byte");
+        let ml_seed = u8::try_from(i).expect("Fixture index fits in a byte");
         let (mm, ml) = mm_segment(b'C', 'm', &occ, ml_seed);
 
         let mut rec = RecordBuf::default();
@@ -534,9 +523,9 @@ fn write_infer_mm_ml_fixture(path: &Path, n: usize) {
     w.try_finish().unwrap();
 }
 
-/// Decode every record's (name, SEQ) from a BAM/uBAM via noodles -- independent
-/// of the htslib oracle used for mods, this just needs the raw bases to check
-/// the suffix/cut-length trimming property.
+/// Decodes every record's (name, SEQ) from a BAM via noodles, independently of
+/// the htslib oracle used for mods; only the raw bases are needed to check the
+/// suffix and cut-length property.
 fn read_bam_seqs(path: &Path) -> HashMap<String, Vec<u8>> {
     let mut r = bam::io::Reader::new(std::fs::File::open(path).unwrap());
     let hdr = r.read_header().unwrap();
@@ -582,51 +571,45 @@ fn infer_on_ubam_preserves_mm_ml() {
     assert_eq!(
         out_seqs.len(),
         n,
-        "all {n} reads must survive (long inserts, default min-length 1)"
+        "All {n} reads survive (long inserts, default min-length 1)"
     );
 
     // Each output sequence is an adapter-trimmed suffix of its input.
     for (name, out_seq) in &out_seqs {
-        let orig_seq = in_seqs.get(name).expect("matching input read");
+        let orig_seq = in_seqs.get(name).expect("Matching input read");
         assert!(
             orig_seq.ends_with(out_seq.as_slice()),
-            "output read {name:?} must be an exact suffix of its original"
+            "Output read {name:?} is an exact suffix of its original"
         );
-        // `checked_sub`: a clear panic message if output ever somehow
-        // exceeded input, instead of an underflow wraparound with a cryptic
-        // "attempt to subtract with overflow" pointing at this line only.
+        // `checked_sub` panics with a clear message if output exceeds input,
+        // instead of an overflow panic.
         let cut = orig_seq
             .len()
             .checked_sub(out_seq.len())
-            .expect("output longer than input");
+            .expect("Output longer than input");
         assert!(
             (15..=60).contains(&cut),
-            "read {name:?}: cut length {cut} is not adapter-shaped (planted adapter is 28bp)"
+            "Read {name:?}: cut length {cut} is not adapter-shaped (planted adapter is 28 bp)"
         );
     }
 
     // Decoded output modifications equal the input calls retained by each
-    // read's actual cut interval.
+    // read's cut interval.
     let orig_mods = hts_mods_by_read(&input);
     let out_mods = hts_mods_by_read(&output);
-    assert_eq!(
-        out_mods.len(),
-        n,
-        "all reads must decode from the output BAM"
-    );
+    assert_eq!(out_mods.len(), n, "All reads decode from the output BAM");
 
     let mut any_nonempty = false;
     for (name, (_out_len, got)) in &out_mods {
         let (orig_len, orig) = orig_mods
             .get(name)
-            .unwrap_or_else(|| panic!("output read {name} has no matching original"));
+            .unwrap_or_else(|| panic!("Output read {name} has no matching original"));
         let out_seq_len = out_seqs[name].len();
-        // `checked_sub`: a clear panic message if output ever somehow
-        // exceeded input, instead of an underflow wraparound with a cryptic
-        // "attempt to subtract with overflow" pointing at this line only.
+        // `checked_sub` panics with a clear message if output exceeds input,
+        // instead of an overflow panic.
         let cut = orig_len
             .checked_sub(out_seq_len)
-            .expect("output longer than input");
+            .expect("Output longer than input");
         let expected: Vec<_> = orig
             .iter()
             .filter(|(pos, ..)| *pos >= cut)
@@ -635,7 +618,7 @@ fn infer_on_ubam_preserves_mm_ml() {
         assert_eq!(
             sorted(&expected),
             sorted(got),
-            "read {name}: MM/ML must survive adapter-infer trimming in register"
+            "Read {name}: MM/ML survives adapter-infer trimming in register"
         );
         if !got.is_empty() {
             any_nonempty = true;
@@ -643,26 +626,25 @@ fn infer_on_ubam_preserves_mm_ml() {
     }
     assert!(
         any_nonempty,
-        "sanity check: at least one read must retain a non-empty mod call post-trim \
-         (else the comparison above could trivially pass empty-vs-empty)"
+        "At least one read retains a non-empty mod call after trimming, so the \
+         comparison above is not empty against empty"
     );
 }
 
-// Filtering one sibling segment must not change the retained segment's MM/ML.
+// Filtering one sibling segment does not change the retained segment's MM/ML.
 
 /// Twelve-base retained flank with C at indices 1, 4, 7, and 10.
 const KEPT_FLANK: &[u8] = b"ACGGCGGCGGCG";
-/// 16bp interior adapter, G/T only -- can't spuriously match the all-A/C
-/// flanks, and matches the same adapter `tests/adapter_cli.rs`'s naming test
-/// uses.
+/// 16-bp interior adapter, G/T only: it cannot match the all-A/C flanks, and it
+/// is the adapter `tests/adapter_cli.rs`'s naming test uses.
 const SPLIT_ADAPTER: &[u8] = b"GGGGTTTTGGGGTTTT";
-/// 4bp sibling segment, below `-l 5` -- gets filtered post-split. No `C`, so
-/// it can't perturb `KEPT_FLANK`'s C-occurrence indexing even though MM
-/// encodes modified occurrences over the whole original read.
+/// 4-bp sibling segment, below `-l 5`, filtered after the split. It contains no
+/// `C`, so it cannot perturb `KEPT_FLANK`'s C-occurrence indexing even though
+/// MM counts occurrences over the whole original read.
 const SHORT_FLANK: &[u8] = b"TTTT";
 
-/// Write a one-record uBAM: `seq`, quality 40 throughout, and `KEPT_FLANK`'s
-/// mod tag (`C+m,0,1,0;` / ML `[250,5,200]`, MN = `seq.len()`).
+/// Writes a one-record uBAM: `seq`, quality 40 throughout, and `KEPT_FLANK`'s
+/// mod tag (`C+m,0,1,0;`, ML `[250,5,200]`, MN `seq.len()`).
 fn write_mods_fixture(path: &Path, seq: &[u8]) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -697,8 +679,8 @@ fn write_mods_fixture(path: &Path, seq: &[u8]) {
 fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Split scenario: KEPT_FLANK + interior adapter + a 4bp sibling that -l 5
-    // filters post-split.
+    // Split case: `KEPT_FLANK`, the interior adapter, and a 4-bp sibling that
+    // `-l 5` filters after the split.
     let mut split_seq = KEPT_FLANK.to_vec();
     split_seq.extend_from_slice(SPLIT_ADAPTER);
     split_seq.extend_from_slice(SHORT_FLANK);
@@ -706,8 +688,8 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     let split_out = dir.path().join("split_out.ubam");
     write_mods_fixture(&split_in, &split_seq);
 
-    // Reference: the short sibling (and the adapter) simply never existed --
-    // just the 12bp kept flank, same mod tag, run with no adapter config.
+    // Reference: the same 12-bp kept flank with the same mod tag, run with no
+    // adapter config, so the short sibling and the adapter are absent.
     let solo_in = dir.path().join("solo_in.ubam");
     let solo_out = dir.path().join("solo_out.ubam");
     write_mods_fixture(&solo_in, KEPT_FLANK);
@@ -769,11 +751,11 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     assert_eq!(
         split_names.len(),
         1,
-        "the 4bp sibling must be filtered, not written"
+        "The 4-bp sibling is filtered, not written"
     );
     assert!(
         split_names.contains_key("r1_segment_1"),
-        "kept segment must keep its produced index: {:?}",
+        "Kept segment keeps its produced index: {:?}",
         split_names.keys().collect::<Vec<_>>()
     );
 
@@ -785,21 +767,21 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     b.sort();
     assert_eq!(
         a, b,
-        "the kept segment's MM/ML must be identical to the same 12bp flank \
-         run as if the filtered sibling never existed: split={split_mods:?} solo={solo_mods:?}"
+        "The kept segment's MM/ML equals the same 12-bp flank run without the \
+         filtered sibling: split={split_mods:?} solo={solo_mods:?}"
     );
     assert!(
         a.len() >= 3,
-        "sanity: must decode all 3 modified positions, not an empty-vs-empty pass: {a:?}"
+        "All 3 modified positions decode, so the comparison is not empty against empty: {a:?}"
     );
 }
 
 /// Fixture covering the three MM shapes the `+`/ACGT fixtures above never reach:
 /// a `-` strand group, an RNA `U+` group, and an `N+` group.
 ///
-/// Each is a case where the counting base is not simply the literal MM byte:
-/// `G-m` must count `G` rather than its complement, `U+m` must count `T` because
-/// BAM SEQ has no `U`, and `N+n` must count every base rather than literal `N`.
+/// Each is a case where the counting base is not the literal MM byte: `G-m`
+/// counts `G` rather than its complement, `U+m` counts `T` because BAM SEQ has
+/// no `U`, and `N+n` counts every base rather than literal `N`.
 fn write_fixture_strands(path: &Path) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -808,7 +790,7 @@ fn write_fixture_strands(path: &Path) {
     let mut rec = RecordBuf::default();
     *rec.flags_mut() = Flags::UNMAPPED;
     *rec.name_mut() = Some(b"read1".into());
-    // AGGTACGATCGT: G at 1,2,6,10 ; T at 3,8,11 ; length 12.
+    // AGGTACGATCGT: G at 1,2,6,10; T at 3,8,11; length 12.
     *rec.sequence_mut() = b"AGGTACGATCGT".to_vec().into();
     *rec.quality_scores_mut() = vec![40u8; 12].into();
     let data = rec.data_mut();
@@ -827,11 +809,10 @@ fn write_fixture_strands(path: &Path) {
     w.write_alignment_record(&header, &rec).unwrap();
 }
 
-/// Untrimmed round trip: a no-op run must carry all three group shapes through
-/// byte-for-byte. This guards the pass-through path only. It cannot catch a
-/// counting-base error, because an untrimmed record never reaches the rewrite at
-/// all; `strand_and_ambiguity_groups_match_oracle_when_trimmed` is the test that
-/// covers that, and it was verified to fail against each bug in turn.
+/// Untrimmed round trip: a no-op run carries all three group shapes through byte
+/// for byte. This guards the pass-through path only; an untrimmed record never
+/// reaches the rewrite, so `strand_and_ambiguity_groups_match_oracle_when_trimmed`
+/// covers the counting-base rules.
 #[test]
 fn strand_and_ambiguity_groups_survive_untrimmed_round_trip() {
     let dir = tempfile::tempdir().unwrap();
@@ -849,15 +830,15 @@ fn strand_and_ambiguity_groups_survive_untrimmed_round_trip() {
     after.sort();
     assert_eq!(
         before, after,
-        "a no-op run must not move, drop, or relabel any modification call"
+        "A no-op run neither moves, drops, nor relabels any modification call"
     );
 
-    // Guard against a trivial pass: all three groups must actually be present.
-    assert_eq!(before.len(), 6, "fixture should decode to six calls");
+    // Guard against a trivial pass: all three groups are present.
+    assert_eq!(before.len(), 6, "Fixture decodes to six calls");
     let canonical: std::collections::HashSet<char> = before.iter().map(|t| t.1).collect();
     assert!(
         canonical.contains(&'G') && canonical.contains(&'T'),
-        "expected G and T canonical bases, got {canonical:?}"
+        "Expected G and T canonical bases, got {canonical:?}"
     );
 }
 
@@ -886,12 +867,12 @@ fn strand_and_ambiguity_groups_match_oracle_when_trimmed() {
     got.sort();
     assert_eq!(
         expected, got,
-        "trimmed calls must equal the original restricted to [{head},{tail_start})"
+        "Trimmed calls equal the original restricted to [{head},{tail_start})"
     );
-    assert!(!got.is_empty(), "window must retain at least one call");
+    assert!(!got.is_empty(), "Window retains at least one call");
 }
 
-/// Build a one-read uBAM with caller-chosen flags and tag spelling.
+/// Builds a one-read uBAM with caller-chosen flags and tag spelling.
 fn write_flagged(path: &Path, flags: Flags, mm_tag: &[u8; 2], ml_tag: &[u8; 2]) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -915,10 +896,10 @@ fn write_flagged(path: &Path, flags: Flags, mm_tag: &[u8; 2], ml_tag: &[u8; 2]) 
     w.write_alignment_record(&header, &rec).unwrap();
 }
 
-/// htslib reads the pre-spec lowercase `Mm`/`Ml` (old guppy and megalodon emit
-/// them). whittle rewrites only `MM`/`ML`, so it used to copy them through onto a
-/// trimmed sequence, leaving every call pointing at the wrong base with no
-/// warning. Refused loudly instead.
+/// htslib reads the pre-spec lowercase `Mm`/`Ml` (emitted by early guppy and
+/// megalodon). whittle rewrites only `MM`/`ML`, so a record carrying the
+/// lowercase spelling is refused rather than copied onto a trimmed sequence with
+/// every call pointing at the wrong base.
 #[test]
 fn legacy_lowercase_mod_tags_are_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -928,11 +909,11 @@ fn legacy_lowercase_mod_tags_are_refused() {
 
     let cfg = whittle::cli::config_for_test(&input, &output, 3, 4);
     let mut h = whittle::obs::ProgressHandle::disabled();
-    let err = whittle::run(cfg, &mut h).expect_err("a legacy-tag record must be refused");
+    let err = whittle::run(cfg, &mut h).expect_err("A legacy-tag record is refused");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("legacy") && msg.contains("Mm"),
-        "error should name the legacy tag, got: {msg}"
+        "Error names the legacy tag, got: {msg}"
     );
 }
 
@@ -955,15 +936,15 @@ fn unmapped_but_reverse_complemented_records_are_refused() {
 
     let cfg = whittle::cli::config_for_test(&input, &output, 2, 2);
     let mut h = whittle::obs::ProgressHandle::disabled();
-    let err = whittle::run(cfg, &mut h).expect_err("a reverse-complemented record must be refused");
+    let err = whittle::run(cfg, &mut h).expect_err("A reverse-complemented record is refused");
     assert!(
         format!("{err:#}").contains("reverse-complemented"),
-        "error should name the flag, got: {err:#}"
+        "Error names the flag, got: {err:#}"
     );
 }
 
-/// The same record without either problem still round-trips, so the two refusals
-/// above are not just rejecting everything.
+/// The same record without either problem still round-trips, so the two
+/// refusals above are specific.
 #[test]
 fn plain_unmapped_record_with_modern_tags_still_runs() {
     let dir = tempfile::tempdir().unwrap();
@@ -973,7 +954,7 @@ fn plain_unmapped_record_with_modern_tags_still_runs() {
 
     let cfg = whittle::cli::config_for_test(&input, &output, 3, 4);
     let mut h = whittle::obs::ProgressHandle::disabled();
-    whittle::run(cfg, &mut h).expect("a modern uBAM record trims normally");
+    whittle::run(cfg, &mut h).expect("A modern uBAM record trims normally");
 
     let (head, tail, len) = (3usize, 4usize, 20usize);
     let mut expected: Vec<_> = hts_mods(&input)
@@ -984,5 +965,5 @@ fn plain_unmapped_record_with_modern_tags_still_runs() {
     let mut got = hts_mods(&output);
     expected.sort();
     got.sort();
-    assert_eq!(expected, got, "surviving calls must match htslib");
+    assert_eq!(expected, got, "Surviving calls match htslib");
 }

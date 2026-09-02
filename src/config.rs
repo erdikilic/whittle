@@ -1,3 +1,6 @@
+//! Resolved run configuration: `Config`, tag carry-through policy,
+//! adapter-inference settings, progress mode, and the thread budget.
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -5,8 +8,9 @@ use crate::filter::FilterConfig;
 use crate::io::Format;
 use crate::trim::TrimPlan;
 
-/// Which aux tags to carry into FASTQ headers on BAM→FASTQ conversion.
-/// MM/ML/MN are reconstructed (trim-aware); every other carried tag is verbatim.
+/// Which aux tags to carry into FASTQ headers on BAM-to-FASTQ conversion.
+/// `MM`/`ML`/`MN` are reconstructed (trim-aware); every other carried tag is
+/// copied verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FastqTags {
     /// Carry every aux tag from the source record.
@@ -18,7 +22,8 @@ pub enum FastqTags {
 }
 
 impl FastqTags {
-    /// Parse a `--fastq-tags` spec: `all`, `none`, or a comma list of 2-char tags.
+    /// Parses a `--fastq-tags` spec: `all`, `none`, or a comma list of
+    /// two-character tags.
     pub fn parse(s: &str) -> anyhow::Result<Self> {
         match s {
             "all" => Ok(FastqTags::All),
@@ -49,8 +54,8 @@ impl FastqTags {
         }
     }
 
-    /// Whether the reconstructed MM/ML/MN block is carried. The block is a unit:
-    /// on under `All`, or when an explicit list contains `MM` or `ML`.
+    /// Whether the reconstructed `MM`/`ML`/`MN` block is carried. The block is a
+    /// unit: on under `All`, or when an explicit list contains `MM` or `ML`.
     pub fn carries_mods(&self) -> bool {
         match self {
             FastqTags::All => true,
@@ -63,35 +68,45 @@ impl FastqTags {
 /// What an enabled ab-initio adapter inference run does with its discoveries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterInferAction {
+    /// Trimming with the inferred sequences.
     Trim,
+    /// FASTA output of the inferred sequences, with no read output.
     Report,
 }
 
 /// How much of an inferred recurrent consensus is trusted as technical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterInferPolicy {
+    /// Trust only a short end-facing anchor; no inferred interior splitting.
     Conservative,
+    /// Trust the complete recurrent consensus; interior splitting allowed.
     Aggressive,
 }
 
-/// Whether ab-initio adapter inference runs, and its independent action/policy.
+/// Whether ab-initio adapter inference runs, and its independent action and
+/// policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AdapterInfer {
+    /// Inference does not run.
     #[default]
     Off,
+    /// Inference runs with the given action and policy.
     Enabled {
+        /// What is done with the discoveries.
         action: AdapterInferAction,
+        /// How much of each consensus is trusted.
         policy: AdapterInferPolicy,
     },
 }
 
 impl AdapterInfer {
-    /// Whether ab-initio inference ran, so the adapter set was discovered
+    /// Whether ab-initio inference is enabled, so the adapter set is discovered
     /// rather than configured.
     pub fn is_enabled(self) -> bool {
         matches!(self, Self::Enabled { .. })
     }
 
+    /// Whether inference is enabled in report mode.
     pub fn is_report(self) -> bool {
         matches!(
             self,
@@ -102,6 +117,7 @@ impl AdapterInfer {
         )
     }
 
+    /// Whether inference is enabled with the aggressive policy.
     pub fn is_aggressive(self) -> bool {
         matches!(
             self,
@@ -115,19 +131,21 @@ impl AdapterInfer {
 
 /// A parse-time diagnostic, held until the log subscriber exists.
 ///
-/// `cli::parse` runs before `obs::init`, so anything it prints directly bypasses
-/// the level filter (surviving `--quiet`), carries no `[timestamp] [LEVEL]`
-/// prefix, and lands ahead of the version and command lines that are supposed to
-/// open every run. Collecting the messages instead lets `run` emit them through
-/// tracing alongside the other deferred advisories.
+/// `cli::parse` runs before `obs::init`, so a message printed there directly
+/// would bypass the level filter (surviving `--quiet`), carry no
+/// `[timestamp] [LEVEL]` prefix, and land ahead of the version and command lines
+/// that open every run. The messages are collected instead, and `run` emits them
+/// through tracing with the other deferred advisories.
 #[derive(Debug, Clone)]
 pub struct Advisory {
     /// True for a warning, false for informational.
     pub warn: bool,
+    /// The message text, logged verbatim.
     pub message: String,
 }
 
 impl Advisory {
+    /// Creates a warning-level advisory.
     pub fn warn(message: impl Into<String>) -> Self {
         Advisory {
             warn: true,
@@ -135,6 +153,7 @@ impl Advisory {
         }
     }
 
+    /// Creates an informational advisory.
     pub fn info(message: impl Into<String>) -> Self {
         Advisory {
             warn: false,
@@ -145,10 +164,9 @@ impl Advisory {
 
 /// How progress is reported, chosen independently of the log level.
 ///
-/// `--quiet` conflicts with `--progress` at parse time. The point of the
-/// separation is that a pipeline may want the run summary without a progress line
-/// every thirty seconds in its log, and a terminal user may want the summary
-/// without an animated bar.
+/// `--quiet` conflicts with `--progress` at parse time and outranks this
+/// setting. Progress and log level are separate so the summary can be kept
+/// while in-flight progress lines or the bar are suppressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProgressMode {
     /// A bar on a terminal, periodic lines otherwise.
@@ -164,18 +182,27 @@ pub enum ProgressMode {
     None,
 }
 
+/// Input and output endpoints and any forced formats.
 #[derive(Debug, Clone)]
 pub struct IoConfig {
+    /// Input path; `None` reads stdin.
     pub input: Option<PathBuf>,
+    /// Output path; `None` writes stdout.
     pub output: Option<PathBuf>,
+    /// Input format forced by `--in-format`.
     pub in_format: Option<Format>,
+    /// Output format forced by `--out-format`.
     pub out_format: Option<Format>,
 }
 
+/// The fully resolved settings for one run.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Input, output, and format selection.
     pub io: IoConfig,
+    /// Post-trim segment filters.
     pub filter: FilterConfig,
+    /// Fixed crops and the quality-trim operation.
     pub trim: TrimPlan,
     /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
     /// `--adapter-preset ont` was given (adapter trimming off, no per-read cost).
@@ -183,37 +210,41 @@ pub struct Config {
     /// Whether ab-initio adapter inference runs and whether inferred adapters
     /// are also used for trimming.
     pub adapter_infer: AdapterInfer,
+    /// Resolved worker-thread count.
     pub threads: usize,
+    /// Aux tags carried into FASTQ headers on BAM-to-FASTQ output.
     pub fastq_tags: FastqTags,
-    /// Resolved render-pool size for this dispatch; `0` means "fall back to
-    /// `threads`" (used by tests and any caller that hasn't computed a
-    /// workload-aware budget). Set by `run`/`run_folder` from
-    /// `thread_budget(..).render` before the workflow runs.
+    /// Resolved render-pool size for this dispatch; `0` means the workflow falls
+    /// back to `threads` (tests and callers without a workload-aware budget).
+    /// Set by `settle` from `thread_budget(..).render` before the workflow
+    /// runs.
     pub render_workers: usize,
     /// Reads to sample for adapter-presence detection before trimming the full
     /// dataset. `0` disables detection (trim against the full active set).
     /// Only meaningful when `adapters` is `Some`.
     pub adapter_sample: usize,
-    /// DEFLATE compression level (0-9) for compressed output: bgzf for BAM,
-    /// gzip for FASTQ.gz. `cli::parse` defaults it to 4 for gzip FASTQ and 6
-    /// for BGZF (BAM and `.bgz`), and validates an explicit value to 0..=9.
-    /// Plain FASTQ output ignores it.
+    /// DEFLATE compression level (0-9) for compressed output: bgzf for BAM and
+    /// `.bgz`, gzip for FASTQ.gz. `cli::parse` defaults it to 4 for gzip FASTQ
+    /// and 6 for BGZF and validates an explicit value to 0..=9. Plain FASTQ
+    /// output ignores it.
     pub compression_level: u8,
-    /// When true, keep ONT signal tags consistent through trimming instead of
-    /// dropping them: slice the `mv` move table and update `ts`/`ns`/`sp`/`pi`
-    /// (BAM→BAM only, see `workflow::bam`). Default false drops `mv`/`ts`/`ns`/
-    /// `sp`/`pi` on any trimmed read.
+    /// Whether ONT signal tags are kept consistent through trimming: the `mv`
+    /// move table is sliced and `ts`/`ns`/`sp`/`pi` are updated (BAM-to-BAM
+    /// only, see `workflow::bam`). When false, a trimmed read drops
+    /// `mv`/`ts`/`ns`/`sp`/`pi`.
     pub update_moves: bool,
     /// Whether multithreaded runs write records in input order. When false,
     /// records are written in completion order.
     pub ordered: bool,
+    /// Count of `-v` flags (0 to 2).
     pub verbosity: u8,
+    /// Whether `--quiet` was given.
     pub quiet: bool,
-    /// `Some((requested, ncpu))` when `-t` was clamped down; drives a warning in `run`.
+    /// `Some((requested, ncpu))` when `-t` was clamped down; drives a warning in
+    /// `run`.
     pub threads_clamped: Option<(usize, usize)>,
-    /// Where to write the machine-readable run summary (`--summary-json`), or
-    /// `None` to write none. Written regardless of `--quiet` and the log level,
-    /// since a caller that asked for it is a pipeline that needs the file.
+    /// Destination for the machine-readable run summary (`--summary-json`), or
+    /// `None`. Written regardless of `--quiet` and the log level.
     pub summary_json: Option<PathBuf>,
     /// Diagnostics raised while parsing arguments, emitted by `run` once the log
     /// subscriber exists. See `Advisory`.
@@ -234,7 +265,7 @@ pub struct Config {
 impl Config {
     /// Every file the run writes, each paired with the flag that named it. The
     /// overwrite guards and the report-only advisories both derive from this
-    /// list, so a new artifact flag is covered by both once it is added here.
+    /// list, so an artifact flag added here is covered by both.
     pub fn write_targets(&self) -> impl Iterator<Item = (&'static str, &Path)> {
         [
             ("-o/--output", self.io.output.as_deref()),
@@ -246,23 +277,24 @@ impl Config {
 }
 
 /// How a `-t` total worker budget splits across the workflow stages. The split
-/// is workload-aware (see `thread_budget`): decode never benefits from more
-/// than 1 thread (serial inflate keeps up), while render (MM/ML
-/// reconstruction, or the trim-only pass for FASTQ) and encode (bgzf/gzip
-/// compression) are weighted against each other based on how heavy each stage
-/// is for the dispatched (input, output) pair.
+/// is workload-aware (see `thread_budget`): serial decode keeps up unless the
+/// input is BGZF, while render (MM/ML reconstruction, or the trim-only pass for
+/// FASTQ) and encode (bgzf or gzip compression) are weighted against each other
+/// by the cost of each stage for the dispatched (input, output) pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadBudget {
+    /// Workers for input decoding.
     pub decode: usize,
+    /// Workers for the render pool (trimming and MM/ML reconstruction).
     pub render: usize,
+    /// Workers for output compression.
     pub encode: usize,
 }
 
 impl ThreadBudget {
-    /// Sum across all three stages. Exceeds the requested `-t` value at very
-    /// low counts, since `thread_budget` floors `render` and `encode` at 1 each
-    /// even when the overall total is 1, which is why the banner prints the
-    /// requested count instead.
+    /// Sum across all three stages. May exceed the requested `-t` value at very
+    /// low counts, since `thread_budget` floors `render` and `encode` at 1 each;
+    /// the startup banner prints the requested count instead.
     #[cfg(test)]
     pub fn total(&self) -> usize {
         self.decode + self.render + self.encode
@@ -280,9 +312,10 @@ pub enum EncodeKind {
     Gzip,
 }
 
-/// Split a `-t` worker budget across decode, render, and encode. Parallel input
-/// receives multiple decode workers; otherwise decoding stays serial and the
-/// remaining workers are weighted toward the more expensive downstream stage.
+/// Splits a `-t` worker budget across decode, render, and encode. Parallel
+/// input receives multiple decode workers; otherwise decoding stays serial and
+/// the remaining workers are weighted toward the more expensive downstream
+/// stage.
 pub fn thread_budget(
     total: usize,
     render_heavy: bool,
@@ -304,9 +337,8 @@ pub fn thread_budget(
             // The `min` matters at `total == 3`, where the `max(2)` floor would
             // otherwise take both remaining workers and leave render with none.
             // One worker is reserved for the writer thread and one for render, so
-            // decode can claim at most `total - 2`. Parallel decode gives way to
-            // render here rather than the other way round, because a render pool
-            // of zero is not a slower configuration, it is a broken one.
+            // decode can claim at most `total - 2`. Render takes precedence over
+            // parallel decode because a render pool of zero disables the stage.
             EncodeKind::None if render_heavy => {
                 let decode = (total / 3).max(2).min(total - 2);
                 (decode, total - decode - 1, 1)
@@ -337,11 +369,12 @@ pub fn thread_budget(
 
     let rest = total.saturating_sub(1).max(2); // >= 2 so both stages can get >= 1
     let (render, encode_n) = match (render_heavy, encode) {
-        // No compression pool → render gets everything (encode field unused).
+        // No compression pool: render receives every remaining worker; the
+        // encode field is unused.
         (_, EncodeKind::None) => (rest, 1),
-        // BAM in + bgzf out: split nearly evenly. Raw BAM field/tag conversion
-        // now runs in the render pool alongside MM/ML reconstruction, while the
-        // Noodles BGZF stage uses the other half for ordered block encoding.
+        // BAM in, bgzf out: split nearly evenly. Raw BAM field and tag
+        // conversion runs in the render pool alongside MM/ML reconstruction; the
+        // BGZF stage uses the other half for ordered block encoding.
         (true, EncodeKind::Bgzf) if rest <= 4 => (rest / 2, rest.div_ceil(2)),
         (true, EncodeKind::Bgzf) if rest <= 8 => (rest.div_ceil(2), rest / 2),
         (true, EncodeKind::Bgzf) => {
@@ -413,10 +446,9 @@ pub(crate) fn encode_kind_for(out_fmt: crate::io::Format) -> EncodeKind {
 
 /// Whether the render stage has substantial per-record work. BAM input is
 /// render-heavy for every output format because the parallel path clones owned
-/// `RecordBuf`s before handing them to the writer. FASTQ input is normally
-/// trim-only (light), but adapter matching or ab-initio inference runs an
-/// approximate search per read, which is heavy too, so it gets a render-pool
-/// share rather than being starved as pure compression.
+/// `RecordBuf`s before handing them to the writer. FASTQ input is trim-only
+/// unless adapter matching or ab-initio inference runs an approximate search
+/// per read, which is also heavy and receives a render-pool share.
 pub(crate) fn render_heavy_for(in_fmt: crate::io::Format, cfg: &Config) -> bool {
     matches!(in_fmt, crate::io::Format::Bam)
         || cfg.adapters.is_some()
@@ -427,10 +459,10 @@ pub(crate) fn render_heavy_for(in_fmt: crate::io::Format, cfg: &Config) -> bool 
 mod tests {
     use super::*;
 
-    /// Every stage must get at least one worker at every thread count, for every
-    /// combination of inputs. A stage of zero is not a slower configuration, it is
-    /// a broken one: the consumer falls back to its own default, so the banner
-    /// reports a split the pipeline is not using.
+    /// Every stage receives at least one worker at every thread count and input
+    /// combination. A stage with zero workers makes its consumer fall back to
+    /// its own default, so the banner would report a split the pipeline is not
+    /// using.
     #[test]
     fn every_stage_gets_at_least_one_worker() {
         for total in 0..=64usize {
@@ -452,10 +484,10 @@ mod tests {
     /// With a real compression pool, the three stages must not claim more workers
     /// than were asked for.
     ///
-    /// `EncodeKind::None` is excluded on purpose: plain FASTQ output has no encode
-    /// pool, so its encode field counts the single writer thread rather than a
-    /// share of the budget, and the sum can legitimately read one high. That is
-    /// the case `ThreadBudget::total` documents.
+    /// `EncodeKind::None` is excluded: plain FASTQ output has no encode pool, so
+    /// its encode field counts the single writer thread rather than a budget
+    /// share, and the sum reads one high. `ThreadBudget::total` documents that
+    /// case.
     #[test]
     fn split_stays_within_the_requested_budget() {
         for total in 3..=64usize {
@@ -490,7 +522,7 @@ mod tests {
                 assert!(s.contains(b"MM") && s.contains(b"ML") && s.contains(b"RG"));
                 assert_eq!(s.len(), 3);
             },
-            other => panic!("expected Only, got {other:?}"),
+            other => panic!("Expected Only, got {other:?}"),
         }
     }
 
@@ -503,9 +535,9 @@ mod tests {
 
     #[test]
     fn parse_rejects_non_ascii_two_byte_token() {
-        // "é" is a single codepoint encoded as 2 UTF-8 bytes, so a length-only
-        // check (`b.len() != 2`) would wrongly accept it as a "tag". It must
-        // be rejected, while a normal 2-byte ASCII tag still parses.
+        // A single non-ASCII code point encoded as two UTF-8 bytes would pass a
+        // length-only check (`b.len() != 2`); it is rejected, while a two-byte
+        // ASCII tag parses.
         assert!(FastqTags::parse("é").is_err());
         assert!(FastqTags::parse("RG").is_ok());
     }
@@ -586,9 +618,9 @@ mod tests {
         let only = FastqTags::parse("ML,RG").unwrap();
         assert!(only.carries(b"RG"));
         assert!(!only.carries(b"XY"));
-        // mod block carried when the list has MM *or* ML:
+        // The mod block is carried when the list contains MM or ML.
         assert!(only.carries_mods());
-        // MN alone does not turn on the mod block:
+        // MN alone does not enable the mod block.
         let mn_only = FastqTags::parse("MN").unwrap();
         assert!(!mn_only.carries_mods());
     }

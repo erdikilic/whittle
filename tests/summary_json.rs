@@ -1,12 +1,12 @@
 //! End-to-end `--summary-json` over the compiled binary. The unit tests in
-//! `src/summary.rs` cover the schema shape; these cover the parts only a real
-//! run can show: that the file is written on every dispatch path, that it
-//! survives `--quiet`, and that its counters agree with the reads that actually
-//! came out.
+//! `src/summary.rs` cover the schema shape; these cover the parts only a run
+//! can show: that the file is written on every dispatch path, that it survives
+//! `--quiet`, and that its counters agree with the reads written.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// The binary with `WHITTLE_LOG` cleared.
 fn whittle() -> Command {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
@@ -30,11 +30,13 @@ fn reads() -> String {
     s
 }
 
+/// Parses `<dir>/summary.json`.
 fn summary(dir: &std::path::Path) -> serde_json::Value {
     let text = std::fs::read_to_string(dir.join("summary.json")).unwrap();
     serde_json::from_str(&text).unwrap()
 }
 
+/// The read, base, and drop counters agree with the reads written.
 #[test]
 fn summary_counts_match_the_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -64,13 +66,12 @@ fn summary_counts_match_the_run() {
     assert_eq!(v["bases"]["input"], 80);
     assert_eq!(v["bases"]["output"], 40);
 
-    // The counters agree with what actually landed in the output file.
+    // The counters agree with what was written to the output file.
     let written = std::fs::read_to_string(&out).unwrap();
     assert_eq!(written.lines().count(), 8);
 }
 
-/// A pipeline that asks for the summary gets it even when it silences logging;
-/// that is the whole point of the flag.
+/// The summary is written under `--quiet`.
 #[test]
 fn summary_is_written_under_quiet() {
     let dir = tempfile::tempdir().unwrap();
@@ -91,6 +92,7 @@ fn summary_is_written_under_quiet() {
     assert_eq!(summary(dir.path())["reads"]["input"], 4);
 }
 
+/// The `params` block records the resolved settings and the `command` line.
 #[test]
 fn summary_records_the_resolved_parameters() {
     let dir = tempfile::tempdir().unwrap();
@@ -124,8 +126,8 @@ fn summary_records_the_resolved_parameters() {
     assert!(v["elapsed_seconds"].as_f64().unwrap() >= 0.0);
 }
 
-/// Folder-merge mode goes through its own dispatch arm, so it needs its own
-/// proof that the summary lands.
+/// Folder-merge mode goes through its own dispatch arm, so the summary is
+/// checked there as well.
 #[test]
 fn summary_is_written_for_a_folder_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -148,8 +150,7 @@ fn summary_is_written_for_a_folder_run() {
     assert_eq!(v["bases"]["output"], 16);
 }
 
-/// A mistyped summary path fails before any reads are processed, not after: on a
-/// large BAM a late failure throws away the whole run.
+/// A mistyped summary path fails before any reads are processed, not after.
 #[test]
 fn unwritable_summary_path_fails_the_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -189,8 +190,8 @@ fn no_summary_file_without_the_flag() {
     assert!(!dir.path().join("summary.json").exists());
 }
 
-/// `--quiet` silences the human-readable summary but must not blank out the
-/// JSON's `elapsed_seconds`, which is the field a benchmarking pipeline reads.
+/// `--quiet` silences the human-readable summary but does not blank out the
+/// JSON's `elapsed_seconds`.
 #[test]
 fn elapsed_seconds_survives_quiet() {
     let dir = tempfile::tempdir().unwrap();
@@ -227,8 +228,8 @@ fn adapted_reads(n: usize) -> String {
     fq
 }
 
-/// Report mode writes no records, so it cannot write a summary either. Exiting 0
-/// with neither file and no explanation would strand a pipeline waiting on one.
+/// Report mode writes no records and therefore no summary; the run says the
+/// flag is ignored rather than exiting 0 with neither file.
 #[test]
 fn report_mode_warns_that_summary_json_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
@@ -316,25 +317,21 @@ fn parse_time_advisories_are_formatted_and_ordered() {
     let advisory = stderr
         .lines()
         .find(|l| l.contains("--adapter-ends-only has no effect"))
-        .expect("advisory present");
+        .expect("Advisory present");
     assert!(
         advisory.contains("[WARN]") && advisory.starts_with('['),
-        "advisory must carry the standard prefix: {advisory}"
+        "The advisory carries the standard prefix: {advisory}"
     );
 
-    let version_at = stderr.find("whittle 0.").expect("version line present");
+    let version_at = stderr.find("whittle 0.").expect("Version line present");
     let advisory_at = stderr
         .find("--adapter-ends-only has no effect")
-        .expect("advisory present");
-    assert!(
-        version_at < advisory_at,
-        "the version line must still open the run"
-    );
+        .expect("Advisory present");
+    assert!(version_at < advisory_at, "The version line opens the run");
 }
 
-/// Presence detection narrows the preset, so the set the run trims against is not
-/// the set the startup banner printed. The summary reports both, since a reader
-/// otherwise cannot tell which figure they are looking at.
+/// Presence detection narrows the preset, so the set trimmed against differs
+/// from the set the banner printed. The summary reports both.
 #[test]
 fn summary_reports_configured_and_resolved_adapter_counts() {
     let dir = tempfile::tempdir().unwrap();
@@ -364,20 +361,22 @@ fn summary_reports_configured_and_resolved_adapter_counts() {
         .success();
 
     let a = summary(dir.path())["params"]["adapters"].clone();
-    let configured = a["configured"].as_u64().expect("configured is a number");
-    let count = a["count"].as_u64().expect("count is a number");
+    let configured = a["configured"]
+        .as_u64()
+        .expect("The configured field is a number");
+    let count = a["count"].as_u64().expect("The count field is a number");
 
     let catalog = whittle::adapter::preset::preset_ont().len() as u64;
     assert_eq!(configured, catalog, "The full ONT catalog was configured");
     assert!(
         count < configured,
-        "detection should narrow the set: configured {configured}, resolved {count}"
+        "Detection narrows the set: configured {configured}, resolved {count}"
     );
-    assert!(count > 0, "the planted adapter must be detected");
+    assert!(count > 0, "The planted adapter is detected");
 }
 
-/// Under inference nothing is configured; the set is discovered. Reporting
-/// `configured: 0` beside a non-zero `count` is what makes that legible.
+/// Under inference nothing is configured; the set is discovered, so the summary
+/// reports `configured: 0` beside a non-zero `count`.
 #[test]
 fn inference_reports_zero_configured_adapters() {
     let dir = tempfile::tempdir().unwrap();
@@ -403,6 +402,6 @@ fn inference_reports_zero_configured_adapters() {
         .success();
 
     let a = summary(dir.path())["params"]["adapters"].clone();
-    assert_eq!(a["configured"], 0, "inference configures nothing up front");
+    assert_eq!(a["configured"], 0, "Inference configures nothing up front");
     assert_eq!(a["infer"], "trim");
 }

@@ -1,3 +1,7 @@
+//! whittle: a tag-aware trimmer for long-read FASTQ and unaligned BAM.
+//!
+//! `run` is the library entry point; `cli::parse` builds its `Config`.
+
 pub mod adapter;
 pub(crate) mod banner;
 pub mod cli;
@@ -27,11 +31,12 @@ use config::AdapterInfer;
 pub use config::Config;
 use io::Format;
 
-/// Top-level entry point. Dispatches on the input: a directory triggers
-/// folder-merge (all read files in it merged into one output); otherwise a
-/// single file / stdin is trimmed. FASTQ and unaligned BAM are supported.
+/// Runs one trimming job. A directory input selects folder-merge mode (every
+/// read file in it is merged into one output); any other input is a single file
+/// or stdin. FASTQ and unaligned BAM are supported.
 ///
-/// `obs` drives progress + end-of-run output; library callers pass `ProgressHandle::disabled()`.
+/// `obs` drives progress and end-of-run output; library callers pass
+/// `obs::ProgressHandle::disabled()`.
 pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let mut cfg = cfg;
     let dir = cfg
@@ -51,7 +56,8 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     result
 }
 
-/// Single-file (or stdin) mode: detect the format, announce, and dispatch.
+/// Runs single-file (or stdin) mode: detects the format, announces, and
+/// dispatches.
 fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let setup_start = Instant::now();
     guards::guard_output_collisions(cfg, &[])?;
@@ -59,22 +65,21 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     let in_path = cfg.io.input.clone();
     let in_path = in_path.as_deref();
 
-    // Total input bytes, when known (a real file), drives a determinate
-    // progress bar with %/ETA; stdin has no metadata, so it stays `None` and
-    // renders a spinner instead (see `obs::ProgressHandle::start`).
+    // The total input byte count, known for a file, drives a determinate
+    // progress bar with percent and ETA; stdin has no size, so `None` selects a
+    // spinner (see `obs::ProgressHandle::start`).
     let total: Option<u64> = in_path
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.len());
 
-    // Created here (before the reader) so the same `Arc` can be shared into
-    // `CountingReader` below, then cloned again for the workflow call and
-    // `obs.start`.
+    // Created before the reader so one `Arc` is shared by `CountingReader`, the
+    // workflow call, and `obs.start`.
     let counters = Arc::new(workflow::Counters::default());
 
-    // Open the input (file or stdin) up front so format detection can sniff its
-    // first bytes without losing them: anything consumed gets prepended back via a
-    // Cursor+chain before the FASTQ reader is built. `CountingReader` sits
-    // innermost, so sniff bytes are counted once and re-serving them is free.
+    // The input (file or stdin) is opened before format detection so the sniffed
+    // bytes are kept: whatever detection consumes is chained back in front of
+    // the stream through a `Cursor` before the reader is built. `CountingReader`
+    // sits innermost, so sniffed bytes are counted once.
     let raw: Box<dyn Read + Send> = match in_path {
         Some(p) => Box::new(
             std::fs::File::open(p).with_context(|| format!("opening input {}", p.display()))?,
@@ -100,11 +105,11 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
         },
     };
 
-    // Advisory only: an explicit --in-format/--out-format always wins for
-    // detection, but usually signals a mistake when it disagrees with the path's
-    // extension, e.g. `--out-format fastq` on an `out.fastq.gz` path. Skipped for
-    // stdin/stdout and paths without an extension. Only the detection runs here;
-    // both warnings fire after the banner, with the other advisories.
+    // Advisory only: an explicit `--in-format` or `--out-format` decides the
+    // format, and a disagreement with the path's extension (`--out-format fastq`
+    // on an `out.fastq.gz` path) is reported as a warning. Skipped for stdin,
+    // stdout, and paths without an extension. Only the check runs here; both
+    // warnings are logged after the banner with the other advisories.
     let mismatch_warn = io::format_mismatch_warning("--in-format", cfg.io.in_format, in_path);
     let out_mismatch_warn =
         io::format_mismatch_warning("--out-format", cfg.io.out_format, cfg.io.output.as_deref());
@@ -114,9 +119,8 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), in_fmt));
 
-    // Hard-error before any writer/output file is created: dumping BAM or
-    // gzipped bytes into an interactive terminal is never useful and almost
-    // always means the user forgot `-o`/a redirect.
+    // Hard error before any writer or output file is created: BAM or gzipped
+    // bytes are refused on an interactive terminal.
     guards::guard_stdout_binary(cfg, out_fmt)?;
 
     tracing::debug!(
@@ -163,19 +167,18 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     session.dispatch(cfg, obs, in_fmt, out_fmt, Source::Stream(source))
 }
 
-/// Folder-merge mode: `-i <dir>`. Classify the directory into one format family,
-/// then merge its read files into a single trimmed output through the same
-/// dispatch as the single-file path.
+/// Runs folder-merge mode (`-i <dir>`): classifies the directory into one
+/// format family, then merges its read files into a single trimmed output
+/// through the same dispatch as the single-file path.
 fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
-    // `--in-format` is inert here, since a directory's family is decided per
-    // file by extension, so it gets a warning below rather than being silently
-    // ignored.
+    // `--in-format` is inert for a directory, whose family is decided per file
+    // by extension, so a warning is queued below.
     let folder_in_format_ignored = cfg.io.in_format.is_some();
 
     // `classify` hard-errors when `-o` names a read file inside `-i <dir>`:
-    // real input or stale prior output, overwriting either while merging the
-    // rest is silent data loss. The guard then covers every other written file
-    // against every member.
+    // overwriting real input or stale prior output while merging the rest is
+    // silent data loss. The guard then checks every other written file against
+    // every member.
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
     guards::guard_output_collisions(cfg, &paths)?;
     let family_fmt = match family {
@@ -226,7 +229,7 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
         cfg.io.output.as_deref(),
     ));
     // Every member file's precise format, not the collapsed family: a folder of
-    // .fastq.gz merged into plain .fastq is a conversion.
+    // `.fastq.gz` merged into plain `.fastq` is a conversion.
     let same_format = paths.iter().all(|p| io::from_extension(p) == Some(out_fmt));
     if is_no_op(cfg, same_format) {
         warnings.push(NO_OP_WARNING.to_string());
@@ -254,17 +257,17 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
     session.dispatch(cfg, obs, family_fmt, out_fmt, Source::Folder(paths))
 }
 
-/// Sniff the input format from the stream's first bytes when neither
+/// Sniffs the input format from the stream's first bytes when neither
 /// `--in-format` nor the path extension decides it. Returns the format and the
-/// stream with the consumed bytes chained back in front, so the reader built next
-/// sees the input from its true start.
+/// stream with the consumed bytes chained back in front, so the reader built
+/// next sees the input from its start.
 fn detect_format(
     in_path: Option<&Path>,
     mut source: Box<dyn Read + Send>,
 ) -> anyhow::Result<(Format, Box<dyn Read + Send>)> {
-    // Probe enough bytes to see a full BGZF block header (18 bytes), so a BAM
-    // read from stdin or an unknown extension is told apart from gzipped FASTQ.
-    // A single `read()` may return fewer; loop to fill.
+    // The probe covers a full BGZF block header (18 bytes), which tells a BAM on
+    // stdin or under an unknown extension apart from gzipped FASTQ. A single
+    // `read()` may return fewer bytes, so the loop fills the buffer.
     let mut probe = [0u8; 18];
     let mut n = 0;
     while n < probe.len() {
@@ -294,8 +297,8 @@ fn detect_format(
     Ok((fmt, Box::new(std::io::Cursor::new(replay).chain(source))))
 }
 
-/// Split the `-t` worker budget for a dispatch, once, so the banner's Threads
-/// line and the workflow agree on the same numbers.
+/// Splits the `-t` worker budget for a dispatch once, so the banner's
+/// `Threads:` line and the workflow use the same numbers.
 ///
 /// BGZF containers (BAM and bgzf FASTQ) decode block-parallel, but only when
 /// render is light: adapter search (preset, FASTA, or inference) makes render
@@ -319,7 +322,9 @@ fn plan_budget(
 /// Where the records come from: one stream (a file or stdin, with any sniffed
 /// bytes chained back in), or the member files of a folder.
 enum Source {
+    /// A single byte stream.
     Stream(Box<dyn Read + Send>),
+    /// The read files of a directory, in merge order.
     Folder(Vec<PathBuf>),
 }
 
@@ -328,8 +333,11 @@ enum Source {
 /// serves both entry points, so every arm settles the configuration and writes
 /// the summary file.
 struct Session {
+    /// The per-stage worker split.
     budget: config::ThreadBudget,
+    /// Live counters shared with the reader and the progress ticker.
     counters: Arc<workflow::Counters>,
+    /// The output path or `<stdout>`, as shown in the banner and the closer.
     out_desc: String,
     /// Start of the processing phase. Stages run concurrently (read, trim, and
     /// write overlap across threads), so this marks a phase boundary, not a
@@ -338,7 +346,7 @@ struct Session {
 }
 
 impl Session {
-    /// Open the processing phase, after the banner has printed.
+    /// Opens the processing phase, after the banner has printed.
     fn begin(
         cfg: &Config,
         budget: config::ThreadBudget,
@@ -364,14 +372,14 @@ impl Session {
         }
     }
 
-    /// Run the workflow for one (input, output) format pair.
+    /// Runs the workflow for one (input, output) format pair.
     ///
     /// Every arm settles the adapter set before creating the output file: an
     /// inference-report exit (`Ok(None)` from `settle`) returns before any output
     /// is touched, since building the writer first would truncate a pre-existing
-    /// `-o` file even though report-only writes no records. The FASTQ->BAM
+    /// `-o` file even though report mode writes no records. The FASTQ-to-BAM
     /// rejection sits before its writer for the same reason, so a rejected run
-    /// never leaves a stray 0-byte file behind.
+    /// leaves no 0-byte file behind.
     fn dispatch(
         self,
         cfg: &mut Config,
@@ -384,7 +392,7 @@ impl Session {
             (Format::Bam, Format::Bam) => {
                 note_tags_ignored(cfg, in_fmt, out_fmt);
                 // Only the first file's header is written, so differing read
-                // groups in the others are worth a warning for BAM output.
+                // groups in the other files are reported for BAM output.
                 if let Source::Folder(paths) = &source {
                     io::dir::warn_on_bam_header_mismatch(paths);
                 }
@@ -403,10 +411,10 @@ impl Session {
                 )?;
                 let stats =
                     workflow::run_raw_bam(&out_header, records, &mut sink, cfg, &self.counters)?;
-                // Explicit finish (final bgzf block + EOF marker) instead of
-                // `Drop`, whose `try_finish` error is silently discarded: an I/O
-                // failure on the final flush (ENOSPC) would otherwise yield a
-                // truncated BAM with a success exit code.
+                // Explicit finish (final bgzf block and EOF marker) rather than
+                // `Drop`, which discards a `try_finish` error: an I/O failure on
+                // the final flush (ENOSPC) would otherwise yield a truncated BAM
+                // and a success exit code.
                 sink.finish()?;
                 self.finish(obs, &stats, cfg)
             },
@@ -422,7 +430,7 @@ impl Session {
                 self.finish(obs, &stats, cfg)
             },
             (Format::Fastq | Format::FastqGz | Format::FastqBgzf, Format::Bam) => {
-                anyhow::bail!("cross-format FASTQ to BAM conversion is not supported")
+                anyhow::bail!("FASTQ-to-BAM conversion is not supported")
             },
             (Format::Fastq | Format::FastqGz | Format::FastqBgzf, _) => {
                 note_tags_ignored(cfg, in_fmt, out_fmt);
@@ -441,8 +449,8 @@ impl Session {
         }
     }
 
-    /// Open the BAM record stream. A stdin BAM's sniff bytes were consumed and
-    /// chained back into the stream, so it is read as-is rather than re-opened.
+    /// Opens the BAM record stream. A stdin BAM's sniffed bytes are chained back
+    /// into the stream, so it is read as is rather than reopened.
     fn bam_reader(
         &self,
         source: Source,
@@ -455,7 +463,7 @@ impl Session {
         }
     }
 
-    /// Open the FASTQ-family record stream for `in_fmt`.
+    /// Opens the FASTQ-family record stream for `in_fmt`.
     fn fastq_reader(
         &self,
         source: Source,
@@ -476,10 +484,10 @@ impl Session {
         }
     }
 
-    /// Close out a finished dispatch: log the phase duration and the end-of-run
-    /// summary, write `--summary-json`, then log the closer. The artifact goes
-    /// before the `Completed` line so a failed write is never reported after a
-    /// success line.
+    /// Closes out a finished dispatch: logs the phase duration and the
+    /// end-of-run summary, writes `--summary-json`, then logs the closer. The
+    /// artifact precedes the `Completed` line so a failed write is never
+    /// reported after a success line.
     fn finish(
         &self,
         obs: &mut obs::ProgressHandle,
@@ -511,14 +519,13 @@ impl Session {
     }
 }
 
-/// Settle the configuration for dispatch and hand back the record stream.
+/// Settles the configuration for dispatch and returns the record stream.
 ///
-/// Two fields are only knowable here. The adapter set has to see reads, since
-/// presence detection samples a prefix and inference discovers from one, so it
-/// is not final until after the banner has printed the configured set. The
-/// render-pool size comes from the thread budget. Both are written in this one
-/// place so no dispatch arm can omit either and silently get an unnarrowed
-/// adapter set or the wrong pool size.
+/// Two fields are only knowable here. The adapter set depends on the reads:
+/// presence detection samples a prefix and inference discovers from one, so the
+/// set is final only after the banner has printed the configured set. The
+/// render-pool size comes from the thread budget. Both are assigned in this one
+/// place so every dispatch arm sees the same narrowed set and pool size.
 ///
 /// `Ok(None)` means the run is over without writing records: that is
 /// `--adapter-infer report`, which prints the inferred FASTA and stops.
@@ -545,9 +552,8 @@ where
     Ok(Some(resolved.records))
 }
 
-/// Name every artifact flag that report-only inference leaves unwritten.
-/// Exiting 0 having silently created none of them strands a pipeline that
-/// expected one, so each flag is called out.
+/// Warns for every artifact flag that report-only inference leaves unwritten;
+/// the run exits 0 without creating any of them.
 fn note_report_only_ignores(cfg: &Config) {
     for (flag, _) in cfg.write_targets() {
         tracing::warn!("{flag} is ignored under --adapter-infer report, which writes no records");
@@ -561,24 +567,24 @@ struct Startup {
     input_line: String,
     /// Input bytes, when known. Drives a determinate bar; `None` gives a spinner.
     total: Option<u64>,
+    /// The input format, or a folder's format family.
     in_fmt: Format,
+    /// The resolved output format.
     out_fmt: Format,
+    /// The per-stage worker split shown in the `Threads:` line.
     budget: config::ThreadBudget,
     /// Advisories specific to this entry point, logged after the shared ones.
     warnings: Vec<String>,
 }
 
-/// Print the startup banner and the deferred advisories, then start progress.
+/// Prints the startup banner and the deferred advisories, then starts progress.
 ///
 /// The order is the output contract: `whittle {version}` and `Command:` (from
-/// `main`), then the resolved config, then every advisory, then live progress. A
-/// reader can always find what ran at the top, and nothing interleaves with the
-/// bar. Both entry points go through here, so an advisory added to one cannot
-/// silently skip the other.
-///
-/// Starting progress is the last step, and belongs here rather than at the call
-/// sites: it is what makes "nothing interleaves with the bar" a property of this
-/// function instead of a convention two callers have to remember.
+/// `main`), then the resolved config, then every advisory, then live progress,
+/// so the run's provenance is at the top and nothing interleaves with the bar.
+/// Both entry points call this function, so an advisory is emitted on both
+/// paths. Starting progress here rather than at the call sites makes the
+/// ordering a property of this function.
 fn announce(
     cfg: &mut Config,
     obs: &mut obs::ProgressHandle,
@@ -607,7 +613,7 @@ fn announce(
             tracing::info!("{line}");
         }
     } else if obs.is_bar() {
-        // Bar mode gets exactly one line so the live bar stays clean.
+        // Bar mode prints one line so the live bar stays clean.
         tracing::info!(
             "{} ({} threads)",
             banner::operation_line(s.in_fmt, s.out_fmt),
@@ -617,7 +623,11 @@ fn announce(
 
     emit_advisories(&mut cfg.advisories);
     if let Some((requested, ncpu)) = cfg.threads_clamped {
-        tracing::warn!("Requested -t {requested} exceeds {ncpu} CPUs; using {ncpu}");
+        tracing::warn!(
+            requested,
+            ncpu,
+            "Requested -t exceeds the CPU count; using the CPU count"
+        );
     }
     for w in &s.warnings {
         tracing::warn!("{w}");
@@ -626,10 +636,10 @@ fn announce(
     obs.start(s.total, counters);
 }
 
-/// Log and drain the parse-time diagnostics, held by `cli::parse` and
-/// `obs::init` until the subscriber exists so `--quiet` can silence them and
-/// they carry the standard prefix. Draining makes a second call a no-op, which
-/// is what lets `run` print whatever the banner did not reach.
+/// Logs and drains the parse-time diagnostics held by `cli::parse` and
+/// `obs::init` until the subscriber exists, so `--quiet` silences them and they
+/// carry the standard prefix. Draining makes a second call a no-op, so `run`
+/// prints only what the banner did not reach.
 fn emit_advisories(advisories: &mut Vec<config::Advisory>) {
     for a in advisories.drain(..) {
         if a.warn {
@@ -640,13 +650,13 @@ fn emit_advisories(advisories: &mut Vec<config::Advisory>) {
     }
 }
 
-/// True when the run neither trims nor filters, so it re-emits (almost) what it
-/// read.
+/// True when the run neither trims nor filters, so the output mirrors the input
+/// apart from format.
 ///
-/// `same_format` is the caller's answer to "is this also not a conversion",
-/// because the two entry points can only answer it differently: folder mode's
-/// family collapses `.fastq`, `.fastq.gz`, and `.fastq.bgz` into one value, so
-/// comparing families there would call a genuine decompression run a no-op.
+/// `same_format` is supplied by the caller because the two entry points answer
+/// it differently: folder mode's family collapses `.fastq`, `.fastq.gz`, and
+/// `.fastq.bgz` into one value, so comparing families there would classify a
+/// decompression run as a no-op.
 fn is_no_op(cfg: &Config, same_format: bool) -> bool {
     let no_trim = cfg.trim.head == 0 && cfg.trim.tail == 0 && cfg.trim.quality.is_none();
     let pass_through_filter = cfg.filter.min_length <= 1
@@ -658,19 +668,19 @@ fn is_no_op(cfg: &Config, same_format: bool) -> bool {
     no_trim && pass_through_filter && cfg.adapters.is_none() && same_format
 }
 
+/// Warning for a run that neither trims nor filters.
 const NO_OP_WARNING: &str =
     "No trimming or filtering options set; output will mostly mirror the input";
 
-/// `--fastq-tags` only affects BAM to FASTQ output. A non-default value
-/// (`none` or an explicit list) on any other path gets a one-line note rather
-/// than being silently ignored; an explicit `all` is the default and stays
-/// silent.
+/// Warns when `--fastq-tags` was set to a non-default value (`none` or an
+/// explicit list) on a path other than BAM-to-FASTQ, where it has no effect. An
+/// explicit `all` equals the default and is silent.
 fn note_tags_ignored(cfg: &Config, in_fmt: Format, out_fmt: Format) {
     if !matches!(cfg.fastq_tags, config::FastqTags::All) {
         tracing::warn!(
-            "--fastq-tags applies only to BAM-to-FASTQ output; ignored for {} to {}",
-            in_fmt.label(),
-            out_fmt.label()
+            input = in_fmt.label(),
+            output = out_fmt.label(),
+            "--fastq-tags applies only to BAM-to-FASTQ output and is ignored"
         );
     }
 }
@@ -723,9 +733,9 @@ mod tests {
         }
     }
 
-    /// `settle` is the one place both dispatch-time fields are written, so both
-    /// must be written: a missed `render_workers` silently oversubscribes the
-    /// render pool (or runs it single-threaded on the BAM full-window path).
+    /// `settle` is the one place both dispatch-time fields are written. A
+    /// missing `render_workers` assignment would oversubscribe the render pool
+    /// or run it single-threaded on the BAM full-window path.
     #[test]
     fn settle_sets_both_dispatch_fields() {
         let mut cfg = base_config();
@@ -741,18 +751,18 @@ mod tests {
         let got = settle(records, &mut cfg, budget, |r| {
             Cow::Borrowed(r.seq.as_slice())
         })
-        .expect("settle succeeds")
-        .expect("records are returned when not in report mode");
+        .expect("Settle succeeds")
+        .expect("Records are returned when not in report mode");
 
         assert_eq!(
             cfg.render_workers, 5,
-            "render pool size comes from the budget"
+            "Render pool size comes from the budget"
         );
-        assert!(cfg.adapters.is_none(), "no adapters configured stays none");
-        assert_eq!(got.count(), 1, "the record stream is handed back intact");
+        assert!(cfg.adapters.is_none(), "No adapters configured stays none");
+        assert_eq!(got.count(), 1, "The record stream is handed back intact");
     }
 
-    /// With no adapter work to do, the stream must pass through untouched rather
+    /// With no adapter work to do, the stream passes through untouched rather
     /// than being buffered.
     #[test]
     fn settle_passes_records_through_when_adapters_are_off() {

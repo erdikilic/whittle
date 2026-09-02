@@ -1,3 +1,5 @@
+//! Parsing of `MM` text and `ML` bytes into `Mods`.
+
 use super::{MmGroup, ModCode, Mods};
 
 /// An `MM` string holding a byte the group grammar does not accept.
@@ -21,7 +23,7 @@ struct GroupScan {
 
 /// Reads one group token without allocating. Codes and deltas are handed to
 /// `on_code` and `on_delta` as they are read, so `parse` collects them while
-/// the counting scan discards them. The grammar is the SAM tags one:
+/// the counting scan discards them. The grammar is the SAM tag grammar:
 /// `[A-Za-z][+-]([a-z]+|[0-9]+)[.?]?(,[0-9]+)*`.
 fn scan_group(
     token: &[u8],
@@ -97,7 +99,7 @@ fn scan_group(
     scan
 }
 
-/// The group tokens of `mm` with their byte offsets. The empty remainder after
+/// Returns the group tokens of `mm` with their byte offsets. The empty remainder after
 /// a final `;` is not a token; an empty token anywhere else is one, and fails
 /// the grammar like any group without a code.
 fn group_tokens(mm: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
@@ -110,8 +112,8 @@ fn group_tokens(mm: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
     })
 }
 
-/// The number of `ML` bytes a well-formed record carrying this `MM` string must
-/// have: one per listed position per mod code, summed over groups. Counts
+/// Returns the number of `ML` bytes a well-formed record carrying this `MM`
+/// string must have: one per listed position per mod code, summed over groups. Counts
 /// without allocating, so a caller can check `ML` on the hot path without
 /// building the groups. `Err` when `mm` does not conform to the grammar.
 pub fn expected_ml_len(mm: &[u8]) -> Result<usize, MalformedMm> {
@@ -145,7 +147,7 @@ pub fn parse_checked(mm: &[u8], ml: &[u8]) -> Result<Mods, MalformedMm> {
     }
 }
 
-/// The parsed groups and the offset of the first unexpected byte, if any.
+/// Returns the parsed groups and the offset of the first unexpected byte, if any.
 fn parse_inner(mm: &[u8], ml: &[u8]) -> (Mods, Option<usize>) {
     let mut groups = Vec::new();
     let mut ml_pos = 0usize;
@@ -162,7 +164,7 @@ fn parse_inner(mm: &[u8], ml: &[u8]) -> (Mods, Option<usize>) {
             continue;
         }
 
-        // Claim this group's ML bytes: positions * codes, position-major.
+        // This group's ML bytes: positions * codes, position-major.
         let want = deltas.len() * scan.codes;
         let end = (ml_pos + want).min(ml.len());
         let group_ml = ml[ml_pos..end].to_vec();
@@ -200,7 +202,7 @@ mod tests {
 
     #[test]
     fn multi_code_group_takes_two_ml_per_position() {
-        // C+mh with 2 positions -> 4 ML bytes, position-major.
+        // `C+mh` with 2 positions takes 4 ML bytes, position-major.
         let m = parse(b"C+mh,1,3;", &[10, 20, 30, 40]);
         let g = &m.groups[0];
         assert_eq!(g.codes, vec![ModCode::Char(b'm'), ModCode::Char(b'h')]);
@@ -233,11 +235,11 @@ mod tests {
         assert!(g.ml.is_empty());
     }
 
+    /// A corrupt 20-digit ChEBI id or delta overflows `u32`/`usize` under
+    /// `n * 10 + d`; saturating arithmetic clamps instead of panicking (debug
+    /// builds panic on overflow).
     #[test]
     fn over_long_numeric_fields_saturate_without_panicking() {
-        // A corrupt 20-digit ChEBI id and delta overflow u32/usize with the naive
-        // `n*10 + d`; saturating arithmetic must clamp instead of panicking (this
-        // test is a debug build, where overflow panics).
         let m = parse(b"C+99999999999999999999,88888888888888888888;", &[1]);
         assert_eq!(m.groups.len(), 1);
         assert_eq!(m.groups[0].codes, vec![ModCode::Chebi(u32::MAX)]);
@@ -268,7 +270,7 @@ mod tests {
             assert_eq!(
                 expected_ml_len(mm),
                 Ok(want),
-                "counting scan disagreed for {}",
+                "Counting scan disagreed for {}",
                 String::from_utf8_lossy(mm)
             );
         }

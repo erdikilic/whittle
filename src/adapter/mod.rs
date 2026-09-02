@@ -1,3 +1,10 @@
+//! Adapter, primer and barcode trimming.
+//!
+//! Searches each read window for catalog sequences with sassy, classifies every
+//! accepted hit as a terminal trim or an interior excision, and returns the kept
+//! spans. Presence detection, ab-initio inference and the ONT catalog live in
+//! the submodules.
+
 pub mod detect;
 pub mod infer;
 mod ont_catalog;
@@ -16,66 +23,77 @@ use search::{
     new_ambiguous_searcher, new_batched_searcher, new_searcher, pattern_hits,
 };
 
+// One searcher of each kind per thread, reused across reads so
+// `adapter_segments` does not allocate a searcher and its scratch buffers on
+// every call. Per-thread state keeps the parallel workflows free of sharing.
 thread_local! {
-    /// One reverse-complement searcher per thread, reused across reads so
-    /// `adapter_segments` doesn't allocate a fresh searcher (and its scratch
-    /// buffers) on every call. Per-thread, so the parallel workflows stay
-    /// data-race-free without sharing.
-    /// The fast all-ACGT searcher. Only used when both the pattern and the
+    /// The fast all-ACGT searcher. Used only when both the pattern and the
     /// searched text are plain ACGT; see `is_plain_acgt`.
     static RC_SEARCHER: RefCell<PlainSearcher> = RefCell::new(new_searcher());
 
-    /// Pattern-batched searcher. Sassy's `Dna` profile does not implement
-    /// `search_patterns`; on A/C/G/T input its IUPAC profile is equivalent.
     /// The ambiguity-tolerant searcher, used for a degenerate primer.
     static RC_AMBIGUOUS: RefCell<AmbiguousSearcher> = RefCell::new(new_ambiguous_searcher());
+
+    /// The pattern-batched searcher. Sassy implements `search_patterns` only
+    /// for the IUPAC profile, which on A/C/G/T input is equivalent to the DNA
+    /// profile.
     static BATCH_SEARCHER: RefCell<BatchedAdapterSearcher> = RefCell::new(new_batched_searcher());
 }
 
-/// Which read end a catalog sequence is expected at. This gates terminal
-/// trimming only: `Five` trims at the 5' end, `Three` at the 3' end, `Both` at
-/// either. Interior chimera-splitting (when enabled) considers any adapter that
-/// matches in the read interior regardless of this tag, since a front/rear
-/// adapter appearing mid-read is itself the chimera signal.
+/// The read end a catalog sequence is expected at. The tag gates terminal
+/// trimming only: interior chimera splitting, when enabled, accepts any adapter
+/// that matches in the read interior regardless of the tag, since a front or
+/// rear adapter appearing mid-read is itself the chimera signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum End {
+    /// Expected at the 5' end.
     Five,
+    /// Expected at the 3' end.
     Three,
+    /// Expected at either end.
     Both,
 }
 
-/// One searchable adapter/primer/barcode/flank sequence.
+/// One searchable adapter, primer, barcode or flank sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Adapter {
+    /// Display name, used in logs and the report.
     pub name: String,
+    /// Nucleotide sequence; may contain IUPAC ambiguity codes.
     pub seq: Vec<u8>,
+    /// Read end the sequence is expected at.
     pub end: End,
 }
 
 /// Resolved adapter-trimming settings for a run.
 #[derive(Debug, Clone)]
 pub struct AdapterConfig {
+    /// Sequences searched for, in configuration order.
     pub adapters: Vec<Adapter>,
     /// End-match tolerance as a fraction of adapter length (`k_end`).
     pub error_rate: f64,
-    /// Bases at each end classified as "terminal" (trim) vs interior (split).
+    /// Bases at each end within which a hit is terminal (trim) rather than
+    /// interior (split).
     pub end_size: usize,
-    /// Split on interior adapters. False = ends-only (`--adapter-ends-only`).
+    /// Whether interior adapters split the read; `false` is ends-only
+    /// (`--adapter-ends-only`).
     pub split: bool,
-    /// Exact-seed automaton for lossless whole-read candidate filtering. Built
-    /// lazily after presence detection/inference has finalized `adapters`.
+    /// Exact-seed automaton for lossless whole-read candidate filtering, built
+    /// lazily once presence detection or inference has finalized `adapters`.
     pub(crate) candidate_index: OnceLock<CandidateIndex>,
 }
 
 impl AdapterConfig {
+    /// Replaces the adapter set and discards the candidate index built for the
+    /// previous set.
     pub(crate) fn replace_adapters(&mut self, adapters: Vec<Adapter>) {
         self.adapters = adapters;
         self.candidate_index = OnceLock::new();
     }
 }
 
-/// Edit budget for a `len`-base pattern at `rate`, rounded down. The epsilon
-/// keeps an integral product whose double lands below its integer.
+/// Returns the edit budget for a `len`-base pattern at `rate`, rounded down.
+/// The epsilon keeps an integral product whose double lands below its integer.
 pub(crate) fn edit_budget(rate: f64, len: usize) -> usize {
     (rate * len as f64 + 1e-9).floor() as usize
 }
@@ -84,12 +102,16 @@ pub(crate) fn edit_budget(rate: f64, len: usize) -> usize {
 /// of it, for interior hits.
 #[derive(Debug, Clone, Copy)]
 struct Budget {
+    /// Pattern length in bases.
     len: usize,
+    /// Edit budget for terminal hits.
     k_end: usize,
+    /// Edit budget for interior hits.
     k_mid: usize,
 }
 
 impl Budget {
+    /// Computes the budgets for a `len`-base pattern at `error_rate`.
     fn new(len: usize, error_rate: f64) -> Self {
         Self {
             len,
@@ -104,29 +126,42 @@ impl Budget {
 /// read for that adapter instead of candidate windows.
 const MAX_SEED_EXPANSIONS: usize = 256;
 
+/// Exact-seed index over the adapter set. Aho-Corasick partition seeds bound
+/// the interior search to candidate windows, and equal-length adapters are
+/// grouped into SIMD batches for the terminal search.
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateIndex {
+    /// Automaton over every seed expansion; `None` when no adapter has seeds.
     matcher: Option<AhoCorasick>,
+    /// Adapters owning each seed, indexed by automaton pattern id.
     seed_adapters: Vec<Vec<usize>>,
     /// Per-adapter edit budgets, computed once per adapter set.
     budgets: Vec<Budget>,
     /// Adapters with no usable seeds (see `MAX_SEED_EXPANSIONS`).
     unfiltered: Vec<bool>,
+    /// Equal-length adapter groups searched together over the end windows.
     terminal_batches: Vec<TerminalBatch>,
+    /// Adapters covered by a batch and skipped by the singleton search.
     batched_adapters: Vec<bool>,
 }
 
-/// Equal-length adapters searched together through Sassy's pattern-parallel
-/// API. Sassy handles forward and reverse-complement matching for the batch.
+/// Equal-length adapters searched together through sassy's pattern-parallel
+/// API, which matches the forward and reverse-complement strands for the batch.
 #[derive(Debug, Clone)]
 struct TerminalBatch {
+    /// Indices into `AdapterConfig::adapters`, in pattern order.
     adapter_indices: Vec<usize>,
+    /// The adapter sequences, in `adapter_indices` order.
     patterns: Vec<Vec<u8>>,
+    /// The shared pattern length.
     len: usize,
+    /// The shared terminal edit budget.
     k_end: usize,
 }
 
 impl CandidateIndex {
+    /// Builds the index for `adapters`; interior seeds are built only when
+    /// `include_interior`.
     fn new(adapters: &[Adapter], error_rate: f64, include_interior: bool) -> Self {
         let budgets: Vec<Budget> = adapters
             .iter()
@@ -162,16 +197,16 @@ impl CandidateIndex {
                 AhoCorasick::builder()
                     .ascii_case_insensitive(true)
                     .build(&patterns)
-                    .expect("adapter seeds are nonempty ASCII DNA patterns")
+                    .expect("Adapter seeds are nonempty ASCII DNA patterns")
             });
             (matcher, seed_adapters)
         } else {
             (None, Vec::new())
         };
 
-        // Sassy can pack equal-length patterns across SIMD lanes. Keep
-        // singletons on the ordinary search path: batching them cannot use
-        // pattern-level parallelism and is slower for these terminal windows.
+        // Sassy packs equal-length patterns across SIMD lanes. Singletons stay
+        // on the ordinary search path: a batch of one has no pattern-level
+        // parallelism and is slower over these terminal windows.
         let mut by_len: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (adapter_idx, adapter) in adapters.iter().enumerate() {
             if adapter.seq.len() >= MIN_PATTERN_LEN {
@@ -211,9 +246,9 @@ impl CandidateIndex {
         }
     }
 
-    /// Per-adapter text spans that can hold an interior hit: a radius around
-    /// every exact seed occurrence, merged, or the whole text for an
-    /// `unfiltered` adapter.
+    /// Returns the per-adapter text spans that can hold an interior hit: a
+    /// radius around every exact seed occurrence, merged, or the whole text for
+    /// an `unfiltered` adapter.
     fn candidate_windows(&self, text: &[u8]) -> Vec<Vec<(usize, usize)>> {
         let mut windows: Vec<Vec<(usize, usize)>> = self
             .unfiltered
@@ -232,10 +267,10 @@ impl CandidateIndex {
         for m in matcher.find_overlapping_iter(text) {
             for &adapter_idx in &self.seed_adapters[m.pattern().as_usize()] {
                 let Budget { len, k_end, .. } = self.budgets[adapter_idx];
-                // The exact seed lies inside the <=k_mid alignment. A radius of
-                // pattern length + k_end on each side necessarily contains that
-                // entire alignment and enough context for the original k_end
-                // Sassy search to reproduce its span/tie behavior.
+                // The exact seed lies inside the `<= k_mid` alignment. A radius
+                // of pattern length + `k_end` on each side contains that entire
+                // alignment and enough context for the full-window `k_end`
+                // search to reproduce its span and tie behavior.
                 let radius = len + k_end;
                 windows[adapter_idx].push((
                     m.start().saturating_sub(radius),
@@ -261,11 +296,11 @@ impl CandidateIndex {
     }
 }
 
-/// Exact seeds of one strand of `pattern`: `max_edits + 1` pieces, each
-/// expanded over its ambiguity codes. At most `max_edits` edits leave one piece
-/// untouched, so a read carrying the pattern holds one expansion of one piece
-/// verbatim. `None` when a piece expands past `MAX_SEED_EXPANSIONS` or holds a
-/// byte outside the nucleotide alphabet.
+/// Returns the exact seeds of one strand of `pattern`: `max_edits + 1` pieces,
+/// each expanded over its ambiguity codes. At most `max_edits` edits leave one
+/// piece untouched, so a read carrying the pattern holds one expansion of one
+/// piece verbatim. `None` when a piece expands past `MAX_SEED_EXPANSIONS` or
+/// holds a byte outside the nucleotide alphabet.
 fn partition_seeds(pattern: &[u8], max_edits: usize) -> Option<Vec<Vec<u8>>> {
     let parts = (max_edits + 1).min(pattern.len());
     let mut seeds = Vec::new();
@@ -277,7 +312,7 @@ fn partition_seeds(pattern: &[u8], max_edits: usize) -> Option<Vec<Vec<u8>>> {
     Some(seeds)
 }
 
-/// Every plain ACGT string `piece` stands for, or `None` past
+/// Returns every plain ACGT string `piece` stands for, or `None` past
 /// `MAX_SEED_EXPANSIONS` or on a byte outside the nucleotide alphabet.
 fn expand_iupac(piece: &[u8]) -> Option<Vec<Vec<u8>>> {
     let mut expansions: Vec<Vec<u8>> = vec![Vec::with_capacity(piece.len())];
@@ -299,7 +334,7 @@ fn expand_iupac(piece: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some(expansions)
 }
 
-/// The IUPAC complement of one base or ambiguity code, case preserved.
+/// Returns the IUPAC complement of one base or ambiguity code, case preserved.
 /// `S`, `W` and `N` are their own complements; any other byte passes through.
 fn complement(base: u8) -> u8 {
     let upper = match base.to_ascii_uppercase() {
@@ -324,39 +359,43 @@ fn complement(base: u8) -> u8 {
     }
 }
 
+/// Returns the reverse complement of `seq`, code by code.
 fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter().rev().map(|&b| complement(b)).collect()
 }
 
-/// Sequences shorter than this are never searched standalone: a <11 bp pattern
-/// matches almost anywhere under any error budget. Catalog flanks below it are
-/// omitted from the catalog for the same reason.
+/// Minimum searchable pattern length: a shorter pattern matches almost anywhere
+/// under any error budget and is never searched standalone. Catalog flanks
+/// below it are omitted from the catalog for the same reason.
 pub const MIN_PATTERN_LEN: usize = 11;
 
 /// Outboard flank length at or below which a hit covered by both end zones is
 /// a terminal trim rather than an excision. A flank this short is adapter
-/// residue or junk, and emitting it as a read of its own serves nothing.
+/// residue or junk and is not worth a read of its own.
 const FLANK_SLACK: usize = MIN_PATTERN_LEN;
 
-/// Terminal classification of a hit: which end (if any) it trims.
+/// Terminal classification of a hit: which end, if any, it trims.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Terminal {
+    /// Trims the 5' end.
     Five,
+    /// Trims the 3' end.
     Three,
     /// Covered by both end zones with a real flank on each side: excise the
     /// adapter span and keep both flanks. See `classify_terminal`.
     Excise,
+    /// Trims neither end.
     None,
 }
 
-/// Search `pattern` in `text`, choosing the profile by what the pattern holds.
+/// Searches `pattern` in `text`, choosing the profile by the pattern's alphabet.
 ///
 /// A degenerate primer needs the IUPAC profile so its wobble positions match the
-/// bases they stand for. A plain ACGT pattern takes the materially faster DNA
-/// profile, which matters because a narrowed adapter set is searched one pattern
-/// at a time rather than batched across SIMD lanes.
+/// bases they stand for. A plain ACGT pattern takes the faster DNA profile,
+/// which matters because a narrowed adapter set is searched one pattern at a
+/// time rather than batched across SIMD lanes.
 ///
-/// `text` is always plain ACGT by the time it gets here; see `normalized_read`.
+/// `text` is plain ACGT on every call; see `normalized_read`.
 fn search(
     plain: &mut PlainSearcher,
     ambiguous: &mut AmbiguousSearcher,
@@ -371,24 +410,24 @@ fn search(
     }
 }
 
-/// What an ambiguity code in a read is rewritten to before searching.
+/// The base an ambiguity code in a read is rewritten to before searching.
 ///
-/// An uncalled base is evidence of nothing, so it should consume error budget
-/// rather than match for free: a short `N` inside a real adapter still matches
+/// An uncalled base is evidence of nothing, so it consumes error budget rather
+/// than matching for free: a short `N` inside a real adapter still matches
 /// within `--adapter-error-rate`, while a run of them never looks like an
 /// adapter. Leaving the codes in place and searching on the IUPAC profile would
-/// do the opposite and excise the whole run as if it were adapter.
+/// do the opposite and excise the whole run as adapter.
 ///
-/// Any ACGT byte serves; what matters is that it is one fixed base, so no real
+/// Any ACGT byte serves; the requirement is one fixed base, so that no real
 /// adapter matches a homopolymer run of it within its budget. The rewrite also
-/// keeps the fast profile usable, which panics during traceback on anything else,
-/// and it is what lets the batched path stay consistent, since sassy implements
-/// batching only for IUPAC.
+/// keeps the fast profile usable, which panics during traceback on any other
+/// byte, and keeps the batched path consistent, since sassy implements batching
+/// only for IUPAC.
 const AMBIGUOUS_READ_BASE: u8 = b'A';
 
-/// The read as every searcher sees it: each byte outside ACGT rewritten to
-/// `AMBIGUOUS_READ_BASE`. A plain read, the overwhelming majority, borrows
-/// unchanged and allocates nothing.
+/// Returns the read as every searcher sees it: each byte outside ACGT rewritten
+/// to `AMBIGUOUS_READ_BASE`. A plain read, the common case, borrows unchanged
+/// and allocates nothing.
 pub(crate) fn normalized_read(window: &[u8]) -> Cow<'_, [u8]> {
     if is_plain_acgt(window) {
         return Cow::Borrowed(window);
@@ -407,11 +446,8 @@ pub(crate) fn normalized_read(window: &[u8]) -> Cow<'_, [u8]> {
     )
 }
 
-/// Records one adapter hit and what was decided about it.
-///
-/// This is the detail needed to answer why a read was cut where it was: which
-/// sequence matched, over what span, how far off an exact match it was, and
-/// whether that made it a terminal trim, an excision, or nothing at all.
+/// Emits a trace event for one adapter hit: the sequence, its span, its edit
+/// cost, and the action taken (a terminal trim, an excision, or none).
 fn trace_hit(name: &str, start: usize, end: usize, cost: usize, action: Option<HitAction>) {
     tracing::trace!(
         adapter = name,
@@ -439,7 +475,7 @@ pub enum HitAction {
     Excise,
 }
 
-/// The end nearer to a hit at `[start, end)` in a length-`n` window.
+/// Returns the end nearer to a hit at `[start, end)` in a length-`n` window.
 fn nearer_end(start: usize, end: usize, n: usize) -> Terminal {
     if start <= n - end {
         Terminal::Five
@@ -448,7 +484,7 @@ fn nearer_end(start: usize, end: usize, n: usize) -> Terminal {
     }
 }
 
-/// Classifies a hit at window coords `[start, end)` in a length-`n` window.
+/// Classifies a hit at window coordinates `[start, end)` in a length-`n` window.
 ///
 /// A hit inside one end zone only trims that end when the adapter's tag allows
 /// it. A hit covered by both end zones (`n <= end_size + hit length`) is placed
@@ -474,9 +510,9 @@ fn classify_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: E
     }
 }
 
-/// Ends-only variant of `classify_terminal`: splitting is disabled, so an
-/// `Excise` hit can't keep both flanks. Resolve it back to a terminal trim
-/// toward the nearer end, leaving every other outcome untouched.
+/// Classifies a hit for ends-only mode: splitting is disabled, so an `Excise`
+/// outcome of `classify_terminal` resolves to a terminal trim toward the nearer
+/// end, and every other outcome is unchanged.
 fn ends_only_terminal(start: usize, end: usize, n: usize, end_size: usize, tag: End) -> Terminal {
     match classify_terminal(start, end, n, end_size, tag) {
         Terminal::Excise => nearer_end(start, end, n),
@@ -502,9 +538,9 @@ enum Site {
     Interior,
 }
 
-/// Head end and tail start for a `len`-base adapter at budget `k_end`. Each
-/// window covers `end_size` bases plus the longest alignment, `len + k_end`,
-/// so it holds every hit that can reach its end zone.
+/// Returns the head end and tail start for a `len`-base adapter at budget
+/// `k_end`. Each window covers `end_size` bases plus the longest alignment,
+/// `len + k_end`, so it holds every hit that can reach its end zone.
 fn terminal_windows(n: usize, end_size: usize, len: usize, k_end: usize) -> (usize, usize) {
     let reach = end_size + len + k_end;
     (reach.min(n), n.saturating_sub(reach))
@@ -513,18 +549,24 @@ fn terminal_windows(n: usize, end_size: usize, len: usize, k_end: usize) -> (usi
 /// Accumulator for the accepted hits of one window: the keep boundaries and
 /// interior cuts.
 struct Keep<'a> {
+    /// The configured adapters, for tags and names.
     adapters: &'a [Adapter],
+    /// Window length.
     n: usize,
+    /// Terminal zone depth, capped at `n`.
     end_size: usize,
+    /// Whether interior hits split the read.
     split: bool,
     /// 5' keep boundary; advances inward on 5' trims.
     lo: usize,
     /// 3' keep boundary; retreats inward on 3' trims.
     hi: usize,
+    /// Accepted excisions, merged by `into_segments`.
     interior: Vec<(usize, usize)>,
 }
 
 impl<'a> Keep<'a> {
+    /// Creates an accumulator that keeps the whole `[0, n)` window.
     fn new(adapters: &'a [Adapter], n: usize, end_size: usize, split: bool) -> Self {
         Self {
             adapters,
@@ -570,7 +612,8 @@ impl<'a> Keep<'a> {
         }
     }
 
-    /// The keep segments: `[lo, hi)` with the merged interior cuts carved out.
+    /// Returns the keep segments: `[lo, hi)` with the merged interior cuts
+    /// carved out.
     fn into_segments(self) -> Vec<(usize, usize)> {
         let Keep {
             lo, hi, interior, ..
@@ -715,14 +758,14 @@ fn search_interior(
     }
 }
 
-/// Compute adapter keep-segments for `window`:
-///   - terminal hits within `end_size` of an end trim that end inward;
-///   - interior hits (stricter `k_mid`) excise and split.
+/// Computes the adapter keep segments for `window`: terminal hits within
+/// `end_size` of an end trim that end inward, and interior hits (at the
+/// stricter `k_mid`) excise and split.
 ///
-/// Under `--adapter-ends-only` (`cfg.split` false) only the two end-zones are
+/// Under `--adapter-ends-only` (`cfg.split` false) only the two end zones are
 /// searched, since no interior hit could be acted on.
 ///
-/// Returns `[start,end)` spans in `window` coordinates.
+/// Returns `[start, end)` spans in `window` coordinates.
 pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
     let n = window.len();
     if n == 0 {
@@ -758,6 +801,7 @@ mod segment_tests {
     use super::preset::preset_ont;
     use super::*;
 
+    /// Builds a configuration at error rate 0.2 and `end_size` 20.
     fn cfg(adapters: Vec<Adapter>, split: bool) -> AdapterConfig {
         AdapterConfig {
             adapters,
@@ -767,6 +811,8 @@ mod segment_tests {
             candidate_index: std::sync::OnceLock::new(),
         }
     }
+
+    /// Builds an adapter from its parts.
     fn ad(name: &str, seq: &[u8], end: End) -> Adapter {
         Adapter {
             name: name.into(),
@@ -775,8 +821,8 @@ mod segment_tests {
         }
     }
 
-    /// Deterministic SplitMix64 bases, the same generator the inference
-    /// fixtures use.
+    /// Generates deterministic SplitMix64 bases with the same generator the
+    /// inference fixtures use.
     fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
         let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
         (0..len)
@@ -791,7 +837,8 @@ mod segment_tests {
             .collect()
     }
 
-    /// Exhaustive reference implementation for candidate-filter comparisons.
+    /// Computes the segments by exhaustive full-window search, as the reference
+    /// for the candidate filter.
     fn reference_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
         let n = window.len();
         if n == 0 {
@@ -893,6 +940,7 @@ mod segment_tests {
         segments
     }
 
+    /// Linear congruential generator for deterministic fixtures.
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> usize {
@@ -1003,16 +1051,21 @@ mod segment_tests {
         }
     }
 
+    /// The candidate search matches the full-window reference on random plain
+    /// adapters.
     #[test]
     fn candidate_search_matches_full_search_randomized() {
         check_candidate_search_randomized(0x4e4f_4f44_4c45_5301, false);
     }
 
+    /// The candidate search matches the full-window reference on random
+    /// degenerate adapters.
     #[test]
     fn candidate_search_matches_full_search_randomized_degenerate() {
         check_candidate_search_randomized(0x4445_4745_4e45_5241, true);
     }
 
+    /// A window holding an `N` run matches the reference after normalization.
     #[test]
     fn non_acgt_window_falls_back_to_scalar_search() {
         let cfg = cfg(
@@ -1029,6 +1082,7 @@ mod segment_tests {
         );
     }
 
+    /// A copy within the edit budget always retains one exact seed piece.
     #[test]
     fn partition_seeds_survive_random_indels_and_substitutions() {
         struct Lcg(u64);
@@ -1089,6 +1143,8 @@ mod segment_tests {
         }
     }
 
+    /// `expand_iupac` enumerates every concrete string and refuses to expand
+    /// past the cap or over a non-nucleotide byte.
     #[test]
     fn expand_iupac_enumerates_every_base_and_caps() {
         assert_eq!(expand_iupac(b"AC"), Some(vec![b"AC".to_vec()]));
@@ -1112,6 +1168,8 @@ mod segment_tests {
         );
     }
 
+    /// Reverse complementing twice is the identity for every IUPAC code, with
+    /// case preserved.
     #[test]
     fn reverse_complement_uses_the_full_iupac_table() {
         for &code in b"ACGTRYSWKMBDHVNacgtryswkmbdhvn" {
@@ -1135,6 +1193,8 @@ mod segment_tests {
         assert_eq!(reverse_complement(b"AACG"), b"CGTT");
     }
 
+    /// `edit_budget` does not round an integral product down through
+    /// floating-point error.
     #[test]
     fn edit_budget_keeps_an_integral_product() {
         assert_eq!(edit_budget(0.29, 100), 29);
@@ -1144,10 +1204,10 @@ mod segment_tests {
         assert_eq!(edit_budget(0.0, 50), 0);
     }
 
+    /// Both seed pieces of the 12-mer hold an `N`; the planted copy is one
+    /// concrete instance and still splits the read.
     #[test]
     fn degenerate_adapter_splits_interior_chimera() {
-        // Both seed pieces of the 12-mer hold an `N`; the planted copy is one
-        // concrete instance.
         let adapter = b"GTNGTTGGNTGT";
         let mut w = vec![b'A'; 40];
         w.extend_from_slice(b"GTGGTTGGGTGT");
@@ -1162,10 +1222,10 @@ mod segment_tests {
         assert_eq!(adapter_segments(&w, &c), vec![(0, 40), (52, 92)]);
     }
 
+    /// The `N` sits in the first piece and the substitution (C to A) in the
+    /// second, so only an expanded first-piece seed finds the copy.
     #[test]
     fn degenerate_adapter_splits_with_one_substitution_in_the_plain_piece() {
-        // The `N` sits in the first piece; the substitution (C -> A) in the
-        // second, so only an expanded first-piece seed can find the copy.
         let adapter = b"GTNGTTGGCTGT";
         let mut w = vec![b'A'; 40];
         w.extend_from_slice(b"GTGGTTGGATGT");
@@ -1180,9 +1240,10 @@ mod segment_tests {
         assert_eq!(adapter_segments(&w, &c), vec![(0, 40), (52, 92)]);
     }
 
+    /// Each 8-base piece holds five `N`s (1024 expansions), past the cap, so
+    /// the adapter is searched over the whole window and still splits it.
     #[test]
     fn overly_degenerate_adapter_is_searched_unfiltered() {
-        // Each 8-base piece holds five N's (1024 expansions), past the cap.
         let adapter = b"NNNNNGGTTGGNNNNN";
         let mut w = vec![b'A'; 35];
         w.extend_from_slice(b"CACGTGGTTGGACGTC");
@@ -1210,12 +1271,14 @@ mod segment_tests {
         );
     }
 
+    /// An empty adapter set keeps the whole window.
     #[test]
     fn no_adapters_is_identity() {
         let w = b"ACGTACGTACGTACGT";
         assert_eq!(adapter_segments(w, &cfg(vec![], true)), vec![(0, w.len())]);
     }
 
+    /// A 5' adapter at the read start is trimmed.
     #[test]
     fn trims_5prime_adapter_and_outboard() {
         let adapter = b"ACGTACGTACGT"; // 12 bp
@@ -1225,13 +1288,13 @@ mod segment_tests {
         assert_eq!(adapter_segments(&w, &c), vec![(12, 24)]);
     }
 
+    /// With the default `end_size` of 150 the two end zones overlap for any
+    /// read of at most 300 bp. A chimera-junction adapter within `end_size` of
+    /// both ends splits the read and keeps both inserts; treating it as a
+    /// terminal adapter would discard the entire outboard arm, up to `end_size`
+    /// bases of real insert.
     #[test]
     fn central_chimera_on_short_read_splits_both_arms() {
-        // With the default end_size=150, both end-zones overlap for any read
-        // <= 2*end_size (300bp). A chimera-junction adapter sitting within
-        // end_size of both ends must split the read (keep both inserts), not be
-        // treated as a terminal adapter, which discarded the entire outboard
-        // arm (up to ~end_size bases of real insert).
         let adapter = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only (no A/C to collide)
         let mut w = vec![b'A'; 115]; // insert1
         let cut = w.len();
@@ -1252,10 +1315,10 @@ mod segment_tests {
         );
     }
 
+    /// Three junk bases, the adapter, then the insert: the 3 bp flank is
+    /// trimmed with the adapter instead of surviving as its own segment.
     #[test]
     fn near_terminal_excision_folds_into_a_trim() {
-        // Three junk bases, the adapter, then the insert: the 3 bp flank is
-        // trimmed with the adapter instead of surviving as its own segment.
         let adapter = b"GGGGTTTTGGGGTTTTGGGG";
         let mut w = b"AAA".to_vec();
         w.extend_from_slice(adapter);
@@ -1276,8 +1339,8 @@ mod segment_tests {
         assert_eq!(adapter_segments(&w, &c), vec![(0, 37)]);
     }
 
-    /// One kept segment that reaches the far end, with the trim boundary at the
-    /// adapter or at most `slack` bases into the insert.
+    /// Asserts one kept segment that reaches the far end, with the trim boundary
+    /// at the adapter or at most `slack` bases into the insert.
     fn assert_insert_kept(
         segs: &[(usize, usize)],
         n: usize,
@@ -1352,12 +1415,11 @@ mod segment_tests {
         }
     }
 
+    /// A minimal user FASTA: `f` tagged 5' and its reverse complement tagged
+    /// 3', with the adapter and its insert on a 162 bp read. Equal lengths take
+    /// the batched path; the shortened rear entry takes the singleton path.
     #[test]
     fn front_and_reverse_complement_rear_pair_keep_insert_on_short_read() {
-        // A minimal user FASTA: `f` tagged 5' and its reverse complement tagged
-        // 3', with the adapter and its insert on a 162 bp read. Equal lengths
-        // take the batched path; the shortened rear entry takes the singleton
-        // path.
         let f = b"ACTTGCCTGTCGCTCTATCTTC";
         let r = reverse_complement(f);
         let mut w = f.to_vec();
@@ -1381,9 +1443,11 @@ mod segment_tests {
         }
     }
 
+    /// Inside the overlap of both end zones the outcome is geometric and the
+    /// tag is ignored; with one zone only, the tag decides.
     #[test]
     fn classify_terminal_is_geometric_in_the_overlap() {
-        // Both zones cover the hit on a 60 bp window with end_size 150.
+        // Both zones cover every hit on a 60 bp window with `end_size` 60.
         for tag in [End::Five, End::Three, End::Both] {
             assert_eq!(classify_terminal(0, 20, 60, 60, tag), Terminal::Five);
             assert_eq!(classify_terminal(40, 60, 60, 60, tag), Terminal::Three);
@@ -1418,20 +1482,22 @@ mod segment_tests {
         );
     }
 
+    /// An interior adapter splits the read into its two flanks.
     #[test]
     fn splits_on_interior_adapter() {
-        let adapter = b"GGGGTTTTGGGGTTTT"; // 16 bp, no C/A so it can't match the flanks
+        let adapter = b"GGGGTTTTGGGGTTTT"; // 16 bp, no C/A so it cannot match the flanks
         let mut w = b"AAAAAAAAAAAAAAAAAAAAAAAA".to_vec(); // 24 bp lead (> end_size 20)
         let cut_start = w.len();
         w.extend_from_slice(adapter);
         w.extend_from_slice(b"CCCCCCCCCCCCCCCCCCCCCCCC"); // 24 bp tail
         let c = cfg(vec![ad("mid", adapter, End::Both)], true);
         let segs = adapter_segments(&w, &c);
-        assert_eq!(segs.len(), 2, "interior adapter splits the read");
+        assert_eq!(segs.len(), 2, "Interior adapter splits the read");
         assert_eq!(segs[0], (0, cut_start));
         assert_eq!(segs[1], (cut_start + adapter.len(), w.len()));
     }
 
+    /// Ends-only mode leaves an interior adapter in place.
     #[test]
     fn ends_only_suppresses_interior_split() {
         let adapter = b"GGGGTTTTGGGGTTTT";
@@ -1442,11 +1508,10 @@ mod segment_tests {
         assert_eq!(adapter_segments(&w, &c), vec![(0, w.len())]);
     }
 
+    /// A 5' adapter, an insert and a 3' adapter in ends-only mode: both ends
+    /// trim to the insert although only the two end zones are searched.
     #[test]
     fn ends_only_trims_both_terminal_adapters() {
-        // [5' adapter][insert][3' adapter], ends-only mode: both ends must
-        // still trim to the insert even though only the two end-zones (not
-        // the whole window) are searched.
         let adapter5 = b"ACGTACGTACGT"; // 12 bp
         let adapter3 = b"TTTTGGGGCCCC"; // 12 bp, distinct from adapter5
         let insert = b"AAAAAAAAAAAA"; // 12 bp
@@ -1463,13 +1528,12 @@ mod segment_tests {
         assert_eq!(adapter_segments(&w, &c), vec![(12, 24)]);
     }
 
+    /// A terminal 5' adapter that starts inside `end_size` but ends beyond it:
+    /// with `end_size` 4, a 12 bp adapter at position 2 spans [2, 14). A head
+    /// zone of `window[..end_size]` (4 bytes) cannot contain a 12-byte match;
+    /// the `end_size + len` sizing gives `window[..16]`, which does.
     #[test]
     fn ends_only_trims_adapter_straddling_end_size() {
-        // A terminal 5' adapter that starts inside end_size but ends beyond it:
-        // end_size=4, a 12 bp adapter at position 2 spans [2,14). A naive
-        // `window[..end_size]` head zone (4 bytes) could never contain a 12-byte
-        // match, leaving the read untrimmed. The correct `end_size + len` sizing
-        // gives `window[..16]`, which does.
         let adapter = b"ACGTACGTACGT"; // 12 bp
         let mut w = b"AA".to_vec(); // 2 bp prefix -> adapter starts at position 2
         w.extend_from_slice(adapter); // adapter occupies [2, 14)
@@ -1485,6 +1549,7 @@ mod segment_tests {
         assert_eq!(segs, vec![(14, w.len())]);
     }
 
+    /// A pattern below `MIN_PATTERN_LEN` is never searched.
     #[test]
     fn short_pattern_is_skipped() {
         let short = b"GGTGCTG"; // 7 bp < MIN_PATTERN_LEN
@@ -1493,26 +1558,27 @@ mod segment_tests {
         assert_eq!(adapter_segments(w, &c), vec![(0, w.len())]);
     }
 
+    /// An empty window yields no segments.
     #[test]
     fn empty_window_returns_empty() {
         let c = cfg(vec![ad("a", b"ACGTACGTACGT", End::Both)], true);
         assert_eq!(adapter_segments(b"", &c), vec![]);
     }
 
+    /// The window is the adapter, matched `End::Both` at the start: the 5'
+    /// trim advances `lo` to `n`, so `lo >= hi` and the whole window is
+    /// consumed.
     #[test]
     fn whole_window_consumed_returns_empty() {
-        // Window is the adapter, matched End::Both at the very start: the
-        // terminal-5' branch advances `lo` to `n`, so `lo >= hi` and the whole
-        // window is consumed.
         let adapter = b"ACGTACGTACGT"; // 12 bp
         let c = cfg(vec![ad("a", adapter, End::Both)], true);
         assert_eq!(adapter_segments(adapter, &c), vec![]);
     }
 
+    /// Mirror of `trims_5prime_adapter_and_outboard` with the adapter at the
+    /// 3' end: insert first, adapter last.
     #[test]
     fn trims_3prime_adapter() {
-        // Mirror of trims_5prime_adapter_and_outboard, but the adapter sits at the
-        // 3' end: insert first, adapter last.
         let adapter = b"ACGTACGTACGT"; // 12 bp
         let mut w = b"AAAAAAAAAAAA".to_vec();
         w.extend_from_slice(adapter);
@@ -1520,13 +1586,13 @@ mod segment_tests {
         assert_eq!(adapter_segments(&w, &c), vec![(0, 12)]);
     }
 
+    /// Two distinct interior adapters whose hits overlap by 6 bp: `a` matches
+    /// [24, 40) and `b` matches [34, 50), constructed so their shared 6 bp
+    /// region ("TGTGTG", the tail of `a` and head of `b`) is the same window
+    /// bytes, giving both an exact (cost 0) hit. The overlap merges into one
+    /// excision, leaving exactly 2 segments.
     #[test]
     fn overlapping_interior_cuts_merge() {
-        // Two different interior adapters whose hits overlap by 6 bp: `a` matches
-        // [24,40), `b` matches [34,50), constructed so their shared 6 bp region
-        // ("TGTGTG", the tail of `a` / head of `b`) is literally the same window
-        // bytes, giving both an exact (cost 0) hit. The overlap must merge into one
-        // excision, leaving exactly 2 segments (not 3).
         let a = b"GGGGTTTTTGTGTGTG"; // 16 bp
         let b = b"TGTGTGTGTTTTGGGG"; // 16 bp, shares a's last 6 bp as its first 6 bp
         let mut w = b"AAAAAAAAAAAAAAAAAAAAAAAA".to_vec(); // 24 bp lead
@@ -1538,16 +1604,16 @@ mod segment_tests {
         assert_eq!(
             segs.len(),
             2,
-            "overlapping interior cuts merge into one excision"
+            "Overlapping interior cuts merge into one excision"
         );
         assert_eq!(segs[0], (0, 24));
         assert_eq!(segs[1], (50, w.len()));
     }
 
+    /// The terminal hit [0, 16) overlaps the interior hit [10, 26); clipping the
+    /// interior interval to the keep window still excises [16, 26).
     #[test]
     fn straddling_cut_is_clipped_not_leaked() {
-        // The terminal hit [0,16) overlaps the interior hit [10,26).
-        // Clipping the interior interval to the keep window must still excise [16,26).
         let t_prefix = b"GGTGTGGTTT"; // 10 bp
         let overlap = b"GTTGGT"; // 6 bp, shared
         let s_suffix = b"TGGTGTTGGG"; // 10 bp
@@ -1571,7 +1637,7 @@ mod segment_tests {
         assert_eq!(
             segs,
             vec![(26, 60)],
-            "s is fully excised, no leaked bases before 26"
+            "Adapter s is fully excised, no leaked bases before 26"
         );
         // No retained segment may contain the interior adapter.
         for &(seg_start, seg_end) in &segs {
@@ -1583,9 +1649,10 @@ mod segment_tests {
         }
     }
 
+    /// A cost-4 hit within `k_end` of 6 but above the interior `k_mid` of 3
+    /// does not split the read.
     #[test]
     fn interior_above_k_mid_does_not_split() {
-        // The cost-4 hit is within k_end=6 but exceeds the interior k_mid=3 limit.
         let adapter = b"GGTTGGTTGGTT"; // 12 bp
         let mut mutated = adapter.to_vec();
         for &i in &[1usize, 4, 7, 10] {
@@ -1598,8 +1665,9 @@ mod segment_tests {
         let mut w = b"AAAAAAAAAAAAAAAAAAAAAAAA".to_vec(); // 24 bp lead
         w.extend_from_slice(&mutated); // interior copy at [24, 36), cost 4 vs `adapter`
         w.extend_from_slice(b"CCCCCCCCCCCCCCCCCCCCCCCC"); // 24 bp tail
-        // end_size=10 keeps the intended hit and sassy's other fuzzy hits (found
-        // under the wide k_end=6 budget) away from the near-end terminal checks.
+        // `end_size` of 10 keeps the intended hit and sassy's other fuzzy hits
+        // (found under the wide `k_end` of 6) away from the near-end terminal
+        // checks.
         let c = AdapterConfig {
             adapters: vec![ad("mid", adapter, End::Both)],
             error_rate: 0.5,
@@ -1610,15 +1678,15 @@ mod segment_tests {
         assert_eq!(
             adapter_segments(&w, &c),
             vec![(0, w.len())],
-            "cost 4 hit is above k_mid=3 and must not split the read"
+            "Cost 4 hit is above k_mid=3 and must not split the read"
         );
     }
 
+    /// A six-base insertion expands the terminal alignment from 20 to 26 bases.
+    /// The terminal search window includes `k_end` additional bases, so
+    /// ends-only and split modes select the same [2, 28) alignment.
     #[test]
     fn ends_only_equals_split_on_indel_terminal_adapter() {
-        // A six-base insertion expands the terminal alignment from 20 to 26 bases.
-        // The terminal search window includes `k_end` additional bases so ends-only
-        // and split modes select the same [2,28) alignment.
         let adapter = b"AAAACCCCGGGGTTTTACGT"; // 20 bp
         let extra = b"CTGACT"; // 6 bp splice, foreign bases -> forces insertion
         let mut copy = adapter[..10].to_vec();
@@ -1647,21 +1715,22 @@ mod segment_tests {
         assert_eq!(
             split_segs,
             vec![(28, w.len())],
-            "split-mode finds the full 26bp indel-bearing hit and trims to 28"
+            "Split mode finds the full 26bp indel-bearing hit and trims to 28"
         );
         assert_eq!(
             ends_only_segs, split_segs,
-            "ends-only must match split-mode exactly: the end-zone must be wide \
+            "Ends-only must match split mode exactly: the end zone must be wide \
              enough (end_size + len + k_end) to contain the full indel-lengthened hit"
         );
-        // Adapter bases actually removed, not just nominally "equal but empty".
+        // Adapter bases are removed, rather than both results being equal and empty.
         assert_eq!(ends_only_segs[0].0, 28);
     }
 
+    /// A 40 bp insert plus a 20 bp adapter at the 3' end, tagged `End::Both`,
+    /// with `end_size >= n` so both zones overlap. The insert [0, 40) is kept
+    /// and the read is not dropped.
     #[test]
     fn three_prime_both_adapter_on_short_read_trims_tail_not_whole_read() {
-        // 40bp insert + 20bp adapter at the 3' end; End::Both; end_size >= n so both
-        // zones overlap. Must keep the insert [0,40), not drop the read.
         let adapter = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only (no A/C to collide with insert)
         let mut w = vec![b'A'; 40];
         w.extend_from_slice(adapter);
@@ -1676,10 +1745,12 @@ mod segment_tests {
             split: false,
             ..split.clone()
         };
-        assert_eq!(adapter_segments(&w, &split), vec![(0, 40)], "split mode");
-        assert_eq!(adapter_segments(&w, &ends), vec![(0, 40)], "ends-only mode");
+        assert_eq!(adapter_segments(&w, &split), vec![(0, 40)], "Split mode");
+        assert_eq!(adapter_segments(&w, &ends), vec![(0, 40)], "Ends-only mode");
     }
 
+    /// A 5' `End::Both` adapter on a short read trims the head and keeps the
+    /// insert.
     #[test]
     fn five_prime_both_adapter_on_short_read_trims_head() {
         let adapter = b"GGGGTTTTGGGGTTTTGGGG";
@@ -1695,14 +1766,14 @@ mod segment_tests {
         assert_eq!(adapter_segments(&w, &split), vec![(20, 60)]);
     }
 
+    /// The two terminal patterns and their reverse complements are distinct,
+    /// leaving the 40-base insert as the only retained segment.
     #[test]
     fn both_adapters_at_both_ends_keep_middle() {
-        // The two terminal patterns and their reverse complements are distinct,
-        // leaving the 40-base insert as the only retained segment.
         let a5 = b"GGGGTTTTGGGGTTTTGGGG";
         let a3 = b"AAAAGGGGAAAAGGGGAAAA"; // A/G only (purine): not self-complementary, not revcomp(a5)
         let mut w = a5.to_vec();
-        w.extend_from_slice(&[b'T'; 40]); // insert bytes don't match either adapter's revcomp
+        w.extend_from_slice(&[b'T'; 40]); // insert bytes do not match either adapter's revcomp
         w.extend_from_slice(a3);
         let cfg = AdapterConfig {
             adapters: vec![ad("a5", a5, End::Both), ad("a3", a3, End::Both)],
@@ -1715,10 +1786,10 @@ mod segment_tests {
         assert_eq!(segs, vec![(20, 60)]);
     }
 
+    /// Distinct end-specific adapters preserve the insert when the end search
+    /// regions overlap on a short read.
     #[test]
     fn inferred_single_end_adapters_on_short_read_keep_insert() {
-        // Distinct end-specific adapters must preserve the insert when the end
-        // search regions overlap on a short read.
         let a5 = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
         let a3 = b"AAAAGGGGAAAAGGGGAAAA"; // 20bp, A/G only: not a5, not revcomp(a5)
         let mut w = a5.to_vec();
@@ -1731,6 +1802,6 @@ mod segment_tests {
             split: true,
             candidate_index: std::sync::OnceLock::new(),
         };
-        assert_eq!(adapter_segments(&w, &c), vec![(20, 60)], "insert survives");
+        assert_eq!(adapter_segments(&w, &c), vec![(20, 60)], "Insert survives");
     }
 }

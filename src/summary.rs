@@ -18,6 +18,7 @@ use crate::workflow::Stats;
 /// Incremented only when an existing field changes meaning or is removed.
 const SCHEMA_VERSION: u32 = 1;
 
+/// The `--summary-json` document for one run.
 #[derive(Debug, Serialize)]
 pub struct Summary {
     schema_version: u32,
@@ -38,9 +39,9 @@ pub struct Summary {
     warnings: Warnings,
 }
 
-/// The run's resolved settings, after defaults and clamping. Reading these back
-/// rather than re-deriving them from `command` is what makes the file a
-/// self-contained provenance record.
+/// The run's resolved settings, after defaults and clamping. Reading these back,
+/// rather than re-deriving them from `command`, makes the file a self-contained
+/// provenance record.
 #[derive(Debug, Serialize)]
 struct Params {
     threads: usize,
@@ -65,6 +66,7 @@ struct Params {
     adapters: Option<AdapterParams>,
 }
 
+/// The selected quality-trimming operation and its threshold.
 #[derive(Debug, Serialize)]
 struct QualityOpParams {
     /// `trim`, `best_segment`, or `split`.
@@ -74,14 +76,15 @@ struct QualityOpParams {
     window: Option<usize>,
 }
 
+/// The adapter-trimming settings and the configured and resolved set sizes.
 #[derive(Debug, Serialize)]
 struct AdapterParams {
-    /// Adapters configured before resolution: the preset and/or FASTA asked for.
+    /// Adapters configured before resolution: the preset, the FASTA, or both.
     /// This is the figure the startup banner prints, since it is all that is
     /// known before reads have been sampled. `0` under inference, where the set
     /// is discovered rather than configured.
     configured: usize,
-    /// Adapters actually trimmed against, after presence detection narrowed the
+    /// Adapters trimmed against, after presence detection narrowed the
     /// configured set or inference replaced it. Equal to `configured` when
     /// neither ran.
     count: usize,
@@ -97,11 +100,12 @@ struct AdapterParams {
     infer_policy: Option<&'static str>,
 }
 
+/// Read-level counts: input, output, and the three-way split of the input.
 #[derive(Debug, Serialize)]
 struct Reads {
     input: u64,
     /// Output segments written. A `--qual-split` read can contribute several,
-    /// so this can legitimately exceed `input`.
+    /// so this can exceed `input`.
     output: u64,
     /// Input reads that produced at least one surviving segment.
     with_output: u64,
@@ -112,6 +116,7 @@ struct Reads {
     all_filtered: u64,
 }
 
+/// Base-level counts for input and output.
 #[derive(Debug, Serialize)]
 struct Bases {
     input: u64,
@@ -129,16 +134,18 @@ struct SegmentsDropped {
     gc_out_of_range: u64,
 }
 
+/// Per-read anomalies the run tolerated.
 #[derive(Debug, Serialize)]
 struct Warnings {
     /// Reads whose per-base kinetics tag length disagreed with the sequence and
     /// was left untouched.
     malformed_tag_reads: u64,
+    /// Reads whose `MM`/`ML`/`MN` block was malformed and removed.
     malformed_mod_reads: u64,
 }
 
 impl Summary {
-    /// Build the summary from a finished run. `command` is the shell-quoted
+    /// Builds the summary from a finished run. `command` is the shell-quoted
     /// invocation (see `crate::command_line`), `output` the output path or
     /// `<stdout>` label already computed for the banner.
     pub fn new(
@@ -189,16 +196,16 @@ impl Summary {
         }
     }
 
-    /// Serialize to pretty-printed JSON with a trailing newline, so the file is
-    /// both diff-friendly and safe to `cat` in a shell.
+    /// Serializes to pretty-printed JSON with a trailing newline, so the file is
+    /// diff-friendly and safe to `cat` in a shell.
     pub fn to_json(&self) -> anyhow::Result<String> {
         let mut s = serde_json::to_string_pretty(self)?;
         s.push('\n');
         Ok(s)
     }
 
-    /// Write the summary to `path`. A failure here is a hard error: a caller
-    /// that passed `--summary-json` is a pipeline that needs the file.
+    /// Writes the summary to `path`. A write failure is a hard error, since a
+    /// stale file from a previous invocation would otherwise remain in place.
     pub fn write(&self, path: &Path) -> anyhow::Result<()> {
         let json = self.to_json()?;
         std::fs::write(path, json)
@@ -380,7 +387,7 @@ mod tests {
         assert_eq!(v["reads"]["with_output"], 92);
         assert_eq!(v["reads"]["trimmed_to_nothing"], 5);
         assert_eq!(v["reads"]["all_filtered"], 3);
-        // Output segments can exceed input reads under --qual-split.
+        // Output segments can exceed input reads under `--qual-split`.
         assert_eq!(v["reads"]["output"], 110);
     }
 
@@ -408,7 +415,7 @@ mod tests {
         assert_eq!(v["params"]["quality_op"]["threshold"], 9);
         assert_eq!(v["params"]["quality_op"]["window"], 50);
         assert_eq!(v["params"]["fastq_tags"], "all");
-        // An unset --max-length is null, not usize::MAX leaking into the file.
+        // An unset `--max-length` is null, not `usize::MAX` leaking into the file.
         assert!(v["params"]["max_length"].is_null());
         // Adapter trimming off is null, not a zeroed block.
         assert!(v["params"]["adapters"].is_null());
@@ -428,8 +435,7 @@ mod tests {
         c.adapters_configured = Some(124);
         let s = Summary::new(&c, &stats(), String::new(), String::new(), None);
         let v = value(&s);
-        // Both figures are reported: detection narrowed 124 down to 0 here, and a
-        // reader can see that rather than guessing which number they are looking at.
+        // Both figures are reported: detection narrowed 124 down to 0 here.
         assert_eq!(v["params"]["adapters"]["configured"], 124);
         assert_eq!(v["params"]["adapters"]["count"], 0);
         assert_eq!(v["params"]["adapters"]["error_rate"], 0.2);
@@ -463,8 +469,8 @@ mod tests {
         assert!(value(&s)["elapsed_seconds"].is_null());
     }
 
-    /// stdin/stdout runs still name their endpoints, so a summary file is never
-    /// ambiguous about where the reads came from.
+    /// A stdin or stdout run names its endpoints, so the summary file records
+    /// where the reads came from and went.
     #[test]
     fn stdin_and_stdout_get_explicit_labels() {
         let mut c = cfg();

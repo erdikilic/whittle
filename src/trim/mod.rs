@@ -1,18 +1,33 @@
+//! Per-read trimming: fixed crop, adapter stage and quality stage, producing kept intervals.
+
 pub mod strategies;
 
 use strategies::{best_segment, split_low_quality, trim_by_quality};
 
+/// The quality-based operation applied within each adapter segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QualityOp {
+    /// Trimming of both ends up to the first base at or above the cutoff.
     TrimQual(u8),
+    /// The single highest-scoring segment (modified Mott).
     BestSegment(u8),
-    Split { cutoff: u8, window: usize },
+    /// A split at runs of at least `window` bases below `cutoff`.
+    Split {
+        /// Phred cutoff below which a base counts as low quality.
+        cutoff: u8,
+        /// Minimum run of low-quality bases that splits the read.
+        window: usize,
+    },
 }
 
+/// The per-read trim configuration.
 #[derive(Debug, Clone)]
 pub struct TrimPlan {
+    /// Bases removed from the 5' end.
     pub head: usize,
+    /// Bases removed from the 3' end.
     pub tail: usize,
+    /// Quality operation applied after the crop and adapter stages, if any.
     pub quality: Option<QualityOp>,
 }
 
@@ -30,7 +45,7 @@ pub fn apply(
     debug_assert_eq!(
         seq.len(),
         phred.len(),
-        "apply: seq.len() must equal phred.len()"
+        "Sequence and quality lengths must be equal"
     );
     let seq_len = seq.len();
     let start = plan.head.min(seq_len);
@@ -39,9 +54,9 @@ pub fn apply(
         return vec![];
     }
 
-    // Quality op within one `[s, e)` segment, results offset back to original
-    // coordinates and appended to `out`. No length filter here. The caller
-    // filters each returned segment (length/quality/GC).
+    // The quality op within one `[s, e)` segment, with results offset back to
+    // read coordinates and appended to `out`. No length filter is applied; the
+    // caller filters each returned segment.
     let quality_in = |s: usize, e: usize, out: &mut Vec<(usize, usize)>| {
         let wp = &phred[s..e];
         let offset = |v: Vec<(usize, usize)>, out: &mut Vec<(usize, usize)>| {
@@ -57,9 +72,9 @@ pub fn apply(
         }
     };
 
-    // Adapter stage on the cropped window, mapped back to original coordinates,
-    // then the quality op within each segment. The common no-adapter path skips
-    // straight to the quality op with no intermediate segment vector.
+    // The adapter stage on the cropped window, mapped back to read coordinates,
+    // then the quality op within each segment. The no-adapter path goes directly
+    // to the quality op with no intermediate segment vector.
     let mut out = Vec::new();
     match adapters {
         None => {
@@ -92,8 +107,9 @@ mod tests {
 
     #[test]
     fn crop_then_quality_offsets_back() {
-        // 20 bases; crop head 2; then trim_qual on the remaining window.
-        // phred: low low [good...] -> after crop the good region starts at 2.
+        // 20 bases, head crop 2, then `TrimQual` on the remaining window. The
+        // first two Phred values are low, so the good region starts at 2 after
+        // the crop.
         let mut phred = vec![40u8; 20];
         phred[0] = 2;
         phred[1] = 2;
@@ -106,10 +122,10 @@ mod tests {
         assert_eq!(apply(&seq, &phred, &plan, None), vec![(2, 20)]);
     }
 
+    /// `apply` applies no length filter; the caller filters per segment after
+    /// trimming, so a short segment is returned.
     #[test]
     fn short_segments_are_emitted_not_filtered() {
-        // `apply` has no length filter at all: filtering moved entirely to the
-        // caller (per-segment, post-trim). A short segment is still RETURNED here.
         let phred = vec![40u8; 4];
         let seq = vec![b'A'; 4];
         let plan = TrimPlan {

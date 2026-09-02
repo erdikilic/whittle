@@ -1,91 +1,95 @@
-//! Resolving the adapter set a run actually trims against.
+//! Resolution of the adapter set a run trims against.
 //!
-//! Presence detection and ab-initio inference both need to see reads before the
-//! set is final, so this owns the buffer-then-decide seam: sample a prefix,
-//! narrow or discover the set, then hand the record stream back to the caller
-//! with the sampled prefix chained in front of it.
+//! Presence detection and ab-initio inference both read a sample before the set
+//! is final. This module buffers a prefix, narrows or discovers the set, and
+//! returns the record stream with the sampled prefix chained in front of it.
 
 use std::borrow::Cow;
 
 use super::{detect, infer};
 use crate::config::{AdapterInfer, Config};
 
-/// Decode the packed SEQ of a lazy raw BAM record only when adapter sampling
-/// needs it. Normal workflow records stay packed until a render worker converts
-/// them to `RecordBuf`.
+/// Decodes the packed `SEQ` of a lazy raw BAM record for adapter sampling.
+/// Workflow records otherwise stay packed until a render worker converts them
+/// to `RecordBuf`.
 pub(crate) fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
     Cow::Owned(rec.sequence().iter().collect())
 }
 
-/// A kept adapter's support below this is close enough to `infer::KEEP_SUPPORT`
-/// (0.30) to warrant a warning rather than a plain info line: a barcode-specific
-/// sequence present in only a fraction of reads can clear the keep floor while
-/// staying far from a confident near-1.0 presence. ~1.5x the floor gives headroom
-/// without reaching a genuine high-prevalence adapter's typical support.
+/// Support below which a kept adapter is logged with a warning rather than a
+/// plain info line. It is about 1.5 times `infer::KEEP_SUPPORT` (0.30): a
+/// barcode-specific sequence present in a fraction of reads can clear the keep
+/// floor while staying far from the near-1.0 support of a library adapter.
 pub(crate) const MARGINAL_SUPPORT: f64 = 0.45;
 
-/// Log each ab-initio discovery at `info!`: `inferred_N ≈ NAME (pct%) · support
-/// X.XX`, or `(no catalog match)` when the sequence cross-names against nothing
-/// in the ONT catalog. `inferred_N` is the adapter's name (its 1-based position
-/// in `discovered`); the catalog match is an annotation. The raw sequence goes
-/// to `debug!` instead, too noisy for INFO. Support below `MARGINAL_SUPPORT`
-/// also gets a `warn!`, being close enough to the `KEEP_SUPPORT` floor to
-/// re-check.
+/// Logs each ab-initio discovery: one `info!` line per adapter with its support
+/// and best catalog match (an annotation; `inferred_N` is the name), a `warn!`
+/// when the support is below `MARGINAL_SUPPORT` or the anchor is conservative,
+/// and the sequences at `debug!`.
 pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: usize) {
     tracing::info!(
-        "Adapter inference: sampled {n_sampled} reads, discovered {} adapter{}",
-        discovered.len(),
-        if discovered.len() == 1 { "" } else { "s" }
+        reads = n_sampled,
+        discovered = discovered.len(),
+        "Adapter inference: sampled prefix scanned"
     );
-    for (i, d) in discovered.iter().enumerate() {
-        let n = i + 1;
+    for d in discovered {
+        let support = format!("{:.2}", d.support);
         match d.name_hits.first() {
             Some((name, pct)) => {
+                let identity_pct = format!("{pct:.0}");
                 tracing::info!(
-                    "inferred_{n} \u{2248} {name} ({pct:.0}%) \u{b7} support {:.2}",
-                    d.support
+                    adapter = %d.adapter.name,
+                    catalog_match = %name,
+                    identity_pct = %identity_pct,
+                    support = %support,
+                    "Inferred adapter"
                 );
             },
             None => {
                 tracing::info!(
-                    "inferred_{n} (no catalog match) \u{b7} support {:.2}",
-                    d.support
+                    adapter = %d.adapter.name,
+                    support = %support,
+                    "Inferred adapter with no catalog match"
                 );
             },
         }
         if d.support < MARGINAL_SUPPORT {
             tracing::warn!(
-                "Adapter '{}' support {:.2} is marginal (near the KEEP_SUPPORT floor); \
-                 verify with --adapter-infer report",
-                d.adapter.name,
-                d.support
+                adapter = %d.adapter.name,
+                support = %support,
+                floor = MARGINAL_SUPPORT,
+                "Inferred adapter support is marginal; verify with --adapter-infer report"
             );
         }
         if d.uncertain_bases() > 0 {
             tracing::warn!(
-                "Adapter '{}' uses a conservative {} bp terminal anchor; {} bp of the \
-                 {} bp recurrent consensus remain uncertain and will not be trimmed \
-                 (--adapter-infer-policy aggressive opts into the full consensus)",
-                d.adapter.name,
-                d.adapter.seq.len(),
-                d.uncertain_bases(),
-                d.assembled_seq.len(),
+                adapter = %d.adapter.name,
+                anchor_bp = d.adapter.seq.len(),
+                uncertain_bp = d.uncertain_bases(),
+                consensus_bp = d.assembled_seq.len(),
+                "Inferred adapter trims with a conservative terminal anchor; the insert-facing \
+                 remainder is not trimmed (--adapter-infer-policy aggressive uses the full \
+                 consensus)"
             );
         }
+        let sequence = String::from_utf8_lossy(&d.adapter.seq);
         tracing::debug!(
-            "inferred_{n} trimming sequence: {}",
-            String::from_utf8_lossy(&d.adapter.seq)
+            adapter = %d.adapter.name,
+            sequence = %sequence,
+            "Inferred adapter trimming sequence"
         );
         if d.uncertain_bases() > 0 {
+            let consensus = String::from_utf8_lossy(&d.assembled_seq);
             tracing::debug!(
-                "inferred_{n} full recurrent consensus (review only): {}",
-                String::from_utf8_lossy(&d.assembled_seq)
+                adapter = %d.adapter.name,
+                consensus = %consensus,
+                "Inferred adapter full recurrent consensus"
             );
         }
     }
 }
 
-/// Print inferred adapters as FASTA with support and the best catalog match.
+/// Prints inferred adapters as FASTA with support and the best catalog match.
 /// Numbering follows the final discovery order used by the status log.
 pub(crate) fn print_discovered_fasta(discovered: &[infer::InferredAdapter]) {
     for (i, d) in discovered.iter().enumerate() {
@@ -120,7 +124,7 @@ where
     f(&seqs)
 }
 
-/// Buffer at most `n` records, stopping when the input is exhausted.
+/// Buffers at most `n` records, stopping when the input is exhausted.
 pub(crate) fn buffer_prefix<R>(
     records: &mut impl Iterator<Item = anyhow::Result<R>>,
     n: usize,
@@ -136,25 +140,26 @@ pub(crate) fn buffer_prefix<R>(
     Ok(sample)
 }
 
-/// What resolution decided: the stream to process, with any sampled prefix
+/// The outcome of resolution: the stream to process, with any sampled prefix
 /// chained back in front of it, and the adapter set to trim it against.
 pub(crate) struct Resolved<R> {
+    /// The record stream, with any sampled prefix chained back in front of it.
     pub records: Box<dyn Iterator<Item = anyhow::Result<R>> + Send>,
-    /// The set actually trimmed against, after presence detection narrowed the
+    /// The set trimmed against, after presence detection narrowed the
     /// configured set or inference replaced it. `None` when trimming is off.
     pub adapters: Option<super::AdapterConfig>,
 }
 
-/// Decide the adapter set for a run, reading a prefix of the stream when it has
-/// to, and return it with the stream intact.
+/// Decides the adapter set for a run, reading a prefix of the stream when
+/// needed, and returns it with the stream intact.
 ///
 /// `Ok(None)` means the run is over without writing records: that is
 /// `--adapter-infer report`, which prints the inferred FASTA and stops.
 ///
 /// Takes `&Config` and returns the outcome rather than writing back into the
-/// config: the set is only final after reads have been seen, which is well after
-/// the banner has printed the configured one, and an in-place overwrite made
-/// those two silently different views of the same field.
+/// config: the set is final only after reads have been seen, which is after the
+/// banner has printed the configured set, and an in-place overwrite would leave
+/// the banner and the run describing different sets.
 pub(crate) fn resolve<R, I, F>(
     mut records: I,
     cfg: &Config,
@@ -168,15 +173,11 @@ where
     F: for<'a> Fn(&'a R) -> Cow<'a, [u8]>,
 {
     if cfg.adapter_infer != AdapterInfer::Off {
-        // Inference mode stores an empty configuration until discovery completes.
-        // `cli::parse` always pairs inference with an (initially empty) adapter
-        // config, but `run` is public, so a library caller can hand over a
-        // mismatched pair. An error beats a panic at a public boundary.
+        // `cli::parse` pairs inference with an initially empty adapter config,
+        // but `run` is public, so a library caller can omit it. The mismatch is
+        // reported as an error rather than a panic.
         let Some(base) = cfg.adapters.clone() else {
-            anyhow::bail!(
-                "adapter inference was requested without an adapter configuration; \
-                 this is a caller error, not a bad input file"
-            );
+            anyhow::bail!("adapter inference requires an adapter configuration");
         };
 
         let sample: Vec<R> = buffer_prefix(&mut records, cfg.adapter_sample)?;
@@ -186,11 +187,11 @@ where
                 Box::new(sample.into_iter().map(anyhow::Ok).chain(records))
             };
         if s < detect::MIN_SAMPLE_FOR_DETECTION {
-            // Report-only mode must not create output when the sample is too small.
+            // Report-only mode writes no output when the sample is too small.
             tracing::warn!(
-                "Adapter inference: too few reads ({s}, need >= {}) to infer reliably; \
-                 keeping reads untrimmed",
-                detect::MIN_SAMPLE_FOR_DETECTION
+                reads = s,
+                minimum = detect::MIN_SAMPLE_FOR_DETECTION,
+                "Adapter inference: too few reads to infer reliably; keeping reads untrimmed"
             );
             if cfg.adapter_infer.is_report() {
                 return Ok(None);
@@ -217,7 +218,8 @@ where
 
         if discovered.is_empty() {
             tracing::warn!(
-                "Adapter inference: no adapters inferred from the first {s} reads; keeping \
+                reads = s,
+                "Adapter inference: no adapters inferred from the sampled prefix; keeping \
                  reads untrimmed"
             );
         }
@@ -229,7 +231,7 @@ where
         }));
     }
 
-    // Avoid buffering when neither inference nor presence sampling is active.
+    // No buffering when neither inference nor presence sampling is active.
     let Some(ac) = cfg.adapters.clone().filter(|_| cfg.adapter_sample > 0) else {
         return Ok(Some(Resolved {
             records: Box::new(records),
@@ -237,14 +239,17 @@ where
         }));
     };
 
-    // Narrow the configured set to what the sampled prefix contains.
+    // Presence detection narrows the configured set to what the sampled prefix
+    // contains.
     let sample: Vec<R> = buffer_prefix(&mut records, cfg.adapter_sample)?;
     let s = sample.len();
     let full = ac.adapters.len();
     let kept = if s < detect::MIN_SAMPLE_FOR_DETECTION {
         tracing::info!(
-            "Adapter presence: only {s} reads (< {}); using all {full} adapters",
-            detect::MIN_SAMPLE_FOR_DETECTION
+            reads = s,
+            minimum = detect::MIN_SAMPLE_FOR_DETECTION,
+            configured = full,
+            "Adapter presence: sample too small; using all configured adapters"
         );
         ac.adapters.clone()
     } else {
@@ -261,26 +266,24 @@ where
         });
         if detected.is_empty() {
             tracing::warn!(
-                "Adapter presence: no adapters detected in the first {s} sampled reads; using all {full} \
-                 (the sampled prefix may be unrepresentative; pass --adapter-sample 0 to always use the full set)"
+                reads = s,
+                configured = full,
+                "Adapter presence: no adapters detected in the sampled prefix; using all \
+                 configured adapters (the prefix may be unrepresentative; --adapter-sample 0 \
+                 skips sampling)"
             );
             ac.adapters.clone()
         } else {
             let names: Vec<&str> = detected.iter().take(12).map(|a| a.name.as_str()).collect();
-            let more = detected.len().saturating_sub(names.len());
+            let listed = names.join(", ");
+            let unlisted = detected.len().saturating_sub(names.len());
             tracing::info!(
-                "Adapter presence: sampled {s} reads, kept {} of {full} adapters{}{}",
-                detected.len(),
-                if names.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", names.join(", "))
-                },
-                if more > 0 {
-                    format!(" +{more} more")
-                } else {
-                    String::new()
-                },
+                reads = s,
+                kept = detected.len(),
+                configured = full,
+                adapters = %listed,
+                unlisted,
+                "Adapter presence: sampled prefix narrowed the adapter set"
             );
             detected
         }
