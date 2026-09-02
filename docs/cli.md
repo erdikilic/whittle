@@ -75,6 +75,8 @@ tell a real input from a stale prior output, and merging over either loses data.
 | `--qual-split-window <N>` | Tolerate low-quality runs shorter than N without splitting (default 1); requires `--qual-split` |
 | `--trim-barcodes` | Remove the barcode spans dorado recorded in the `bi` aux tag, before every other stage (BAM input) |
 | `--update-moves` | Rewrite ONT signal tags through trimming instead of dropping them (BAM-to-BAM) |
+| `--remove-tag <TAG>` | Remove this two-character aux tag from every output record; repeatable (BAM input) |
+| `--strip-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM input) |
 | `-a, --adapter-fasta <FILE>` | Adapter/primer FASTA; enables adapter trimming |
 | `--adapter-preset {none,ont}` | Built-in adapter catalog (default `none`; `ont` enables trimming) |
 | `--adapter-error-rate <F>` | End-match tolerance as a fraction of adapter length (default 0.2); requires an adapter source |
@@ -128,6 +130,40 @@ An adapter source is `--adapter-fasta`, `--adapter-preset ont`, or
 `--adapter-infer`. The tuning flags `--adapter-error-rate`, `--adapter-end-size`,
 and `--adapter-sample` are rejected without one, since they would otherwise be
 accepted and ignored.
+
+## Removing tags
+
+`--remove-tag <TAG>` removes one two-character aux tag from every output record.
+It is repeatable, and each value has to be exactly two alphanumeric characters,
+checked before the run rather than silently matching nothing.
+
+`--strip-kinetics` removes the per-base kinetics and alignment-count arrays in a
+single flag: `ip`, `pw`, `fi`, `fp`, `ri`, `rp`, `sa`, `sm` and `sx`. It is
+equivalent to naming each of them with `--remove-tag`, and both flags fill one
+removal set, so they combine.
+
+```bash
+whittle -i reads.bam -o smaller.bam --strip-kinetics --remove-tag ML
+```
+
+Removal happens after whittle has rewritten the tags it keeps in register, so
+removing one whittle maintains leaves the rest of the record intact: the record
+is written without that tag rather than with a stale one. Removing `MM` keeps
+the rebuilt `ML` and `MN`, and removing one per-base array still slices the
+others to the trimmed window.
+
+Removal applies on every BAM output path. A run that trims nothing normally
+writes records back without decoding them; when tags are removed each record is
+rebuilt instead, which costs the decode and changes nothing else about the
+output. On BAM-to-FASTQ the removal applies to the tags carried into the header,
+after `--fastq-tags` has chosen which tags are carried at all.
+
+Both flags name BAM auxiliary tags, so they require BAM input and are refused on
+FASTQ rather than accepted and ignored. Removing tags is a complete run on its
+own: `whittle -i in.bam -o out.bam --strip-kinetics` with no trimming options is
+valid and only strips tags. The resolved set is recorded under
+`params.remove_tags` in the summary JSON, with `params.strip_kinetics` recording
+which flag asked for it.
 
 ## Machine-readable summary
 

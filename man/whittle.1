@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Tag\-aware long\-read trimmer
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-in\-format\fR] [\fB\-\-out\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-ordered\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-qual\fR] [\fB\-Q\fR|\fB\-\-max\-qual\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-qual\-mode\fR] [\fB\-H\fR|\fB\-\-head\-crop\fR] [\fB\-T\fR|\fB\-\-tail\-crop\fR] [\fB\-\-qual\-trim\fR] [\fB\-\-qual\-best\-segment\fR] [\fB\-\-qual\-split\fR] [\fB\-\-qual\-split\-window\fR] [\fB\-\-update\-moves\fR] [\fB\-\-trim\-barcodes\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-size\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\fR] [\fB\-\-adapter\-infer\fR] [\fB\-\-adapter\-infer\-policy\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-in\-format\fR] [\fB\-\-out\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-ordered\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-qual\fR] [\fB\-Q\fR|\fB\-\-max\-qual\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-qual\-mode\fR] [\fB\-H\fR|\fB\-\-head\-crop\fR] [\fB\-T\fR|\fB\-\-tail\-crop\fR] [\fB\-\-qual\-trim\fR] [\fB\-\-qual\-best\-segment\fR] [\fB\-\-qual\-split\fR] [\fB\-\-qual\-split\-window\fR] [\fB\-\-update\-moves\fR] [\fB\-\-trim\-barcodes\fR] [\fB\-\-remove\-tag\fR] [\fB\-\-strip\-kinetics\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-size\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\fR] [\fB\-\-adapter\-infer\fR] [\fB\-\-adapter\-infer\-policy\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Tag\-aware long\-read trimmer
 .SH OPTIONS
@@ -153,6 +153,13 @@ Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp an
 .TP
 \fB\-\-trim\-barcodes\fR
 Remove the barcode spans dorado recorded in the bi aux tag, before every other trimming stage. BAM input only
+.SH TAGS
+.TP
+\fB\-\-remove\-tag\fR \fI<TAG>\fR
+Remove this two\-character aux tag from every output record. Repeatable. BAM input only
+.TP
+\fB\-\-strip\-kinetics\fR
+Remove the per\-base kinetics and alignment\-count arrays (ip pw fi fp ri rp sa sm sx). BAM input only
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<ADAPTER_FASTA>\fR

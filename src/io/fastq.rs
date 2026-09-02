@@ -507,27 +507,48 @@ fn write_array(out: &mut Vec<u8>, a: &Array) {
     }
 }
 
-/// Appends the reconstructed MM/ML/MN block as SAM aux text (no leading TAB)
-/// to `out`: `MM:Z:<mm>\tML:B:C,<ml...>\tMN:i:<mn>`. `ml` is `None` for an
-/// MM-only source record (ML is optional per the SAM spec), in which case the
-/// `ML:B:C` field is omitted rather than emitted empty.
-pub fn push_mods_aux(out: &mut Vec<u8>, mm: &[u8], ml: Option<&[u8]>, mn: usize) {
+/// Appends the reconstructed MM/ML/MN block as SAM aux text to `out`, each
+/// field TAB-prefixed: `\tMM:Z:<mm>\tML:B:C,<ml...>\tMN:i:<mn>`. `ml` is
+/// `None` for an MM-only source record (ML is optional per the SAM spec), in
+/// which case the `ML:B:C` field is omitted rather than emitted empty.
+///
+/// A field named by `remove` is left out and the others still emitted, which is
+/// what BAM output does with the same setting. Every field TAB-prefixed rather
+/// than TAB-separated is what lets any one of them be omitted.
+pub fn push_mods_aux(
+    out: &mut Vec<u8>,
+    mm: &[u8],
+    ml: Option<&[u8]>,
+    mn: usize,
+    remove: &crate::config::TagRemoval,
+) {
     out.reserve(mm.len() + 40);
-    out.extend_from_slice(b"MM:Z:");
-    out.extend_from_slice(mm);
-    if let Some(ml) = ml {
+    if !remove.contains(b"MM") {
+        out.extend_from_slice(b"\tMM:Z:");
+        out.extend_from_slice(mm);
+    }
+    if let Some(ml) = ml
+        && !remove.contains(b"ML")
+    {
         out.extend_from_slice(b"\tML:B:C");
         push_comma_u8s(out, ml);
     }
-    out.extend_from_slice(b"\tMN:i:");
-    push_u64(out, mn as u64);
+    if !remove.contains(b"MN") {
+        out.extend_from_slice(b"\tMN:i:");
+        push_u64(out, mn as u64);
+    }
 }
 
 /// Formats the reconstructed MM/ML/MN block as SAM aux text into a new buffer;
 /// see [`push_mods_aux`].
-pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
+pub fn format_mods_aux(
+    mm: &[u8],
+    ml: Option<&[u8]>,
+    mn: usize,
+    remove: &crate::config::TagRemoval,
+) -> Vec<u8> {
     let mut out = Vec::new();
-    push_mods_aux(&mut out, mm, ml, mn);
+    push_mods_aux(&mut out, mm, ml, mn, remove);
     out
 }
 
@@ -889,19 +910,38 @@ mod tests {
 
     #[test]
     fn mods_aux_layout() {
+        let keep = crate::config::TagRemoval::default();
         assert_eq!(
-            format_mods_aux(b"C+m,0;", Some(&[10, 20]), 6),
-            b"MM:Z:C+m,0;\tML:B:C,10,20\tMN:i:6"
+            format_mods_aux(b"C+m,0;", Some(&[10, 20]), 6, &keep),
+            b"\tMM:Z:C+m,0;\tML:B:C,10,20\tMN:i:6"
         );
         // ML present but empty (e.g. all mods sliced away yet MM retained) yields
         // a zero-length `B:C` array.
         assert_eq!(
-            format_mods_aux(b"C+m;", Some(&[]), 4),
-            b"MM:Z:C+m;\tML:B:C\tMN:i:4"
+            format_mods_aux(b"C+m;", Some(&[]), 4, &keep),
+            b"\tMM:Z:C+m;\tML:B:C\tMN:i:4"
         );
         // ML absent (MM-only source record): the ML field is omitted rather than
         // emitted empty, so the record stays valid.
-        assert_eq!(format_mods_aux(b"C+m,0;", None, 4), b"MM:Z:C+m,0;\tMN:i:4");
+        assert_eq!(
+            format_mods_aux(b"C+m,0;", None, 4, &keep),
+            b"\tMM:Z:C+m,0;\tMN:i:4"
+        );
+        // Each removed field goes on its own, leaving the rest of the block.
+        let removal =
+            |tag: &str| crate::config::TagRemoval::parse(&[tag.to_string()], false).unwrap();
+        assert_eq!(
+            format_mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("ML")),
+            b"\tMM:Z:C+m,0;\tMN:i:6"
+        );
+        assert_eq!(
+            format_mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("MN")),
+            b"\tMM:Z:C+m,0;\tML:B:C,10"
+        );
+        assert_eq!(
+            format_mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("MM")),
+            b"\tML:B:C,10\tMN:i:6"
+        );
     }
 
     #[test]

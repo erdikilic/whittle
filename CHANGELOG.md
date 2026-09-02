@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--remove-tag <TAG>` and `--strip-kinetics`: remove auxiliary tags from every
+  output record. `--remove-tag` names one two-character tag and is repeatable;
+  `--strip-kinetics` removes the nine per-base kinetics and alignment-count
+  arrays (`ip`, `pw`, `fi`, `fp`, `ri`, `rp`, `sa`, `sm`, `sx`) in one flag, and
+  both fill the same removal set. Removal runs after the rewrite of the tags
+  whittle keeps in register, so removing `MM` still leaves a rebuilt `ML`/`MN`
+  and removing one per-base array still slices the others. It applies on every
+  BAM output path, including the untrimmed fast path, whose records are rebuilt
+  rather than passed through when tags are removed, and to the tags carried into
+  a BAM-to-FASTQ header. The resolved set is reported under
+  `params.remove_tags`. BAM input only.
 - `--trim-barcodes`: removes the barcode spans dorado recorded in the `bi` aux
   tag. The positions are read rather than the sequences searched for, so the cut
   is the one `dorado demux` would have made, and it runs through the same

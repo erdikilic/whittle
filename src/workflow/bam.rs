@@ -14,7 +14,7 @@ use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 
 use super::{BAM_BATCH, Counters, Rendered, Stats, process_read_segments, run_parallel};
-use crate::config::{Config, FastqTags};
+use crate::config::{Config, FastqTags, TagRemoval};
 use crate::io::fastq::{push_aux_field, push_mods_aux, push_record_body};
 use crate::{mods, trim};
 
@@ -1227,7 +1227,8 @@ fn count_undo_tags_dropped(
 /// `total`: SEQ/QUAL sliced, `MM`/`ML`/`MN` rebuilt, per-base kinetics sliced,
 /// stale signal-space tags rewritten or dropped, the name set per platform on a
 /// split (`segment_name`).
-/// Remaining aux tags are copied unchanged.
+/// Remaining aux tags are copied unchanged; `--remove-tag` removal is the
+/// workflows' own, applied through `reconstruct_record_with_bases`.
 pub fn reconstruct_record(
     src: &RecordBuf,
     start: usize,
@@ -1245,7 +1246,15 @@ pub fn reconstruct_record(
         idx,
         total,
     };
-    reconstruct_record_with_bases(src, seq, qual, window, mod_block, update_moves)
+    reconstruct_record_with_bases(
+        src,
+        seq,
+        qual,
+        window,
+        mod_block,
+        update_moves,
+        &TagRemoval::default(),
+    )
 }
 
 /// Builds one output record for `window`. The record is assembled field by
@@ -1253,6 +1262,11 @@ pub fn reconstruct_record(
 /// rewritten ones replaced in place, removed ones skipped and added ones
 /// appended. A `Malformed` block is removed. An untrimmed, unsplit record with
 /// an `Absent` or `Consistent` block is cloned as is.
+///
+/// `remove` names the tags `--remove-tag` and `--strip-kinetics` drop. Removal
+/// is applied last, to the rewritten tag set, so a removed tag whittle
+/// maintains (`MM`, the move table, a per-base array) is absent from the
+/// output rather than left stale.
 fn reconstruct_record_with_bases(
     src: &RecordBuf,
     seq: &[u8],
@@ -1260,6 +1274,7 @@ fn reconstruct_record_with_bases(
     window: Window,
     mod_block: ModBlock,
     update_moves: bool,
+    remove: &TagRemoval,
 ) -> RecordBuf {
     let Window {
         start, end, total, ..
@@ -1269,7 +1284,11 @@ fn reconstruct_record_with_bases(
     debug_assert_eq!(src.quality_scores().as_ref(), qual);
     let trimmed = start != 0 || end != orig_len;
     let split = total > 1;
-    if !trimmed && !split && matches!(mod_block, ModBlock::Absent | ModBlock::Consistent) {
+    if !trimmed
+        && !split
+        && remove.is_empty()
+        && matches!(mod_block, ModBlock::Absent | ModBlock::Consistent)
+    {
         return src.clone();
     }
 
@@ -1321,9 +1340,17 @@ fn reconstruct_record_with_bases(
         platform,
         update_moves,
     ));
+    // A removed tag is dropped from the rewrite list as well, so neither the
+    // copy loop below nor the append loop after it can put it back.
+    if !remove.is_empty() {
+        updates.retain(|(t, _)| !remove.contains(&<[u8; 2]>::from(*t)));
+    }
 
     let data = out.data_mut();
     for (tag, value) in src.data().iter() {
+        if remove.contains(&<[u8; 2]>::from(tag)) {
+            continue;
+        }
         if let Some(i) = updates.iter().position(|(t, _)| *t == tag) {
             if let (_, Some(v)) = updates.remove(i) {
                 data.insert(tag, v);
@@ -1521,6 +1548,7 @@ fn run_bam_seq<R: InputRecord>(
                     window,
                     mod_block,
                     cfg.update_moves,
+                    &cfg.remove_tags,
                 );
                 sink.write_record(header, &out)?;
                 Ok(())
@@ -1744,6 +1772,10 @@ fn raw_gc_fraction(record: &bam::Record) -> f64 {
 /// are observed for every record, the tags against the surviving window or
 /// against none when the read is dropped. Returns the output and whether a
 /// known per-base tag is malformed.
+///
+/// Tag removal never reaches here: `run_raw_bam` excludes it from the
+/// full-window shortcut, so a run that removes tags rebuilds every record
+/// through `run_bam`.
 fn process_raw_full_window(
     record: bam::Record,
     cfg: &Config,
@@ -1820,6 +1852,7 @@ fn process_raw_full_window(
                 window,
                 mod_block,
                 cfg.update_moves,
+                &cfg.remove_tags,
             ))
         },
     };
@@ -1885,7 +1918,8 @@ fn run_raw_bam_full_window_parallel(
 /// Runs the uBAM workflow on raw records from a production reader. Full-window
 /// runs filter and write unchanged records without building an owned
 /// `RecordBuf`; any configuration that can alter sequence or tags is routed to
-/// `run_bam`.
+/// `run_bam`, tag removal included, since a record that would otherwise pass
+/// through untouched still has to be rebuilt without the removed tags.
 pub fn run_raw_bam(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
@@ -1897,7 +1931,8 @@ pub fn run_raw_bam(
         && cfg.trim.tail == 0
         && cfg.trim.quality.is_none()
         && cfg.adapters.is_none()
-        && !cfg.trim_barcodes;
+        && !cfg.trim_barcodes
+        && cfg.remove_tags.is_empty();
     if !full_window {
         return run_bam(header, records, sink, cfg, counters);
     }
@@ -1963,6 +1998,7 @@ pub fn run_bam<R: InputRecord>(
                         window,
                         mod_block,
                         cfg.update_moves,
+                        &cfg.remove_tags,
                     ));
                     Ok(())
                 },
@@ -1982,7 +2018,9 @@ pub fn run_bam<R: InputRecord>(
 /// in place and the removed ones skipped, per-base arrays sliced, then the
 /// rebuilt MM/ML/MN block, then the added tags. Nothing is appended when
 /// nothing is carried (the record then has a plain header). A `Malformed`
-/// block is omitted.
+/// block is omitted. A tag named by `remove` is left out of the header, after
+/// the rewrite, exactly as on BAM output.
+#[allow(clippy::too_many_arguments)]
 fn push_fastq_tags(
     tags: &mut Vec<u8>,
     src: &RecordBuf,
@@ -1991,6 +2029,7 @@ fn push_fastq_tags(
     mod_block: ModBlock,
     sel: &FastqTags,
     platform: Platform,
+    remove: &TagRemoval,
 ) {
     let Window { start, end, .. } = window;
     let orig_len = seq.len();
@@ -2000,6 +2039,9 @@ fn push_fastq_tags(
     // the signal and poly-A tags.
     let mut updates =
         window_tag_updates(src, src.quality_scores().as_ref(), window, platform, false);
+    if !remove.is_empty() {
+        updates.retain(|(t, _)| !remove.contains(&<[u8; 2]>::from(*t)));
+    }
     for (tag, value) in src.data().iter() {
         let t = <[u8; 2]>::from(tag);
         if matches!(&t, b"MM" | b"ML" | b"MN") {
@@ -2009,7 +2051,7 @@ fn push_fastq_tags(
             .iter()
             .position(|(u, _)| *u == tag)
             .map(|i| updates.remove(i).1);
-        if !sel.carries(&t) {
+        if !sel.carries(&t) || remove.contains(&t) {
             continue;
         }
         let value: Cow<Value> = match rewritten {
@@ -2031,8 +2073,7 @@ fn push_fastq_tags(
         && let Some((mm, ml)) = mod_tags(src)
     {
         let (mm, ml) = rebuild_mods(mm, ml, seq, start, end);
-        tags.push(b'\t');
-        push_mods_aux(tags, &mm, ml.as_deref(), end - start);
+        push_mods_aux(tags, &mm, ml.as_deref(), end - start, remove);
     }
     for (tag, value) in updates {
         let t = <[u8; 2]>::from(tag);
@@ -2049,6 +2090,7 @@ fn push_fastq_tags(
 /// record: the platform's segment name (`segment_name`), the selected aux
 /// tags, then the sliced bases and qualities. The header is assembled in
 /// place, so the tag text is formatted once, into the output buffer.
+#[allow(clippy::too_many_arguments)]
 fn render_fastq_window(
     out: &mut Vec<u8>,
     rec: &RecordBuf,
@@ -2056,6 +2098,7 @@ fn render_fastq_window(
     mod_block: ModBlock,
     platform: Platform,
     sel: &FastqTags,
+    remove: &TagRemoval,
 ) {
     let Window { start, end, .. } = window;
     let seq = rec.sequence().as_ref();
@@ -2068,7 +2111,7 @@ fn render_fastq_window(
     } else {
         out.extend_from_slice(name);
     }
-    push_fastq_tags(out, rec, seq, window, mod_block, sel, platform);
+    push_fastq_tags(out, rec, seq, window, mod_block, sel, platform, remove);
     push_record_body(out, &seq[start..end], &qual[start..end]);
 }
 
@@ -2134,6 +2177,7 @@ where
                     mod_block,
                     platform,
                     &cfg.fastq_tags,
+                    &cfg.remove_tags,
                 );
                 writer.write_all(&rendered)?;
                 Ok(())
@@ -2201,6 +2245,7 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
                         mod_block,
                         platform,
                         &cfg.fastq_tags,
+                        &cfg.remove_tags,
                     );
                     out.push(buf);
                     Ok(())
@@ -2405,6 +2450,7 @@ mod tests {
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
             trim_barcodes: false,
+            remove_tags: crate::config::TagRemoval::default(),
         };
 
         let result = run_bam(
@@ -2561,6 +2607,7 @@ mod tests {
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
             trim_barcodes: false,
+            remove_tags: crate::config::TagRemoval::default(),
         }
     }
 
@@ -3515,6 +3562,7 @@ mod tests {
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
             trim_barcodes: false,
+            remove_tags: crate::config::TagRemoval::default(),
         };
         // 300 reads with mods so reconstruction runs on every one.
         let recs: Vec<RecordBuf> = (0..300)
@@ -3631,6 +3679,7 @@ mod tests {
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
             trim_barcodes: false,
+            remove_tags: crate::config::TagRemoval::default(),
         };
         let recs: Vec<anyhow::Result<RecordBuf>> = (0..3000)
             .map(|_| anyhow::Ok(RecordBuf::default()))
@@ -3713,6 +3762,7 @@ mod tests {
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
             trim_barcodes: false,
+            remove_tags: crate::config::TagRemoval::default(),
         };
         let good: Vec<anyhow::Result<RecordBuf>> =
             (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
@@ -3781,6 +3831,7 @@ mod tests {
             progress: crate::config::ProgressMode::Auto,
             adapters_configured: None,
             trim_barcodes: false,
+            remove_tags: crate::config::TagRemoval::default(),
         };
         let recs: Vec<RecordBuf> = (0..300)
             .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))
@@ -4812,6 +4863,154 @@ mod tests {
             assert_eq!(tag(&out, *b"st"), tag(&r, *b"st"), "{t:?}");
             assert_eq!(tag(&out, *b"du"), tag(&r, *b"du"), "{t:?}");
         }
+    }
+
+    /// Builds the removal set the flags produce.
+    fn removal(tags: &[&str], strip_kinetics: bool) -> crate::config::TagRemoval {
+        let tags: Vec<String> = tags.iter().map(|t| (*t).to_string()).collect();
+        crate::config::TagRemoval::parse(&tags, strip_kinetics).unwrap()
+    }
+
+    /// An 8-base record carrying a rewritten block (`MM`/`ML`/`MN`), a per-base
+    /// array (`ip`), a run-length coverage array (`sa`) and a copied scalar
+    /// (`RG`).
+    fn record_with_mixed_tags() -> RecordBuf {
+        let mut rec = ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]);
+        let data = rec.data_mut();
+        data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(8));
+        data.insert(
+            Tag::new(b'i', b'p'),
+            Value::Array(Array::UInt8((0..8).collect())),
+        );
+        data.insert(
+            Tag::new(b's', b'a'),
+            Value::Array(Array::UInt32(vec![8, 3])),
+        );
+        data.insert(
+            Tag::new(b'R', b'G'),
+            Value::String(b"run1".as_slice().into()),
+        );
+        rec
+    }
+
+    /// A removed tag is left out of a trimmed record, whether whittle rewrites
+    /// it (`MM`) or copies it (`RG`). Removal runs after the rewrite, so the
+    /// rest of the modification block is still rebuilt against the window.
+    #[test]
+    fn removal_drops_a_rewritten_and_a_copied_tag_on_a_trimmed_record() {
+        let rec = record_with_mixed_tags();
+        let mut cfg = cfg_bam2fq(None, 2, FastqTags::All);
+        cfg.remove_tags = removal(&["MM", "RG"], false);
+        let (_stats, out) = bam2bam(vec![rec], &cfg);
+
+        assert_eq!(out.len(), 1);
+        let out = &out[0];
+        assert_eq!(out.sequence().as_ref(), b"ACCCAC");
+        assert!(tag(out, *b"MM").is_none(), "MM was removed");
+        assert!(tag(out, *b"RG").is_none(), "RG was removed");
+        // The block is still rebuilt for the window: the call at base 0 falls
+        // outside it, leaving the two at bases 3 and 4.
+        assert_eq!(
+            tag(out, *b"ML"),
+            Some(Value::Array(Array::UInt8(vec![20, 30])))
+        );
+        assert_eq!(tag(out, *b"MN"), Some(Value::Int32(6)));
+        // An untouched per-base array is still sliced to the window.
+        assert_eq!(
+            tag(out, *b"ip"),
+            Some(Value::Array(Array::UInt8((2..8).collect())))
+        );
+    }
+
+    /// Removal applies to a record no trimming would otherwise change, which is
+    /// what routes the raw full-window path through the decoded rebuild.
+    #[test]
+    fn removal_applies_to_an_untrimmed_record() {
+        let rec = record_with_mixed_tags();
+        let mut cfg = cfg_bam2fq(None, 0, FastqTags::All);
+        cfg.remove_tags = removal(&["RG"], false);
+        let (_stats, out) = bam2bam(vec![rec.clone()], &cfg);
+
+        assert_eq!(out.len(), 1);
+        assert!(tag(&out[0], *b"RG").is_none(), "RG was removed");
+        // Every other tag rides through unchanged, values included.
+        for t in [*b"MM", *b"ML", *b"MN", *b"ip", *b"sa"] {
+            assert_eq!(
+                tag(&out[0], t),
+                tag(&rec, t),
+                "{}",
+                String::from_utf8_lossy(&t)
+            );
+        }
+        assert_eq!(out[0].sequence().as_ref(), rec.sequence().as_ref());
+    }
+
+    /// `--strip-kinetics` removes all nine per-base arrays and nothing else.
+    #[test]
+    fn strip_kinetics_removes_every_per_base_array() {
+        let mut rec = ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]);
+        let names: [[u8; 2]; 9] = [
+            *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sm", *b"sx", *b"sa",
+        ];
+        {
+            let data = rec.data_mut();
+            for name in names {
+                let value = if name == *b"sa" {
+                    Value::Array(Array::UInt32(vec![8, 3]))
+                } else {
+                    Value::Array(Array::UInt8((0..8).collect()))
+                };
+                data.insert(Tag::new(name[0], name[1]), value);
+            }
+            data.insert(
+                Tag::new(b'R', b'G'),
+                Value::String(b"run1".as_slice().into()),
+            );
+        }
+
+        let mut cfg = cfg_bam2fq(None, 0, FastqTags::All);
+        cfg.remove_tags = removal(&[], true);
+        let (_stats, out) = bam2bam(vec![rec], &cfg);
+
+        assert_eq!(out.len(), 1);
+        for name in names {
+            assert!(
+                tag(&out[0], name).is_none(),
+                "{} was removed",
+                String::from_utf8_lossy(&name)
+            );
+        }
+        assert_eq!(
+            tag(&out[0], *b"RG"),
+            string_value(b"run1"),
+            "An unnamed tag is untouched"
+        );
+        assert!(tag(&out[0], *b"MM").is_some());
+    }
+
+    /// On BAM-to-FASTQ the removal applies to the tags carried into the header,
+    /// per field of the modification block as it does on BAM output.
+    #[test]
+    fn removal_drops_the_tag_from_a_fastq_header() {
+        let rec = record_with_mixed_tags();
+        let mut cfg = cfg_bam2fq(None, 2, FastqTags::All);
+        cfg.remove_tags = removal(&["MM", "RG"], false);
+        let (_stats, text) = bam2fq(vec![rec.clone()], &cfg);
+
+        let header = text.lines().next().unwrap();
+        assert!(!header.contains("MM:Z:"), "MM was removed: {header}");
+        assert!(!header.contains("RG:Z:"), "RG was removed: {header}");
+        assert!(header.contains("ML:B:C,20,30"), "{header}");
+        assert!(header.contains("MN:i:6"), "{header}");
+        assert!(header.contains("ip:B:C,2,3,4,5,6,7"), "{header}");
+
+        // Without the flag the same run carries both.
+        let mut keep = cfg.clone();
+        keep.remove_tags = crate::config::TagRemoval::default();
+        let (_stats, text) = bam2fq(vec![rec], &keep);
+        let header = text.lines().next().unwrap();
+        assert!(header.contains("MM:Z:"), "{header}");
+        assert!(header.contains("RG:Z:run1"), "{header}");
     }
 }
 

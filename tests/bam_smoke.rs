@@ -616,3 +616,249 @@ fn trim_barcodes_is_rejected_on_fastq_input() {
         .failure()
         .stderr(predicates::str::contains("--trim-barcodes"));
 }
+
+/// The nine per-base arrays `--strip-kinetics` removes.
+const KINETICS_TAGS: [[u8; 2]; 9] = [
+    *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sm", *b"sx", *b"sa",
+];
+
+/// Writes a one-read uBAM carrying every tag class removal has to cope with: a
+/// rewritten block (`MM`/`ML`/`MN`), the nine per-base arrays, and a copied
+/// scalar (`RG`).
+fn write_tag_fixture(path: &std::path::Path) {
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
+    w.write_header(&header).unwrap();
+
+    let mut r = RecordBuf::default();
+    *r.flags_mut() = Flags::UNMAPPED;
+    *r.name_mut() = Some(b"read1".into());
+    *r.sequence_mut() = b"CCACCCAC".to_vec().into();
+    *r.quality_scores_mut() = vec![40; 8].into();
+    let data = r.data_mut();
+    data.insert(
+        Tag::BASE_MODIFICATIONS,
+        Value::String(b"C+m,0,1,0;".to_vec().into()),
+    );
+    data.insert(
+        Tag::BASE_MODIFICATION_PROBABILITIES,
+        Value::Array(Array::UInt8(vec![10, 20, 30])),
+    );
+    data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(8));
+    for name in KINETICS_TAGS {
+        // `sa` is run-length coverage: one run of 8 bases at coverage 3.
+        let value = if name == *b"sa" {
+            Value::Array(Array::UInt32(vec![8, 3]))
+        } else {
+            Value::Array(Array::UInt8((0..8).collect()))
+        };
+        data.insert(Tag::new(name[0], name[1]), value);
+    }
+    data.insert(
+        Tag::new(b'R', b'G'),
+        Value::String(b"run1".as_slice().into()),
+    );
+    w.write_alignment_record(&header, &r).unwrap();
+    w.try_finish().unwrap();
+}
+
+/// Runs whittle over the tag fixture with `args` and returns the single output
+/// record.
+fn run_with_tag_fixture(dir: &std::path::Path, name: &str, args: &[&str]) -> RecordBuf {
+    let in_path = dir.join("tags.bam");
+    let out_path = dir.join(name);
+    write_tag_fixture(&in_path);
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(args)
+        .arg("-i")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .assert()
+        .success();
+    read_one(&out_path)
+}
+
+fn has_tag(rec: &RecordBuf, tag: [u8; 2]) -> bool {
+    rec.data().get(&Tag::new(tag[0], tag[1])).is_some()
+}
+
+/// `--remove-tag` removes a tag whittle rewrites (`MM`) and one it copies
+/// (`RG`) from a trimmed record, and the rest of the modification block is
+/// still rebuilt against the trimmed window.
+#[test]
+fn remove_tag_drops_rewritten_and_copied_tags_on_bam_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_with_tag_fixture(
+        dir.path(),
+        "trimmed.bam",
+        &[
+            "--head-crop",
+            "2",
+            "--remove-tag",
+            "MM",
+            "--remove-tag",
+            "RG",
+        ],
+    );
+
+    assert_eq!(out.sequence().as_ref(), b"ACCCAC");
+    assert!(!has_tag(&out, *b"MM"), "MM was removed");
+    assert!(!has_tag(&out, *b"RG"), "RG was removed");
+    // The call at base 0 falls outside the window; the two remaining ones keep
+    // their probabilities and MN follows the trimmed length.
+    assert_eq!(
+        out.data().get(&Tag::BASE_MODIFICATION_PROBABILITIES),
+        Some(&Value::Array(Array::UInt8(vec![20, 30])))
+    );
+    assert_eq!(
+        out.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH),
+        Some(&Value::Int32(6))
+    );
+    // An untouched per-base array is still sliced to the window.
+    assert_eq!(
+        out.data().get(&Tag::new(b'i', b'p')),
+        Some(&Value::Array(Array::UInt8((2..8).collect())))
+    );
+}
+
+/// A run with no trimming takes the raw full-window path, where a record is
+/// written back without being decoded. Removal routes such a record through the
+/// decoded rebuild instead, so the tags go and nothing else changes.
+#[test]
+fn remove_tag_reaches_the_raw_full_window_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let untouched = run_with_tag_fixture(dir.path(), "raw_keep.bam", &["-t", "4"]);
+    assert!(has_tag(&untouched, *b"MM"), "The fixture carries MM");
+    assert!(has_tag(&untouched, *b"RG"), "The fixture carries RG");
+
+    let out = run_with_tag_fixture(
+        dir.path(),
+        "raw_drop.bam",
+        &["-t", "4", "--remove-tag", "MM", "--remove-tag", "RG"],
+    );
+    assert!(!has_tag(&out, *b"MM"), "MM was removed");
+    assert!(!has_tag(&out, *b"RG"), "RG was removed");
+    assert_eq!(out.sequence().as_ref(), untouched.sequence().as_ref());
+    assert_eq!(
+        out.quality_scores().as_ref(),
+        untouched.quality_scores().as_ref()
+    );
+    for tag in KINETICS_TAGS {
+        assert_eq!(
+            out.data().get(&Tag::new(tag[0], tag[1])),
+            untouched.data().get(&Tag::new(tag[0], tag[1])),
+            "{}",
+            String::from_utf8_lossy(&tag)
+        );
+    }
+}
+
+/// On BAM-to-FASTQ the removal applies to the tags carried into the header.
+#[test]
+fn remove_tag_drops_tags_from_the_fastq_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("tags.bam");
+    let out_path = dir.path().join("out.fastq");
+    write_tag_fixture(&in_path);
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["--remove-tag", "MM", "--remove-tag", "RG", "-i"])
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .assert()
+        .success();
+
+    let text = std::fs::read_to_string(&out_path).unwrap();
+    let header = text.lines().next().unwrap();
+    assert!(!header.contains("MM:Z:"), "MM was removed: {header}");
+    assert!(!header.contains("RG:Z:"), "RG was removed: {header}");
+    assert!(header.contains("ML:B:C,10,20,30"), "{header}");
+    assert!(header.contains("MN:i:8"), "{header}");
+    assert!(header.contains("ip:B:C,0,1,2,3,4,5,6,7"), "{header}");
+}
+
+/// `--strip-kinetics` removes all nine per-base arrays and leaves every other
+/// tag alone.
+#[test]
+fn strip_kinetics_removes_the_nine_per_base_arrays() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_with_tag_fixture(dir.path(), "stripped.bam", &["--strip-kinetics"]);
+
+    for tag in KINETICS_TAGS {
+        assert!(
+            !has_tag(&out, tag),
+            "{} was removed",
+            String::from_utf8_lossy(&tag)
+        );
+    }
+    assert!(has_tag(&out, *b"MM"), "An unnamed tag is untouched");
+    assert!(has_tag(&out, *b"RG"), "An unnamed tag is untouched");
+    assert_eq!(out.sequence().as_ref(), b"CCACCCAC");
+}
+
+/// The removed tags name BAM aux tags, so the flags are refused on FASTQ input
+/// rather than accepted and ignored.
+#[test]
+fn remove_tag_flags_are_rejected_on_fastq_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("reads.fastq");
+    std::fs::write(&in_path, "@r1\nACGTACGTAC\n+\nIIIIIIIIII\n").unwrap();
+
+    for (args, flag) in [
+        (vec!["--remove-tag", "RG"], "--remove-tag"),
+        (vec!["--strip-kinetics"], "--strip-kinetics"),
+    ] {
+        Command::cargo_bin("whittle")
+            .unwrap()
+            .env_remove("WHITTLE_LOG")
+            .args(&args)
+            .arg("-i")
+            .arg(&in_path)
+            .arg("-o")
+            .arg(dir.path().join("out.fastq"))
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(flag));
+
+        // A stream carries no extension, so the refusal comes from the detected
+        // format instead.
+        Command::cargo_bin("whittle")
+            .unwrap()
+            .env_remove("WHITTLE_LOG")
+            .args(&args)
+            .args(["--out-format", "fastq", "-o"])
+            .arg(dir.path().join("out2.fastq"))
+            .write_stdin("@r1\nACGTACGTAC\n+\nIIIIIIIIII\n")
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(flag));
+    }
+}
+
+/// A value that is not a two-character SAM tag fails before the run, with the
+/// flag named.
+#[test]
+fn a_malformed_remove_tag_fails_at_parse_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("tags.bam");
+    write_tag_fixture(&in_path);
+
+    for bad in ["MMM", "M", "M_"] {
+        Command::cargo_bin("whittle")
+            .unwrap()
+            .env_remove("WHITTLE_LOG")
+            .args(["--remove-tag", bad, "-i"])
+            .arg(&in_path)
+            .arg("-o")
+            .arg(dir.path().join("out.bam"))
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("--remove-tag"));
+    }
+}

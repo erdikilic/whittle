@@ -65,6 +65,25 @@ pub(crate) fn guard_barcode_input(cfg: &Config, in_fmt: io::Format) -> anyhow::R
     Ok(())
 }
 
+/// Rejects `--remove-tag` and `--strip-kinetics` on any input format other than
+/// BAM.
+///
+/// Both name BAM auxiliary tags, which only a BAM record carries, so on FASTQ
+/// they would be accepted and silently do nothing. Applied where
+/// `guard_barcode_input` is: `cli::parse` checks the format an explicit
+/// `--in-format` or a known extension names, and `run` checks again once
+/// detection has classified a stream.
+pub(crate) fn guard_remove_tag_input(cfg: &Config, in_fmt: io::Format) -> anyhow::Result<()> {
+    if !cfg.remove_tags.is_empty() && in_fmt != io::Format::Bam {
+        anyhow::bail!(
+            "{} removes BAM auxiliary tags and requires BAM input (got {})",
+            cfg.remove_tags.flags(),
+            in_fmt.label()
+        );
+    }
+    Ok(())
+}
+
 /// Checks every file the run writes against every file it reads and against
 /// each other.
 ///
