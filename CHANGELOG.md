@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tarball. It is rendered from the live CLI definition by
   `cargo run --example gen-man`; `clap_mangen` is a dev-dependency, so the
   shipped binary is unchanged.
+- `--ordered` writes records in input order when running with more than one
+  thread, so output is byte-identical between runs and to a single-threaded run.
+  Without it records are written as they finish, which is faster and uses less
+  memory; a BAM written that way carries `SO:unsorted` in its header.
 
 ### Changed
 - The progress bar shows the output count beside the input count, so a filter
@@ -132,6 +136,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored.
 - Argument-parsing diagnostics bypassed the log level filter, printing even
   under `--quiet` without the standard prefix and ahead of the version line.
+- PacBio reverse-strand kinetics (`ri`, `rp`) are sliced from the far end of the
+  array, matching the last-base-first layout the PacBio BAM specification
+  defines; trimmed HiFi reads previously carried shifted reverse IPD and pulse
+  width values.
+- The `qs` refresh applies only to a float mean-quality tag. PacBio `qs:i` and
+  `qe:i` query coordinates pass through unchanged instead of being overwritten.
+- Under `--adapter-preset ont`, reads shorter than about 175 bp that carry a
+  normal front or rear adapter keep their insert. The rear catalog entries are
+  reverse complements of the front entries, and a hit covered by both end zones
+  was placed by its tag rather than its position, so the two trims met and the
+  read was dropped.
+- Adapters with IUPAC ambiguity codes split chimeras. The exact-seed filter
+  expands ambiguity codes and the complement table covers the full IUPAC
+  alphabet; previously such adapters trimmed at the ends but never matched an
+  interior hit.
+- A truncated or unreadable gzip input under `-t 2` or more exits with status 1
+  and a message instead of panicking after writing partial output. A failing
+  run also stops reading its input at the first error.
+- An MM group whose positions all fall outside the kept window is emitted as an
+  empty group rather than removed, so implicit-mode bases stay canonical. An
+  `MN` that disagrees with the sequence length, an `ML` whose length disagrees
+  with `MM`, an `MM` that does not parse to its end, or a non-`B:C` `ML` removes
+  the modification block and is counted under `warnings.malformed_mod_reads` in
+  the summary and in the end-of-run advisory, instead of being repaired or
+  dropped silently.
+- Quality bytes outside the Phred+33 range are an error naming the record and
+  the byte, instead of being rewritten to Q0.
+- A bgzip-compressed file named `.fastq.gz` is detected by its block header and
+  read through the multithreaded BGZF decoder.
+- Directory input skips hidden files and sorts members in natural order, so
+  `run_2` precedes `run_10`.
+- `-` names stdin for `-i` and stdout for `-o`. `-t 0` is rejected, quality
+  bounds must be finite and non-negative, `--qual-split-window` and the adapter
+  tuning flags require the flag they modify,
+  and `--progress` conflicts with `--quiet`.
+- A `WHITTLE_LOG` value that does not parse falls back to the verbosity level
+  and is reported, instead of silencing every log line including errors.
+- A missing input file error names the path; a closed downstream pipe exits
+  quietly with status 0.
+- The end-of-run `Completed` line prints after the summary JSON is written, so a
+  failed write is not preceded by a success line.
 
 ## [0.1.1] - 2026-07-14
 
