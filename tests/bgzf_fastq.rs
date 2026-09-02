@@ -39,6 +39,23 @@ fn bgzf_fastq_path_and_stdin_are_detected() {
         .stdout(TRIMMED);
 }
 
+// `bgzip reads.fastq` and `samtools fastq | bgzip` write BGZF under a `.gz`
+// extension; the stream is read as BGZF regardless of the extension.
+#[test]
+fn bgzf_stream_under_gz_extension_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("reads.fastq.gz");
+    std::fs::write(&input, bgzf_bytes()).unwrap();
+
+    whittle()
+        .arg("-i")
+        .arg(&input)
+        .args(["-H", "1", "-T", "1", "-t", "4", "--quiet"])
+        .assert()
+        .success()
+        .stdout(TRIMMED);
+}
+
 // The 28-byte BGZF EOF marker (an empty gzip block). samtools/bgzip require it
 // to treat a .bgz stream as complete; a writer that omits it makes `bgzip -t`
 // report truncation even when every data block is intact.

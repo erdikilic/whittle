@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,8 +17,9 @@ pub enum Family {
 }
 
 /// Classify a directory's immediate children into a single read-file family and a
-/// sorted path list. Non-read files and subdirectories are ignored. Errors if the
-/// folder mixes FASTQ and BAM, or holds no read files.
+/// path list in natural name order. Non-read files, hidden files (a leading `.`,
+/// which covers macOS `._` AppleDouble sidecars) and subdirectories are ignored.
+/// Errors if the folder mixes FASTQ and BAM, or holds no read files.
 ///
 /// An `output` naming a read file inside the directory is a hard error: a real
 /// input is indistinguishable from a stale prior output, and merging over either
@@ -30,7 +32,7 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
         std::fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?;
     for entry in entries {
         let path = entry?.path();
-        if !path.is_file() {
+        if !path.is_file() || is_hidden(&path) {
             continue;
         }
         let format = from_extension(&path);
@@ -70,13 +72,66 @@ pub fn classify(dir: &Path, output: Option<&Path>) -> anyhow::Result<(Family, Ve
             bam.len()
         ),
     };
-    paths.sort();
+    paths.sort_by(|a, b| natural_cmp(file_name_bytes(a), file_name_bytes(b)));
     Ok((family, paths))
+}
+
+fn file_name_bytes(path: &Path) -> &[u8] {
+    path.file_name().map_or(b"", |n| n.as_encoded_bytes())
+}
+
+/// True for a file name starting with `.`.
+fn is_hidden(path: &Path) -> bool {
+    file_name_bytes(path).starts_with(b".")
+}
+
+/// Orders names with each digit run compared by numeric value, so `run_2`
+/// precedes `run_10`. Runs of equal value, and names equal run for run, fall
+/// back to byte order so the ordering stays total.
+fn natural_cmp(a: &[u8], b: &[u8]) -> Ordering {
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+            let run_a = &a[i..i + digit_run(&a[i..])];
+            let run_b = &b[j..j + digit_run(&b[j..])];
+            let value_a = trim_leading_zeros(run_a);
+            let value_b = trim_leading_zeros(run_b);
+            let by_value = value_a
+                .len()
+                .cmp(&value_b.len())
+                .then_with(|| value_a.cmp(value_b))
+                .then_with(|| run_a.cmp(run_b));
+            if by_value != Ordering::Equal {
+                return by_value;
+            }
+            i += run_a.len();
+            j += run_b.len();
+        } else {
+            let by_byte = a[i].cmp(&b[j]);
+            if by_byte != Ordering::Equal {
+                return by_byte;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    (a.len() - i).cmp(&(b.len() - j)).then_with(|| a.cmp(b))
+}
+
+fn digit_run(bytes: &[u8]) -> usize {
+    bytes.iter().take_while(|c| c.is_ascii_digit()).count()
+}
+
+fn trim_leading_zeros(run: &[u8]) -> &[u8] {
+    let zeros = run.iter().take_while(|&&c| c == b'0').count();
+    &run[zeros..]
 }
 
 /// One chained record stream over all FASTQ-family files, opened lazily as the
 /// chain reaches each file (avoids exhausting file descriptors on large folders).
 /// A file-open error surfaces as an `Err` item rather than aborting construction.
+/// A `.gz` member is probed for BGZF framing so a bgzip-compressed file takes
+/// the block-parallel reader.
 pub fn fastq_records(
     paths: &[PathBuf],
     bgzf_workers: usize,
@@ -96,10 +151,17 @@ pub fn fastq_records(
                     ))
                 })
                 .map_err(anyhow::Error::from);
-            let reader = counted.and_then(|inner| match from_extension(&p) {
-                Some(Format::FastqBgzf) => crate::io::fastq::reader_from_bgzf(inner, bgzf_workers),
-                Some(Format::FastqGz) => Ok(crate::io::fastq::reader_from(inner, true)),
-                _ => Ok(crate::io::fastq::reader_from(inner, false)),
+            let reader = counted.and_then(|mut inner| {
+                let format = match from_extension(&p) {
+                    Some(Format::FastqGz) => crate::io::probe_gz(&mut inner)?,
+                    Some(other) => other,
+                    None => Format::Fastq,
+                };
+                match format {
+                    Format::FastqBgzf => crate::io::fastq::reader_from_bgzf(inner, bgzf_workers),
+                    Format::FastqGz => Ok(crate::io::fastq::reader_from(inner, true)),
+                    Format::Fastq | Format::Bam => Ok(crate::io::fastq::reader_from(inner, false)),
+                }
             });
             match reader {
                 Ok(reader) => reader,
@@ -214,6 +276,70 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_str().unwrap())
             .collect();
         assert_eq!(names, vec!["a_0.fastq", "b_1.fastq.gz"]); // sorted, .txt/subdir excluded
+    }
+
+    #[test]
+    fn hidden_files_are_skipped() {
+        let d = tempfile::tempdir().unwrap();
+        touch(d.path(), "run_1.fastq");
+        touch(d.path(), "._run_1.fastq"); // AppleDouble sidecar
+        touch(d.path(), ".hidden.fastq.gz");
+        touch(d.path(), ".stale.bam"); // hidden, so it cannot make the folder mixed
+        let (fam, paths) = classify(d.path(), None).unwrap();
+        assert_eq!(fam, Family::Fastq);
+        let names: Vec<_> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["run_1.fastq"]);
+
+        let only_hidden = tempfile::tempdir().unwrap();
+        touch(only_hidden.path(), "._a.fastq");
+        let err = classify(only_hidden.path(), None).unwrap_err().to_string();
+        assert!(err.contains("no FASTQ or BAM"), "got: {err}");
+    }
+
+    #[test]
+    fn member_files_sort_in_natural_order() {
+        let d = tempfile::tempdir().unwrap();
+        for name in [
+            "run_10.fastq",
+            "run_2.fastq",
+            "run_1.fastq",
+            "run_0.fastq.gz",
+        ] {
+            touch(d.path(), name);
+        }
+        let (_, paths) = classify(d.path(), None).unwrap();
+        let names: Vec<_> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "run_0.fastq.gz",
+                "run_1.fastq",
+                "run_2.fastq",
+                "run_10.fastq"
+            ]
+        );
+    }
+
+    #[test]
+    fn natural_cmp_orders_digit_runs_numerically() {
+        use std::cmp::Ordering;
+        assert_eq!(natural_cmp(b"run_2", b"run_10"), Ordering::Less);
+        assert_eq!(natural_cmp(b"run_10", b"run_2"), Ordering::Greater);
+        assert_eq!(natural_cmp(b"a", b"a1"), Ordering::Less);
+        assert_eq!(natural_cmp(b"a10b", b"a10c"), Ordering::Less);
+        assert_eq!(natural_cmp(b"a9z", b"a10a"), Ordering::Less);
+        assert_eq!(natural_cmp(b"b1", b"a10"), Ordering::Greater);
+        // Equal numeric value: the zero-padded run sorts first, deterministically.
+        assert_eq!(natural_cmp(b"x02", b"x2"), Ordering::Less);
+        assert_eq!(natural_cmp(b"x2", b"x02"), Ordering::Greater);
+        assert_eq!(natural_cmp(b"same", b"same"), Ordering::Equal);
+        assert_eq!(natural_cmp(b"", b"a"), Ordering::Less);
     }
 
     #[test]

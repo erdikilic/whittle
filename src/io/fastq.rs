@@ -1,6 +1,4 @@
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::io::{self, BufWriter, Read, Write};
 
 use flate2::read::MultiGzDecoder;
 use gzp::deflate::Mgzip;
@@ -12,20 +10,6 @@ use seq_io::fastq::{Reader, Record};
 
 use crate::config::Config;
 use crate::record::ReadRecord;
-
-/// Build a streaming FASTQ record iterator over a file (or stdin when `input`
-/// is `None`), transparently decompressing gzip when `gz` is true.
-pub fn reader(
-    input: Option<&Path>,
-    gz: bool,
-) -> anyhow::Result<Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send>> {
-    let raw: Box<dyn Read + Send> = match input {
-        Some(p) => Box::new(File::open(p)?),
-        None => Box::new(io::stdin()),
-    };
-    let buffered: Box<dyn Read + Send> = Box::new(BufReader::new(raw));
-    Ok(reader_from(buffered, gz))
-}
 
 /// Build a streaming FASTQ record iterator over an already-open source (e.g. a
 /// peeked-and-chained stdin stream), transparently decompressing gzip when
@@ -39,9 +23,7 @@ pub fn reader_from(
     } else {
         inner
     };
-    Box::new(RecordIter {
-        reader: Reader::new(inner),
-    })
+    Box::new(RecordIter::new(inner))
 }
 
 /// Build a FASTQ iterator over BGZF-compressed input. Unlike ordinary gzip,
@@ -59,23 +41,97 @@ pub fn reader_from_bgzf(
     } else {
         Box::new(noodles_bgzf::io::Reader::new(inner))
     };
-    Ok(Box::new(RecordIter {
-        reader: Reader::new(inner),
-    }))
+    Ok(Box::new(RecordIter::new(inner)))
 }
+
+/// Highest raw Phred score a Phred+33 quality byte encodes (`~`, ASCII 126).
+const MAX_PHRED33: u8 = 126 - 33;
 
 struct RecordIter<R: Read> {
     reader: Reader<R>,
+    /// Records yielded so far.
+    count: u64,
+    /// Id of the last record yielded, kept for error context.
+    last_id: Vec<u8>,
+}
+
+impl<R: Read> RecordIter<R> {
+    fn new(inner: R) -> Self {
+        RecordIter {
+            reader: Reader::new(inner),
+            count: 0,
+            last_id: Vec::new(),
+        }
+    }
+
+    /// Converts a reader error. An `Io` error is unwrapped to the inner
+    /// `io::Error` and given stream-position context: seq_io's wrapper both
+    /// displays and sources the same error, which prints its message twice
+    /// under anyhow's alternate formatting. Parse errors already carry their
+    /// record and line.
+    fn describe(&self, e: seq_io::fastq::Error) -> anyhow::Error {
+        match e {
+            seq_io::fastq::Error::Io(e) => {
+                let context = if self.count == 0 {
+                    "reading the first FASTQ record".to_string()
+                } else {
+                    format!(
+                        "reading FASTQ record after {}",
+                        String::from_utf8_lossy(&self.last_id)
+                    )
+                };
+                anyhow::Error::new(e).context(context)
+            },
+            other => anyhow::Error::new(other),
+        }
+    }
+}
+
+/// Names the first quality byte outside the Phred+33 range. `qual` holds at
+/// least one such byte.
+fn invalid_quality(id: &[u8], qual: &[u8]) -> anyhow::Error {
+    let (pos, &byte) = qual
+        .iter()
+        .enumerate()
+        .find(|&(_, &b)| b.wrapping_sub(33) > MAX_PHRED33)
+        .expect("the caller found a quality byte outside the Phred+33 range");
+    anyhow::anyhow!(
+        "record {}: quality byte 0x{byte:02x} at position {} is outside the Phred+33 range \
+         (ASCII 33..=126)",
+        String::from_utf8_lossy(id),
+        pos + 1
+    )
 }
 
 impl<R: Read> Iterator for RecordIter<R> {
     type Item = anyhow::Result<ReadRecord>;
     fn next(&mut self) -> Option<Self::Item> {
-        let rec = self.reader.next()?;
-        Some(rec.map_err(anyhow::Error::from).map(|r| ReadRecord {
-            name: r.head().to_vec(),
-            seq: r.seq().to_vec(),
-            qual: r.qual().iter().map(|&b| b.saturating_sub(33)).collect(),
+        let rec = match self.reader.next()? {
+            Ok(rec) => rec,
+            Err(e) => return Some(Err(self.describe(e))),
+        };
+        // One pass converts and validates: a byte below 33 wraps above the
+        // maximum, so a single compare per byte flags both ends of the range.
+        let raw = rec.qual();
+        let mut out_of_range = false;
+        let qual: Vec<u8> = raw
+            .iter()
+            .map(|&b| {
+                let q = b.wrapping_sub(33);
+                out_of_range |= q > MAX_PHRED33;
+                q
+            })
+            .collect();
+        if out_of_range {
+            return Some(Err(invalid_quality(rec.id_bytes(), raw)));
+        }
+        self.count += 1;
+        self.last_id.clear();
+        self.last_id.extend_from_slice(rec.id_bytes());
+        Some(Ok(ReadRecord {
+            name: rec.head().to_vec(),
+            seq: rec.seq().to_vec(),
+            qual,
         }))
     }
 }
@@ -306,13 +362,6 @@ pub fn format_mods_aux(mm: &[u8], ml: Option<&[u8]>, mn: usize) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
-fn reader_from_slice(bytes: &'static [u8]) -> RecordIter<&'static [u8]> {
-    RecordIter {
-        reader: Reader::new(bytes),
-    }
-}
-
 /// FASTQ output writer: a plain buffered writer, or a `gzp` parallel gzip writer
 /// when the output format is explicitly `FastqGz`.
 ///
@@ -369,8 +418,8 @@ impl FastqOut {
 /// Build the FASTQ output writer: a file or stdout, wrapped in a parallel gzip
 /// encoder (`gzp`, using `gz_workers` worker threads, the caller's
 /// workload-aware ENCODE share of the `-t` budget) when the output format is
-/// `FastqGz`, else a plain buffered writer. `gz_workers` is only read on the
-/// `FastqGz` branch, so plain-output callers may pass any value.
+/// `FastqGz`, else a plain buffered writer. Both compressed formats clamp
+/// `gz_workers` to at least one thread; plain output ignores it.
 pub(crate) fn writer(
     cfg: &Config,
     out_fmt: crate::io::Format,
@@ -380,6 +429,7 @@ pub(crate) fn writer(
         Some(p) => Box::new(std::fs::File::create(p)?),
         None => Box::new(std::io::stdout()),
     };
+    let workers = std::num::NonZero::new(gz_workers).unwrap_or(std::num::NonZero::<usize>::MIN);
     match out_fmt {
         crate::io::Format::FastqGz => {
             // gzp's `Mgzip` (libdeflate-backed blocked gzip) rather than `Gzip`
@@ -387,8 +437,7 @@ pub(crate) fn writer(
             // a valid multi-member gzip stream that `MultiGzDecoder` and standard
             // gzip tools decode.
             let w = ParCompressBuilder::<Mgzip>::new()
-                .num_threads(gz_workers)
-                .unwrap()
+                .num_threads(workers.get())?
                 .compression_level(Compression::new(cfg.compression_level as u32))
                 .from_writer(base);
             Ok(FastqOut::Gz(w))
@@ -398,10 +447,7 @@ pub(crate) fn writer(
                 .ok_or_else(|| anyhow::anyhow!("invalid BGZF compression level"))?;
             let w = noodles_bgzf::io::multithreaded_writer::Builder::default()
                 .set_compression_level(level)
-                .set_worker_count(
-                    std::num::NonZero::new(gz_workers.max(1))
-                        .unwrap_or(std::num::NonZero::<usize>::MIN),
-                )
+                .set_worker_count(workers)
                 .build_from_writer(base);
             Ok(FastqOut::Bgzf(w))
         },
@@ -443,12 +489,115 @@ mod tests {
     #[test]
     fn roundtrip_reader_writer() {
         let fq = b"@r1\nACGT\n+\nIIII\n@r2 x\nTT\n+\n!!\n";
-        let recs: Vec<ReadRecord> = reader_from_slice(fq).map(|r| r.unwrap()).collect();
+        let recs: Vec<ReadRecord> = RecordIter::new(&fq[..]).map(|r| r.unwrap()).collect();
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].name, b"r1");
         assert_eq!(recs[0].seq, b"ACGT");
         assert_eq!(recs[0].qual, vec![40, 40, 40, 40]); // 'I' = 73 - 33
         assert_eq!(recs[1].qual, vec![0, 0]); // '!' = 33 - 33
+    }
+
+    #[test]
+    fn quality_range_bounds_are_accepted() {
+        let fq = b"@r1\nAC\n+\n!~\n";
+        let recs: Vec<ReadRecord> = RecordIter::new(&fq[..]).map(|r| r.unwrap()).collect();
+        assert_eq!(recs[0].qual, vec![0, 93]);
+    }
+
+    #[test]
+    fn quality_byte_outside_phred33_range_is_an_error() {
+        let fq = b"@r1 desc\nACGTACGT\n+\nII I\x01III\n";
+        let err = RecordIter::new(&fq[..])
+            .next()
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("record r1"), "names the record id: {err}");
+        assert!(
+            err.contains("0x20"),
+            "names the first offending byte: {err}"
+        );
+        assert!(err.contains("Phred+33"), "names the expected range: {err}");
+
+        let fq = b"@r2\nAC\n+\nI\x7f\n";
+        let err = RecordIter::new(&fq[..])
+            .next()
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("record r2") && err.contains("0x7f"), "{err}");
+    }
+
+    /// Serves `data` and fails every read past its end with `msg`.
+    struct FailAfter {
+        data: Vec<u8>,
+        pos: usize,
+        msg: &'static str,
+    }
+
+    impl Read for FailAfter {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos == self.data.len() {
+                return Err(io::Error::other(self.msg));
+            }
+            let n = (self.data.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn io_error_carries_record_context_and_prints_the_cause_once() {
+        // More than one parser buffer of records, so the failing read follows
+        // records that were yielded.
+        let mut data = Vec::new();
+        for i in 0..8000 {
+            data.extend_from_slice(format!("@r{i} desc\nACGT\n+\nIIII\n").as_bytes());
+        }
+        let mut it = RecordIter::new(FailAfter {
+            data,
+            pos: 0,
+            msg: "incomplete deflate stream",
+        });
+        let mut last_id = None;
+        let err = loop {
+            match it.next().unwrap() {
+                Ok(rec) => last_id = Some(rec.name[..rec.name.len() - 5].to_vec()),
+                Err(e) => break e,
+            }
+        };
+        let last_id = String::from_utf8(last_id.expect("records precede the error")).unwrap();
+        assert_eq!(
+            format!("{err:#}"),
+            format!("reading FASTQ record after {last_id}: incomplete deflate stream")
+        );
+
+        let mut it = RecordIter::new(FailAfter {
+            data: Vec::new(),
+            pos: 0,
+            msg: "boom",
+        });
+        let err = it.next().unwrap().unwrap_err();
+        assert_eq!(format!("{err:#}"), "reading the first FASTQ record: boom");
+    }
+
+    #[test]
+    fn parse_error_message_is_not_duplicated() {
+        let fq = b"@r1\nACGT\n+\nII\n";
+        let err = RecordIter::new(&fq[..]).next().unwrap().unwrap_err();
+        let msg = format!("{err:#}");
+        assert_eq!(msg.matches("FASTQ parse error").count(), 1, "{msg}");
+    }
+
+    #[test]
+    fn gz_writer_clamps_zero_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("o.fastq.gz");
+        let mut cfg = crate::cli::config_for_test(&path, &path, 0, 0);
+        cfg.io.output = Some(path);
+        let w = writer(&cfg, crate::io::Format::FastqGz, 0).unwrap();
+        w.finish().unwrap();
     }
 
     #[test]
