@@ -1,10 +1,12 @@
+//! Quality-based trimming strategies over raw Phred scores.
+
 use crate::qual::phred_to_prob;
 
 /// A list of half-open `[start, end)` index ranges into a read.
 type Segments = Vec<(usize, usize)>;
 
-/// Trim low-quality bases from both ends until reaching a base with phred >= cutoff.
-/// Inputs are raw phred here.
+/// Trims low-quality bases from both ends up to the first base with a Phred
+/// score at or above `cutoff`. Inputs are raw Phred scores.
 pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     let len = phred.len();
     let mut start = 0;
@@ -22,8 +24,9 @@ pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     }
 }
 
-/// Modified Mott: the single segment with the lowest cumulative error probability.
-/// `cutoff_q` is converted to a probability cutoff before scanning.
+/// Returns the single segment with the lowest cumulative error probability
+/// (modified Mott). `cutoff_q` is converted to a probability cutoff before
+/// scanning.
 pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
     let cutoff = phred_to_prob(cutoff_q);
     let mut best_start = usize::MAX;
@@ -57,9 +60,10 @@ pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
     }
 }
 
-/// Split into high-quality segments separated by runs of >= `window` low-quality
-/// bases. Emits every high-quality run, regardless of length — the caller's
-/// length filter (`-l`) owns dropping short pieces, post-trim.
+/// Splits the read into high-quality segments separated by runs of at least
+/// `window` bases below `cutoff`. Every high-quality run is emitted regardless
+/// of length; the caller's length filter (`-l`) drops short pieces after
+/// trimming.
 pub fn split_low_quality(phred: &[u8], cutoff: u8, window: usize) -> Vec<(usize, usize)> {
     let window = window.max(1);
     let mut segments = Vec::new();
@@ -101,7 +105,7 @@ pub fn split_low_quality(phred: &[u8], cutoff: u8, window: usize) -> Vec<(usize,
 mod tests {
     use super::*;
 
-    // (seq, ascii_qual) — shared test vectors for the trim-strategy tests below.
+    /// Shared `(seq, phred)` test vectors for the strategy tests.
     fn reads() -> [(Vec<u8>, Vec<u8>); 6] {
         let raw = [
             (
@@ -149,8 +153,8 @@ mod tests {
 
     #[test]
     fn best_segment_expected_ranges() {
-        // These Q-score cutoffs are the equivalents of probability thresholds:
-        // 0.01=Q20, 0.199..=Q7, 0.0316..=Q15, 0.0001=Q40.
+        // The Q-score cutoffs correspond to probability thresholds: 0.01 = Q20,
+        // 0.199 = Q7, 0.0316 = Q15, 0.0001 = Q40.
         let expected: [(u8, Vec<(usize, usize)>); 6] = [
             (20, vec![(10, 16)]),
             (7, vec![(0, 20)]),
@@ -166,8 +170,8 @@ mod tests {
 
     #[test]
     fn split_expected_segments() {
-        // (cutoff, expected) with window=1. Every high-quality run is emitted,
-        // including short ones — length filtering is the caller's job now.
+        // (cutoff, expected) with window 1. Every high-quality run is emitted,
+        // including short ones; length filtering belongs to the caller.
         let cases: [(u8, Segments); 6] = [
             (20, vec![(4, 5), (6, 9), (10, 16), (17, 18), (19, 20)]),
             (7, vec![(0, 2), (4, 15), (17, 20)]),
@@ -183,7 +187,7 @@ mod tests {
 
     #[test]
     fn split_window_tolerates_short_dips() {
-        // III#IIII###III with Q40=I, Q2=#
+        // `III#IIII###III` with `I` = Q40 and `#` = Q2.
         let phred: Vec<u8> = b"III#IIII###III".iter().map(|&b| b - 33).collect();
         assert_eq!(
             split_low_quality(&phred, 10, 1),

@@ -1,29 +1,34 @@
-use super::{MmGroup, Mods, counting_base};
+//! Windowing of parsed modifications to a trimmed sequence interval.
 
+use super::{MmGroup, Mods, counting_base, counts};
+
+/// Restricts every group to the window `[start, end)`: skip-counts are
+/// renumbered against the window's own counting-base occurrences and each
+/// surviving position keeps its `ML` bytes. Every source group is emitted,
+/// with no positions when none survive, because a group declares how the
+/// bases it does not list are read (canonical under `.` or no status, no call
+/// under `?`) and removing it would change that reading for the whole window.
 pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
     let mut out = Vec::new();
     // MM deltas index occurrences of the canonical base, so reconstructing a
-    // window only needs its occurrence-index bounds. Cache these for groups
-    // sharing a counting base (e.g. C+h and C+m) without materializing every
-    // matching SEQ position.
+    // window only needs its occurrence-index bounds. The bounds are cached for
+    // groups sharing a counting base (e.g. `C+h` and `C+m`) without
+    // materializing every matching SEQ position.
     let mut bounds_cache: Vec<(u8, usize, usize)> = Vec::new();
 
     for g in &mods.groups {
         let ncodes = g.codes.len().max(1);
-        let cbase = counting_base(g.base, g.strand);
+        let cbase = counting_base(g.base);
 
-        // Occurrence indexes in [before, window_end) are inside [start, end).
-        // Index-based lookup keeps the conditional insert borrow straightforward.
+        // Occurrence indexes in `[before, window_end)` are inside `[start, end)`.
+        // An index lookup avoids holding a borrow across the conditional insert.
         let cache_idx = match bounds_cache.iter().position(|(b, _, _)| *b == cbase) {
             Some(i) => i,
             None => {
-                let before = seq[..start]
-                    .iter()
-                    .filter(|&&b| b.to_ascii_uppercase() == cbase)
-                    .count();
+                let before = seq[..start].iter().filter(|&&b| counts(b, cbase)).count();
                 let in_window = seq[start..end]
                     .iter()
-                    .filter(|&&b| b.to_ascii_uppercase() == cbase)
+                    .filter(|&&b| counts(b, cbase))
                     .count();
                 bounds_cache.push((cbase, before, before + in_window));
                 bounds_cache.len() - 1
@@ -31,16 +36,16 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
         };
         let (_, before, window_end) = bounds_cache[cache_idx];
 
-        // Walk the group's deltas to recover each modified absolute position and
-        // its ML byte run, then keep the ones inside the window.
+        // Each delta yields a modified absolute position and its ML byte run;
+        // those inside the window are kept.
         let mut new_deltas = Vec::new();
         let mut new_ml = Vec::new();
         let mut prev_widx: isize = -1;
         let mut cursor = 0usize; // occurrence index of the counting base
 
         for (k, &d) in g.deltas.iter().enumerate() {
-            // Saturating so a corrupt (clamped) delta can't overflow the running
-            // cursor; it simply remains outside the finite window bounds.
+            // Saturating so a corrupt (clamped) delta cannot overflow the running
+            // cursor; it remains outside the finite window bounds.
             cursor = cursor.saturating_add(d);
             let occurrence = cursor;
             cursor = cursor.saturating_add(1);
@@ -57,20 +62,14 @@ pub fn reconstruct(mods: &Mods, seq: &[u8], start: usize, end: usize) -> Mods {
             new_ml.extend_from_slice(&g.ml[ml_start..ml_end]);
         }
 
-        // Keep a group that has surviving positions, OR one that was already
-        // empty in the source (`g.deltas.is_empty()` — a valid "assessed, none
-        // found" record, often carrying a `?`/`.` status). A group that HAD
-        // positions but lost every one to the window is genuinely dropped.
-        if !new_deltas.is_empty() || g.deltas.is_empty() {
-            out.push(MmGroup {
-                base: g.base,
-                strand: g.strand,
-                codes: g.codes.clone(),
-                status: g.status,
-                deltas: new_deltas,
-                ml: new_ml,
-            });
-        }
+        out.push(MmGroup {
+            base: g.base,
+            strand: g.strand,
+            codes: g.codes.clone(),
+            status: g.status,
+            deltas: new_deltas,
+            ml: new_ml,
+        });
     }
 
     Mods { groups: out }
@@ -81,75 +80,109 @@ mod tests {
     use super::*;
     use crate::mods::parse;
 
-    // Helper: build from raw MM/ML then reconstruct.
+    /// Parses raw MM/ML and reconstructs the window.
     fn recon(mm: &[u8], ml: &[u8], seq: &[u8], start: usize, end: usize) -> Mods {
         reconstruct(&parse(mm, ml), seq, start, end)
     }
 
     #[test]
     fn keeps_only_in_window_and_renumbers() {
-        // seq C at indices 0,2,5,8. MM "C+m,0,1,0" -> modified Cs at occ 0,2,3 => pos 0,5,8.
-        // ML one byte per position: [11,22,33].
+        // C at indices 0, 2, 5, 8. `C+m,0,1,0` marks occurrences 0, 2, 3, which
+        // are positions 0, 5, 8. ML has one byte per position: [11, 22, 33].
         let seq = b"CACATCTTC"; // 'C' at 0,2,5,8
         let m = recon(b"C+m,0,1,0;", &[11, 22, 33], seq, 3, 9);
-        // window [3,9): C occurrences at 5,8. Surviving modified: pos5 (occ idx1), pos8 (occ idx2).
-        // window C positions = [5,8] -> renumber. pos5 -> delta 0; pos8 -> delta 0.
+        // Window [3,9) holds C occurrences 5 and 8; the survivors are position 5
+        // (occurrence 1) and position 8 (occurrence 2). Renumbered against the
+        // window's C positions [5, 8], both deltas are 0.
         assert_eq!(m.groups.len(), 1);
         assert_eq!(m.groups[0].deltas, vec![0, 0]);
         assert_eq!(m.groups[0].ml, vec![22, 33]);
     }
 
+    /// An MM group with zero positions (e.g. `C+m?;`, assessed, none found) is
+    /// valid SAM and survives windowing.
     #[test]
     fn preserves_originally_empty_group() {
-        // An MM group with zero positions (e.g. `C+m?;` — "assessed, none
-        // found") is valid SAM and must survive windowing, distinct from
-        // a group whose positions all fell OUTSIDE the window (dropped).
         let seq = b"ACAC"; // A at 0,2 ; C at 1,3
-        // A+a has a modified A at occ 0 (pos 0, in window); C+m? is empty.
+        // `A+a` has a modified A at occurrence 0 (position 0, in window); `C+m?`
+        // is empty.
         let m = recon(b"A+a,0;C+m?;", &[9], seq, 0, 4);
-        assert_eq!(m.groups.len(), 2, "empty C+m? group kept alongside A+a");
+        assert_eq!(m.groups.len(), 2, "Empty C+m? group is kept alongside A+a");
         let cm = m
             .groups
             .iter()
             .find(|g| g.base == b'C')
-            .expect("empty C+m? group preserved");
+            .expect("Empty C+m? group is preserved");
         assert!(cm.deltas.is_empty());
         assert!(cm.ml.is_empty());
         assert_eq!(cm.status, Some(b'?'));
     }
 
+    /// A group whose listed positions all fall outside the window is emitted
+    /// with no positions: under `.` (or no status) it still declares the
+    /// window's unlisted bases canonical, which its absence would not.
     #[test]
-    fn drops_group_with_no_survivors() {
+    fn keeps_group_with_no_survivors_as_empty() {
         let seq = b"CCCC";
-        let m = recon(b"C+m,0;", &[50], seq, 2, 4); // modified C at pos0, outside [2,4)
-        assert!(m.groups.is_empty());
+        let m = recon(b"C+m.,0;", &[50], seq, 2, 4); // modified C at pos0, outside [2,4)
+        assert_eq!(m.groups.len(), 1);
+        let g = &m.groups[0];
+        assert!(g.deltas.is_empty());
+        assert!(g.ml.is_empty());
+        assert_eq!(g.status, Some(b'.'));
+        assert_eq!((g.base, g.strand), (b'C', b'+'));
     }
 
     #[test]
     fn multi_code_keeps_both_ml_bytes_per_position() {
         let seq = b"CC";
-        // C+mh with 2 positions (0 and next) -> ML [a0,b0,a1,b1]. Keep both in [0,2).
+        // `C+mh` with 2 positions has ML [a0, b0, a1, b1]; both are kept in [0,2).
         let m = recon(b"C+mh,0,0;", &[1, 2, 3, 4], seq, 0, 2);
         assert_eq!(m.groups[0].ml, vec![1, 2, 3, 4]);
         assert_eq!(m.groups[0].deltas, vec![0, 0]);
     }
 
+    /// Pinned against htslib, which counts the literal fundamental base on both
+    /// strands. Counting the complement would move every reverse-strand call
+    /// onto a different base.
     #[test]
-    fn minus_strand_counts_complement() {
-        // G-m: counting base = complement(G) = C. seq C at 1,3. "G-m,0,0" -> modified at C occ 0,1 => pos1,3.
-        let seq = b"ACAC";
-        let m = recon(b"G-m,0,0;", &[7, 8], seq, 2, 4); // window keeps pos3 only
+    fn minus_strand_counts_the_literal_base() {
+        // G at 1 and 3. `G-m,0,0` marks G occurrences 0 and 1, positions 1 and 3.
+        let seq = b"AGAG";
+        let m = recon(b"G-m,0,0;", &[7, 8], seq, 2, 4); // window [2,4) keeps abs 3 only
         assert_eq!(m.groups[0].deltas, vec![0]);
         assert_eq!(m.groups[0].ml, vec![8]);
         assert_eq!((m.groups[0].base, m.groups[0].strand), (b'G', b'-'));
     }
 
+    /// BAM SEQ stores `T`, never `U`, so an RNA group must count `T`.
+    #[test]
+    fn uracil_group_counts_thymine_positions() {
+        let m = recon(b"U+m,0,0;", &[7, 8], b"ATAT", 2, 4);
+        assert_eq!(m.groups[0].deltas, vec![0]);
+        assert_eq!(m.groups[0].ml, vec![8]);
+    }
+
+    /// `N` in MM means "any base", so its skip-counts index every position.
+    #[test]
+    fn n_group_counts_every_base() {
+        let m = recon(b"N+n,2,1;", &[7, 8], b"ACGTACGT", 0, 8);
+        assert_eq!(m.groups[0].deltas, vec![2, 1]);
+        assert_eq!(m.groups[0].ml, vec![7, 8]);
+
+        // Window [3,8) drops position 2 and keeps position 4, which becomes
+        // window index 1.
+        let m = recon(b"N+n,2,1;", &[7, 8], b"ACGTACGT", 3, 8);
+        assert_eq!(m.groups[0].deltas, vec![1]);
+        assert_eq!(m.groups[0].ml, vec![8]);
+    }
+
     #[test]
     fn truncated_ml_does_not_panic() {
-        // MM lists 3 modified C's but ML has only 1 byte (malformed/truncated).
+        // MM lists 3 modified Cs but ML has only 1 byte (truncated).
         let m = reconstruct(&crate::mods::parse(b"C+m,0,0,0;", &[5]), b"CCC", 0, 3);
-        // All three C's are in-window; deltas renumber to [0,0,0]; only the ML bytes
-        // that actually exist are kept (no panic).
+        // All three Cs are in the window; deltas renumber to [0, 0, 0]; only the
+        // ML bytes present are kept.
         assert_eq!(m.groups.len(), 1);
         assert_eq!(m.groups[0].deltas, vec![0, 0, 0]);
         assert_eq!(m.groups[0].ml, vec![5]);
@@ -157,9 +190,11 @@ mod tests {
 
     #[test]
     fn renumber_with_nonzero_gap_and_offset_first() {
-        // seq CCCCC (C at 0,1,2,3,4). MM C+m,0,1,0 -> modified at occ 0,2,3 => abs 0,2,3, ML [a,b,c].
-        // Window [1,5): drop abs 0 (outside); keep abs 2 and 3.
-        // window C positions = [1,2,3,4]; widx(2)=1 -> delta 1; widx(3)=2 -> delta 0.
+        // CCCCC has C at 0..=4. `C+m,0,1,0` marks occurrences 0, 2, 3, which are
+        // positions 0, 2, 3, with ML [a, b, c]. Window [1,5) drops position 0 and
+        // keeps positions 2 and 3. Against window C positions [1, 2, 3, 4],
+        // position 2 has window index 1 (delta 1) and position 3 has window
+        // index 2 (delta 0).
         let m = reconstruct(
             &crate::mods::parse(b"C+m,0,1,0;", &[10, 20, 30]),
             b"CCCCC",
@@ -172,8 +207,8 @@ mod tests {
 
     #[test]
     fn mod_exactly_at_window_start_is_kept() {
-        // C at 0..=4, all modified. Window [2,5): abs2 (== start) must survive,
-        // abs4 (== end-1) must survive; there is no abs5 (half-open end).
+        // C at 0..=4, all modified. In window [2,5), position 2 (the start) and
+        // position 4 (end - 1) survive; the half-open end excludes position 5.
         let m = recon(b"C+m,0,0,0,0,0;", &[1, 2, 3, 4, 5], b"CCCCC", 2, 5);
         assert_eq!(m.groups.len(), 1);
         assert_eq!(m.groups[0].deltas, vec![0, 0, 0]); // abs 2,3,4 renumbered
@@ -182,7 +217,8 @@ mod tests {
 
     #[test]
     fn mod_exactly_at_window_end_is_excluded() {
-        // Window [0,3): abs0 (== start == 0) kept; abs3 (== end) dropped (half-open).
+        // Window [0,3) keeps position 0 (the start) and drops position 3 (the
+        // exclusive end).
         let m = recon(b"C+m,0,0,0,0,0;", &[1, 2, 3, 4, 5], b"CCCCC", 0, 3);
         assert_eq!(m.groups.len(), 1);
         assert_eq!(m.groups[0].deltas, vec![0, 0, 0]); // abs 0,1,2
@@ -192,7 +228,7 @@ mod tests {
     /// Random windows preserve the ML bytes associated with surviving positions.
     #[test]
     fn ml_stays_byte_aligned_over_random_windows() {
-        // Deterministic LCG — reproducible, no external rng dependency.
+        // A deterministic LCG keeps the test reproducible without an external RNG.
         struct Lcg(u64);
         impl Lcg {
             fn next_u64(&mut self) -> u64 {
@@ -257,15 +293,19 @@ mod tests {
                 }
             }
 
+            assert_eq!(
+                out.groups.len(),
+                1,
+                "One group expected: seq={seq:?} window=[{start},{end})"
+            );
             if exp_ml.is_empty() {
                 assert!(
-                    out.groups.is_empty(),
-                    "no survivors in [{start},{end}) but a group was emitted: seq={seq:?}"
+                    out.groups[0].deltas.is_empty() && out.groups[0].ml.is_empty(),
+                    "No survivors in [{start},{end}) but positions were emitted: seq={seq:?}"
                 );
             } else {
-                assert_eq!(out.groups.len(), 1, "seq={seq:?} window=[{start},{end})");
                 let g = &out.groups[0];
-                // Single code -> exactly one ML byte per surviving delta. The invariant.
+                // With a single code there is exactly one ML byte per surviving delta.
                 assert_eq!(
                     g.ml.len(),
                     g.deltas.len(),
@@ -273,33 +313,29 @@ mod tests {
                 );
                 assert_eq!(
                     g.ml, exp_ml,
-                    "kept ML must equal in-window positions': seq={seq:?} window=[{start},{end})"
+                    "Kept ML must equal the in-window positions' bytes: seq={seq:?} window=[{start},{end})"
                 );
             }
         }
     }
 
+    /// A corrupt second delta clamps to `usize::MAX` in `parse`; the running
+    /// cursor saturates rather than overflowing, and the unreachable position
+    /// is dropped.
     #[test]
     fn huge_delta_does_not_overflow_cursor() {
-        // A corrupt second delta clamps to usize::MAX in `parse`; the running
-        // `cursor` in reconstruct must saturate rather than overflow (which would
-        // panic in this debug build). The unreachable position is simply dropped.
         let m = recon(b"C+m,1,99999999999999999999;", &[5, 6], b"CCCC", 0, 4);
-        // Only the first modified C (occurrence 1 -> abs 1) survives.
+        // Only the first modified C (occurrence 1, position 1) survives.
         assert_eq!(m.groups.len(), 1);
         assert_eq!(m.groups[0].deltas, vec![1]);
         assert_eq!(m.groups[0].ml, vec![5]);
     }
 
-    /// Property test extending `ml_stays_byte_aligned_over_random_windows` to
-    /// MULTI-code groups (`ncodes ∈ {1, 2}`, e.g. `C+m` and `C+mh`). ML is
-    /// position-major — `ncodes` bytes per modified position — and after slicing
-    /// to a window the surviving ML must stay position-major and byte-exact: its
-    /// length equals `surviving_positions * ncodes`, and the bytes equal exactly
-    /// the in-window positions' `ncodes`-byte runs in order. This is the
-    /// misalignment class that would silently corrupt every downstream
-    /// probability for multi-mod reads, which the single-code property test
-    /// above cannot reach.
+    /// `ml_stays_byte_aligned_over_random_windows` extended to multi-code groups
+    /// (`ncodes` of 1 or 2, e.g. `C+m` and `C+mh`). ML is position-major, so
+    /// after slicing its length equals `surviving_positions * ncodes` and its
+    /// bytes are the in-window positions' `ncodes`-byte runs in order. The
+    /// single-code test cannot reach this misalignment class.
     #[test]
     fn ml_stays_byte_aligned_multicode_over_random_windows() {
         struct Lcg(u64);
@@ -349,7 +385,7 @@ mod tests {
                 deltas.push((o as i64 - prev - 1) as usize);
                 prev = o as i64;
             }
-            // ML: ncodes bytes per modified position, position-major.
+            // ML holds `ncodes` bytes per modified position, position-major.
             let ml: Vec<u8> = (0..occ.len() * ncodes)
                 .map(|_| rng.below(256) as u8)
                 .collect();
@@ -367,8 +403,8 @@ mod tests {
 
             let out = recon(&mm, &ml, &seq, start, end);
 
-            // Independent expected survivors: each in-window position's ncodes-byte
-            // ML run, concatenated in order.
+            // Independent expected survivors: each in-window position's
+            // `ncodes`-byte ML run, concatenated in order.
             let mut exp_ml = Vec::new();
             for (k, &o) in occ.iter().enumerate() {
                 let abs = c_pos[o];
@@ -377,19 +413,19 @@ mod tests {
                 }
             }
 
+            assert_eq!(
+                out.groups.len(),
+                1,
+                "One group expected: seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
+            );
             if exp_ml.is_empty() {
                 assert!(
-                    out.groups.is_empty(),
-                    "no survivors but a group was emitted: seq={seq:?} ncodes={ncodes}"
+                    out.groups[0].deltas.is_empty() && out.groups[0].ml.is_empty(),
+                    "No survivors but positions were emitted: seq={seq:?} ncodes={ncodes}"
                 );
             } else {
-                assert_eq!(
-                    out.groups.len(),
-                    1,
-                    "seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
-                );
                 let g = &out.groups[0];
-                assert_eq!(g.codes.len(), ncodes, "code count must be preserved");
+                assert_eq!(g.codes.len(), ncodes, "Code count must be preserved");
                 assert_eq!(
                     g.ml.len(),
                     g.deltas.len() * ncodes,
@@ -397,7 +433,7 @@ mod tests {
                 );
                 assert_eq!(
                     g.ml, exp_ml,
-                    "kept ML must equal in-window positions' runs: seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
+                    "Kept ML must equal the in-window positions' runs: seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
                 );
             }
         }

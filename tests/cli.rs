@@ -1,11 +1,23 @@
+//! CLI behavior over the compiled binary: argument validation, logging modes,
+//! guardrail warnings, and the failure path.
+
+use std::io::Read as _;
+use std::path::Path;
+use std::process::Stdio;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// The binary with `WHITTLE_LOG` cleared, so the environment does not change
+/// the log mode.
 fn whittle() -> Command {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
     cmd
 }
+
+/// One 20-bp Q40 read.
+const READS: &str = "@r1\nACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIII\n";
 
 #[test]
 fn version_is_long_only() {
@@ -25,7 +37,8 @@ fn version_is_long_only() {
 #[test]
 fn verbosity_above_trace_is_rejected() {
     whittle()
-        .args(["-vvv", "-i", "/dev/null"])
+        .args(["-vvv", "--in-format", "fastq"])
+        .write_stdin("")
         .assert()
         .failure()
         .stderr(predicate::str::contains("accepts at most -vv"));
@@ -75,17 +88,17 @@ fn min_length_filters() {
         .stdout(""); // filtered out
 }
 
+/// Streaming the input while `File::create` truncates it destroys the data. The
+/// run fails up front with one `Failed after` line and leaves the input
+/// untouched.
 #[test]
 fn same_input_output_file_is_rejected_and_preserves_input() {
-    // Streaming the input while truncating it on File::create destroys the data
-    // (a plain FASTQ run silently emitted an empty file with a success exit).
-    // The run must fail up front and leave the input untouched.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reads.fastq");
     std::fs::write(&path, "@r1\nACGT\n+\nIIII\n@r2\nTTTT\n+\nIIII\n").unwrap();
     let before = std::fs::read(&path).unwrap();
 
-    whittle()
+    let assert = whittle()
         .arg("-i")
         .arg(&path)
         .arg("-o")
@@ -93,11 +106,17 @@ fn same_input_output_file_is_rejected_and_preserves_input() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("same file"));
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert_eq!(
+        stderr.matches("Failed after").count(),
+        1,
+        "Exactly one failure line is printed: {stderr}"
+    );
 
     assert_eq!(
         std::fs::read(&path).unwrap(),
         before,
-        "input must not be modified"
+        "Input must not be modified"
     );
 }
 
@@ -131,10 +150,10 @@ fn out_of_range_gc_bound_errors() {
         .stderr(predicate::str::contains("min-gc"));
 }
 
+/// NaN slips past `min > max` (every NaN comparison is false) and would disable
+/// quality filtering, so it is rejected explicitly.
 #[test]
 fn nan_quality_bound_errors() {
-    // NaN slips past `min > max` (every NaN comparison is false) and would silently
-    // disable quality filtering; it must be rejected explicitly.
     whittle()
         .args(["--min-qual", "nan", "--in-format", "fastq"])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
@@ -143,11 +162,317 @@ fn nan_quality_bound_errors() {
         .stderr(predicate::str::contains("NaN"));
 }
 
+/// How a run ends for one argument set.
+enum Expect {
+    /// Exit non-zero with the substring on stderr.
+    Fails,
+    /// Exit zero with the substring on stderr.
+    Warns,
+}
+
+/// Every validation and advisory names the flag it concerns, so the offending
+/// argument is identifiable from the message alone.
+#[test]
+fn every_validation_names_its_flag() {
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fastq = dir.path().join("reads.fastq");
+    std::fs::write(&fastq, READS).unwrap();
+    // gzip bytes behind a plain `.fastq` name, so `--in-format fastq-gz` is right
+    // and the extension is the one that looks wrong.
+    let misnamed_gz = dir.path().join("misnamed.fastq");
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(READS.as_bytes()).unwrap();
+    std::fs::write(&misnamed_gz, enc.finish().unwrap()).unwrap();
+    let folder = dir.path().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("a.fastq"), READS).unwrap();
+    let missing = dir.path().join("no-such-adapters.fasta");
+    let p = |path: &Path| path.to_str().unwrap().to_string();
+
+    let cases: Vec<(Vec<String>, Expect, &str)> = vec![
+        (
+            vec!["--compression-level".into(), "10".into()],
+            Expect::Fails,
+            "--compression-level",
+        ),
+        (
+            vec!["--max-gc".into(), "1.5".into()],
+            Expect::Fails,
+            "--max-gc (1.5) must be a fraction",
+        ),
+        (
+            vec![
+                "--min-gc".into(),
+                "0.8".into(),
+                "--max-gc".into(),
+                "0.2".into(),
+            ],
+            Expect::Fails,
+            "--min-gc (0.8) must not exceed --max-gc",
+        ),
+        (
+            vec!["--max-qual".into(), "nan".into()],
+            Expect::Fails,
+            "NaN",
+        ),
+        (
+            vec!["--min-qual=-5".into()],
+            Expect::Fails,
+            "--min-qual (-5) must be a finite quality",
+        ),
+        (
+            vec!["--max-qual".into(), "inf".into()],
+            Expect::Fails,
+            "--max-qual (inf) must be a finite quality",
+        ),
+        (vec!["-t".into(), "0".into()], Expect::Fails, "--threads"),
+        (
+            vec!["--fastq-tags".into(), "MM,ABC".into()],
+            Expect::Fails,
+            "--fastq-tags: invalid tag",
+        ),
+        (
+            vec!["--qual-split-window".into(), "5".into()],
+            Expect::Fails,
+            "--qual-split",
+        ),
+        (
+            vec!["--progress".into(), "bar".into(), "--quiet".into()],
+            Expect::Fails,
+            "cannot be used with",
+        ),
+        (
+            vec!["--adapter-fasta".into(), p(&missing)],
+            Expect::Fails,
+            "--adapter-fasta",
+        ),
+        (
+            vec![
+                "--adapter-preset".into(),
+                "ont".into(),
+                "--adapter-end-size".into(),
+                "0".into(),
+            ],
+            Expect::Fails,
+            "--adapter-end-size must be >= 1",
+        ),
+        (
+            vec![
+                "--adapter-infer".into(),
+                "--adapter-sample".into(),
+                "0".into(),
+            ],
+            Expect::Fails,
+            "--adapter-sample 0 disables sampling",
+        ),
+        (
+            vec!["--adapter-error-rate".into(), "0.5".into()],
+            Expect::Fails,
+            "--adapter-error-rate requires an adapter source",
+        ),
+        (
+            vec!["--adapter-end-size".into(), "50".into()],
+            Expect::Fails,
+            "--adapter-end-size requires an adapter source",
+        ),
+        (
+            vec!["--adapter-sample".into(), "50".into()],
+            Expect::Fails,
+            "--adapter-sample requires an adapter source",
+        ),
+        (
+            vec![
+                "-i".into(),
+                p(&misnamed_gz),
+                "--in-format".into(),
+                "fastq-gz".into(),
+                "-o".into(),
+                p(&dir.path().join("out_in_mismatch.fastq")),
+            ],
+            Expect::Warns,
+            "--in-format",
+        ),
+        (
+            vec![
+                "-i".into(),
+                p(&fastq),
+                "-o".into(),
+                p(&dir.path().join("out_out_mismatch.fastq.gz")),
+                "--out-format".into(),
+                "fastq".into(),
+            ],
+            Expect::Warns,
+            "--out-format",
+        ),
+        (
+            vec![
+                "-i".into(),
+                p(&folder),
+                "--in-format".into(),
+                "fastq".into(),
+                "-o".into(),
+                p(&dir.path().join("out_folder.fastq")),
+            ],
+            Expect::Warns,
+            "--in-format is ignored for a directory input",
+        ),
+        (
+            vec![
+                "-i".into(),
+                p(&fastq),
+                "-o".into(),
+                p(&dir.path().join("out_noop.fastq")),
+            ],
+            Expect::Warns,
+            "No trimming or filtering options set",
+        ),
+        (
+            vec![
+                "-i".into(),
+                p(&fastq),
+                "-o".into(),
+                p(&dir.path().join("out.bam")),
+            ],
+            Expect::Fails,
+            "FASTQ-to-BAM conversion is not supported",
+        ),
+        (
+            vec![
+                "-i".into(),
+                p(&fastq),
+                "-o".into(),
+                p(&dir.path().join("out_sum.fastq")),
+                "--summary-json".into(),
+                p(dir.path()),
+            ],
+            Expect::Fails,
+            "--summary-json",
+        ),
+    ];
+
+    for (args, expect, needle) in cases {
+        let mut cmd = whittle();
+        cmd.args(&args);
+        if !args.iter().any(|a| a == "-i") {
+            cmd.args(["--in-format", "fastq"]).write_stdin(READS);
+        }
+        let output = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match expect {
+            Expect::Fails => assert!(
+                !output.status.success(),
+                "Case {args:?} must fail: {stderr}"
+            ),
+            Expect::Warns => assert!(
+                output.status.success(),
+                "Case {args:?} must succeed: {stderr}"
+            ),
+        }
+        assert!(
+            stderr.contains(needle),
+            "Case {args:?}: stderr lacks {needle:?}: {stderr}"
+        );
+    }
+}
+
+/// A missing input names its path, so a command line with several paths on it
+/// says which one is wrong.
+#[test]
+fn missing_input_error_names_the_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nonexistent.fastq");
+    whittle()
+        .arg("-i")
+        .arg(&missing)
+        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("opening input"))
+        .stderr(predicate::str::contains("nonexistent.fastq"));
+}
+
+/// An unparseable `WHITTLE_LOG` does not disable logging: the level falls back
+/// to the default, the failure line still prints, and the rejected directive is
+/// named.
+#[test]
+fn invalid_whittle_log_falls_back_and_still_reports_the_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nonexistent.fastq");
+    whittle()
+        .env("WHITTLE_LOG", "garbage=nope=1")
+        .arg("-i")
+        .arg(&missing)
+        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Failed after"))
+        .stderr(predicate::str::contains("WHITTLE_LOG"))
+        .stderr(predicate::str::contains("garbage=nope=1"));
+}
+
+/// `-` is the pipeline spelling of stdin and stdout; no file named `-` appears.
+#[test]
+fn dash_means_stdin_and_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    whittle()
+        .current_dir(dir.path())
+        .args(["-i", "-", "-o", "-", "--in-format", "fastq", "-l", "5"])
+        .write_stdin(READS)
+        .assert()
+        .success()
+        .stdout(READS)
+        .stderr(predicate::str::contains("Input: <stdin>"))
+        .stderr(predicate::str::contains("Output: <stdout>"));
+    assert!(
+        !dir.path().join("-").exists(),
+        "No file named - may be created"
+    );
+}
+
+/// A downstream reader that stops early (`whittle ... | head`) is not a failure
+/// of this run: the process exits 0 without a `Failed after` line.
+#[test]
+fn downstream_closing_the_pipe_exits_quietly() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("reads.fastq");
+    // Well past the pipe buffer, so writes are still in flight when the reader
+    // goes away.
+    std::fs::write(&input, READS.repeat(40_000)).unwrap();
+
+    for threads in [&["-t", "1"][..], &[][..]] {
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("whittle"))
+            .env_remove("WHITTLE_LOG")
+            .args(["-i", input.to_str().unwrap()])
+            .args(threads)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut head = [0u8; 100];
+        stdout.read_exact(&mut head).unwrap();
+        drop(stdout);
+
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "A closed pipe exits 0 ({threads:?}): {stderr}"
+        );
+        assert!(
+            !stderr.contains("Failed after"),
+            "A closed pipe is not reported as a failure ({threads:?}): {stderr}"
+        );
+    }
+}
+
+/// Two hard links to one inode canonicalize to distinct paths, so only the inode
+/// and device check catches this; otherwise `File::create` truncates the input.
 #[test]
 #[cfg(unix)]
 fn hard_linked_input_output_is_rejected_and_preserves_input() {
-    // Two hard links to one inode canonicalize to distinct paths, so only the
-    // inode+device check catches this — otherwise File::create truncates the input.
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.fastq");
     let output = dir.path().join("out.fastq");
@@ -167,13 +492,14 @@ fn hard_linked_input_output_is_rejected_and_preserves_input() {
     assert_eq!(
         std::fs::read(&input).unwrap(),
         before,
-        "hard-linked input must be preserved"
+        "Hard-linked input must be preserved"
     );
 }
 
+/// A default run prints the `Summary:` line to stderr; `--quiet` drops it and
+/// keeps the reads on stdout.
 #[test]
 fn quiet_suppresses_summary_but_keeps_stdout() {
-    // A minimal FASTQ over stdin; default run prints the "Summary:" line to stderr.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .arg("--quiet")
@@ -213,7 +539,7 @@ fn verbose_shows_phase_timing() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Processing")); // phase timing line appears at DEBUG
+        .stderr(predicate::str::contains("Processing started")); // the phase timing line appears at DEBUG
 }
 
 #[test]
@@ -223,12 +549,12 @@ fn default_hides_debug() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Processing").not());
+        .stderr(predicate::str::contains("Processing started").not());
 }
 
+/// `--quiet` wins even when `WHITTLE_LOG` asks for verbose output.
 #[test]
 fn quiet_beats_whittle_log() {
-    // --quiet must win even when WHITTLE_LOG asks for verbose output.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .env("WHITTLE_LOG", "debug")
@@ -240,23 +566,23 @@ fn quiet_beats_whittle_log() {
         .stderr(predicate::str::contains("Summary:").not());
 }
 
+/// Without `--quiet`, `WHITTLE_LOG` raises the level above the CLI default.
 #[test]
 fn whittle_log_overrides_verbosity_when_not_quiet() {
-    // Without --quiet, WHITTLE_LOG still raises the level above the CLI's default.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .env("WHITTLE_LOG", "debug")
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Processing"));
+        .stderr(predicate::str::contains("Processing started"));
 }
 
+/// assert_cmd captures stderr to a pipe (non-TTY), so the run is in line mode
+/// regardless of verbosity. The full startup banner and the `Completed` closer
+/// appear in order.
 #[test]
 fn line_mode_banner_and_closer_appear_in_order() {
-    // assert_cmd captures stderr to a pipe (non-tty), so this always runs in
-    // line mode regardless of verbosity — the full startup banner plus the
-    // Completed closer should appear, in order.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle().write_stdin(input).assert().success().stderr(
         predicate::str::contains("whittle ")
@@ -271,45 +597,25 @@ fn line_mode_banner_and_closer_appear_in_order() {
     );
 }
 
-#[test]
-fn failure_path_prints_a_single_failed_after_line() {
-    // The reworked `main.rs` failure path must print one clean "Failed after
-    // ...: <message>" line via tracing (not a second, differently-formatted
-    // anyhow dump from the default `fn main() -> anyhow::Result<()>` pattern).
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reads.fastq");
-    std::fs::write(&path, "@r1\nACGT\n+\nIIII\n").unwrap();
-
-    whittle()
-        .arg("-i")
-        .arg(&path)
-        .arg("-o")
-        .arg(&path)
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("Failed after").and(predicate::str::contains("same file")),
-        );
-}
-
+/// The version and command lines precede the resolved configuration and the
+/// diagnostics.
 #[test]
 fn banner_version_and_command_come_first_in_line_mode() {
-    // Version and command precede resolved configuration and diagnostics.
     let input = "@r1\nACGT\n+\nIIII\n";
     let assert = whittle().write_stdin(input).assert().success();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    let version_pos = stderr.find("whittle ").expect("version line missing");
-    let command_pos = stderr.find("Command:").expect("command line missing");
-    let operation_pos = stderr.find("Trimming").expect("operation line missing");
+    let version_pos = stderr.find("whittle ").expect("Version line present");
+    let command_pos = stderr.find("Command:").expect("Command line present");
+    let operation_pos = stderr.find("Trimming").expect("Operation line present");
     assert!(
         version_pos < command_pos && command_pos < operation_pos,
-        "expected version, then Command:, then the operation line, in order: {stderr:?}"
+        "Expected version, then Command:, then the operation line, in order: {stderr:?}"
     );
 }
 
+/// Captured stderr is non-interactive and contains no ANSI escapes.
 #[test]
 fn non_tty_stderr_has_no_ansi_escapes() {
-    // Captured stderr is non-interactive and must contain no ANSI escapes.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .write_stdin(input)
@@ -318,11 +624,11 @@ fn non_tty_stderr_has_no_ansi_escapes() {
         .stderr(predicate::str::contains("\u{1b}").not());
 }
 
+/// Every read fails an unreachable min-qual bound: nothing survives, and the run
+/// succeeds. The all-dropped guardrail WARN fires so the run is distinguishable
+/// from a clean empty-output run.
 #[test]
 fn all_dropped_run_warns() {
-    // Every read fails an unreachable min-qual bound: nothing survives, but
-    // the run itself still succeeds — the all-dropped guardrail WARN must
-    // fire so this doesn't silently look like a clean empty-output run.
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
         .args(["-q", "50", "--in-format", "fastq"])
@@ -331,14 +637,14 @@ fn all_dropped_run_warns() {
         .success()
         .stderr(
             predicate::str::contains("No reads survived")
-                .and(predicate::str::contains("input reads were dropped")),
+                .and(predicate::str::contains("every input read was dropped")),
         );
 }
 
+/// Zero input reads is not an error, and the empty-input guardrail WARN still
+/// fires.
 #[test]
 fn empty_input_warns() {
-    // Zero input reads (not an error) must still surface the empty-input
-    // guardrail WARN rather than a silent, unremarkable "0 in, 0 out" summary.
     whittle()
         .args(["--in-format", "fastq"])
         .write_stdin("")
@@ -370,8 +676,7 @@ fn bam_to_fastq_conversion_phrasing() {
     let inp = dir.path().join("in.bam");
     let out = dir.path().join("o.fastq");
 
-    // Build a minimal one-read uBAM in the tempdir so the test is hermetic
-    // (it must not depend on a fixture outside the repository).
+    // A minimal one-read uBAM built in the tempdir keeps the test hermetic.
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(&inp).unwrap());
     w.write_header(&header).unwrap();
@@ -395,7 +700,6 @@ fn bam_to_fastq_conversion_phrasing() {
 
 #[test]
 fn gz_output_roundtrips() {
-    use std::io::Read;
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.fastq.gz");
     whittle()

@@ -1,49 +1,41 @@
+//! End-to-end adapter trimming, presence detection, and ab-initio inference
+//! over the compiled binary.
+
 use std::io::Write;
 
 use assert_cmd::Command;
 
+/// `--help` lists every quality-trimming and adapter flag.
 #[test]
-fn old_qual_flag_is_gone_new_one_listed() {
-    Command::cargo_bin("whittle")
+fn help_lists_the_quality_and_adapter_flags() {
+    let assert = Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
         .args(["--help"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("--qual-split"))
-        .stdout(predicates::str::contains("--qual-trim"))
-        .stdout(predicates::str::contains("--qual-best-segment"));
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for flag in [
+        "--qual-split",
+        "--qual-trim",
+        "--qual-best-segment",
+        "--adapter-fasta",
+        "--adapter-preset",
+        "--adapter-error-rate",
+        "--adapter-end-size",
+        "--adapter-ends-only",
+        "--adapter-sample",
+        "--adapter-infer",
+        "--adapter-infer-policy",
+    ] {
+        assert!(stdout.contains(flag), "Help must list {flag}: {stdout}");
+    }
 }
 
-#[test]
-fn adapter_help_lists_flags() {
-    Command::cargo_bin("whittle")
-        .unwrap()
-        .env_remove("WHITTLE_LOG")
-        .args(["--help"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("--adapter-fasta"))
-        .stdout(predicates::str::contains("--adapter-preset"))
-        .stdout(predicates::str::contains("--adapter-error-rate"))
-        .stdout(predicates::str::contains("--adapter-ends-only"))
-        .stdout(predicates::str::contains("--adapter-infer-policy"));
-}
-
-#[test]
-fn adapter_sample_flag_listed() {
-    Command::cargo_bin("whittle")
-        .unwrap()
-        .env_remove("WHITTLE_LOG")
-        .args(["--help"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("--adapter-sample"));
-}
-
+/// The range check runs once an adapter source is active; `--in-format fastq`
+/// keeps format detection out of the failure so the flag is the only cause.
 #[test]
 fn rejects_out_of_range_error_rate() {
-    // error-rate is only validated when an adapter source is active.
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
@@ -52,11 +44,13 @@ fn rejects_out_of_range_error_rate() {
             "ont",
             "--adapter-error-rate",
             "2.0",
-            "-i",
-            "/dev/null",
+            "--in-format",
+            "fastq",
         ])
+        .write_stdin("")
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicates::str::contains("--adapter-error-rate"));
 }
 
 #[test]
@@ -69,9 +63,10 @@ fn adapter_sample_below_min_is_rejected() {
             "ont",
             "--adapter-sample",
             "50",
-            "-i",
-            "/dev/null",
+            "--in-format",
+            "fastq",
         ])
+        .write_stdin("")
         .assert()
         .failure()
         .stderr(predicates::str::contains("must be 0"));
@@ -101,16 +96,16 @@ fn fastq_end_adapter_is_trimmed() {
         .stdout
         .clone();
     let out = String::from_utf8(out).unwrap();
-    assert!(out.contains(insert), "insert kept");
+    assert!(out.contains(insert), "Insert kept");
     assert!(
         !out.contains(&format!("{adapter}{insert}")),
-        "adapter trimmed off"
+        "Adapter trimmed off"
     );
 }
 
 #[test]
 fn adapter_fasta_with_no_usable_entries_errors() {
-    // only a too-short entry -> skipped -> zero usable adapters.
+    // A single too-short entry is skipped, leaving zero usable adapters.
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     writeln!(fa, ">short\nACGT").unwrap();
     let mut fq = tempfile::NamedTempFile::new().unwrap();
@@ -129,13 +124,13 @@ fn adapter_fasta_with_no_usable_entries_errors() {
         .stderr(predicates::str::contains("no usable adapters"));
 }
 
-// Custom FASTA entries remain active without presence-based reduction, including
-// entries absent from the sampled reads.
+/// Custom FASTA entries remain active without presence-based reduction,
+/// including entries absent from the sampled reads.
 #[test]
 fn custom_fasta_never_reduces_even_with_an_absent_adapter() {
-    let present = "GGGGTTTTGGGGTTTTGGGG"; // 20bp present adapter
-    let absent = "ACGACGACGACGACGACGAC"; // 20bp never in the reads
-    let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40bp
+    let present = "GGGGTTTTGGGGTTTTGGGG"; // 20 bp, present adapter
+    let absent = "ACGACGACGACGACGACGAC"; // 20 bp, never in the reads
+    let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40 bp
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     writeln!(fa, ">present\n{present}\n>absent\n{absent}").unwrap();
     let mut fq = tempfile::NamedTempFile::new().unwrap();
@@ -158,13 +153,13 @@ fn custom_fasta_never_reduces_even_with_an_absent_adapter() {
     let stderr = String::from_utf8_lossy(&res.stderr);
     assert!(
         !stderr.contains("Adapter presence"),
-        "custom --adapter-fasta must disable detection outright, so no reduction is ever logged: {stderr}"
+        "Custom --adapter-fasta disables detection outright, so no reduction is logged: {stderr}"
     );
     let stdout = String::from_utf8_lossy(&res.stdout);
-    assert!(stdout.contains(insert), "insert kept");
+    assert!(stdout.contains(insert), "Insert kept");
     assert!(
         !stdout.contains(&format!("{present}{insert}")),
-        "present adapter trimmed"
+        "Present adapter trimmed"
     );
 }
 
@@ -195,11 +190,11 @@ fn adapter_sample_zero_disables_detection() {
     let stderr = String::from_utf8_lossy(&res.get_output().stderr);
     assert!(
         !stderr.contains("Adapter presence"),
-        "detection must be off: {stderr}"
+        "Detection is off: {stderr}"
     );
 }
 
-// Preset detection skips samples below the minimum discovery size.
+/// Preset detection skips samples below the minimum discovery size.
 #[test]
 fn tiny_input_skips_detection() {
     let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, real preset entry
@@ -230,22 +225,19 @@ fn tiny_input_skips_detection() {
     let stderr = String::from_utf8_lossy(&res.get_output().stderr);
     assert!(
         stderr.contains("using all"),
-        "tiny input must skip detection: {stderr}"
+        "Tiny input skips detection: {stderr}"
     );
 }
 
-// Presence detection is opt-in: --adapter-sample defaults to 0 (off), so a
-// preset run with no --adapter-sample flag at all must never engage
-// detection -- no "Adapter presence" line at any point -- while still
-// trimming the preset adapter that's present in every read, since with
-// detection off the full (un-reduced) catalog is what gets searched.
+/// Presence detection is opt-in: `--adapter-sample` defaults to 0, so a preset
+/// run without the flag never engages detection (no `Adapter presence` line)
+/// and trims the preset adapter present in every read against the full catalog.
 #[test]
 fn default_does_not_run_detection() {
     let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, real preset entry
-    // Long insert -- see the comment on
-    // `detection_output_equals_full_set_for_present_adapter` for why a short
-    // insert can be consumed entirely by the catalog's paired front/rear
-    // entries within the default 150bp end-zone (unrelated to detection).
+    // Long insert: see `detection_output_equals_full_set_for_present_adapter`
+    // for why a short insert can be consumed entirely by the catalog's paired
+    // front and rear entries within the default 150-bp end zone.
     let insert = "A".repeat(300);
     let mut fq = tempfile::NamedTempFile::new().unwrap();
     for i in 0..200 {
@@ -272,25 +264,25 @@ fn default_does_not_run_detection() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("Adapter presence"),
-        "detection must be off by default (no --adapter-sample given): {stderr}"
+        "Detection is off by default (no --adapter-sample given): {stderr}"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains(&"A".repeat(280)),
-        "insert must still be kept: {stdout}"
+        "Insert is kept: {stdout}"
     );
     assert!(
         !stdout.contains(&format!("{front}{insert}")),
-        "preset adapter must still be trimmed off by default (full-set search): {stdout}"
+        "Preset adapter is trimmed off by default (full-set search): {stdout}"
     );
 }
 
-// Presence detection may remove inactive preset entries but must not change the
-// output for a present adapter. The long insert keeps the paired rear entry
-// outside the default end-search region.
+/// Presence detection may remove inactive preset entries but does not change
+/// the output for a present adapter. The long insert keeps the paired rear entry
+/// outside the default end-search region.
 #[test]
 fn detection_output_equals_full_set_for_present_adapter() {
-    let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, 27bp
+    let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, 27 bp
     let insert = "A".repeat(300);
     let mut fq = tempfile::NamedTempFile::new().unwrap();
     for i in 0..200 {
@@ -303,11 +295,9 @@ fn detection_output_equals_full_set_for_present_adapter() {
     }
 
     let run = |extra_args: &[&str]| {
-        // `-t 1`: pin single-threaded so output order is deterministic (the
-        // parallel writer path lands records in arrival order, not input
-        // order, for `threads > 1` -- see `workflow::fastq::run`). That
-        // nondeterminism is orthogonal to what this test checks, so it must
-        // be controlled for to get a meaningful byte comparison.
+        // `-t 1` pins the sequential path so output order is deterministic;
+        // the parallel writer emits records in arrival order (see
+        // `workflow::fastq::run`), which is unrelated to this check.
         let mut args = vec![
             "-i",
             fq.path().to_str().unwrap(),
@@ -329,46 +319,44 @@ fn detection_output_equals_full_set_for_present_adapter() {
     };
 
     // Detection ON (explicit opt-in sampling, since detection defaults to
-    // off): reduces the 124-entry catalog.
+    // off): narrows the catalog.
     let (detect_on, detect_on_err) = run(&["--adapter-sample", "10000"]);
-    // Detection OFF (the default: no --adapter-sample flag needed, but pass
-    // 0 explicitly for clarity): trims against the full 124-adapter set.
+    // Detection OFF (the default; 0 is passed explicitly for clarity): trims
+    // against the full catalog.
     let (detect_off, _) = run(&["--adapter-sample", "0"]);
 
-    assert!(
-        !detect_on.is_empty(),
-        "detection-on output must be non-empty"
-    );
+    assert!(!detect_on.is_empty(), "Detection-on output is non-empty");
     let stderr_on = String::from_utf8_lossy(&detect_on_err);
+    let catalog = whittle::adapter::preset::preset_ont().len();
     assert!(
-        stderr_on.contains("Adapter presence: sampled") && !stderr_on.contains("kept 124 of 124"),
-        "detection must genuinely engage (kept < full 124): {stderr_on}"
+        stderr_on.contains("Adapter presence: sampled")
+            && !stderr_on.contains(&format!("kept {catalog} of {catalog}")),
+        "Detection must narrow the catalog of {catalog}: {stderr_on}"
     );
     let detect_on_str = String::from_utf8(detect_on.clone()).unwrap();
-    // A long run of the insert's A's, not the full 300 -- fuzzy end-matching
-    // can legitimately consume a base or two of the boundary between adapter
-    // and insert (an equal-cost alignment choice), which isn't what this
-    // test is checking; the real guarantee is the byte-identical comparison
-    // below.
+    // A long run of the insert's A's rather than the full 300: fuzzy end
+    // matching may consume a base or two at the adapter and insert boundary (an
+    // equal-cost alignment choice). The byte-identical comparison below is the
+    // guarantee under test.
     assert!(
         detect_on_str.contains(&"A".repeat(280)),
-        "detection-on output should keep (most of) the insert: {detect_on_str}"
+        "Detection-on output keeps most of the insert: {detect_on_str}"
     );
     assert_eq!(
         detect_on, detect_off,
-        "trimming a present adapter must be byte-identical whether detection \
-         is on (drops absent catalog adapters) or off (uses the full set), \
-         since detection only removes adapters that don't act"
+        "Trimming a present adapter is byte-identical whether detection is on \
+         (drops absent catalog adapters) or off (uses the full set), since \
+         detection removes only adapters that do not act"
     );
 }
 
-// An adapter-free prefix must not disable a custom FASTA for later reads, even
-// when an adapter sample size is explicitly supplied.
+/// An adapter-free prefix does not disable a custom FASTA for later reads, even
+/// when an adapter sample size is explicitly supplied.
 #[test]
 fn custom_fasta_trims_adapters_after_a_clean_prefix() {
-    let adapter = "GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
+    let adapter = "GGGGTTTTGGGGTTTTGGGG"; // 20 bp, G/T only
     let insert = "A".repeat(40);
-    let clean = "C".repeat(60); // pure C: can't match a G/T-only adapter within budget
+    let clean = "C".repeat(60); // pure C: cannot match a G/T-only adapter within budget
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     writeln!(fa, ">present\n{adapter}").unwrap();
     let mut fq = tempfile::NamedTempFile::new().unwrap();
@@ -405,21 +393,21 @@ fn custom_fasta_trims_adapters_after_a_clean_prefix() {
 
     assert!(
         !stderr.contains("Adapter presence: sampled"),
-        "custom --adapter-fasta must disable detection outright: {stderr}"
+        "Custom --adapter-fasta disables detection outright: {stderr}"
     );
     assert!(
         !stdout.contains(&format!("{adapter}{insert}")),
-        "the 10 adapted reads must be trimmed, not left untouched: {stdout}"
+        "The 10 adapted reads are trimmed: {stdout}"
     );
     let trimmed_lines = stdout.lines().filter(|l| *l == insert).count();
     assert_eq!(
         trimmed_lines, 10,
-        "all 10 adapted reads' inserts must survive trimming: {stdout}"
+        "All 10 adapted inserts survive trimming: {stdout}"
     );
 }
 
-// When a sampled prefix contains no preset adapters, detection falls back to
-// the full preset so adapters in later reads are still processed.
+/// When a sampled prefix contains no preset adapters, detection falls back to
+/// the full preset so adapters in later reads are still processed.
 #[test]
 fn preset_detection_falls_back_when_prefix_has_no_adapters() {
     let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, real preset entry
@@ -460,11 +448,11 @@ fn preset_detection_falls_back_when_prefix_has_no_adapters() {
 
     assert!(
         stderr.contains("no adapters detected"),
-        "must fall back to the full set with a warning: {stderr}"
+        "Falls back to the full set with a warning: {stderr}"
     );
     assert!(
         !stdout.contains(&format!("{front}{insert}")),
-        "the 10 adapted reads must be trimmed via the full-set fallback: {stdout}"
+        "The 10 adapted reads are trimmed through the full-set fallback: {stdout}"
     );
 }
 
@@ -543,8 +531,8 @@ fn infer_policy_rejects_unknown_value() {
         .stderr(predicates::str::contains("invalid value 'balanced'"));
 }
 
-// Report-only inference names discoveries against the built-in catalog and
-// user-supplied FASTA entries.
+/// Report-only inference names discoveries against the built-in catalog and
+/// user-supplied FASTA entries.
 #[test]
 fn infer_report_with_fasta_notes_naming_includes_fasta() {
     let mut fa = tempfile::NamedTempFile::new().unwrap();
@@ -566,15 +554,16 @@ fn infer_report_with_fasta_notes_naming_includes_fasta() {
         ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("plus your FASTA's adapters"));
+        .stderr(predicates::str::contains("and the supplied FASTA"));
 }
 
 // Inference fixtures plant an exact adapter before deterministic, non-periodic
 // genomic backgrounds. Error-tolerant recovery is covered by unit tests.
 
-/// The 28bp adapter planted at the 5' end of every synthetic read below (an
-/// SQK-NSK007/LSK109-neighborhood front sequence -- same one used by
-/// `discover_recovers_planted_adapter_under_error` in src/adapter/infer.rs).
+/// The 28-bp adapter planted at the 5' end of every synthetic read below: an
+/// SQK-NSK007/LSK109-neighborhood front sequence, the same one
+/// `discover_recovers_planted_adapter_under_error` in `src/adapter/infer.rs`
+/// uses.
 const PLANTED_ADAPTER: &str = "AATGTACTTCGTTCAGTTACGTATTGCT";
 
 /// Length of the per-read genomic tail appended after `PLANTED_ADAPTER`.
@@ -600,19 +589,19 @@ fn splitmix_tail(i: usize, len: usize) -> Vec<u8> {
 }
 
 /// The full (untrimmed) synthetic sequence for read `i`: the exact planted
-/// adapter followed by its splitmix64 tail. Used both to write the input
-/// fixture and, independently, to recompute what a genuinely-trimmed output
-/// record must be a suffix of.
+/// adapter followed by its splitmix64 tail. Used to write the input fixture
+/// and, independently, to recompute the read that a trimmed output record must
+/// be a suffix of.
 fn full_read_seq(i: usize) -> Vec<u8> {
     let mut seq = PLANTED_ADAPTER.as_bytes().to_vec();
     seq.extend(splitmix_tail(i, TAIL_LEN));
     seq
 }
 
-/// Write `n` synthetic reads (see fixture notes above) to `<dir>/adapted.fastq`
-/// and return its path. Read `i`'s id is `@r{i}` (no description), so a test
-/// can parse the trailing digits back into the same index `full_read_seq`
-/// used to build it.
+/// Writes `n` synthetic reads (see the fixture notes above) to
+/// `<dir>/adapted.fastq` and returns its path. Read `i`'s id is `@r{i}` (no
+/// description), so a test can parse the trailing digits back into the index
+/// from which `full_read_seq` built it.
 fn write_adapted_fastq(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
     let path = dir.join("adapted.fastq");
     let mut f = std::fs::File::create(&path).unwrap();
@@ -678,18 +667,18 @@ fn infer_report_prints_and_does_not_trim() {
     let out = assert.get_output();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("inferred") || stderr.contains("support"),
-        "report-only must log what it discovered: {stderr}"
+        stderr.contains("Adapter inference: sampled") && stderr.contains("discovered"),
+        "Report-only logs what it discovered: {stderr}"
     );
     // Report-only exits before dispatch: no FASTQ record header on stdout.
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         !stdout.contains('@'),
-        "report-only must not write any trimmed FASTQ to stdout: {stdout}"
+        "Report-only writes no trimmed FASTQ to stdout: {stdout}"
     );
 }
 
-// Report-only emits discovered adapters as FASTA records on stdout.
+/// Report-only emits discovered adapters as FASTA records on stdout.
 #[test]
 fn infer_report_prints_sequence_to_stdout() {
     let dir = tempfile::tempdir().unwrap();
@@ -708,31 +697,30 @@ fn infer_report_prints_sequence_to_stdout() {
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(
         stdout.contains(PLANTED_ADAPTER),
-        "stdout must contain the discovered adapter's actual bases, not just \
-         its name/support: {stdout}"
+        "Stdout contains the discovered adapter's bases, not only its name and \
+         support: {stdout}"
     );
     assert!(
         stdout.trim_start().starts_with('>'),
-        "stdout must be FASTA (header line starting with '>'): {stdout}"
+        "Stdout is FASTA (header line starting with '>'): {stdout}"
     );
     assert!(
         stdout.contains("boundary=")
             && stdout.contains("assembled_length=")
             && stdout.contains("uncertain_bases="),
-        "FASTA header must expose boundary uncertainty: {stdout}"
+        "FASTA header exposes boundary uncertainty: {stdout}"
     );
 }
 
-// Cross-naming considers both the ONT catalog and the user's FASTA. The custom
-// name sorts first and deterministically wins an equal-identity tie.
+/// Cross-naming considers both the ONT catalog and the supplied FASTA. The
+/// custom name sorts first and deterministically wins an equal-identity tie.
 #[test]
 fn infer_report_cross_names_against_user_fasta() {
     let dir = tempfile::tempdir().unwrap();
     let fq = write_adapted_fastq(dir.path(), 500);
-    // Filename deliberately has no "MY_CUSTOM_ADAPTER" substring, so a stray
-    // path/filename echo elsewhere in the log could never produce a false
-    // pass -- the assertion below can only be satisfied by the discovered
-    // adapter's own cross-name.
+    // The filename contains no "MY_CUSTOM_ADAPTER" substring, so a path echo
+    // elsewhere in the log cannot satisfy the assertion below; only the
+    // discovered adapter's cross-name can.
     let fa_path = dir.path().join("cross_name_refs.fa");
     std::fs::write(
         &fa_path,
@@ -756,8 +744,8 @@ fn infer_report_cross_names_against_user_fasta() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
         stderr.contains("MY_CUSTOM_ADAPTER"),
-        "discovered adapter must be cross-named against the user's --adapter-fasta, \
-         not just the built-in catalog: {stderr}"
+        "Discovered adapter is cross-named against the supplied --adapter-fasta, \
+         not only the built-in catalog: {stderr}"
     );
 }
 
@@ -782,45 +770,44 @@ fn infer_trims_planted_adapter() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
         stderr.contains("inferred"),
-        "stderr must show an inferred-adapter log line: {stderr}"
+        "Stderr shows an inferred-adapter log line: {stderr}"
     );
 
     let trimmed = std::fs::read_to_string(&out_path).unwrap();
     assert!(
         !trimmed.contains(PLANTED_ADAPTER),
-        "the planted adapter must not survive anywhere in the output: {trimmed}"
+        "The planted adapter survives nowhere in the output: {trimmed}"
     );
 
-    // Each surviving sequence must be a suffix of its independently rebuilt
-    // input, with a cut length consistent with the planted adapter.
+    // Each surviving sequence is a suffix of its independently rebuilt input,
+    // with a cut length consistent with the planted adapter.
     let mut lines = trimmed.lines();
     let mut n_records = 0;
     while let Some(header) = lines.next() {
-        assert!(header.starts_with("@r"), "unexpected header: {header}");
-        let idx: usize = header[2..].parse().expect("header must be @r<index>");
-        let seq_line = lines.next().expect("sequence line");
-        let _plus = lines.next().expect("plus line");
-        let _qual = lines.next().expect("quality line");
+        assert!(header.starts_with("@r"), "Unexpected header: {header}");
+        let idx: usize = header[2..].parse().expect("Header is @r<index>");
+        let seq_line = lines.next().expect("Sequence line");
+        let _plus = lines.next().expect("Plus line");
+        let _qual = lines.next().expect("Quality line");
 
         let original = full_read_seq(idx);
-        // `checked_sub`: a clear panic message if output ever somehow
-        // exceeded input, instead of an underflow wraparound with a cryptic
-        // "attempt to subtract with overflow" pointing at this line only.
+        // `checked_sub` panics with a clear message if output exceeds input,
+        // instead of an overflow panic.
         let cut = original
             .len()
             .checked_sub(seq_line.len())
-            .expect("output longer than input");
+            .expect("Output longer than input");
         assert!(
             original.ends_with(seq_line.as_bytes()),
-            "record {idx}'s output must be an exact suffix of its original read"
+            "Record {idx}'s output is an exact suffix of its original read"
         );
         assert!(
             (20..=50).contains(&cut),
-            "record {idx}: cut length {cut} is not adapter-shaped (planted adapter is 28bp)"
+            "Record {idx}: cut length {cut} is not adapter-shaped (planted adapter is 28 bp)"
         );
         n_records += 1;
     }
-    assert_eq!(n_records, n, "no reads were dropped by trimming");
+    assert_eq!(n_records, n, "No reads were dropped by trimming");
 }
 
 #[test]
@@ -843,23 +830,21 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
     let assert = cmd.assert().success();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
-        stderr.contains("too few") || stderr.contains("no adapters"),
-        "must warn about the undersized sample: {stderr}"
+        stderr.contains("too few reads"),
+        "Warns about the undersized sample: {stderr}"
     );
 
-    // Untrimmed: every output record equals its full original (unstripped)
-    // read exactly -- the planted adapter is still there, verbatim.
+    // Untrimmed: every output record equals its full original read; the
+    // planted adapter is still present.
     let trimmed = std::fs::read_to_string(&out_path).unwrap();
     for i in 0..n {
         let expected = String::from_utf8(full_read_seq(i)).unwrap();
         assert!(
             trimmed.contains(&expected),
-            "record {i} must be kept untrimmed: {trimmed}"
+            "Record {i} is kept untrimmed: {trimmed}"
         );
     }
 }
-
-// `--adapter-infer report` must not write or modify record output.
 
 /// Report-only writes no records when discovery is skipped for insufficient
 /// input reads.
@@ -885,21 +870,21 @@ fn infer_report_tiny_input_writes_no_output() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
         stderr.contains("too few"),
-        "must warn about the undersized sample: {stderr}"
+        "Warns about the undersized sample: {stderr}"
     );
 
-    // Report-only must write no records: either the `-o` file was never
-    // created, or it exists but is empty / has no FASTQ record header.
+    // Report-only writes no records: either the `-o` file was never created, or
+    // it exists but is empty or has no FASTQ record header.
     match std::fs::read(&out_path) {
         Ok(bytes) => assert!(
             bytes.is_empty() || !bytes.contains(&b'@'),
-            "report-only must not write any output records to -o: {:?}",
+            "Report-only writes no output records to -o: {:?}",
             String::from_utf8_lossy(&bytes)
         ),
         Err(e) => assert_eq!(
             e.kind(),
             std::io::ErrorKind::NotFound,
-            "unexpected error reading -o file: {e}"
+            "Unexpected error reading the -o file: {e}"
         ),
     }
 }
@@ -908,8 +893,8 @@ fn infer_report_tiny_input_writes_no_output() {
 #[test]
 fn infer_report_does_not_clobber_output_file() {
     let dir = tempfile::tempdir().unwrap();
-    // Adequate (>= MIN_SAMPLE_FOR_DETECTION) planted-adapter input, so
-    // discovery actually runs (not the too-few-reads path exercised above).
+    // At least `MIN_SAMPLE_FOR_DETECTION` planted-adapter reads, so discovery
+    // runs rather than the too-few-reads path.
     let fq = write_adapted_fastq(dir.path(), 500);
     let out_path = dir.path().join("existing.txt");
     let sentinel = "SENTINEL: pre-existing file contents, must survive\n";
@@ -932,17 +917,15 @@ fn infer_report_does_not_clobber_output_file() {
     let contents = std::fs::read_to_string(&out_path).unwrap();
     assert_eq!(
         contents, sentinel,
-        "report-only must not touch a pre-existing -o file at all"
+        "Report-only leaves a pre-existing -o file untouched"
     );
 }
 
-// --- determinism ---------------------------------------------------------
-
-/// Same input, run twice through `--adapter-infer` at `-t 1`, must produce
-/// byte-identical output. Discovery itself (`infer::discover`) is pure over
-/// its sampled slice with no RNG or hashmap-iteration-order dependence, and
-/// `-t 1` pins the FASTQ dispatch to its sequential (order-preserving) path,
-/// so this is a black-box seal on that guarantee rather than new logic.
+/// The same input run twice through `--adapter-infer` at `-t 1` produces
+/// byte-identical output. Discovery (`infer::discover`) is pure over its sampled
+/// slice with no RNG or hash-map iteration-order dependence, and `-t 1` pins the
+/// FASTQ dispatch to its sequential (order-preserving) path, so this is a
+/// black-box check of that guarantee.
 #[test]
 fn infer_is_deterministic() {
     let dir = tempfile::tempdir().unwrap();
@@ -966,41 +949,27 @@ fn infer_is_deterministic() {
     assert_eq!(
         run("a.fastq"),
         run("b.fastq"),
-        "same input -> byte-identical output"
+        "Same input gives byte-identical output"
     );
 }
 
-// --- marginal-support warning ------------------------------------------
-
-/// Fraction of reads that carry `PLANTED_ADAPTER` at all; the rest are pure
-/// background (no adapter anywhere in the read), modelling a low-prevalence
-/// / barcode-specific adapter rather than a per-read match-quality problem.
-/// Support is now a whole-consensus PRESENCE fraction (see
-/// `infer::assemble`'s doc comment), so a per-read *error rate* no longer
-/// drags a genuine adapter's support down (a real, closely-matching
-/// reconstruction now recovers at support ~1.0, see
-/// `discover_recovers_planted_adapter_under_error`) -- what still lands an
-/// adapter in the marginal band is being present in only a *minority* of
-/// reads. 0.38 * 500 = 190 planted reads out of 500 puts support at ~0.38,
-/// inside `[KEEP_SUPPORT, MARGINAL_SUPPORT)` = `[0.30, 0.45)` with headroom
-/// on both sides.
+/// Fraction of reads carrying `PLANTED_ADAPTER`; the rest are pure background,
+/// modeling a low-prevalence (barcode-specific) adapter rather than a per-read
+/// match-quality problem. Support is a whole-consensus presence fraction, so only
+/// minority prevalence lands an adapter in the marginal band: 190 planted reads
+/// out of 500 puts support at ~0.38, inside `[0.30, 0.45)` with headroom either
+/// side.
 const PLANTED_ADAPTER_PREVALENCE: f64 = 0.38;
 
-/// Fixture for the marginal-support warning: `PLANTED_ADAPTER_PREVALENCE` of
-/// `n` reads get an EXACT copy of `PLANTED_ADAPTER` (no injected
-/// substitution error -- error-tolerant recovery is already covered by
-/// `discover_recovers_planted_adapter_under_error`, this fixture targets
-/// marginal *prevalence* instead) followed by a splitmix64 tail; the
-/// remaining reads are pure splitmix64 background of the same total length,
-/// carrying no adapter at all (same non-periodic bit-mix pattern used
-/// throughout this file and in `src/adapter/infer.rs`'s own `discover_*`
-/// unit tests, so it can't itself register as a spurious low-complexity
-/// signal).
+/// Fixture for the marginal-support warning: `PLANTED_ADAPTER_PREVALENCE` of `n`
+/// reads get an exact `PLANTED_ADAPTER` copy followed by a splitmix64 tail, the
+/// rest pure splitmix64 background of the same length. Exact copies: error
+/// tolerance is covered elsewhere; this fixture targets prevalence. The
+/// non-periodic background cannot itself register as low-complexity signal.
 fn write_adapted_fastq_marginal(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
-    // NOTE: deliberately not named "*marginal*" -- the path is itself echoed
-    // into the `[INFO] Input: ...` / `Command: ...` log lines, which would
-    // make `stderr.contains("marginal")` a false positive unrelated to the
-    // actual warning message under test.
+    // The path contains no "marginal" substring: it is echoed into the `Input:`
+    // and `Command:` log lines, and `stderr.contains("marginal")` must match
+    // only the warning under test.
     let path = dir.join("weak_adapter.fastq");
     let mut f = std::fs::File::create(&path).unwrap();
     let planted_n = (n as f64 * PLANTED_ADAPTER_PREVALENCE).round() as usize;
@@ -1010,8 +979,8 @@ fn write_adapted_fastq_marginal(dir: &std::path::Path, n: usize) -> std::path::P
             s.extend(splitmix_tail(i, TAIL_LEN));
             s
         } else {
-            // pure background, no adapter -- same total read length as the
-            // planted branch so both groups look alike apart from content.
+            // Pure background, no adapter; the same total read length as the
+            // planted branch, so the groups differ only in content.
             splitmix_tail(i, TAIL_LEN + PLANTED_ADAPTER.len())
         };
         let qual = "I".repeat(seq.len());
@@ -1026,9 +995,9 @@ fn write_adapted_fastq_marginal(dir: &std::path::Path, n: usize) -> std::path::P
 }
 
 /// A kept adapter whose support sits in `[KEEP_SUPPORT, MARGINAL_SUPPORT)`
-/// (here ~0.38, see `write_adapted_fastq_marginal`) must get an explicit
-/// `warn!` in addition to the plain per-adapter info line, so a marginal
-/// discovery doesn't read the same as a confident one.
+/// (about 0.38 here, see `write_adapted_fastq_marginal`) gets an explicit
+/// `warn!` in addition to the per-adapter info line, so a marginal discovery is
+/// distinguishable from a confident one.
 #[test]
 fn infer_warns_on_marginal_support() {
     let dir = tempfile::tempdir().unwrap();
@@ -1047,11 +1016,11 @@ fn infer_warns_on_marginal_support() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
         stderr.contains("marginal"),
-        "a support just above KEEP_SUPPORT must be flagged marginal: {stderr}"
+        "A support slightly above KEEP_SUPPORT is flagged marginal: {stderr}"
     );
 }
 
-// BAM report-only mode emits FASTA text and completes without record output.
+/// Writes `n` unmapped records built from `full_read_seq` to a BAM at `path`.
 fn write_minimal_ubam(path: &std::path::Path, n: usize) {
     use noodles_bam as bam;
     use noodles_sam::alignment::RecordBuf;
@@ -1076,6 +1045,7 @@ fn write_minimal_ubam(path: &std::path::Path, n: usize) {
     writer.try_finish().unwrap();
 }
 
+/// BAM report-only mode emits FASTA text and completes without record output.
 #[test]
 fn infer_report_on_bam_input_with_piped_stdout_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -1124,7 +1094,7 @@ fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
     assert_eq!(
         no_crop.get_output().stdout,
         b"",
-        "sanity: the raw whole-read mean (24.8) must fail -q 30 with no trim applied"
+        "The raw whole-read mean (24.8) fails -q 30 with no trim applied"
     );
 
     let cropped = Command::cargo_bin("whittle")
@@ -1147,7 +1117,7 @@ fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
     assert_eq!(
         cropped.get_output().stdout,
         b"@r1\nAAAAAA\n+\nIIIIII\n",
-        "trimmed insert (mean 40) must survive -q 30 once the bad flank is cropped away first"
+        "The trimmed insert (mean 40) survives -q 30 once the low-quality flank is cropped"
     );
 
     let guard = Command::cargo_bin("whittle")
@@ -1170,12 +1140,12 @@ fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
     let guard_out = guard.get_output();
     assert_eq!(
         guard_out.stdout, b"",
-        "guard: the insert's own mean (40) must still fail -q 45"
+        "The insert's own mean (40) still fails -q 45"
     );
     let stderr = String::from_utf8_lossy(&guard_out.stderr);
     assert!(
         stderr.contains("No reads survived"),
-        "guard run must report the read as fully dropped: {stderr}"
+        "The guard run reports the read as fully dropped: {stderr}"
     );
 }
 
@@ -1183,7 +1153,7 @@ fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
 /// renumbered after filtering.
 #[test]
 fn produced_index_naming_end_to_end() {
-    let adapter = "GGGGTTTTGGGGTTTT"; // 16bp, G/T only -> no accidental match in the A flanks
+    let adapter = "GGGGTTTTGGGGTTTT"; // 16 bp, G/T only: no accidental match in the A flanks
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     writeln!(fa, ">mid\n{adapter}").unwrap();
 
@@ -1243,35 +1213,30 @@ fn produced_index_naming_end_to_end() {
     assert_eq!(
         String::from_utf8(out).unwrap(),
         expected,
-        "exact survivor names/order: unsplit unchanged, both-survive suffixed 1/2, \
+        "Exact survivor names and order: unsplit unchanged, both-survive suffixed 1 and 2, \
          first-filtered leaves a lone _segment_2"
     );
 }
 
-/// Accounting/summary end-to-end: a mix of clean reads, a chimera with one
-/// sub-`-l` half, an all-adapter read (fully consumed by terminal trimming, so
-/// `trim::apply` produces zero segments), an empty read, and a read whose sole
-/// produced segment is itself too short. Exercises the three-way read-level
-/// counter split through the real binary's rendered summary
-/// (`obs.rs`'s `Summary:`/`Trimmed to nothing:`/`All segments filtered:`/
-/// `Segments dropped:` lines), not just the `Counters`/`Stats` unit tests in
-/// `src/workflow/mod.rs`. In particular it distinguishes the all-adapter/empty
-/// reads (`reads_trimmed_to_nothing` — no segments produced at all) from the
-/// short-only read (`reads_all_filtered` — one segment produced, then
-/// filtered).
+/// Accounting end-to-end: clean reads, a chimera with one sub-`-l` half, an
+/// all-adapter read, an empty read, and a read whose only segment is too short.
+/// Exercises the three-way read-level split through the compiled binary's
+/// rendered summary lines, in addition to the `Counters`/`Stats` unit tests. In
+/// particular it separates `reads_trimmed_to_nothing` (no segments produced)
+/// from `reads_all_filtered` (one produced, then filtered).
 #[test]
 fn accounting_summary_end_to_end() {
-    let adapter = "GGGGTTTTGGGGTTTTGGGG"; // 20bp, G/T only
+    let adapter = "GGGGTTTTGGGGTTTTGGGG"; // 20 bp, G/T only
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     writeln!(fa, ">mid\n{adapter}").unwrap();
 
     let mut fq = tempfile::NamedTempFile::new().unwrap();
-    // Two clean reads: no adapter present, comfortably above -l 5.
+    // Two clean reads: no adapter present, well above `-l 5`.
     writeln!(fq, "@clean1\n{}\n+\n{}", "A".repeat(20), "I".repeat(20)).unwrap();
     writeln!(fq, "@clean2\n{}\n+\n{}", "A".repeat(20), "I".repeat(20)).unwrap();
-    // Chimera: interior adapter splits into a 3bp flank (< -l 5, filtered
-    // TooShort) and a 15bp flank (survives) -> 1 read with output, 1 segment
-    // written, 1 segment dropped.
+    // Chimera: the interior adapter splits into a 3-bp flank (below `-l 5`,
+    // filtered as TooShort) and a 15-bp flank (survives): 1 read with output,
+    // 1 segment written, 1 segment dropped.
     writeln!(
         fq,
         "@chimera\n{}{adapter}{}\n+\n{}",
@@ -1280,18 +1245,16 @@ fn accounting_summary_end_to_end() {
         "I".repeat(38)
     )
     .unwrap();
-    // All-adapter: the read IS the adapter -- terminal trimming consumes the
-    // whole thing, so `trim::apply` produces zero segments (no segment-level
-    // drop; the per-segment filter loop never runs) -> reads_trimmed_to_nothing.
+    // All-adapter: the read equals the adapter, so terminal trimming consumes it
+    // and `trim::apply` produces zero segments (no segment-level drop; the
+    // per-segment filter loop never runs): reads_trimmed_to_nothing.
     writeln!(fq, "@alladapter\n{adapter}\n+\n{}", "I".repeat(20)).unwrap();
-    // Empty read: 0-length SEQ/QUAL, not silently skipped from accounting ->
-    // also reads_trimmed_to_nothing.
+    // Empty read: 0-length SEQ and QUAL, counted rather than skipped: also
+    // reads_trimmed_to_nothing.
     write!(fq, "@empty\n\n+\n\n").unwrap();
-    // Short-only: no adapter present, no split -- trim::apply returns the
-    // whole (untrimmed) 3bp read as its single produced segment, which the
-    // length filter then rejects -> reads_all_filtered (distinct from
-    // reads_trimmed_to_nothing: a segment WAS produced, just not one that
-    // survived).
+    // Short-only: no adapter, no split; `trim::apply` returns the whole 3-bp
+    // read as its single produced segment, which the length filter rejects:
+    // reads_all_filtered (a segment was produced and then filtered).
     writeln!(fq, "@shortonly\n{}\n+\n{}", "A".repeat(3), "I".repeat(3)).unwrap();
 
     let res = Command::cargo_bin("whittle")
@@ -1315,11 +1278,12 @@ fn accounting_summary_end_to_end() {
         .success();
     let stderr = String::from_utf8_lossy(&res.get_output().stderr);
 
-    // Read level: 6 input reads; 3 produced output (2 clean + the chimera's
-    // surviving half); 2 trimmed to nothing (the fully-consumed adapter read,
-    // the empty read); 1 with every segment filtered (shortonly) -- the
+    // Read level: 6 input reads; 3 produced output (2 clean and the chimera's
+    // surviving half); 2 trimmed to nothing (the fully consumed adapter read
+    // and the empty read); 1 with every segment filtered (shortonly); the
     // three-way invariant (`reads_with_output + reads_trimmed_to_nothing +
-    // reads_all_filtered == input_reads`) holds via `snapshot`'s debug assert.
+    // reads_all_filtered == input_reads`) holds through `snapshot`'s debug
+    // assert.
     assert!(
         stderr.contains("Summary: 6 input reads, 3 output reads"),
         "input_reads=6, segments written=3: {stderr}"
@@ -1334,7 +1298,7 @@ fn accounting_summary_end_to_end() {
     );
     assert!(
         stderr.contains("Segments dropped: 2 (2 too short)"),
-        "segments_dropped_short=2 (the chimera's short half + shortonly's sole segment): {stderr}"
+        "segments_dropped_short=2 (the chimera's short half and shortonly's sole segment): {stderr}"
     );
 }
 
@@ -1366,27 +1330,27 @@ fn qual_split_emits_short_pieces_for_post_trim_filter_to_own() {
 
     assert!(
         stdout.contains("r1_segment_2"),
-        "the surviving AAAAAA piece [5,11) must be named _segment_2 (produced \
-         as the 2nd of 2 pieces, even though the 1st was filtered): {stdout}"
+        "The surviving AAAAAA piece [5,11) is named _segment_2 (produced as the \
+         second of two pieces, though the first was filtered): {stdout}"
     );
     assert!(
         !stdout.contains("@r1\n"),
-        "the read must not appear unsuffixed -- it was split into 2 produced \
+        "The read does not appear unsuffixed; it was split into two produced \
          pieces: {stdout}"
     );
     assert!(
         !stdout.contains("r1_segment_1"),
-        "the short AAAA piece [0,4) is filtered TooShort by -l 5, not written: {stdout}"
+        "The short AAAA piece [0,4) is filtered as TooShort by -l 5 and not written: {stdout}"
     );
     assert!(
         stderr.contains("Segments dropped: 1 (1 too short)"),
-        "the short high-quality piece must be a real produced-then-filtered \
-         segment, bumping segments_dropped_short by exactly 1: {stderr}"
+        "The short high-quality piece is a produced-then-filtered segment, so \
+         segments_dropped_short is exactly 1: {stderr}"
     );
 }
 
-/// Same read, `-l 4`: both produced pieces (len 4 and len 6) now clear the
-/// length filter, so both survive and are numbered 1/2.
+/// The same read at `-l 4`: both produced pieces (length 4 and length 6) pass
+/// the length filter, so both survive and are numbered 1 and 2.
 #[test]
 fn qual_split_both_pieces_survive_at_lower_length_floor() {
     let mut fq = tempfile::NamedTempFile::new().unwrap();
@@ -1411,10 +1375,116 @@ fn qual_split_both_pieces_survive_at_lower_length_floor() {
 
     assert!(
         stdout.contains("r1_segment_1"),
-        "AAAA [0,4) now clears -l 4: {stdout}"
+        "AAAA [0,4) passes -l 4: {stdout}"
     );
     assert!(
         stdout.contains("r1_segment_2"),
         "AAAAAA [5,11) still survives: {stdout}"
+    );
+}
+
+/// Real ONT reads contain ambiguity codes, and sassy's `Dna` profile panics
+/// during traceback on any non-ACGT byte in the text. A read carrying one near an
+/// end must still be trimmed, and the run must complete: the searcher rewrites the
+/// code before searching, so no path reaches that profile with a byte it cannot
+/// represent.
+#[test]
+fn ambiguity_codes_in_reads_do_not_abort_adapter_trimming() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("n.fastq");
+    let output = dir.path().join("out.fastq");
+
+    // The ONT kit-14 ligation adapter with one ambiguity code inside it, at the
+    // 5' end where terminal search looks, then a random insert.
+    let adapter = b"CCTGTACTTCGTTCAGTTACGTATTGC";
+    let mut fq = String::new();
+    for (i, code) in [b'N', b'Y', b'R', b'H'].into_iter().enumerate() {
+        let mut a = adapter.to_vec();
+        a[3] = code;
+        let body: String = (0..300)
+            .map(|j| b"ACGT"[(i * 31 + j * 17 + j * j * 3) % 4] as char)
+            .collect();
+        let s = format!("{}{body}", String::from_utf8(a).unwrap());
+        fq.push_str(&format!("@r{i}\n{s}\n+\n{}\n", "I".repeat(s.len())));
+    }
+    std::fs::write(&input, fq).unwrap();
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", output.to_str().unwrap()])
+        .args(["--adapter-preset", "ont"])
+        .assert()
+        .success();
+
+    let out = std::fs::read_to_string(&output).unwrap();
+    assert_eq!(out.lines().count(), 16, "All four reads survive");
+    assert!(
+        !out.contains("CCTGTACTTCGTTCAGTTACG"),
+        "The adapter is trimmed despite the ambiguity code"
+    );
+}
+
+/// A wobble position stands for the bases it covers, and reads carrying either
+/// variant trim. Ambiguous adapter entries are kept, not skipped.
+#[test]
+fn degenerate_primer_trims_every_variant_it_covers() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+    let fasta = dir.path().join("primer.fasta");
+    let output = dir.path().join("out.fastq");
+
+    // Y = C or T at position 8; R = A or G at position 15.
+    std::fs::write(&fasta, ">degenerate\nACGTACGTYCGTACGRACGT\n").unwrap();
+
+    // One read per concrete variant the pattern covers, plus a read whose base at
+    // the wobble position is outside it (A at the Y slot) as a negative control.
+    let variants = [
+        ("yc_ra", "ACGTACGTCCGTACGAACGT"),
+        ("yt_rg", "ACGTACGTTCGTACGGACGT"),
+        ("yc_rg", "ACGTACGTCCGTACGGACGT"),
+        ("miss", "ACGTACGTACGTACGAACGT"),
+    ];
+    let mut fq = String::new();
+    for (i, (name, prefix)) in variants.iter().enumerate() {
+        let body: String = (0..300)
+            .map(|j| b"ACGT"[(i * 31 + j * 17 + j * j * 3) % 4] as char)
+            .collect();
+        let s = format!("{prefix}{body}");
+        fq.push_str(&format!("@{name}\n{s}\n+\n{}\n", "I".repeat(s.len())));
+    }
+    std::fs::write(&input, fq).unwrap();
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", output.to_str().unwrap()])
+        .args(["-a", fasta.to_str().unwrap()])
+        .args(["--adapter-error-rate", "0.0"])
+        .assert()
+        .success();
+
+    let out = std::fs::read_to_string(&output).unwrap();
+    let seqs: std::collections::HashMap<&str, &str> = out
+        .lines()
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|c| (c[0].trim_start_matches('@'), c[1]))
+        .collect();
+
+    for (name, prefix) in &variants[..3] {
+        let got = seqs.get(name).unwrap_or_else(|| panic!("{name} missing"));
+        assert!(
+            !got.starts_with(&prefix[..12]),
+            "{name}: the degenerate primer should have been trimmed, got {}",
+            &got[..20.min(got.len())]
+        );
+    }
+    // Exact matching only, so a base outside the wobble set is not a hit.
+    assert!(
+        seqs["miss"].starts_with("ACGTACGTACGT"),
+        "A base outside the ambiguity set does not trim"
     );
 }

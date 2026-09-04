@@ -1,3 +1,5 @@
+//! Folder-merge mode (`-i <dir>`) over the compiled binary.
+
 use std::fs::File;
 use std::path::Path;
 
@@ -8,6 +10,7 @@ use noodles_sam::alignment::io::Write as _;
 use noodles_sam::alignment::record::Flags;
 use predicates::prelude::*;
 
+/// The binary with `WHITTLE_LOG` cleared.
 fn whittle() -> Command {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
@@ -27,15 +30,47 @@ fn folder_merge_fastq_sorted_and_ignores_non_read_files() {
         .arg(dir.path())
         .arg("-o")
         .arg(&out)
-        .args(["-H", "2", "-T", "2", "-t", "1"]) // -t 1 => deterministic order
+        .args(["-H", "2", "-T", "2", "-t", "1"]) // -t 1 gives deterministic order
         .assert()
         .success();
 
-    // Sorted: a.fastq then b.fastq. Head/tail-crop 2 => GTAC, TTGG.
+    // Sorted: a.fastq then b.fastq; head and tail crop 2 give GTAC, TTGG.
     let got = std::fs::read_to_string(&out).unwrap();
     assert_eq!(got, "@r1\nGTAC\n+\nIIII\n@r2\nTTGG\n+\nIIII\n");
 }
 
+#[test]
+fn folder_merge_skips_hidden_files_and_orders_members_naturally() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, id) in [
+        ("run_10.fastq", "r10"),
+        ("run_2.fastq", "r2"),
+        ("run_1.fastq", "r1"),
+    ] {
+        std::fs::write(dir.path().join(name), format!("@{id}\nACGT\n+\nIIII\n")).unwrap();
+    }
+    // An AppleDouble sidecar is not FASTQ and fails to parse if ingested.
+    std::fs::write(dir.path().join("._run_1.fastq"), b"\x00\x05\x16\x07junk").unwrap();
+    std::fs::write(dir.path().join(".hidden.fastq"), "@hidden\nACGT\n+\nIIII\n").unwrap();
+    let out = dir.path().join("merged.fastq");
+
+    whittle()
+        .arg("-i")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
+        .args(["-t", "1"])
+        .assert()
+        .success();
+
+    let got = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(
+        got,
+        "@r1\nACGT\n+\nIIII\n@r2\nACGT\n+\nIIII\n@r10\nACGT\n+\nIIII\n"
+    );
+}
+
+/// Writes a one-read uBAM with the given name, sequence, and qualities.
 fn write_ubam(path: &Path, name: &[u8], seq: &[u8], quals: Vec<u8>) {
     let header = noodles_sam::Header::default();
     let mut w = bam::io::Writer::new(File::create(path).unwrap());
@@ -72,7 +107,7 @@ fn folder_merge_bam_two_files() {
         hdr.programs()
             .roots()
             .any(|(id, _)| AsRef::<[u8]>::as_ref(id) == b"whittle"),
-        "expected @PG whittle in merged header"
+        "Expected @PG whittle in the merged header"
     );
     let mut count = 0usize;
     let mut buf = RecordBuf::default();
@@ -94,9 +129,9 @@ fn empty_folder_errors() {
         .stderr(predicates::str::contains("no FASTQ or BAM"));
 }
 
+/// A folder merge cannot overwrite one of its input files.
 #[test]
 fn folder_output_matching_a_real_input_is_rejected_and_preserves_it() {
-    // A folder merge cannot overwrite one of its input files.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.fastq"), "@a\nACGT\n+\nIIII\n").unwrap();
     std::fs::write(dir.path().join("b.fastq"), "@b\nTTTT\n+\nIIII\n").unwrap();
@@ -115,19 +150,19 @@ fn folder_output_matching_a_real_input_is_rejected_and_preserves_it() {
     assert_eq!(
         std::fs::read(&a).unwrap(),
         before,
-        "the real input file must be untouched"
+        "The real input file is untouched"
     );
 }
 
+/// A rerun whose `-o` is inside `-i <dir>` (the previous output is a read file,
+/// indistinguishable from real input) hard-errors rather than overwriting.
 #[test]
 fn folder_rerun_with_output_inside_dir_hard_errors() {
-    // When `-o` lands inside `-i <dir>`, a rerun (the output now a read file in the
-    // folder — indistinguishable from a real input) must hard-error, not overwrite.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.fastq"), "@r1\nACGTACGT\n+\nIIIIIIII\n").unwrap();
     let out = dir.path().join("merged.fastq");
 
-    // First run: merged.fastq doesn't exist yet -> succeeds, creates it.
+    // First run: merged.fastq does not exist; the run succeeds and creates it.
     whittle()
         .arg("-i")
         .arg(dir.path())
@@ -138,7 +173,7 @@ fn folder_rerun_with_output_inside_dir_hard_errors() {
         .success();
     let first = std::fs::read_to_string(&out).unwrap();
 
-    // Rerun: merged.fastq now exists in the dir -> hard error, prior output kept.
+    // Rerun: merged.fastq exists in the directory; hard error, prior output kept.
     whittle()
         .arg("-i")
         .arg(dir.path())
@@ -151,14 +186,15 @@ fn folder_rerun_with_output_inside_dir_hard_errors() {
     assert_eq!(
         std::fs::read_to_string(&out).unwrap(),
         first,
-        "prior output preserved"
+        "Prior output preserved"
     );
 }
 
+/// A BAM folder producing a FASTQ output inside itself: the first run succeeds,
+/// and the rerun (merged.fastq is then a read file in the folder) hard-errors
+/// rather than overwriting.
 #[test]
 fn folder_bam_to_fastq_rerun_with_output_inside_dir_hard_errors() {
-    // BAM folder producing a FASTQ output inside itself: first run works, rerun
-    // (merged.fastq now a read file in the folder) hard-errors rather than overwrite.
     let dir = tempfile::tempdir().unwrap();
     write_ubam(&dir.path().join("a.bam"), b"r1", b"ACGTACGT", vec![40; 8]);
     let out = dir.path().join("merged.fastq");
@@ -185,10 +221,11 @@ fn folder_bam_to_fastq_rerun_with_output_inside_dir_hard_errors() {
     assert_eq!(
         std::fs::read_to_string(&out).unwrap(),
         first,
-        "prior output preserved"
+        "Prior output preserved"
     );
 }
 
+/// Writes a one-read uBAM whose header declares the read group `rg`.
 fn write_ubam_with_rg(path: &Path, name: &[u8], rg: &str) {
     use noodles_sam::header::record::value::Map;
     use noodles_sam::header::record::value::map::ReadGroup;
@@ -206,12 +243,12 @@ fn write_ubam_with_rg(path: &Path, name: &[u8], rg: &str) {
     w.try_finish().unwrap();
 }
 
-// Folder merge preserves custom-FASTA semantics across the combined stream.
+/// Folder merge preserves custom-FASTA semantics across the combined stream.
 #[test]
 fn folder_merge_custom_fasta_never_reduces_still_trims() {
-    let present = "GGGGTTTTGGGGTTTTGGGG"; // 20bp present adapter
-    let absent = "ACGACGACGACGACGACGAC"; // 20bp never in the reads
-    let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40bp
+    let present = "GGGGTTTTGGGGTTTTGGGG"; // 20 bp, present adapter
+    let absent = "ACGACGACGACGACGACGAC"; // 20 bp, never in the reads
+    let insert = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40 bp
     let dir = tempfile::tempdir().unwrap();
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     std::io::Write::write_fmt(
@@ -256,26 +293,26 @@ fn folder_merge_custom_fasta_never_reduces_still_trims() {
     let stderr = String::from_utf8_lossy(&res.get_output().stderr).into_owned();
     assert!(
         !stderr.contains("Adapter presence"),
-        "custom --adapter-fasta must disable detection outright in folder-merge too: {stderr}"
+        "Custom --adapter-fasta disables detection outright in folder-merge mode as well: {stderr}"
     );
 
     let got = std::fs::read_to_string(&out).unwrap();
-    assert!(got.contains(insert), "insert kept");
+    assert!(got.contains(insert), "Insert kept");
     assert!(
         !got.contains(&format!("{present}{insert}")),
-        "present adapter trimmed off in merged output"
+        "Present adapter trimmed off in the merged output"
     );
     assert_eq!(
         got.matches("@r").count(),
         200,
-        "all 200 merged reads present"
+        "All 200 merged reads present"
     );
 }
 
+/// Folder merge keeps only the first header, so records from a file declaring a
+/// different `@RG` would reference a read group missing from the merged output.
 #[test]
 fn folder_merge_bam_warns_on_differing_read_groups() {
-    // Folder merge keeps only the first header, so records from a file declaring a
-    // different @RG would reference a read group missing from the merged output.
     let dir = tempfile::tempdir().unwrap();
     write_ubam_with_rg(&dir.path().join("a.bam"), b"r1", "rg_a");
     write_ubam_with_rg(&dir.path().join("b.bam"), b"r2", "rg_b");

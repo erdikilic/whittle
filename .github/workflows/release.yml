@@ -2,40 +2,46 @@ name: Release
 
 on:
   push:
-    # Bare version tags, e.g. 0.1.0 or 0.1.0-rc1 — no "v" prefix.
+    # Bare version tags, e.g. 0.1.0 or 0.1.0-rc1, with no "v" prefix.
     tags: ["[0-9]+.[0-9]+.[0-9]+", "[0-9]+.[0-9]+.[0-9]+-*"]
-  workflow_dispatch: # manual runs build + checksum every target without publishing
+  # A manual run builds and checksums every target without publishing.
+  workflow_dispatch:
 
 permissions:
-  contents: write # attach binaries to the GitHub Release
+  # Attaches binaries to the GitHub Release.
+  contents: write
 
 jobs:
   release:
     strategy:
       fail-fast: false
       matrix:
+        # `pgo` marks the targets whose binary runs on its own runner, which is
+        # what training needs. The two aarch64 Linux targets are cross-compiled,
+        # so nothing on the runner can execute them; they are built without a
+        # profile and are otherwise identical.
         include:
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, pgo: true }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, pgo: true }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-latest }
-          - { target: x86_64-apple-darwin, os: macos-13 }
-          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-13, pgo: true }
+          - { target: aarch64-apple-darwin, os: macos-14, pgo: true }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      # Linux: install the cross C toolchain + Rust target. This covers the
-      # aarch64 cross-compile and both musl targets, using native cross GCCs on
-      # the runner (cmake is present there for the zlib-ng C build) rather than
-      # a container. sassy's SIMD still resolves per arch: x86_64 gets AVX2 via
-      # .cargo/config.toml, aarch64 uses baseline NEON.
+      # Linux: installs the cross C toolchain and Rust target. This covers the
+      # aarch64 cross-compile and both musl targets, using the runner's native
+      # cross GCCs (cmake is present there for the zlib-ng C build) rather than
+      # a container. sassy's SIMD resolves per architecture: x86_64 gets AVX2
+      # via .cargo/config.toml, aarch64 uses baseline NEON.
       - uses: taiki-e/setup-cross-toolchain-action@v1
         if: runner.os == 'Linux'
         with:
           target: ${{ matrix.target }}
 
-      # macOS: native build, just add the Rust target for the active toolchain.
+      # macOS: native build; adds the Rust target for the active toolchain.
       - name: Add Rust target (macOS)
         if: runner.os == 'macOS'
         env:
@@ -44,10 +50,34 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The training corpus comes from an example, and building an example
+      # builds the dev-dependencies, of which rust-htslib compiles bundled
+      # HTSlib from C. macOS needs nothing added for that.
+      - name: Install HTSlib build deps
+        if: ${{ matrix.pgo && runner.os == 'Linux' }}
+        run: sudo apt-get update && sudo apt-get install -y
+             build-essential zlib1g-dev
+
+      - name: Install llvm-tools
+        if: ${{ matrix.pgo }}
+        run: rustup component add llvm-tools
+
       - name: Build
+        if: ${{ !matrix.pgo }}
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --target "$TARGET"
+
+      # Instrument, generate the corpus, train, merge the profile, rebuild. The
+      # script carries the `-C target-cpu` from .cargo/config.toml into both
+      # builds, since RUSTFLAGS replaces that setting rather than adding to it,
+      # and stops at the first step that fails, so an unoptimized binary is
+      # never packaged. The CI `pgo` job runs the same script.
+      - name: Build with PGO
+        if: ${{ matrix.pgo }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: scripts/pgo-build.sh "$TARGET"
 
       - name: Package
         id: pkg
@@ -56,7 +86,15 @@ jobs:
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           name="whittle-${version}-${TARGET}"
-          tar -C "target/${TARGET}/release" -czf "${name}.tar.gz" whittle
+          mkdir -p "dist/${name}"
+          cp "target/${TARGET}/release/whittle" "dist/${name}/"
+          # The committed man page, not a regenerated one: the cross-toolchain
+          # action sets CARGO_BUILD_TARGET, so `cargo run` here would cross-build
+          # the generator and execute it under QEMU, costing a full debug build of
+          # the dependency tree per matrix leg. CI verifies the page is current.
+          cp -R man "dist/${name}/"
+          cp README.md CHANGELOG.md LICENSE "dist/${name}/"
+          tar -C dist -czf "${name}.tar.gz" "${name}"
           shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 

@@ -1,23 +1,28 @@
 # Formatting configuration for `whittle`.
 #
-# The unstable options in the "nightly" sections require the nightly toolchain:
-# `cargo +nightly fmt`. Stable `cargo fmt` still runs and passes `--check` — it
-# simply ignores those options and leaves the affected code as written.
+# The unstable options in the "nightly" section require the nightly toolchain:
+# `cargo +nightly fmt`. Stable `cargo fmt` runs and passes `--check` with this
+# file; it ignores the unstable options and leaves the affected code as written.
 #
 # Comment- and string-reflowing options (wrap_comments, format_strings,
-# format_code_in_doc_comments, normalize_comments) are deliberately NOT enabled:
-# the hand-formatted doc comments and multi-line error strings are intentional.
+# format_code_in_doc_comments, normalize_comments) are not enabled: doc comments
+# and multi-line error strings are hand-formatted.
 
-# --- width / general (stable) ---
-max_width = 100          # roomy (rustfmt's default; not the cramped 80)
-newline_style = "Unix"   # always LF
+# Width and general options (stable).
+# rustfmt's default width.
+max_width = 100
+newline_style = "Unix"
 
-# --- expression / literal tidiness (stable) ---
-use_field_init_shorthand = true    # `Foo { x }` instead of `Foo { x: x }`
-match_block_trailing_comma = true  # trailing comma after `=> { … }` match arms
-hex_literal_case = "Lower"         # `0x1f`, not `0x1F`
+# Expression and literal options (stable).
+# `Foo { x }` instead of `Foo { x: x }`.
+use_field_init_shorthand = true
+# Trailing comma after block match arms.
+match_block_trailing_comma = true
+# `0x1f`, not `0x1F`.
+hex_literal_case = "Lower"
 
-# --- imports (nightly) ---
-imports_granularity = "Module"      # merge `use a::b; use a::c;` -> `use a::{b, c};`
-group_imports = "StdExternalCrate"  # order: std / external crates / this crate
-
+# Import options (nightly).
+# Merges `use a::b; use a::c;` into `use a::{b, c};`.
+imports_granularity = "Module"
+# Groups imports as std, external crates, this crate.
+group_imports = "StdExternalCrate"

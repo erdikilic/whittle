@@ -1,47 +1,74 @@
+//! Per-read trimming: barcode window, fixed crop, adapter stage and quality stage, producing kept intervals.
+
 pub mod strategies;
 
 use strategies::{best_segment, split_low_quality, trim_by_quality};
 
+/// The quality-based operation applied within each adapter segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QualityOp {
+    /// Trimming of both ends up to the first base at or above the cutoff.
     TrimQual(u8),
+    /// The single highest-scoring segment (modified Mott).
     BestSegment(u8),
-    Split { cutoff: u8, window: usize },
+    /// A split at runs of at least `window` bases below `cutoff`.
+    Split {
+        /// Phred cutoff below which a base counts as low quality.
+        cutoff: u8,
+        /// Minimum run of low-quality bases that splits the read.
+        window: usize,
+    },
 }
 
+/// The per-read trim configuration.
 #[derive(Debug, Clone)]
 pub struct TrimPlan {
+    /// Bases removed from the 5' end.
     pub head: usize,
+    /// Bases removed from the 3' end.
     pub tail: usize,
+    /// Quality operation applied after the crop and adapter stages, if any.
     pub quality: Option<QualityOp>,
 }
 
-/// Fixed crop first (positional), then the adapter stage on the cropped window
-/// (when configured), then the chosen quality op within each adapter segment,
-/// offsetting intervals back to original coordinates. Emits crop->adapter->quality
-/// segments only, including short ones; the caller filters (length/quality/GC)
-/// per segment — `apply` never applies a length filter itself.
+/// Applies `plan` to one read and returns the kept intervals in read
+/// coordinates: `barcode` first, then the fixed crop, then the adapter stage on
+/// the cropped window (when configured), then the quality operation within each
+/// adapter segment. Every segment is returned, including short ones; the caller
+/// filters each by length, quality and GC.
+///
+/// `barcode` is the per-read window an outer stage leaves for the rest of the
+/// trim, in read coordinates and within `[0, seq.len()]`. `--trim-barcodes`
+/// resolves it from the record's `bi` aux tag; every other path passes `None`,
+/// which is the whole read.
 pub fn apply(
     seq: &[u8],
     phred: &[u8],
     plan: &TrimPlan,
     adapters: Option<&crate::adapter::AdapterConfig>,
+    barcode: Option<(usize, usize)>,
 ) -> Vec<(usize, usize)> {
     debug_assert_eq!(
         seq.len(),
         phred.len(),
-        "apply: seq.len() must equal phred.len()"
+        "Sequence and quality lengths must be equal"
     );
     let seq_len = seq.len();
-    let start = plan.head.min(seq_len);
-    let end = seq_len.saturating_sub(plan.tail).max(start);
+    // The barcode window is the outermost stage, so the crop counts from its
+    // first base rather than from the read's.
+    let (outer_start, outer_end) = match barcode {
+        Some((s, e)) => (s.min(seq_len), e.clamp(s.min(seq_len), seq_len)),
+        None => (0, seq_len),
+    };
+    let start = outer_start.saturating_add(plan.head).min(outer_end);
+    let end = outer_end.saturating_sub(plan.tail).max(start);
     if start >= end {
         return vec![];
     }
 
-    // Quality op within one `[s, e)` segment, results offset back to original
-    // coordinates and appended to `out`. No length filter here — the caller
-    // filters each returned segment (length/quality/GC).
+    // The quality op within one `[s, e)` segment, with results offset back to
+    // read coordinates and appended to `out`. No length filter is applied; the
+    // caller filters each returned segment.
     let quality_in = |s: usize, e: usize, out: &mut Vec<(usize, usize)>| {
         let wp = &phred[s..e];
         let offset = |v: Vec<(usize, usize)>, out: &mut Vec<(usize, usize)>| {
@@ -57,12 +84,14 @@ pub fn apply(
         }
     };
 
-    // Adapter stage on the cropped window, mapped back to original coordinates,
-    // then the quality op within each segment. The common no-adapter path skips
-    // straight to the quality op with no intermediate segment vector.
+    // The adapter stage on the cropped window, mapped back to read coordinates,
+    // then the quality op within each segment. The no-adapter path goes directly
+    // to the quality op with no intermediate segment vector.
     let mut out = Vec::new();
     match adapters {
-        None => quality_in(start, end, &mut out),
+        None => {
+            quality_in(start, end, &mut out);
+        },
         Some(cfg) => {
             for (s, e) in crate::adapter::adapter_segments(&seq[start..end], cfg) {
                 quality_in(s + start, e + start, &mut out);
@@ -85,13 +114,14 @@ mod tests {
             tail: 3,
             quality: None,
         };
-        assert_eq!(apply(&seq, &phred, &plan, None), vec![(5, 17)]);
+        assert_eq!(apply(&seq, &phred, &plan, None, None), vec![(5, 17)]);
     }
 
     #[test]
     fn crop_then_quality_offsets_back() {
-        // 20 bases; crop head 2; then trim_qual on the remaining window.
-        // phred: low low [good...] -> after crop the good region starts at 2.
+        // 20 bases, head crop 2, then `TrimQual` on the remaining window. The
+        // first two Phred values are low, so the good region starts at 2 after
+        // the crop.
         let mut phred = vec![40u8; 20];
         phred[0] = 2;
         phred[1] = 2;
@@ -101,13 +131,13 @@ mod tests {
             tail: 0,
             quality: Some(QualityOp::TrimQual(30)),
         };
-        assert_eq!(apply(&seq, &phred, &plan, None), vec![(2, 20)]);
+        assert_eq!(apply(&seq, &phred, &plan, None, None), vec![(2, 20)]);
     }
 
+    /// `apply` applies no length filter; the caller filters per segment after
+    /// trimming, so a short segment is returned.
     #[test]
     fn short_segments_are_emitted_not_filtered() {
-        // `apply` has no length filter at all: filtering moved entirely to the
-        // caller (per-segment, post-trim). A short segment is still RETURNED here.
         let phred = vec![40u8; 4];
         let seq = vec![b'A'; 4];
         let plan = TrimPlan {
@@ -115,7 +145,7 @@ mod tests {
             tail: 0,
             quality: None,
         };
-        assert_eq!(apply(&seq, &phred, &plan, None), vec![(0, 4)]);
+        assert_eq!(apply(&seq, &phred, &plan, None, None), vec![(0, 4)]);
     }
 
     #[test]
@@ -128,7 +158,7 @@ mod tests {
             quality: None,
         };
         assert_eq!(
-            apply(&seq, &phred, &plan, None),
+            apply(&seq, &phred, &plan, None, None),
             Vec::<(usize, usize)>::new()
         );
     }
@@ -156,7 +186,7 @@ mod tests {
             split: false,
             candidate_index: std::sync::OnceLock::new(),
         };
-        assert_eq!(apply(&seq, &phred, &plan, Some(&ac)), vec![(12, 24)]);
+        assert_eq!(apply(&seq, &phred, &plan, Some(&ac), None), vec![(12, 24)]);
     }
 
     #[test]
@@ -168,6 +198,42 @@ mod tests {
             tail: 3,
             quality: None,
         };
-        assert_eq!(apply(&seq, &phred, &plan, None), vec![(5, 17)]);
+        assert_eq!(apply(&seq, &phred, &plan, None, None), vec![(5, 17)]);
+    }
+}
+
+#[cfg(test)]
+mod barcode_tests {
+    use super::*;
+
+    /// The barcode window is the outermost stage, so the head crop counts from
+    /// the first base after the front barcode.
+    #[test]
+    fn barcode_window_precedes_the_crop() {
+        let seq = vec![b'A'; 20];
+        let phred = vec![40u8; 20];
+        let plan = TrimPlan {
+            head: 2,
+            tail: 1,
+            quality: None,
+        };
+        assert_eq!(
+            apply(&seq, &phred, &plan, None, Some((5, 15))),
+            vec![(7, 14)]
+        );
+    }
+
+    /// A crop wider than the barcode window keeps nothing.
+    #[test]
+    fn crop_beyond_the_barcode_window_keeps_nothing() {
+        let seq = vec![b'A'; 20];
+        let phred = vec![40u8; 20];
+        let plan = TrimPlan {
+            head: 6,
+            tail: 6,
+            quality: None,
+        };
+        let kept = apply(&seq, &phred, &plan, None, Some((5, 15)));
+        assert!(kept.is_empty());
     }
 }

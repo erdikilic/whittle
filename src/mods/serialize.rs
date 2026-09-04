@@ -1,16 +1,16 @@
+//! Serialization of parsed modifications back to `MM` text and `ML` bytes.
+
 use super::{ModCode, Mods};
 use crate::io::fastq::push_u64;
 
+/// Serializes groups back to an `MM:Z` string and the concatenated `ML` bytes.
 pub fn serialize(mods: &Mods) -> (Vec<u8>, Vec<u8>) {
     let mut mm = Vec::new();
     let mut ml = Vec::new();
 
     for g in &mods.groups {
-        // Empty-delta groups ARE emitted: `reconstruct` only ever keeps an
-        // empty group that was empty in the source (a valid "assessed, none
-        // found" record), and dropping it here would silently erase that
-        // information. A group that lost all its positions to the window is
-        // already excluded upstream, so it never reaches here.
+        // A group with no positions is emitted as `C+m;`: it declares how the
+        // unlisted bases of its kind are read, so it carries information.
         mm.push(g.base);
         mm.push(g.strand);
         for code in &g.codes {
@@ -53,10 +53,10 @@ mod tests {
         assert_eq!(ml, vec![1, 2, 3, 4, 5]);
     }
 
+    /// A zero-position group is valid SAM (assessed, none found) and is
+    /// re-emitted rather than dropped; it contributes no ML bytes.
     #[test]
     fn emits_empty_groups() {
-        // A zero-position group is valid SAM ("assessed, none found") and must
-        // be re-emitted, not dropped. Contributes no ML bytes.
         let mut mods = parse(b"C+m,0;", &[7]);
         mods.groups.push(crate::mods::MmGroup {
             base: b'A',

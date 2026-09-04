@@ -1,6 +1,7 @@
 [toolchain]
-# Pin an exact stable so contributors and CI build identically; bump this in its
-# own PR (that's when new clippy lints land, deliberately rather than by surprise).
+# An exact stable pin so contributors and CI build identically. A pin bump goes
+# in its own PR, since it brings new clippy lints. The MSRV is `rust-version` in
+# Cargo.toml (1.91), checked by the `msrv` CI job.
 channel = "1.96.0"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
