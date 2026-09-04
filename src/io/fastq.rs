@@ -214,22 +214,6 @@ pub fn write_segment_tagged<W: Write>(
     write_body(w, seq, phred, tags)
 }
 
-/// Writes one FASTQ record under `name` exactly as given, with no segment
-/// suffix, and `tags` (already TAB-prefixed per field, or empty) after it:
-/// `@<name><tags>`. For callers that name their segments themselves, such as
-/// the BAM-to-FASTQ path with its per-platform split names.
-pub fn write_named_record<W: Write>(
-    w: &mut W,
-    name: &[u8],
-    seq: &[u8],
-    phred: &[u8],
-    tags: &[u8],
-) -> io::Result<()> {
-    w.write_all(b"@")?;
-    w.write_all(name)?;
-    write_body(w, seq, phred, tags)
-}
-
 /// Appends the rest of a record after its header id and tags to `out`: the
 /// newline, the sequence, the `+` line and the Phred+33 qualities. The `Vec`
 /// counterpart of `write_body` for callers that assemble the header in place.
@@ -444,14 +428,6 @@ pub fn push_aux_field(out: &mut Vec<u8>, tag: [u8; 2], value: &Value) {
     }
 }
 
-/// Formats one SAM aux field as text `XX:T:VALUE` (no leading TAB) into a new
-/// buffer; see [`push_aux_field`].
-pub fn format_aux_field(tag: [u8; 2], value: &Value) -> Vec<u8> {
-    let mut out = Vec::new();
-    push_aux_field(&mut out, tag, value);
-    out
-}
-
 /// Appends a `B` array's subtype code and comma-prefixed elements. The
 /// capacity for the wider element types is reserved at two bytes per element,
 /// the shortest text an element can take.
@@ -537,19 +513,6 @@ pub fn push_mods_aux(
         out.extend_from_slice(b"\tMN:i:");
         push_u64(out, mn as u64);
     }
-}
-
-/// Formats the reconstructed MM/ML/MN block as SAM aux text into a new buffer;
-/// see [`push_mods_aux`].
-pub fn format_mods_aux(
-    mm: &[u8],
-    ml: Option<&[u8]>,
-    mn: usize,
-    remove: &crate::config::TagRemoval,
-) -> Vec<u8> {
-    let mut out = Vec::new();
-    push_mods_aux(&mut out, mm, ml, mn, remove);
-    out
 }
 
 /// Capacity of the buffer in front of the output file or stdout. Plain output
@@ -813,59 +776,76 @@ mod tests {
     use noodles_sam::alignment::record_buf::data::field::Value;
     use noodles_sam::alignment::record_buf::data::field::value::Array;
 
+    /// One aux field in a buffer of its own, so an expectation reads as the
+    /// field text rather than as the state of a shared buffer.
+    fn aux(tag: [u8; 2], value: &Value) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_aux_field(&mut out, tag, value);
+        out
+    }
+
+    /// The MM/ML/MN block in a buffer of its own, for the same reason.
+    fn mods_aux(
+        mm: &[u8],
+        ml: Option<&[u8]>,
+        mn: usize,
+        remove: &crate::config::TagRemoval,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_mods_aux(&mut out, mm, ml, mn, remove);
+        out
+    }
+
     #[test]
     fn aux_scalar_types() {
         assert_eq!(
-            format_aux_field(*b"RG", &Value::String(b"grp1".as_slice().into())),
+            aux(*b"RG", &Value::String(b"grp1".as_slice().into())),
             b"RG:Z:grp1"
         );
-        assert_eq!(format_aux_field(*b"NM", &Value::Int32(-3)), b"NM:i:-3");
-        assert_eq!(format_aux_field(*b"Uq", &Value::UInt8(200)), b"Uq:i:200");
-        assert_eq!(format_aux_field(*b"pa", &Value::Float(0.5)), b"pa:f:0.5");
-        assert_eq!(format_aux_field(*b"bc", &Value::Character(b'K')), b"bc:A:K");
+        assert_eq!(aux(*b"NM", &Value::Int32(-3)), b"NM:i:-3");
+        assert_eq!(aux(*b"Uq", &Value::UInt8(200)), b"Uq:i:200");
+        assert_eq!(aux(*b"pa", &Value::Float(0.5)), b"pa:f:0.5");
+        assert_eq!(aux(*b"bc", &Value::Character(b'K')), b"bc:A:K");
         assert_eq!(
-            format_aux_field(*b"H2", &Value::Hex(b"1AE3".as_slice().into())),
+            aux(*b"H2", &Value::Hex(b"1AE3".as_slice().into())),
             b"H2:H:1AE3"
         );
         // Every integer width serializes with SAM type code `i`, regardless of
         // signedness or size.
-        assert_eq!(format_aux_field(*b"i1", &Value::Int8(-5)), b"i1:i:-5");
-        assert_eq!(format_aux_field(*b"i2", &Value::Int16(-300)), b"i2:i:-300");
-        assert_eq!(format_aux_field(*b"i3", &Value::UInt16(400)), b"i3:i:400");
-        assert_eq!(
-            format_aux_field(*b"i4", &Value::UInt32(70000)),
-            b"i4:i:70000"
-        );
+        assert_eq!(aux(*b"i1", &Value::Int8(-5)), b"i1:i:-5");
+        assert_eq!(aux(*b"i2", &Value::Int16(-300)), b"i2:i:-300");
+        assert_eq!(aux(*b"i3", &Value::UInt16(400)), b"i3:i:400");
+        assert_eq!(aux(*b"i4", &Value::UInt32(70000)), b"i4:i:70000");
     }
 
     #[test]
     fn aux_array_subtypes() {
         assert_eq!(
-            format_aux_field(*b"a1", &Value::Array(Array::UInt8(vec![1, 2, 3]))),
+            aux(*b"a1", &Value::Array(Array::UInt8(vec![1, 2, 3]))),
             b"a1:B:C,1,2,3"
         );
         assert_eq!(
-            format_aux_field(*b"a2", &Value::Array(Array::Int8(vec![-1, 2]))),
+            aux(*b"a2", &Value::Array(Array::Int8(vec![-1, 2]))),
             b"a2:B:c,-1,2"
         );
         assert_eq!(
-            format_aux_field(*b"a3", &Value::Array(Array::Int16(vec![-5]))),
+            aux(*b"a3", &Value::Array(Array::Int16(vec![-5]))),
             b"a3:B:s,-5"
         );
         assert_eq!(
-            format_aux_field(*b"a4", &Value::Array(Array::UInt16(vec![5]))),
+            aux(*b"a4", &Value::Array(Array::UInt16(vec![5]))),
             b"a4:B:S,5"
         );
         assert_eq!(
-            format_aux_field(*b"a5", &Value::Array(Array::Int32(vec![7]))),
+            aux(*b"a5", &Value::Array(Array::Int32(vec![7]))),
             b"a5:B:i,7"
         );
         assert_eq!(
-            format_aux_field(*b"a6", &Value::Array(Array::UInt32(vec![8]))),
+            aux(*b"a6", &Value::Array(Array::UInt32(vec![8]))),
             b"a6:B:I,8"
         );
         assert_eq!(
-            format_aux_field(*b"a7", &Value::Array(Array::Float(vec![1.5]))),
+            aux(*b"a7", &Value::Array(Array::Float(vec![1.5]))),
             b"a7:B:f,1.5"
         );
     }
@@ -912,34 +892,34 @@ mod tests {
     fn mods_aux_layout() {
         let keep = crate::config::TagRemoval::default();
         assert_eq!(
-            format_mods_aux(b"C+m,0;", Some(&[10, 20]), 6, &keep),
+            mods_aux(b"C+m,0;", Some(&[10, 20]), 6, &keep),
             b"\tMM:Z:C+m,0;\tML:B:C,10,20\tMN:i:6"
         );
         // ML present but empty (e.g. all mods sliced away yet MM retained) yields
         // a zero-length `B:C` array.
         assert_eq!(
-            format_mods_aux(b"C+m;", Some(&[]), 4, &keep),
+            mods_aux(b"C+m;", Some(&[]), 4, &keep),
             b"\tMM:Z:C+m;\tML:B:C\tMN:i:4"
         );
         // ML absent (MM-only source record): the ML field is omitted rather than
         // emitted empty, so the record stays valid.
         assert_eq!(
-            format_mods_aux(b"C+m,0;", None, 4, &keep),
+            mods_aux(b"C+m,0;", None, 4, &keep),
             b"\tMM:Z:C+m,0;\tMN:i:4"
         );
         // Each removed field goes on its own, leaving the rest of the block.
         let removal =
             |tag: &str| crate::config::TagRemoval::parse(&[tag.to_string()], false).unwrap();
         assert_eq!(
-            format_mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("ML")),
+            mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("ML")),
             b"\tMM:Z:C+m,0;\tMN:i:6"
         );
         assert_eq!(
-            format_mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("MN")),
+            mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("MN")),
             b"\tMM:Z:C+m,0;\tML:B:C,10"
         );
         assert_eq!(
-            format_mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("MM")),
+            mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("MM")),
             b"\tML:B:C,10\tMN:i:6"
         );
     }
@@ -978,20 +958,5 @@ mod tests {
         let mut out = Vec::new();
         write_segment_tagged(&mut out, b"read2", b"AC", &[40, 40], 2, 1, b"\tMN:i:2").unwrap();
         assert_eq!(out, b"@read2_segment_2\tMN:i:2\nAC\n+\nII\n");
-    }
-
-    /// The named writer takes the name as given: no suffix, no description
-    /// handling, and the same body layout as the segment writers.
-    #[test]
-    fn named_writer_uses_the_name_verbatim() {
-        let mut out = Vec::new();
-        write_named_record(&mut out, b"m1/7/ccs/10_12", b"AC", &[40, 40], b"\tqs:i:10").unwrap();
-        assert_eq!(out, b"@m1/7/ccs/10_12\tqs:i:10\nAC\n+\nII\n");
-
-        let mut named = Vec::new();
-        write_named_record(&mut named, b"r1 desc", b"ACGT", &[40; 4], b"").unwrap();
-        let mut segment = Vec::new();
-        write_segment(&mut segment, b"r1 desc", b"ACGT", &[40; 4], 1, 0).unwrap();
-        assert_eq!(named, segment);
     }
 }

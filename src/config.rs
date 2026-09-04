@@ -185,12 +185,6 @@ pub enum AdapterInfer {
 }
 
 impl AdapterInfer {
-    /// Whether ab-initio inference is enabled, so the adapter set is discovered
-    /// rather than configured.
-    pub fn is_enabled(self) -> bool {
-        matches!(self, Self::Enabled { .. })
-    }
-
     /// Whether inference is enabled in report mode.
     pub fn is_report(self) -> bool {
         matches!(
