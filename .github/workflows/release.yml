@@ -16,17 +16,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `pgo` marks the targets whose binary runs on its own runner, which is
-        # what training needs. The two aarch64 Linux targets are cross-compiled,
-        # so nothing on the runner can execute them; they are built without a
-        # profile and are otherwise identical.
         include:
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, pgo: true }
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, pgo: true }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-latest }
-          - { target: x86_64-apple-darwin, os: macos-13, pgo: true }
-          - { target: aarch64-apple-darwin, os: macos-14, pgo: true }
+          - { target: x86_64-apple-darwin, os: macos-13 }
+          - { target: aarch64-apple-darwin, os: macos-14 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -50,34 +46,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The training corpus comes from an example, and building an example
-      # builds the dev-dependencies, of which rust-htslib compiles bundled
-      # HTSlib from C. macOS needs nothing added for that.
-      - name: Install HTSlib build deps
-        if: ${{ matrix.pgo && runner.os == 'Linux' }}
-        run: sudo apt-get update && sudo apt-get install -y
-             build-essential zlib1g-dev
-
-      - name: Install llvm-tools
-        if: ${{ matrix.pgo }}
-        run: rustup component add llvm-tools
-
       - name: Build
-        if: ${{ !matrix.pgo }}
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --target "$TARGET"
-
-      # Instrument, generate the corpus, train, merge the profile, rebuild. The
-      # script carries the `-C target-cpu` from .cargo/config.toml into both
-      # builds, since RUSTFLAGS replaces that setting rather than adding to it,
-      # and stops at the first step that fails, so an unoptimized binary is
-      # never packaged. The CI `pgo` job runs the same script.
-      - name: Build with PGO
-        if: ${{ matrix.pgo }}
-        env:
-          TARGET: ${{ matrix.target }}
-        run: scripts/pgo-build.sh "$TARGET"
 
       - name: Package
         id: pkg
