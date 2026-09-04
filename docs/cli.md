@@ -181,7 +181,7 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
 {
   "schema_version": 1,
   "tool": "whittle",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "command": "whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json",
   "input": "reads.bam",
   "output": "trimmed.fastq.gz",
