@@ -1140,7 +1140,7 @@ dependencies = [
  "bstr",
  "indexmap",
  "memchr",
- "noodles-bgzf",
+ "noodles-bgzf 0.48.0",
  "noodles-core",
  "noodles-csi",
  "noodles-sam",
@@ -1151,6 +1151,18 @@ name = "noodles-bgzf"
 version = "0.48.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da1dbf501b46281ca402b458211653bc8c510ea605400a1192d272a35360aa54"
+dependencies = [
+ "bytes",
+ "crossbeam-channel",
+ "rayon",
+ "zlib-rs",
+]
+
+[[package]]
+name = "noodles-bgzf"
+version = "0.51.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "280d401d0358893ad706fb6094a18e7f9e8f3002630f4960889cb702b6e2714e"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -1177,7 +1189,7 @@ dependencies = [
  "bit-vec",
  "bstr",
  "indexmap",
- "noodles-bgzf",
+ "noodles-bgzf 0.48.0",
  "noodles-core",
 ]
 
@@ -1192,7 +1204,7 @@ dependencies = [
  "indexmap",
  "lexical-core",
  "memchr",
- "noodles-bgzf",
+ "noodles-bgzf 0.48.0",
  "noodles-core",
  "noodles-csi",
 ]
@@ -1956,7 +1968,7 @@ dependencies = [
  "indicatif",
  "jiff",
  "noodles-bam",
- "noodles-bgzf",
+ "noodles-bgzf 0.51.0",
  "noodles-sam",
  "predicates",
  "rayon",
