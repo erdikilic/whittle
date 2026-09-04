@@ -1813,12 +1813,12 @@ fn process_raw_full_window(
         let gc = (cfg.filter.min_gc.is_some() || cfg.filter.max_gc.is_some())
             .then(|| raw_gc_fraction(&record));
         match crate::filter::check_metrics(seq_len, qual, gc, &cfg.filter) {
-            Err(reason) => {
+            Some(reason) => {
                 counters.record_segment_drop(reason);
                 counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
                 true
             },
-            Ok(_) => false,
+            None => false,
         }
     };
     if dropped {
