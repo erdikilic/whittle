@@ -7,13 +7,12 @@ use std::sync::atomic::Ordering;
 
 use noodles_bam as bam;
 use noodles_sam::alignment::RecordBuf;
-use noodles_sam::alignment::record::cigar::{Op, op::Kind};
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 
-use super::{BAM_BATCH, Counters, Rendered, Stats, process_read_segments, run_parallel};
+use super::{BAM_BATCH, Counters, Stats, process_read_segments, run_parallel};
 use crate::config::{Config, FastqTags, TagRemoval};
 use crate::io::fastq::{push_aux_field, push_mods_aux, push_record_body};
 use crate::{mods, trim};
@@ -93,30 +92,14 @@ const MOD_TAGS: [Tag; 3] = [
     Tag::BASE_MODIFICATION_SEQUENCE_LENGTH,
 ];
 
-/// Input accepted by the BAM workflows. Production readers yield lazy raw
-/// `bam::Record`s, so structured field/tag decoding happens on a render worker;
-/// tests and library callers can still provide an already-decoded `RecordBuf`.
-pub trait InputRecord: Send {
-    /// Length of the record's sequence, available without decoding.
-    fn sequence_len(&self) -> usize;
-    /// Decodes into an owned `RecordBuf`.
-    fn decode(self) -> std::io::Result<RecordBuf>;
-}
-
-impl InputRecord for bam::Record {
-    fn sequence_len(&self) -> usize {
-        self.sequence().len()
-    }
-
-    fn decode(self) -> std::io::Result<RecordBuf> {
-        decode_raw_record(&self)
-    }
-}
-
 /// Converts a raw record to a `RecordBuf` on the render worker without routing
 /// sequence, quality and every aux value through the generic SAM trait
 /// iterators. The concrete noodles views have bulk conversions for these large
 /// fields and reduce conversion overhead on long reads.
+///
+/// BAM's `CG:B:I` overflow representation of a CIGAR longer than 65535
+/// operations is not expanded: the workflows accept unaligned records only,
+/// whose CIGAR is empty.
 fn decode_raw_record(src: &bam::Record) -> std::io::Result<RecordBuf> {
     let mut dst = RecordBuf::default();
     *dst.name_mut() = src.name().map(Into::into);
@@ -137,70 +120,7 @@ fn decode_raw_record(src: &bam::Record) -> std::io::Result<RecordBuf> {
     *dst.sequence_mut() = src.sequence().into();
     *dst.quality_scores_mut() = src.quality_scores().into();
     *dst.data_mut() = src.data().try_into()?;
-    resolve_long_cigar(&mut dst)?;
     Ok(dst)
-}
-
-/// Expands BAM's `CG:B:I` overflow representation for records whose CIGAR does
-/// not fit in the 16-bit operation count. This mirrors the resolution performed
-/// by `noodles_bam::io::Reader::read_record_buf` after decoding a buffered
-/// record, which the lazy raw-record API leaves to its caller.
-fn resolve_long_cigar(record: &mut RecordBuf) -> io::Result<()> {
-    let is_overflow_placeholder = match record.cigar().as_ref() {
-        [op_0, op_1] => {
-            *op_0 == Op::new(Kind::SoftClip, record.sequence().len()) && op_1.kind() == Kind::Skip
-        },
-        _ => false,
-    };
-
-    if !is_overflow_placeholder {
-        return Ok(());
-    }
-
-    let Some((_, value)) = record.data_mut().remove(&Tag::CIGAR) else {
-        return Ok(());
-    };
-    let Value::Array(Array::UInt32(values)) = value else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid CG data field type",
-        ));
-    };
-
-    let cigar = record.cigar_mut().as_mut();
-    cigar.clear();
-    for n in values {
-        let kind = match n & 0x0f {
-            0 => Kind::Match,
-            1 => Kind::Insertion,
-            2 => Kind::Deletion,
-            3 => Kind::Skip,
-            4 => Kind::SoftClip,
-            5 => Kind::HardClip,
-            6 => Kind::Pad,
-            7 => Kind::SequenceMatch,
-            8 => Kind::SequenceMismatch,
-            actual => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid CG CIGAR operation kind: {actual}"),
-                ));
-            },
-        };
-        cigar.push(Op::new(kind, (n >> 4) as usize));
-    }
-
-    Ok(())
-}
-
-impl InputRecord for RecordBuf {
-    fn sequence_len(&self) -> usize {
-        self.sequence().as_ref().len()
-    }
-
-    fn decode(self) -> std::io::Result<RecordBuf> {
-        Ok(self)
-    }
 }
 
 /// Returns the element count of a `B` array of any subtype.
@@ -382,7 +302,7 @@ const BARCODE_TAG: [u8; 2] = *b"bi";
 
 /// The window a record's `bi` barcode positions leave for the rest of the trim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BarcodeSpan {
+pub(crate) enum BarcodeSpan {
     /// The record carries no `bi` tag, so the barcode stage keeps every base.
     Absent,
     /// Bases `[start, end)` remain once the recorded barcodes are removed.
@@ -443,7 +363,7 @@ fn barcode_interval(
 
 /// Resolves a record's `bi` barcode positions into the window to keep over a
 /// `seq_len`-base sequence.
-pub fn barcode_window(rec: &RecordBuf, seq_len: usize) -> BarcodeSpan {
+pub(crate) fn barcode_window(rec: &RecordBuf, seq_len: usize) -> BarcodeSpan {
     let Some(value) = rec.data().get(&Tag::new(BARCODE_TAG[0], BARCODE_TAG[1])) else {
         return BarcodeSpan::Absent;
     };
@@ -467,7 +387,7 @@ pub fn barcode_window(rec: &RecordBuf, seq_len: usize) -> BarcodeSpan {
 
 /// The state of a record's `MM`/`ML`/`MN` block relative to its sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModBlock {
+pub(crate) enum ModBlock {
     /// No `MM:Z` tag. An `ML` or `MN` present on its own is copied verbatim.
     Absent,
     /// `MM` parses to its end, `ML` (when present) is a `B:C` array of the
@@ -482,80 +402,6 @@ pub enum ModBlock {
     Malformed,
 }
 
-/// Returns the `ML` length `mm` declares (one byte per listed position per mod
-/// code, summed over groups), or `None` when `mm` does not conform to the
-/// group grammar `[A-Za-z][+-]([a-z]+|[0-9]+)[.?]?(,[0-9]+)*`. The verdict and
-/// the count agree with `mods::expected_ml_len`, which reads every delta digit
-/// by digit; here the delta tail of a group is validated in bulk and its
-/// positions are counted as commas, in passes the compiler vectorizes. `MM` is
-/// the largest text tag of a modification-calling record, and every record is
-/// classified.
-fn declared_ml_len(mm: &[u8]) -> Option<usize> {
-    let mut total = 0usize;
-    let mut next = 0usize;
-    for token in mm.split(|&b| b == b';') {
-        let start = next;
-        next += token.len() + 1;
-        if start >= mm.len() {
-            // The empty remainder after a final `;` is not a group.
-            break;
-        }
-        let (codes, tail) = split_group_head(token)?;
-        total += codes * delta_count(tail)?;
-    }
-    Some(total)
-}
-
-/// Splits a group token into its code count and its delta tail; `None` when
-/// the head is not `[A-Za-z][+-]([a-z]+|[0-9]+)[.?]?`. A ChEBI id is one code.
-fn split_group_head(token: &[u8]) -> Option<(usize, &[u8])> {
-    if !token.first()?.is_ascii_alphabetic() || !matches!(token.get(1)?, b'+' | b'-') {
-        return None;
-    }
-    let body = &token[2..];
-    let (codes, head_len) = if body.first().is_some_and(|b| b.is_ascii_digit()) {
-        (1, body.iter().take_while(|b| b.is_ascii_digit()).count())
-    } else {
-        let letters = body.iter().take_while(|b| b.is_ascii_alphabetic()).count();
-        (letters, letters)
-    };
-    if codes == 0 {
-        return None;
-    }
-    let mut tail = &body[head_len..];
-    if let Some((&(b'.' | b'?'), rest)) = tail.split_first() {
-        tail = rest;
-    }
-    Some((codes, tail))
-}
-
-/// Returns the number of positions a group's delta tail lists; `None` when the
-/// tail is not `(,[0-9]+)*`. A single trailing comma is accepted, as the
-/// digit-by-digit scan accepts it, and lists no position. The three passes
-/// (every byte a comma or digit, no comma after a comma, the comma count) run
-/// without an early exit so they vectorize.
-fn delta_count(tail: &[u8]) -> Option<usize> {
-    let Some((&first, _)) = tail.split_first() else {
-        return Some(0);
-    };
-    if first != b',' {
-        return None;
-    }
-    let well_formed = tail
-        .iter()
-        .fold(true, |ok, &b| ok & (b == b',' || b.is_ascii_digit()));
-    let doubled = tail
-        .iter()
-        .zip(&tail[1..])
-        .filter(|&(&a, &b)| a == b',' && b == b',')
-        .count();
-    if !well_formed || doubled != 0 {
-        return None;
-    }
-    let commas = tail.iter().filter(|&&b| b == b',').count();
-    Some(commas - usize::from(tail[tail.len() - 1] == b','))
-}
-
 /// Classifies a modification block from its parts. `ml` is `None` when the tag
 /// is absent and `Some(None)` when it is present with a subtype other than
 /// `B:C`; `mn` is `None` when absent and `Some(None)` when not an integer.
@@ -565,13 +411,7 @@ fn classify_mod_block(
     mn: Option<Option<i64>>,
     seq_len: usize,
 ) -> ModBlock {
-    let declared = declared_ml_len(mm);
-    debug_assert_eq!(
-        declared,
-        mods::expected_ml_len(mm).ok(),
-        "The bulk check must agree with the reference scan"
-    );
-    let Some(expected) = declared else {
+    let Some(expected) = mods::expected_ml_len(mm) else {
         return ModBlock::Malformed;
     };
     match ml {
@@ -602,7 +442,7 @@ fn mod_tags(src: &RecordBuf) -> Option<(&[u8], Option<&[u8]>)> {
 
 /// Classifies the modification block of a decoded record whose sequence has
 /// `seq_len` bases.
-pub fn inspect_mod_block(src: &RecordBuf, seq_len: usize) -> ModBlock {
+pub(crate) fn inspect_mod_block(src: &RecordBuf, seq_len: usize) -> ModBlock {
     let Some((mm, _)) = mod_tags(src) else {
         return ModBlock::Absent;
     };
@@ -673,7 +513,7 @@ fn parent_read_id(src: &RecordBuf) -> Vec<u8> {
 
 /// The platform whose tag conventions a record follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Platform {
+pub(crate) enum Platform {
     /// PacBio: integer `qs`/`qe` query coordinates, `{movie}/{zmw}/...` read
     /// names, `rn` as a pass count, `du:Z` from pbmarkdup.
     PacBio,
@@ -685,7 +525,7 @@ pub enum Platform {
 /// Classifies a record: `PacBio` when it carries an integer `qs` (dorado's `qs`
 /// is a float) or its name follows a PacBio convention (`parse_pacbio_name`),
 /// `Ont` otherwise.
-pub fn platform(rec: &RecordBuf) -> Platform {
+pub(crate) fn platform(rec: &RecordBuf) -> Platform {
     let integer_qs = rec
         .data()
         .get(&Tag::new(b'q', b's'))
@@ -1076,7 +916,7 @@ fn shift_timestamp(value: &[u8], seconds: f64) -> Option<Vec<u8>> {
 /// disagrees with the sequence length, or an `sa` coverage array whose runs do
 /// not sum to it: a malformed per-base tag that cannot be sliced. Used only to
 /// emit a run-level advisory.
-pub fn has_malformed_perbase_tag(rec: &RecordBuf, seq_len: usize) -> bool {
+pub(crate) fn has_malformed_perbase_tag(rec: &RecordBuf, seq_len: usize) -> bool {
     rec.data().iter().any(|(tag, value)| {
         let t = <[u8; 2]>::from(tag);
         match value {
@@ -1223,42 +1063,10 @@ fn count_undo_tags_dropped(
     }
 }
 
-/// Builds one output uBAM record for interval `[start, end)`, segment `idx` of
-/// `total`: SEQ/QUAL sliced, `MM`/`ML`/`MN` rebuilt, per-base kinetics sliced,
-/// stale signal-space tags rewritten or dropped, the name set per platform on a
-/// split (`segment_name`).
-/// Remaining aux tags are copied unchanged; `--remove-tag` removal is the
-/// workflows' own, applied through `reconstruct_record_with_bases`.
-pub fn reconstruct_record(
-    src: &RecordBuf,
-    start: usize,
-    end: usize,
-    total: usize,
-    idx: usize,
-    update_moves: bool,
-) -> RecordBuf {
-    let seq = src.sequence().as_ref();
-    let qual = src.quality_scores().as_ref();
-    let mod_block = inspect_mod_block(src, seq.len());
-    let window = Window {
-        start,
-        end,
-        idx,
-        total,
-    };
-    reconstruct_record_with_bases(
-        src,
-        seq,
-        qual,
-        window,
-        mod_block,
-        update_moves,
-        &TagRemoval::default(),
-    )
-}
-
-/// Builds one output record for `window`. The record is assembled field by
-/// field: SEQ/QUAL are sliced, aux tags are copied in source order with the
+/// Builds one output uBAM record for `window`: SEQ/QUAL sliced, `MM`/`ML`/`MN`
+/// rebuilt, per-base kinetics sliced, stale signal-space tags rewritten or
+/// dropped, the name set per platform on a split (`segment_name`). The record
+/// is assembled field by field: aux tags are copied in source order with the
 /// rewritten ones replaced in place, removed ones skipped and added ones
 /// appended. A `Malformed` block is removed. An untrimmed, unsplit record with
 /// an `Absent` or `Consistent` block is cloned as is.
@@ -1374,26 +1182,6 @@ fn reconstruct_record_with_bases(
     out
 }
 
-/// Slices a record's `MM`/`ML` to the window `[start, end)` and re-serializes
-/// them. `None` when the record carries no `MM:Z` or its block is `Malformed`
-/// (see `ModBlock`). The inner `Option` is the sliced `ML`, `None` when the
-/// source has none: `ML` is optional per the SAM spec, so such a record must not
-/// gain one. Shared by the BAM-to-BAM and BAM-to-FASTQ paths.
-pub fn reconstruct_mods(
-    src: &RecordBuf,
-    seq: &[u8],
-    start: usize,
-    end: usize,
-) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    match inspect_mod_block(src, seq.len()) {
-        ModBlock::Consistent | ModBlock::MissingMn => {
-            let (mm, ml) = mod_tags(src)?;
-            Some(rebuild_mods(mm, ml, seq, start, end))
-        },
-        ModBlock::Absent | ModBlock::Malformed => None,
-    }
-}
-
 /// Rebuilds the `MM`/`ML` block of a `Consistent` or `MissingMn` record for the
 /// window `[start, end)`: skip-counts renumbered, `ML` re-sliced. `ml` is
 /// `None` when the source carries no `ML`, and so is the result's.
@@ -1448,25 +1236,22 @@ struct PreparedRead<'a> {
 
 /// Runs the per-read guards and bookkeeping shared by the decoded workflows:
 /// refuses aligned reads and legacy mod tags, requires full per-base quality,
-/// classifies the modification block, counting a malformed one, and resolves
-/// the barcode window under `--trim-barcodes`, counting an unusable `bi`.
+/// classifies the modification block, counting a malformed one, counts a
+/// malformed per-base tag, and resolves the barcode window under
+/// `--trim-barcodes`, counting an unusable `bi`.
 fn prepare_read<'a>(
     rec: &'a RecordBuf,
     cfg: &Config,
     counters: &Counters,
 ) -> anyhow::Result<PreparedRead<'a>> {
-    crate::io::bam::ensure_unaligned(rec)?;
-    crate::io::bam::ensure_modern_mod_tags(rec)?;
+    crate::io::bam::ensure_trimmable(rec)?;
     let seq = rec.sequence().as_ref();
     let qual = rec.quality_scores().as_ref();
     if qual.len() != seq.len() {
-        let name = rec
-            .name()
-            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-            .unwrap_or_else(|| "<unnamed>".to_string());
         anyhow::bail!(
-            "read {name}: BAM record SEQ length {} != QUAL length {} \
+            "read {}: BAM record SEQ length {} != QUAL length {} \
              (records without full per-base quality are not supported)",
+            crate::io::bam::display_name(rec.name().map(AsRef::as_ref)),
             seq.len(),
             qual.len()
         );
@@ -1474,6 +1259,9 @@ fn prepare_read<'a>(
     let mod_block = inspect_mod_block(rec, seq.len());
     if mod_block == ModBlock::Malformed {
         counters.malformed_mod_reads.fetch_add(1, Ordering::Relaxed);
+    }
+    if has_malformed_perbase_tag(rec, seq.len()) {
+        counters.malformed_tag_reads.fetch_add(1, Ordering::Relaxed);
     }
     let barcode = if cfg.trim_barcodes {
         match barcode_window(rec, seq.len()) {
@@ -1497,74 +1285,100 @@ fn prepare_read<'a>(
     })
 }
 
+/// Runs the per-read guards and the trim on a decoded record, filters each
+/// produced segment and calls `render` with every survivor's window and the
+/// record's modification block. Counts a dropped undo blob once the survivors
+/// are known. Shared by the BAM and FASTQ output paths.
+fn render_windows(
+    rec: &RecordBuf,
+    cfg: &Config,
+    counters: &Counters,
+    mut render: impl FnMut(Window, ModBlock) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let PreparedRead {
+        seq,
+        qual,
+        mod_block,
+        barcode,
+    } = prepare_read(rec, cfg, counters)?;
+    let _read = crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
+    let _read = _read.enter();
+    let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
+    let mut survivors: Vec<(usize, usize)> = Vec::new();
+    process_read_segments(
+        &produced,
+        seq,
+        qual,
+        &cfg.filter,
+        counters,
+        |idx, total, start, end| {
+            survivors.push((start, end));
+            render(
+                Window {
+                    start,
+                    end,
+                    idx,
+                    total,
+                },
+                mod_block,
+            )
+        },
+    )?;
+    count_undo_tags_dropped(counters, rec, seq.len(), &survivors);
+    Ok(())
+}
+
+/// Renders one decoded record for BAM output: every surviving window is
+/// rebuilt into an output record and handed to `emit`. Shared by the
+/// sequential and parallel drivers.
+fn render_bam_read(
+    rec: &RecordBuf,
+    cfg: &Config,
+    counters: &Counters,
+    mut emit: impl FnMut(RecordBuf) -> io::Result<()>,
+) -> anyhow::Result<()> {
+    let seq = rec.sequence().as_ref();
+    let qual = rec.quality_scores().as_ref();
+    render_windows(rec, cfg, counters, |window, mod_block| {
+        let out = reconstruct_record_with_bases(
+            rec,
+            seq,
+            qual,
+            window,
+            mod_block,
+            cfg.update_moves,
+            &cfg.remove_tags,
+        );
+        Ok(emit(out)?)
+    })
+}
+
 /// Runs the single-threaded uBAM workflow: refuses aligned reads, trims, filters
-/// each produced segment and reconstructs the survivors.
-fn run_bam_seq<R: InputRecord>(
+/// each produced segment and writes the reconstructed survivors.
+fn run_bam_seq(
     header: &sam::Header,
-    records: impl Iterator<Item = anyhow::Result<R>>,
+    records: impl Iterator<Item = anyhow::Result<bam::Record>>,
     sink: &mut crate::io::bam::BamSink,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
-    let mut malformed_tag_reads = 0u64;
     for rec in records {
-        let rec = rec?.decode()?;
-        let PreparedRead {
-            seq,
-            qual,
-            mod_block,
-            barcode,
-        } = prepare_read(&rec, cfg, counters)?;
+        let rec = decode_raw_record(&rec?)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
-            .fetch_add(seq.len() as u64, Ordering::Relaxed);
-        if has_malformed_perbase_tag(&rec, seq.len()) {
-            malformed_tag_reads += 1;
-        }
-        let _read =
-            crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
-        let _read = _read.enter();
-        let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
-        let mut survivors: Vec<(usize, usize)> = Vec::new();
-        process_read_segments(
-            &produced,
-            seq,
-            qual,
-            &cfg.filter,
-            counters,
-            |idx, total, s, e| {
-                survivors.push((s, e));
-                let window = Window {
-                    start: s,
-                    end: e,
-                    idx,
-                    total,
-                };
-                let out = reconstruct_record_with_bases(
-                    &rec,
-                    seq,
-                    qual,
-                    window,
-                    mod_block,
-                    cfg.update_moves,
-                    &cfg.remove_tags,
-                );
-                sink.write_record(header, &out)?;
-                Ok(())
-            },
-        )?;
-        count_undo_tags_dropped(counters, &rec, seq.len(), &survivors);
+            .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
+        render_bam_read(&rec, cfg, counters, |out| sink.write_record(header, &out))?;
     }
-    Ok(counters.snapshot(malformed_tag_reads))
+    Ok(counters.snapshot())
 }
 
 /// Runs `workflow::run_parallel` for BAM input: decodes each raw record on the
-/// pool, notes a malformed per-base tag, and hands the decoded record to
-/// `render`. `render` returns the surviving segments only; the per-segment
-/// filter and counters are updated inside it by `process_read_segments`.
-fn run_bam_parallel<R, T, S, Render, WriteOne>(
-    records: impl Iterator<Item = anyhow::Result<R>> + Send,
+/// pool and hands the decoded record to `render`, which returns the record's
+/// output items. The per-segment filter and counters are updated inside
+/// `render` by `process_read_segments`.
+fn run_bam_parallel<T, S, Render, WriteOne>(
+    records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
     cfg: &Config,
     sink: &mut S,
     render: Render,
@@ -1572,7 +1386,6 @@ fn run_bam_parallel<R, T, S, Render, WriteOne>(
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
 where
-    R: InputRecord + Send,
     T: Send,
     S: Send,
     Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
@@ -1581,19 +1394,10 @@ where
     run_parallel(
         records,
         BAM_BATCH,
-        InputRecord::sequence_len,
+        |record: &bam::Record| record.sequence().len(),
         cfg,
         sink,
-        |rec, cfg| {
-            let rec = rec.decode()?;
-            let seq_len = rec.sequence().as_ref().len();
-            let malformed_tags = has_malformed_perbase_tag(&rec, seq_len);
-            let items = render(&rec, cfg)?;
-            Ok(Rendered {
-                items,
-                malformed_tags,
-            })
-        },
+        |rec, cfg| render(&decode_raw_record(&rec)?, cfg),
         write_one,
         counters,
     )
@@ -1713,44 +1517,15 @@ fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(ModBlock, 
     Ok((block, malformed_perbase))
 }
 
-/// Applies the aligned, legacy-tag and reverse-complement guards to a raw
-/// record; the counterpart of `io::bam::ensure_unaligned` and
-/// `ensure_modern_mod_tags`.
-fn ensure_raw_unaligned(record: &bam::Record) -> anyhow::Result<()> {
-    let flags = record.flags();
-    let name = || {
-        record
-            .name()
-            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-            .unwrap_or_else(|| "<unnamed>".to_string())
-    };
-    if !flags.is_unmapped() {
-        anyhow::bail!(
-            "read {} is aligned (mapped); only unaligned BAM (uBAM) input is supported",
-            name()
-        );
-    }
-    for lt in crate::io::bam::LEGACY_MOD_TAGS {
-        if record.data().get(&Tag::new(lt[0], lt[1])).is_some() {
-            anyhow::bail!(
-                "read {} carries the legacy `{}` base-modification tag; whittle rewrites only \
-                 the current `MM`/`ML` spelling, so trimming this record would leave its \
-                 modification calls pointing at the wrong bases",
-                name(),
-                String::from_utf8_lossy(&lt)
-            );
-        }
-    }
-    // See `io::bam::ensure_unaligned` for why a reverse-complemented record is
-    // refused rather than trimmed.
-    if flags.is_reverse_complemented() {
-        anyhow::bail!(
-            "read {} is flagged reverse-complemented; whittle trims in read orientation and \
-             cannot keep position-indexed tags correct for it",
-            name()
-        );
-    }
-    Ok(())
+/// Applies the aligned, reverse-complement and legacy-tag guards to a raw
+/// record; the counterpart of `io::bam::ensure_trimmable`.
+fn ensure_raw_trimmable(record: &bam::Record) -> anyhow::Result<()> {
+    let legacy_tag = crate::io::bam::LEGACY_MOD_TAGS
+        .into_iter()
+        .find(|t| record.data().get(&Tag::new(t[0], t[1])).is_some());
+    crate::io::bam::refuse_untrimmable(record.flags(), legacy_tag, || {
+        crate::io::bam::display_name(record.name().map(AsRef::as_ref))
+    })
 }
 
 fn raw_gc_fraction(record: &bam::Record) -> f64 {
@@ -1768,10 +1543,7 @@ fn raw_gc_fraction(record: &bam::Record) -> f64 {
 /// Filters one raw record over its full window and decides its output: the raw
 /// record itself when nothing changes, a decoded rebuild when `MN` is missing
 /// or the modification block is malformed, nothing when the filter drops it.
-/// The QC observations follow the trimmed path: the input read and its tags
-/// are observed for every record, the tags against the surviving window or
-/// against none when the read is dropped. Returns the output and whether a
-/// known per-base tag is malformed.
+/// A malformed modification block or per-base tag is counted.
 ///
 /// Tag removal never reaches here: `run_raw_bam` excludes it from the
 /// full-window shortcut, so a run that removes tags rebuilds every record
@@ -1780,18 +1552,15 @@ fn process_raw_full_window(
     record: bam::Record,
     cfg: &Config,
     counters: &Arc<Counters>,
-) -> anyhow::Result<(Option<BamOutputRecord>, bool)> {
+) -> anyhow::Result<Option<BamOutputRecord>> {
     let seq_len = record.sequence().len();
     let qualities = record.quality_scores();
     let qual = qualities.as_ref();
     if qual.len() != seq_len {
-        let name = record
-            .name()
-            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-            .unwrap_or_else(|| "<unnamed>".to_string());
         anyhow::bail!(
-            "read {name}: BAM record SEQ length {} != QUAL length {} \
+            "read {}: BAM record SEQ length {} != QUAL length {} \
              (records without full per-base quality are not supported)",
+            crate::io::bam::display_name(record.name().map(AsRef::as_ref)),
             seq_len,
             qual.len()
         );
@@ -1801,8 +1570,9 @@ fn process_raw_full_window(
     if mod_block == ModBlock::Malformed {
         counters.malformed_mod_reads.fetch_add(1, Ordering::Relaxed);
     }
-
-    let mut tag_source: Option<RecordBuf> = None;
+    if malformed_perbase {
+        counters.malformed_tag_reads.fetch_add(1, Ordering::Relaxed);
+    }
 
     let dropped = if seq_len == 0 {
         counters
@@ -1822,7 +1592,7 @@ fn process_raw_full_window(
         }
     };
     if dropped {
-        return Ok((None, malformed_perbase));
+        return Ok(None);
     }
 
     // The window spans the whole record, so a survivor's output is its input.
@@ -1835,9 +1605,7 @@ fn process_raw_full_window(
     let output = match mod_block {
         ModBlock::Absent | ModBlock::Consistent => BamOutputRecord::Raw(record),
         ModBlock::MissingMn | ModBlock::Malformed => {
-            let decoded = tag_source
-                .take()
-                .map_or_else(|| decode_raw_record(&record), Ok)?;
+            let decoded = decode_raw_record(&record)?;
             let seq = decoded.sequence().as_ref();
             let window = Window {
                 start: 0,
@@ -1856,7 +1624,7 @@ fn process_raw_full_window(
             ))
         },
     };
-    Ok((Some(output), malformed_perbase))
+    Ok(Some(output))
 }
 
 fn run_raw_bam_full_window_seq(
@@ -1866,24 +1634,21 @@ fn run_raw_bam_full_window_seq(
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
-    let mut malformed = 0;
     for record in records {
         let record = record?;
-        ensure_raw_unaligned(&record)?;
+        ensure_raw_trimmable(&record)?;
         let seq_len = record.sequence().len();
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
             .fetch_add(seq_len as u64, Ordering::Relaxed);
-        let (output, is_malformed) = process_raw_full_window(record, cfg, counters)?;
-        malformed += u64::from(is_malformed);
-        match output {
+        match process_raw_full_window(record, cfg, counters)? {
             Some(BamOutputRecord::Raw(record)) => sink.write_raw_record(header, &record)?,
             Some(BamOutputRecord::Decoded(record)) => sink.write_record(header, &record)?,
             None => {},
         }
     }
-    Ok(counters.snapshot(malformed))
+    Ok(counters.snapshot())
 }
 
 fn run_raw_bam_full_window_parallel(
@@ -1900,12 +1665,10 @@ fn run_raw_bam_full_window_parallel(
         cfg,
         sink,
         |record, cfg| {
-            ensure_raw_unaligned(&record)?;
-            let (output, malformed_tags) = process_raw_full_window(record, cfg, counters)?;
-            Ok(Rendered {
-                items: output.into_iter().collect(),
-                malformed_tags,
-            })
+            ensure_raw_trimmable(&record)?;
+            Ok(process_raw_full_window(record, cfg, counters)?
+                .into_iter()
+                .collect())
         },
         |sink, output| match output {
             BamOutputRecord::Raw(record) => sink.write_raw_record(header, record),
@@ -1948,9 +1711,9 @@ pub fn run_raw_bam(
 /// rayon pool and drains the `RecordBuf`s through `run_bam_parallel`'s bounded
 /// channel to the writer, in input order under `cfg.ordered` and in completion
 /// order otherwise.
-pub fn run_bam<R: InputRecord>(
+pub(crate) fn run_bam(
     header: &sam::Header,
-    records: impl Iterator<Item = anyhow::Result<R>> + Send,
+    records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
     sink: &mut crate::io::bam::BamSink,
     cfg: &Config,
     counters: &Arc<Counters>,
@@ -1962,48 +1725,13 @@ pub fn run_bam<R: InputRecord>(
         records,
         cfg,
         sink,
-        // Render: per-record guards and trim, then `process_read_segments` filters
-        // per segment and reconstructs survivors into `Vec<RecordBuf>`.
+        // Render: the survivors of one record, as `Vec<RecordBuf>`.
         |rec, cfg| {
-            let PreparedRead {
-                seq,
-                qual,
-                mod_block,
-                barcode,
-            } = prepare_read(rec, cfg, counters)?;
-            let _read =
-                crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
-            let _read = _read.enter();
-            let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
-            let mut items = Vec::with_capacity(produced.len());
-            let mut survivors: Vec<(usize, usize)> = Vec::new();
-            process_read_segments(
-                &produced,
-                seq,
-                qual,
-                &cfg.filter,
-                counters,
-                |idx, total, s, e| {
-                    survivors.push((s, e));
-                    let window = Window {
-                        start: s,
-                        end: e,
-                        idx,
-                        total,
-                    };
-                    items.push(reconstruct_record_with_bases(
-                        rec,
-                        seq,
-                        qual,
-                        window,
-                        mod_block,
-                        cfg.update_moves,
-                        &cfg.remove_tags,
-                    ));
-                    Ok(())
-                },
-            )?;
-            count_undo_tags_dropped(counters, rec, seq.len(), &survivors);
+            let mut items = Vec::new();
+            render_bam_read(rec, cfg, counters, |out| {
+                items.push(out);
+                Ok(())
+            })?;
             Ok(items)
         },
         // Write: encode and write on the writer thread (BGZF compression is
@@ -2115,77 +1843,54 @@ fn render_fastq_window(
     push_record_body(out, &seq[start..end], &qual[start..end]);
 }
 
+/// Renders one decoded record for FASTQ output: every surviving window is
+/// formatted into `buf`, cleared first, and `buf` is handed to `emit`. Shared
+/// by the sequential and parallel drivers.
+fn render_bam_fastq_read(
+    rec: &RecordBuf,
+    cfg: &Config,
+    counters: &Counters,
+    buf: &mut Vec<u8>,
+    mut emit: impl FnMut(&mut Vec<u8>) -> io::Result<()>,
+) -> anyhow::Result<()> {
+    let platform = platform(rec);
+    render_windows(rec, cfg, counters, |window, mod_block| {
+        buf.clear();
+        render_fastq_window(
+            buf,
+            rec,
+            window,
+            mod_block,
+            platform,
+            &cfg.fastq_tags,
+            &cfg.remove_tags,
+        );
+        Ok(emit(buf)?)
+    })
+}
+
 /// Runs the single-threaded uBAM-to-FASTQ workflow: refuses aligned reads,
 /// trims, filters each produced segment, then writes each surviving segment as
 /// FASTQ with the selected aux tags in the header (MM/ML/MN reconstructed,
-/// per-base arrays sliced, other tags copied). gzip compression, when
-/// requested, is handled by the parallel `gzp` writer this drains into.
-fn run_bam_to_fastq_seq<R, W>(
-    records: impl Iterator<Item = anyhow::Result<R>>,
+/// per-base arrays sliced, other tags copied).
+fn run_bam_to_fastq_seq<W: Write>(
+    records: impl Iterator<Item = anyhow::Result<bam::Record>>,
     writer: &mut W,
     cfg: &Config,
     counters: &Arc<Counters>,
-) -> anyhow::Result<Stats>
-where
-    R: InputRecord,
-    W: Write,
-{
-    let mut malformed_tag_reads = 0u64;
-    // One record is rendered into this buffer and handed to the writer whole;
+) -> anyhow::Result<Stats> {
+    // One segment is rendered into this buffer and handed to the writer whole;
     // the buffer keeps its capacity across records.
-    let mut rendered: Vec<u8> = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
     for rec in records {
-        let rec = rec?.decode()?;
-        let PreparedRead {
-            seq,
-            qual,
-            mod_block,
-            barcode,
-        } = prepare_read(&rec, cfg, counters)?;
+        let rec = decode_raw_record(&rec?)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
-            .fetch_add(seq.len() as u64, Ordering::Relaxed);
-        if has_malformed_perbase_tag(&rec, seq.len()) {
-            malformed_tag_reads += 1;
-        }
-        let platform = platform(&rec);
-        let _read =
-            crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
-        let _read = _read.enter();
-        let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
-        let mut survivors: Vec<(usize, usize)> = Vec::new();
-        process_read_segments(
-            &produced,
-            seq,
-            qual,
-            &cfg.filter,
-            counters,
-            |idx, total, s, e| {
-                survivors.push((s, e));
-                let window = Window {
-                    start: s,
-                    end: e,
-                    idx,
-                    total,
-                };
-                rendered.clear();
-                render_fastq_window(
-                    &mut rendered,
-                    &rec,
-                    window,
-                    mod_block,
-                    platform,
-                    &cfg.fastq_tags,
-                    &cfg.remove_tags,
-                );
-                writer.write_all(&rendered)?;
-                Ok(())
-            },
-        )?;
-        count_undo_tags_dropped(counters, &rec, seq.len(), &survivors);
+            .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
+        render_bam_fastq_read(&rec, cfg, counters, &mut buf, |buf| writer.write_all(buf))?;
     }
-    Ok(counters.snapshot(malformed_tag_reads))
+    Ok(counters.snapshot())
 }
 
 /// Runs the uBAM-to-FASTQ workflow: decodes, refuses aligned reads, trims,
@@ -2194,8 +1899,8 @@ where
 /// tags copied). Sequential for `cfg.threads <= 1`; otherwise renders on a
 /// rayon pool and drains through `run_bam_parallel`'s bounded channel, in
 /// input order under `cfg.ordered` and in completion order otherwise.
-pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
-    records: impl Iterator<Item = anyhow::Result<R>> + Send,
+pub fn run_bam_to_fastq<W: Write + Send>(
+    records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
     writer: &mut W,
     cfg: &Config,
     counters: &Arc<Counters>,
@@ -2207,52 +1912,17 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
         records,
         cfg,
         writer,
-        // Render: guards and trim, then `process_read_segments` filters per
-        // segment into `Vec<Vec<u8>>` (rendered FASTQ segments, survivors only).
+        // Render: the survivors of one record, as `Vec<Vec<u8>>` of rendered
+        // FASTQ segments. Each segment's buffer is taken as an item, so the
+        // next segment renders into a fresh one.
         |rec, cfg| {
-            let PreparedRead {
-                seq,
-                qual,
-                mod_block,
-                barcode,
-            } = prepare_read(rec, cfg, counters)?;
-            let platform = platform(rec);
-            let _read =
-                crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
-            let _read = _read.enter();
-            let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
-            let mut out = Vec::with_capacity(produced.len());
-            let mut survivors: Vec<(usize, usize)> = Vec::new();
-            process_read_segments(
-                &produced,
-                seq,
-                qual,
-                &cfg.filter,
-                counters,
-                |idx, total, s, e| {
-                    survivors.push((s, e));
-                    let window = Window {
-                        start: s,
-                        end: e,
-                        idx,
-                        total,
-                    };
-                    let mut buf = Vec::new();
-                    render_fastq_window(
-                        &mut buf,
-                        rec,
-                        window,
-                        mod_block,
-                        platform,
-                        &cfg.fastq_tags,
-                        &cfg.remove_tags,
-                    );
-                    out.push(buf);
-                    Ok(())
-                },
-            )?;
-            count_undo_tags_dropped(counters, rec, seq.len(), &survivors);
-            Ok(out)
+            let mut items = Vec::new();
+            let mut buf = Vec::new();
+            render_bam_fastq_read(rec, cfg, counters, &mut buf, |buf| {
+                items.push(std::mem::take(buf));
+                Ok(())
+            })?;
+            Ok(items)
         },
         // Write: append the rendered bytes to the `FastqOut` writer.
         |w, buf| w.write_all(buf),
@@ -2262,88 +1932,43 @@ pub fn run_bam_to_fastq<R: InputRecord, W: Write + Send>(
 
 #[cfg(test)]
 mod tests {
-    /// The bulk `MM` check returns the reference scan's verdict and count on
-    /// well-formed strings, on every malformed shape, and on the accepted
-    /// oddities (a trailing comma, uppercase codes, an empty string).
-    #[test]
-    fn declared_ml_len_agrees_with_the_reference_scan() {
-        let cases: &[&[u8]] = &[
-            b"",
-            b";",
-            b"C+m,0,5;",
-            b"C+m,0;A+a,1,2;",
-            b"C+mh,1,2;",
-            b"C+MH,1,2;",
-            b"C+12345,3;",
-            b"C+12345;",
-            b"C+m?,1;",
-            b"C+m.,1;",
-            b"C+m?.,1;",
-            b"C+m;",
-            b"C+m",
-            b"C+m,",
-            b"C+m,1,",
-            b"C+m,1,;A+a,2",
-            b"N-x,0",
-            b"C+m,,1;",
-            b"C+;",
-            b"C+",
-            b"+m,1;",
-            b"Cm,1;",
-            b"C*m,1;",
-            b"C+m,a;",
-            b"C+m,1 ;",
-            b"C+m,1;;C+h;",
-            b"C+m1;",
-            b"C+m,1;junk",
-            b"C+m,1;C+h,2,x",
-            b"C+m,-1;",
-            b"C+m,1.5;",
-            b"9+m,1;",
-        ];
-        for &mm in cases {
-            assert_eq!(
-                declared_ml_len(mm),
-                mods::expected_ml_len(mm).ok(),
-                "{}",
-                String::from_utf8_lossy(mm)
-            );
-        }
-    }
-
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::Flags;
-    use noodles_sam::alignment::record::cigar::{Op, op::Kind};
     use noodles_sam::alignment::record::data::field::Tag;
     use noodles_sam::alignment::record_buf::data::field::Value;
     use noodles_sam::alignment::record_buf::data::field::value::Array;
 
     use super::*;
 
-    #[test]
-    fn resolves_long_cigar_overflow_from_cg_tag() {
-        let mut record = RecordBuf::default();
-        *record.sequence_mut() = b"ACGT".to_vec().into();
-        record
-            .cigar_mut()
-            .as_mut()
-            .extend([Op::new(Kind::SoftClip, 4), Op::new(Kind::Skip, 4)]);
-        record.data_mut().insert(
-            Tag::CIGAR,
-            Value::Array(Array::UInt32(vec![2 << 4, (1 << 4) | 1, (1 << 4) | 7])),
-        );
-
-        resolve_long_cigar(&mut record).unwrap();
-
-        assert_eq!(
-            record.cigar().as_ref(),
-            [
-                Op::new(Kind::Match, 2),
-                Op::new(Kind::Insertion, 1),
-                Op::new(Kind::SequenceMatch, 1),
-            ]
-        );
-        assert!(record.data().get(&Tag::CIGAR).is_none());
+    /// Builds one output record for interval `[start, end)`, segment `idx` of
+    /// `total`, with the modification block classified from `src` and no tag
+    /// removal.
+    pub(super) fn reconstruct_record(
+        src: &RecordBuf,
+        start: usize,
+        end: usize,
+        total: usize,
+        idx: usize,
+        update_moves: bool,
+    ) -> RecordBuf {
+        let seq = src.sequence().as_ref();
+        let qual = src.quality_scores().as_ref();
+        let mod_block = inspect_mod_block(src, seq.len());
+        let window = Window {
+            start,
+            end,
+            idx,
+            total,
+        };
+        reconstruct_record_with_bases(
+            src,
+            seq,
+            qual,
+            window,
+            mod_block,
+            update_moves,
+            &TagRemoval::default(),
+        )
     }
 
     fn ubam_with_mods(seq: &[u8], quals: Vec<u8>, mm: &[u8], ml: Vec<u8>) -> RecordBuf {
@@ -2394,11 +2019,6 @@ mod tests {
     /// A BAM record with unequal SEQ and QUAL lengths returns an error.
     #[test]
     fn qual_seq_length_mismatch_errors_without_panicking() {
-        use crate::config::IoConfig;
-        use crate::filter::FilterConfig;
-        use crate::qual::QualMode;
-        use crate::trim::TrimPlan;
-
         let mut rec = RecordBuf::default();
         *rec.flags_mut() = Flags::UNMAPPED;
         *rec.name_mut() = Some(b"r1".into());
@@ -2412,50 +2032,13 @@ mod tests {
             crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, 1, 6).unwrap();
 
         let cfg = Config {
-            io: IoConfig {
-                input: None,
-                output: None,
-                in_format: None,
-                out_format: None,
-            },
-            filter: FilterConfig {
-                min_length: 1,
-                max_length: usize::MAX,
-                min_qual: 0.0,
-                max_qual: 1000.0,
-                min_gc: None,
-                max_gc: None,
-                qual_mode: QualMode::Mean,
-            },
-            trim: TrimPlan {
-                head: 0,
-                tail: 0,
-                quality: None,
-            },
-            adapters: None,
-            adapter_infer: crate::config::AdapterInfer::Off,
-            threads: 1,
-            fastq_tags: crate::config::FastqTags::All,
-            render_workers: 0,
-            adapter_sample: 0,
-            compression_level: 6,
-            update_moves: false,
-            ordered: false,
-            verbosity: 0,
             quiet: true,
-            threads_clamped: None,
-            summary_json: None,
-            advisories: Vec::new(),
-            adapter_fasta: None,
-            progress: crate::config::ProgressMode::Auto,
-            adapters_configured: None,
-            trim_barcodes: false,
-            remove_tags: crate::config::TagRemoval::default(),
+            ..Config::default()
         };
 
         let result = run_bam(
             &header,
-            [Ok(rec)].into_iter(),
+            [Ok(raw_record(&rec))].into_iter(),
             &mut sink,
             &cfg,
             &Arc::new(Counters::default()),
@@ -2549,7 +2132,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 2, FastqTags::All);
         let mut out = Vec::new();
         run_bam_to_fastq(
-            [Ok(rec)].into_iter(),
+            [Ok(raw_record(&rec))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -2562,52 +2145,20 @@ mod tests {
         );
     }
 
-    use crate::config::{FastqTags, IoConfig};
-    use crate::filter::FilterConfig;
-    use crate::qual::QualMode;
+    use crate::config::FastqTags;
+
     use crate::trim::{QualityOp, TrimPlan};
 
     pub(super) fn cfg_bam2fq(quality: Option<QualityOp>, head: usize, tags: FastqTags) -> Config {
         Config {
-            io: IoConfig {
-                input: None,
-                output: None,
-                in_format: None,
-                out_format: None,
-            },
-            filter: FilterConfig {
-                min_length: 1,
-                max_length: usize::MAX,
-                min_qual: 0.0,
-                max_qual: 1000.0,
-                min_gc: None,
-                max_gc: None,
-                qual_mode: QualMode::Mean,
-            },
             trim: TrimPlan {
                 head,
                 tail: 0,
                 quality,
             },
-            adapters: None,
-            adapter_infer: crate::config::AdapterInfer::Off,
-            threads: 1,
             fastq_tags: tags,
-            render_workers: 0,
-            adapter_sample: 0,
-            compression_level: 6,
-            update_moves: false,
-            ordered: false,
-            verbosity: 0,
             quiet: true,
-            threads_clamped: None,
-            summary_json: None,
-            advisories: Vec::new(),
-            adapter_fasta: None,
-            progress: crate::config::ProgressMode::Auto,
-            adapters_configured: None,
-            trim_barcodes: false,
-            remove_tags: crate::config::TagRemoval::default(),
+            ..Config::default()
         }
     }
 
@@ -2629,7 +2180,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 2, FastqTags::All);
         let mut out = Vec::new();
         let stats = run_bam_to_fastq(
-            [Ok(read2_with_mods_and_rg())].into_iter(),
+            [Ok(raw_record(&read2_with_mods_and_rg()))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -2651,7 +2202,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 2, FastqTags::parse("MM,ML").unwrap());
         let mut out = Vec::new();
         run_bam_to_fastq(
-            [Ok(read2_with_mods_and_rg())].into_iter(),
+            [Ok(raw_record(&read2_with_mods_and_rg()))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -2670,7 +2221,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 2, FastqTags::None);
         let mut out = Vec::new();
         run_bam_to_fastq(
-            [Ok(read2_with_mods_and_rg())].into_iter(),
+            [Ok(raw_record(&read2_with_mods_and_rg()))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -2698,7 +2249,7 @@ mod tests {
             .insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(4));
         let mut out = Vec::new();
         let stats = run_bam_to_fastq(
-            [Ok(rec)].into_iter(),
+            [Ok(raw_record(&rec))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -2728,7 +2279,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 0, FastqTags::All);
         let mut out = Vec::new();
         run_bam_to_fastq(
-            [Ok(rec)].into_iter(),
+            [Ok(raw_record(&rec))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -2790,7 +2341,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 0, FastqTags::All);
         let mut out = Vec::new();
         run_bam_to_fastq(
-            [Ok(rec)].into_iter(),
+            [Ok(raw_record(&rec))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -2879,8 +2430,14 @@ mod tests {
                 let path = dir.path().join("o.bam");
                 let mut sink = crate::io::bam::writer(Some(&path), &header, 1, 6).unwrap();
                 let counters = Arc::new(Counters::default());
-                let stats =
-                    run_bam(&header, [Ok(rec)].into_iter(), &mut sink, &cfg, &counters).unwrap();
+                let stats = run_bam(
+                    &header,
+                    [Ok(raw_record(&rec))].into_iter(),
+                    &mut sink,
+                    &cfg,
+                    &counters,
+                )
+                .unwrap();
                 sink.finish().unwrap();
                 assert_eq!(
                     stats.malformed_mod_reads, 1,
@@ -2920,7 +2477,7 @@ mod tests {
                 let cfg = cfg_bam2fq(None, head, FastqTags::All);
                 let mut out = Vec::new();
                 let stats = run_bam_to_fastq(
-                    [Ok(malformed_mod_record(variant))].into_iter(),
+                    [Ok(raw_record(&malformed_mod_record(variant)))].into_iter(),
                     &mut out,
                     &cfg,
                     &Arc::new(Counters::default()),
@@ -2944,7 +2501,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 0, FastqTags::All);
         let mut out = Vec::new();
         let stats = run_bam_to_fastq(
-            [Ok(rec.clone())].into_iter(),
+            [Ok(raw_record(&rec))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -3079,7 +2636,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 2, FastqTags::All); // head crop 2, window [2,6)
         let mut out = Vec::new();
         run_bam_to_fastq(
-            [Ok(rec)].into_iter(),
+            [Ok(raw_record(&rec))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -3518,51 +3075,17 @@ mod tests {
 
     #[test]
     fn run_bam_parallel_matches_sequential_as_multiset() {
-        use crate::config::{FastqTags, IoConfig};
-        use crate::filter::FilterConfig;
-        use crate::qual::QualMode;
         use crate::trim::TrimPlan;
 
         let mk = |threads| Config {
-            io: IoConfig {
-                input: None,
-                output: None,
-                in_format: None,
-                out_format: None,
-            },
-            filter: FilterConfig {
-                min_length: 1,
-                max_length: usize::MAX,
-                min_qual: 0.0,
-                max_qual: 1000.0,
-                min_gc: None,
-                max_gc: None,
-                qual_mode: QualMode::Mean,
-            },
             trim: TrimPlan {
                 head: 2,
                 tail: 2,
                 quality: None,
             },
-            adapters: None,
-            adapter_infer: crate::config::AdapterInfer::Off,
             threads,
-            fastq_tags: FastqTags::All,
-            render_workers: 0,
-            adapter_sample: 0,
-            compression_level: 6,
-            update_moves: false,
-            ordered: false,
-            verbosity: 0,
             quiet: true,
-            threads_clamped: None,
-            summary_json: None,
-            advisories: Vec::new(),
-            adapter_fasta: None,
-            progress: crate::config::ProgressMode::Auto,
-            adapters_configured: None,
-            trim_barcodes: false,
-            remove_tags: crate::config::TagRemoval::default(),
+            ..Config::default()
         };
         // 300 reads with mods so reconstruction runs on every one.
         let recs: Vec<RecordBuf> = (0..300)
@@ -3594,7 +3117,7 @@ mod tests {
         let mut sink1 = crate::io::bam::writer(Some(&p1), &header, 1, 6).unwrap();
         run_bam(
             &header,
-            recs.clone().into_iter().map(anyhow::Ok),
+            recs.iter().map(|r| Ok(raw_record(r))),
             &mut sink1,
             &mk(1),
             &Arc::new(Counters::default()),
@@ -3609,7 +3132,7 @@ mod tests {
         let mut sink8 = crate::io::bam::writer(Some(&p8), &header, 8, 6).unwrap();
         run_bam(
             &header,
-            recs.into_iter().map(anyhow::Ok),
+            recs.iter().map(|r| Ok(raw_record(r))),
             &mut sink8,
             &mk(8),
             &Arc::new(Counters::default()),
@@ -3630,59 +3153,18 @@ mod tests {
     fn run_bam_parallel_surfaces_write_error_without_deadlock() {
         use std::io;
 
-        use crate::config::IoConfig;
-        use crate::filter::FilterConfig;
-        use crate::qual::QualMode;
-        use crate::trim::TrimPlan;
-
         struct FailAfter {
             limit: usize,
             written: usize,
         }
 
         let cfg = Config {
-            io: IoConfig {
-                input: None,
-                output: None,
-                in_format: None,
-                out_format: None,
-            },
-            filter: FilterConfig {
-                min_length: 1,
-                max_length: usize::MAX,
-                min_qual: 0.0,
-                max_qual: 1000.0,
-                min_gc: None,
-                max_gc: None,
-                qual_mode: QualMode::Mean,
-            },
-            trim: TrimPlan {
-                head: 0,
-                tail: 0,
-                quality: None,
-            },
-            adapters: None,
-            adapter_infer: crate::config::AdapterInfer::Off,
             threads: 4,
-            fastq_tags: crate::config::FastqTags::All,
-            render_workers: 0,
-            adapter_sample: 0,
-            compression_level: 6,
-            update_moves: false,
-            ordered: false,
-            verbosity: 0,
             quiet: true,
-            threads_clamped: None,
-            summary_json: None,
-            advisories: Vec::new(),
-            adapter_fasta: None,
-            progress: crate::config::ProgressMode::Auto,
-            adapters_configured: None,
-            trim_barcodes: false,
-            remove_tags: crate::config::TagRemoval::default(),
+            ..Config::default()
         };
-        let recs: Vec<anyhow::Result<RecordBuf>> = (0..3000)
-            .map(|_| anyhow::Ok(RecordBuf::default()))
+        let recs: Vec<anyhow::Result<bam::Record>> = (0..3000)
+            .map(|_| anyhow::Ok(bam::Record::default()))
             .collect();
 
         let mut sink = FailAfter {
@@ -3716,56 +3198,15 @@ mod tests {
     fn run_bam_parallel_surfaces_parse_error_instead_of_dropping_it() {
         use std::io;
 
-        use crate::config::IoConfig;
-        use crate::filter::FilterConfig;
-        use crate::qual::QualMode;
-        use crate::trim::TrimPlan;
-
         struct NullSink;
 
         let cfg = Config {
-            io: IoConfig {
-                input: None,
-                output: None,
-                in_format: None,
-                out_format: None,
-            },
-            filter: FilterConfig {
-                min_length: 1,
-                max_length: usize::MAX,
-                min_qual: 0.0,
-                max_qual: 1000.0,
-                min_gc: None,
-                max_gc: None,
-                qual_mode: QualMode::Mean,
-            },
-            trim: TrimPlan {
-                head: 0,
-                tail: 0,
-                quality: None,
-            },
-            adapters: None,
-            adapter_infer: crate::config::AdapterInfer::Off,
             threads: 4,
-            fastq_tags: crate::config::FastqTags::All,
-            render_workers: 0,
-            adapter_sample: 0,
-            compression_level: 6,
-            update_moves: false,
-            ordered: false,
-            verbosity: 0,
             quiet: true,
-            threads_clamped: None,
-            summary_json: None,
-            advisories: Vec::new(),
-            adapter_fasta: None,
-            progress: crate::config::ProgressMode::Auto,
-            adapters_configured: None,
-            trim_barcodes: false,
-            remove_tags: crate::config::TagRemoval::default(),
+            ..Config::default()
         };
-        let good: Vec<anyhow::Result<RecordBuf>> =
-            (0..5).map(|_| anyhow::Ok(RecordBuf::default())).collect();
+        let good: Vec<anyhow::Result<bam::Record>> =
+            (0..5).map(|_| anyhow::Ok(bam::Record::default())).collect();
         let recs = good
             .into_iter()
             .chain(std::iter::once(Err(anyhow::anyhow!("bad record"))));
@@ -3787,51 +3228,17 @@ mod tests {
 
     #[test]
     fn run_bam_to_fastq_parallel_matches_sequential_as_multiset() {
-        use crate::config::{FastqTags, IoConfig};
-        use crate::filter::FilterConfig;
-        use crate::qual::QualMode;
         use crate::trim::TrimPlan;
 
         let mk = |threads| Config {
-            io: IoConfig {
-                input: None,
-                output: None,
-                in_format: None,
-                out_format: None,
-            },
-            filter: FilterConfig {
-                min_length: 1,
-                max_length: usize::MAX,
-                min_qual: 0.0,
-                max_qual: 1000.0,
-                min_gc: None,
-                max_gc: None,
-                qual_mode: QualMode::Mean,
-            },
             trim: TrimPlan {
                 head: 2,
                 tail: 2,
                 quality: None,
             },
-            adapters: None,
-            adapter_infer: crate::config::AdapterInfer::Off,
             threads,
-            fastq_tags: FastqTags::All,
-            render_workers: 0,
-            adapter_sample: 0,
-            compression_level: 6,
-            update_moves: false,
-            ordered: false,
-            verbosity: 0,
             quiet: true,
-            threads_clamped: None,
-            summary_json: None,
-            advisories: Vec::new(),
-            adapter_fasta: None,
-            progress: crate::config::ProgressMode::Auto,
-            adapters_configured: None,
-            trim_barcodes: false,
-            remove_tags: crate::config::TagRemoval::default(),
+            ..Config::default()
         };
         let recs: Vec<RecordBuf> = (0..300)
             .map(|_| ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]))
@@ -3857,7 +3264,7 @@ mod tests {
 
         let mut a = Vec::new();
         run_bam_to_fastq(
-            recs.clone().into_iter().map(anyhow::Ok),
+            recs.iter().map(|r| Ok(raw_record(r))),
             &mut a,
             &mk(1),
             &Arc::new(Counters::default()),
@@ -3865,7 +3272,7 @@ mod tests {
         .unwrap();
         let mut b = Vec::new();
         run_bam_to_fastq(
-            recs.into_iter().map(anyhow::Ok),
+            recs.iter().map(|r| Ok(raw_record(r))),
             &mut b,
             &mk(8),
             &Arc::new(Counters::default()),
@@ -3913,7 +3320,7 @@ mod tests {
 
         let mut out = Vec::new();
         let stats = run_bam_to_fastq(
-            [Ok(rec)].into_iter(),
+            [Ok(raw_record(&rec))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -4064,7 +3471,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 2, FastqTags::All); // head crop 2
         let mut out = Vec::new();
         run_bam_to_fastq(
-            [Ok(pacbio_kinetics_record())].into_iter(),
+            [Ok(raw_record(&pacbio_kinetics_record()))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -4103,7 +3510,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 2, FastqTags::All);
         let mut fastq = Vec::new();
         run_bam_to_fastq(
-            [Ok(src.clone())].into_iter(),
+            [Ok(raw_record(&src))].into_iter(),
             &mut fastq,
             &cfg,
             &Arc::new(Counters::default()),
@@ -4125,7 +3532,7 @@ mod tests {
         }
         let mut fastq = Vec::new();
         run_bam_to_fastq(
-            [Ok(src)].into_iter(),
+            [Ok(raw_record(&src))].into_iter(),
             &mut fastq,
             &cfg,
             &Arc::new(Counters::default()),
@@ -4144,7 +3551,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 0, FastqTags::All);
         let counters = Arc::new(Counters::default());
 
-        let (out, _) = process_raw_full_window(
+        let out = process_raw_full_window(
             raw_record(&malformed_mod_record("mn_mismatch")),
             &cfg,
             &counters,
@@ -4160,7 +3567,7 @@ mod tests {
         assert_eq!(counters.malformed_mod_reads.load(Ordering::Relaxed), 1);
 
         let missing = ubam_with_mods(b"CCCA", vec![40; 4], b"C+m,0,0,0;", vec![5, 6, 7]);
-        let (out, _) = process_raw_full_window(raw_record(&missing), &cfg, &counters).unwrap();
+        let out = process_raw_full_window(raw_record(&missing), &cfg, &counters).unwrap();
         let Some(BamOutputRecord::Decoded(rec)) = out else {
             panic!("A missing MN forces a rebuild");
         };
@@ -4174,9 +3581,8 @@ mod tests {
             "A missing MN is not a defect"
         );
 
-        let (out, _) =
-            process_raw_full_window(raw_record(&read2_with_mods_and_rg()), &cfg, &counters)
-                .unwrap();
+        let out = process_raw_full_window(raw_record(&read2_with_mods_and_rg()), &cfg, &counters)
+            .unwrap();
         assert!(matches!(out, Some(BamOutputRecord::Raw(_))));
     }
 
@@ -4258,7 +3664,7 @@ mod tests {
         let cfg = cfg_bam2fq(None, 1, FastqTags::All);
         let mut out = Vec::new();
         run_bam_to_fastq(
-            [Ok(two)].into_iter(),
+            [Ok(raw_record(&two))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -4295,7 +3701,7 @@ mod tests {
         );
         let mut out = Vec::new();
         let stats = run_bam_to_fastq(
-            [Ok(src)].into_iter(),
+            [Ok(raw_record(&src))].into_iter(),
             &mut out,
             &cfg,
             &Arc::new(Counters::default()),
@@ -4430,7 +3836,7 @@ mod tests {
     fn bam2fq(recs: Vec<RecordBuf>, cfg: &Config) -> (Stats, String) {
         let mut out = Vec::new();
         let stats = run_bam_to_fastq(
-            recs.into_iter().map(anyhow::Ok),
+            recs.iter().map(|r| Ok(raw_record(r))),
             &mut out,
             cfg,
             &Arc::new(Counters::default()),
@@ -4448,7 +3854,7 @@ mod tests {
         let mut sink = crate::io::bam::writer(Some(&path), &header, 1, 6).unwrap();
         let stats = run_bam(
             &header,
-            recs.into_iter().map(anyhow::Ok),
+            recs.iter().map(|r| Ok(raw_record(r))),
             &mut sink,
             cfg,
             &Arc::new(Counters::default()),
@@ -5023,6 +4429,7 @@ mod barcode_tests {
     use noodles_sam::alignment::record_buf::data::field::Value;
     use noodles_sam::alignment::record_buf::data::field::value::Array;
 
+    use super::tests::reconstruct_record;
     use super::*;
 
     /// A 20-base record carrying `bi` with the given seven floats.

@@ -5,8 +5,8 @@
 //! `obs` owns the end-of-run counterparts; both use the same `output_desc`
 //! text.
 
-use crate::config::{AdapterInfer, AdapterInferAction, AdapterInferPolicy};
-use crate::{config, filter, io, qual, trim};
+use crate::config::AdapterInfer;
+use crate::{config, filter, io, trim};
 
 /// The startup banner's operation line, also the wording of bar mode's single
 /// start line: `Trimming FASTQ` when input and output share a `Format::family`
@@ -68,16 +68,6 @@ pub(crate) fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> St
     )
 }
 
-/// Lowercase label for a `QualMode`, used only in the startup banner's Filters
-/// line (`{qual_mode} quality >=...`).
-pub(crate) fn qual_mode_label(mode: qual::QualMode) -> &'static str {
-    match mode {
-        qual::QualMode::Mean => "mean",
-        qual::QualMode::Arithmetic => "arithmetic",
-        qual::QualMode::Median => "median",
-    }
-}
-
 /// The startup banner's `Filters: ...; trim: ...` line. Only active clauses
 /// appear, so an all-defaults run reads `Filters: none; trim: none` rather than
 /// every no-op threshold. A bound appears only when it differs from its default:
@@ -106,7 +96,7 @@ pub(crate) fn filters_and_trim_line(
 
     let qual_active = filter.min_qual > 0.0 || filter.max_qual < 1000.0;
     if qual_active {
-        let mut quality = format!("{} quality", qual_mode_label(filter.qual_mode));
+        let mut quality = format!("{} quality", filter.qual_mode.label());
         if filter.min_qual > 0.0 {
             quality.push_str(&format!(" >={}", filter.min_qual));
         }
@@ -171,23 +161,10 @@ pub(crate) fn adapter_banner_line(
         "sample off".to_string()
     };
     let infer_suffix = match adapter_infer {
-        AdapterInfer::Off => "",
-        AdapterInfer::Enabled {
-            action: AdapterInferAction::Trim,
-            policy: AdapterInferPolicy::Conservative,
-        } => " \u{b7} infer trim \u{b7} conservative",
-        AdapterInfer::Enabled {
-            action: AdapterInferAction::Trim,
-            policy: AdapterInferPolicy::Aggressive,
-        } => " \u{b7} infer trim \u{b7} aggressive",
-        AdapterInfer::Enabled {
-            action: AdapterInferAction::Report,
-            policy: AdapterInferPolicy::Conservative,
-        } => " \u{b7} infer report \u{b7} conservative",
-        AdapterInfer::Enabled {
-            action: AdapterInferAction::Report,
-            policy: AdapterInferPolicy::Aggressive,
-        } => " \u{b7} infer report \u{b7} aggressive",
+        AdapterInfer::Off => String::new(),
+        AdapterInfer::Enabled { action, policy } => {
+            format!(" \u{b7} infer {} \u{b7} {}", action.label(), policy.label())
+        },
     };
     let (n_adapters, roles) = if adapter_infer == AdapterInfer::Off {
         (a.adapters.len(), role_breakdown(&a.adapters))
@@ -263,6 +240,7 @@ pub(crate) fn output_desc(output: Option<&std::path::Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AdapterInferAction, AdapterInferPolicy};
 
     fn base_filter() -> filter::FilterConfig {
         filter::FilterConfig {
@@ -272,7 +250,7 @@ mod tests {
             max_qual: 1000.0,
             min_gc: None,
             max_gc: None,
-            qual_mode: qual::QualMode::Mean,
+            qual_mode: crate::qual::QualMode::Mean,
         }
     }
 
@@ -476,7 +454,7 @@ mod tests {
         f.max_qual = 30.0;
         f.min_gc = Some(0.4);
         f.max_gc = Some(0.6);
-        f.qual_mode = qual::QualMode::Median;
+        f.qual_mode = crate::qual::QualMode::Median;
 
         let mut t = base_trim();
         t.head = 10;

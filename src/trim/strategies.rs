@@ -7,7 +7,7 @@ type Segments = Vec<(usize, usize)>;
 
 /// Trims low-quality bases from both ends up to the first base with a Phred
 /// score at or above `cutoff`. Inputs are raw Phred scores.
-pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
+pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Segments {
     let len = phred.len();
     let mut start = 0;
     while start < len && phred[start] < cutoff {
@@ -27,7 +27,7 @@ pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
 /// Returns the single segment with the lowest cumulative error probability
 /// (modified Mott). `cutoff_q` is converted to a probability cutoff before
 /// scanning.
-pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
+pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Segments {
     let cutoff = phred_to_prob(cutoff_q);
     let mut best_start = usize::MAX;
     let mut best_end = usize::MAX;
@@ -64,7 +64,7 @@ pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Vec<(usize, usize)> {
 /// `window` bases below `cutoff`. Every high-quality run is emitted regardless
 /// of length; the caller's length filter (`-l`) drops short pieces after
 /// trimming.
-pub fn split_low_quality(phred: &[u8], cutoff: u8, window: usize) -> Vec<(usize, usize)> {
+pub fn split_low_quality(phred: &[u8], cutoff: u8, window: usize) -> Segments {
     let window = window.max(1);
     let mut segments = Vec::new();
     let mut segment_start: Option<usize> = None;
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn trim_by_quality_expected_ranges() {
-        let expected: [(u8, Vec<(usize, usize)>); 6] = [
+        let expected: [(u8, Segments); 6] = [
             (20, vec![(4, 20)]),
             (7, vec![(0, 20)]),
             (15, vec![(1, 19)]),
@@ -155,7 +155,7 @@ mod tests {
     fn best_segment_expected_ranges() {
         // The Q-score cutoffs correspond to probability thresholds: 0.01 = Q20,
         // 0.199 = Q7, 0.0316 = Q15, 0.0001 = Q40.
-        let expected: [(u8, Vec<(usize, usize)>); 6] = [
+        let expected: [(u8, Segments); 6] = [
             (20, vec![(10, 16)]),
             (7, vec![(0, 20)]),
             (15, vec![(11, 19)]),

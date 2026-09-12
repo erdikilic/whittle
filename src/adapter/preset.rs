@@ -2,14 +2,13 @@
 //! catalog.
 
 use std::fmt;
-use std::str::FromStr;
 
 use super::catalog::{CATALOG, Entry};
 use super::{Adapter, Role};
 
 /// A sequencing kit family the catalog knows. Each variant selects the catalog
 /// entries a library made with that kit can contain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kit {
     /// Ligation sequencing kit V14 (SQK-LSK114), including its cDNA and 10X
     /// primer variants.
@@ -64,27 +63,6 @@ impl Kit {
     pub fn amplicon(self) -> bool {
         matches!(self, Kit::Mab114)
     }
-
-    /// The preset token that names this kit.
-    pub fn token(self) -> &'static str {
-        match self {
-            Kit::Lsk114 => "lsk114",
-            Kit::Rad114 => "rad114",
-            Kit::Rbk114 => "rbk114",
-            Kit::Nbd114 => "nbd114",
-            Kit::Pcb114 => "pcb114",
-            Kit::Rpb114 => "rpb114",
-            Kit::Mab114 => "mab114",
-            Kit::Rna004 => "rna004",
-            Kit::PacBio => "pacbio",
-        }
-    }
-}
-
-impl fmt::Display for Kit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.token())
-    }
 }
 
 /// The preset tokens `--adapter-preset` accepts, with their expansions.
@@ -117,22 +95,6 @@ impl fmt::Display for UnknownPreset {
             self.0,
             known.join(", ")
         )
-    }
-}
-
-impl std::error::Error for UnknownPreset {}
-
-impl FromStr for Kit {
-    type Err = UnknownPreset;
-
-    /// Parses one kit token; `ont` and `all` name several kits and are parsed by
-    /// `parse_presets` only.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Kit::ALL
-            .iter()
-            .copied()
-            .find(|kit| kit.token().eq_ignore_ascii_case(s.trim()))
-            .ok_or_else(|| UnknownPreset(s.to_string()))
     }
 }
 
@@ -209,11 +171,6 @@ pub fn preset(kits: &[Kit]) -> Vec<Adapter> {
         })
         .collect();
     build(&entries)
-}
-
-/// Returns the whole catalog, deduplicated: every kit's sequences.
-pub fn preset_all() -> Vec<Adapter> {
-    preset(Kit::ALL)
 }
 
 /// Returns the Oxford Nanopore catalog, deduplicated.
@@ -327,7 +284,7 @@ mod tests {
     /// The whole catalog holds every barcode, and the ONT union excludes PacBio.
     #[test]
     fn unions_have_the_expected_shape() {
-        let all = preset_all();
+        let all = preset(Kit::ALL);
         assert_eq!(all.iter().filter(|a| a.name.starts_with("BC")).count(), 96);
         assert_eq!(all.iter().filter(|a| a.name.starts_with("TP")).count(), 24);
         assert_eq!(CATALOG.len(), all.len(), "Catalog sequences are unique");
@@ -351,6 +308,5 @@ mod tests {
             parse_presets("lsk114,16s").unwrap_err(),
             UnknownPreset("16s".into())
         );
-        assert_eq!("pacbio".parse::<Kit>().unwrap(), Kit::PacBio);
     }
 }

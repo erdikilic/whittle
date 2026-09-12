@@ -266,8 +266,7 @@ setting or the default, so a malformed variable does not silence the run.
 
 All logging goes to stderr, so stdout carries only read data. By default progress
 shows as a live bar when stderr is a terminal, and as periodic lines (about every
-30s, or 10s under `-v`) when it is redirected to a file or a pipe.
-`WHITTLE_PROGRESS_INTERVAL` overrides that cadence, in whole seconds. The bar is
+30s, or 10s under `-v`) when it is redirected to a file or a pipe. The bar is
 never written to a non-terminal, so a redirected log holds no escape sequences or
 carriage returns.
 

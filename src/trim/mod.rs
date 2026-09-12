@@ -21,7 +21,7 @@ pub enum QualityOp {
 }
 
 /// The per-read trim configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TrimPlan {
     /// Bases removed from the 5' end.
     pub head: usize,

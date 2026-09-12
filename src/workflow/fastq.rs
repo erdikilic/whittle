@@ -4,15 +4,15 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use super::{Counters, FASTQ_BATCH, Rendered, Stats, process_read_segments, run_parallel};
+use super::{Counters, FASTQ_BATCH, Stats, process_read_segments, run_parallel};
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
 use crate::trim;
 
 /// Runs the single-threaded FASTQ workflow: trims, filters each produced segment
-/// and writes the survivors.
-pub fn run_fastq_seq<W: Write>(
+/// and writes the survivors straight to `writer`.
+fn run_fastq_seq<W: Write>(
     records: impl Iterator<Item = anyhow::Result<ReadRecord>>,
     writer: &mut W,
     cfg: &Config,
@@ -24,36 +24,20 @@ pub fn run_fastq_seq<W: Write>(
         counters
             .input_bases
             .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
-        let _read = super::read_span(&rec.name);
-        let _read = _read.enter();
-        let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref(), None);
-        process_read_segments(
-            &produced,
-            &rec.seq,
-            &rec.qual,
-            &cfg.filter,
-            counters,
-            |idx, total, s, e| {
-                write_segment(
-                    writer,
-                    &rec.name,
-                    &rec.seq[s..e],
-                    &rec.qual[s..e],
-                    total,
-                    idx,
-                )?;
-                Ok(())
-            },
-        )?;
+        render_record(&rec, cfg, counters, writer)?;
     }
-    Ok(counters.snapshot(0))
+    Ok(counters.snapshot())
 }
 
 /// Trims one record, filters each produced segment through
-/// `process_read_segments`, and renders the survivors into `buf`. Writing into
-/// an in-memory `Vec<u8>` cannot fail, so the `expect` is an assertion rather
-/// than error handling.
-fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut Vec<u8>) {
+/// `process_read_segments`, and writes the survivors to `w`: the output stream
+/// on the sequential path, a per-record buffer on the parallel one.
+fn render_record<W: Write>(
+    rec: &ReadRecord,
+    cfg: &Config,
+    counters: &Counters,
+    w: &mut W,
+) -> anyhow::Result<()> {
     let _read = super::read_span(&rec.name);
     let _read = _read.enter();
     let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref(), None);
@@ -64,18 +48,10 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut 
         &cfg.filter,
         counters,
         |idx, total, s, e| {
-            write_segment(
-                &mut *buf,
-                &rec.name,
-                &rec.seq[s..e],
-                &rec.qual[s..e],
-                total,
-                idx,
-            )?;
+            write_segment(w, &rec.name, &rec.seq[s..e], &rec.qual[s..e], total, idx)?;
             Ok(())
         },
     )
-    .expect("Writing FASTQ segments into an in-memory Vec<u8> cannot fail");
 }
 
 /// Runs the FASTQ workflow: sequential when `cfg.threads <= 1`; otherwise
@@ -102,14 +78,11 @@ where
         writer,
         |rec, cfg| {
             let mut buf = Vec::with_capacity(rec.seq.len().saturating_mul(2) + rec.name.len() + 6);
-            render_record(&rec, cfg, counters, &mut buf);
-            Ok(Rendered {
-                items: if buf.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![buf]
-                },
-                malformed_tags: false,
+            render_record(&rec, cfg, counters, &mut buf)?;
+            Ok(if buf.is_empty() {
+                Vec::new()
+            } else {
+                vec![buf]
             })
         },
         |writer, buf: &Vec<u8>| writer.write_all(buf),

@@ -124,8 +124,7 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     guards::guard_stdout_binary(cfg, out_fmt)?;
     // Detection has classified the stream, so a piped or extensionless FASTQ
     // reaches the same refusal `cli::parse` applies to a named one.
-    guards::guard_barcode_input(cfg, in_fmt)?;
-    guards::guard_remove_tag_input(cfg, in_fmt)?;
+    guards::guard_bam_only_flags(cfg, in_fmt)?;
 
     tracing::debug!(
         stage = "setup",
@@ -194,8 +193,7 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
     guards::guard_stdout_binary(cfg, out_fmt)?;
-    guards::guard_barcode_input(cfg, family_fmt)?;
-    guards::guard_remove_tag_input(cfg, family_fmt)?;
+    guards::guard_bam_only_flags(cfg, family_fmt)?;
 
     // A `.gz` member is BGZF when its first block header says so.
     let bgzf_input = family_fmt == Format::Bam
@@ -272,17 +270,9 @@ fn detect_format(
     mut source: Box<dyn Read + Send>,
 ) -> anyhow::Result<(Format, Box<dyn Read + Send>)> {
     // The probe covers a full BGZF block header (18 bytes), which tells a BAM on
-    // stdin or under an unknown extension apart from gzipped FASTQ. A single
-    // `read()` may return fewer bytes, so the loop fills the buffer.
+    // stdin or under an unknown extension apart from gzipped FASTQ.
     let mut probe = [0u8; 18];
-    let mut n = 0;
-    while n < probe.len() {
-        let r = source.read(&mut probe[n..])?;
-        if r == 0 {
-            break;
-        }
-        n += r;
-    }
+    let n = io::fill(&mut source, &mut probe)?;
     let mut replay = probe[..n].to_vec();
     let fmt = if io::is_bgzf(&replay) {
         let block_size = usize::from(u16::from_le_bytes([replay[16], replay[17]])) + 1;
@@ -298,7 +288,7 @@ fn detect_format(
         })?;
         io::detect_bgzf_block(&replay)?
     } else {
-        io::detect_input(in_path, &replay)?
+        io::detect_input(&replay)?
     };
     Ok((fmt, Box::new(std::io::Cursor::new(replay).chain(source))))
 }
@@ -397,12 +387,7 @@ impl Session {
         match (in_fmt, out_fmt) {
             (Format::Bam, Format::Bam) => {
                 note_tags_ignored(cfg, in_fmt, out_fmt);
-                // Only the first file's header is written, so differing read
-                // groups in the other files are reported for BAM output.
-                if let Source::Folder(paths) = &source {
-                    io::dir::warn_on_bam_header_mismatch(paths);
-                }
-                let (header, records) = self.bam_reader(source)?;
+                let (header, records) = self.bam_reader(source, true)?;
                 let Some(records) = settle(records, cfg, self.budget, adapter::resolve::bam_seq)?
                 else {
                     return Ok(());
@@ -428,7 +413,7 @@ impl Session {
                 self.finish(obs, &stats, cfg)
             },
             (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
-                let (_header, records) = self.bam_reader(source)?;
+                let (_header, records) = self.bam_reader(source, false)?;
                 let Some(records) = settle(records, cfg, self.budget, adapter::resolve::bam_seq)?
                 else {
                     return Ok(());
@@ -459,16 +444,23 @@ impl Session {
     }
 
     /// Opens the BAM record stream. A stdin BAM's sniffed bytes are chained back
-    /// into the stream, so it is read as is rather than reopened.
+    /// into the stream, so it is read as is rather than reopened. Only the
+    /// first file of a folder contributes its header, so `check_read_groups`
+    /// asks the folder reader to warn when a later file declares a different
+    /// `@RG` set; BAM output only, since FASTQ output writes no header.
     fn bam_reader(
         &self,
         source: Source,
+        check_read_groups: bool,
     ) -> anyhow::Result<(noodles_sam::Header, io::bam::RawRecordIter)> {
         match source {
             Source::Stream(src) => io::bam::reader_from(src, self.budget.decode),
-            Source::Folder(paths) => {
-                io::dir::bam_reader(&paths, self.budget.decode, self.counters.clone())
-            },
+            Source::Folder(paths) => io::dir::bam_reader(
+                &paths,
+                self.budget.decode,
+                self.counters.clone(),
+                check_read_groups,
+            ),
         }
     }
 
@@ -701,26 +693,6 @@ fn note_tags_ignored(cfg: &Config, in_fmt: Format, out_fmt: Format) {
 
 #[cfg(test)]
 mod tests {
-    fn base_filter() -> filter::FilterConfig {
-        filter::FilterConfig {
-            min_length: 1,
-            max_length: usize::MAX,
-            min_qual: 0.0,
-            max_qual: 1000.0,
-            min_gc: None,
-            max_gc: None,
-            qual_mode: qual::QualMode::Mean,
-        }
-    }
-
-    fn base_trim() -> trim::TrimPlan {
-        trim::TrimPlan {
-            head: 0,
-            tail: 0,
-            quality: None,
-        }
-    }
-
     use super::*;
 
     #[test]
@@ -731,7 +703,7 @@ mod tests {
         );
         assert_eq!(
             config::encode_kind_for(io::Format::FastqGz),
-            config::EncodeKind::Gzip
+            config::EncodeKind::Bgzf
         );
         assert_eq!(
             config::encode_kind_for(io::Format::Fastq),
@@ -797,33 +769,9 @@ mod tests {
 
     fn base_config() -> Config {
         Config {
-            io: config::IoConfig {
-                input: None,
-                output: None,
-                in_format: None,
-                out_format: None,
-            },
-            filter: base_filter(),
-            trim: base_trim(),
-            adapters: None,
-            adapter_infer: config::AdapterInfer::Off,
             threads: 8,
-            fastq_tags: config::FastqTags::All,
-            render_workers: 0,
-            adapter_sample: 0,
-            compression_level: 6,
-            update_moves: false,
-            ordered: false,
-            verbosity: 0,
             quiet: true,
-            threads_clamped: None,
-            summary_json: None,
-            advisories: Vec::new(),
-            adapter_fasta: None,
-            progress: crate::config::ProgressMode::Auto,
-            adapters_configured: None,
-            trim_barcodes: false,
-            remove_tags: crate::config::TagRemoval::default(),
+            ..Config::default()
         }
     }
 

@@ -21,6 +21,21 @@ pub struct FilterConfig {
     pub qual_mode: QualMode,
 }
 
+impl Default for FilterConfig {
+    /// No bounds: every length, quality and GC content passes.
+    fn default() -> Self {
+        FilterConfig {
+            min_length: 1,
+            max_length: usize::MAX,
+            min_qual: 0.0,
+            max_qual: 1000.0,
+            min_gc: None,
+            max_gc: None,
+            qual_mode: QualMode::Mean,
+        }
+    }
+}
+
 /// Returns the fraction of `G`/`C` bases (either case) in `seq`; `0.0` for an
 /// empty slice.
 pub fn gc_fraction(seq: &[u8]) -> f64 {

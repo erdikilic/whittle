@@ -12,54 +12,46 @@ pub mod preset;
 pub mod resolve;
 pub mod search;
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use aho_corasick::{AhoCorasick, AhoCorasickKind};
 use search::{
-    AmbiguousSearcher, BatchedAdapterSearcher, EncodedAdapterBatch, Hit, PlainSearcher, Strands,
+    AmbiguousSearcher, EncodedAdapterBatch, Hit, MAX_TILED_PATTERN_LEN, PlainSearcher, Strands,
     encode_patterns, encoded_pattern_hits, for_each_hit, is_plain_acgt, iupac_bases,
-    new_ambiguous_searcher, new_batched_searcher, new_overhang_searcher, new_searcher,
-    pattern_hits,
+    new_ambiguous_searcher, new_overhang_searcher, new_searcher,
 };
 
-// One searcher of each kind per thread, reused across reads so
-// `adapter_segments` does not allocate a searcher and its scratch buffers on
-// every call. Per-thread state keeps the parallel workflows free of sharing.
 thread_local! {
-    /// The fast all-ACGT searcher. Used only when both the pattern and the
-    /// searched text are plain ACGT; see `is_plain_acgt`.
-    static RC_SEARCHER: RefCell<PlainSearcher> = RefCell::new(new_searcher());
-
-    /// The ambiguity-tolerant searcher, used for a degenerate primer.
-    static RC_AMBIGUOUS: RefCell<AmbiguousSearcher> = RefCell::new(new_ambiguous_searcher());
-
-    /// The overhang-aware searcher for the read ends, keyed by the overhang
-    /// cost it was built with so a run at another error rate rebuilds it.
-    static RC_OVERHANG: RefCell<Option<(f32, AmbiguousSearcher)>> = const { RefCell::new(None) };
-
-    /// The tiled searcher, for the pre-encoded terminal batches. Sassy
-    /// implements pattern tiling only for the IUPAC profile, which on A/C/G/T
-    /// input is equivalent to the DNA profile.
-    static BATCH_SEARCHER: RefCell<BatchedAdapterSearcher> = RefCell::new(new_batched_searcher());
-
-    /// Per-read buffers, reused across reads.
-    static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::default());
+    /// The searchers and per-read buffers of this thread, reused across reads
+    /// so `adapter_segments` allocates neither a searcher nor its scratch on
+    /// every call. Per-thread state keeps the parallel workflows free of
+    /// sharing.
+    static STATE: RefCell<ThreadState> = RefCell::new(ThreadState::new());
 }
 
-/// Per-read buffers of one thread. Each keeps its capacity across reads, so
-/// the adapter stage itself allocates only the segments it returns; the
-/// remaining per-read allocations are sassy's own, inside each search call.
-#[derive(Debug, Default)]
-struct Scratch {
+/// One thread's searchers and per-read buffers. Each buffer keeps its
+/// capacity across reads, so the adapter stage itself allocates only the
+/// segments it returns; the remaining per-read allocations are sassy's own,
+/// inside each search call.
+struct ThreadState {
+    /// The fast all-ACGT searcher. Used only when both the pattern and the
+    /// searched text are plain ACGT; see `is_plain_acgt`.
+    plain: PlainSearcher,
+    /// The ambiguity-tolerant searcher, for a degenerate primer and for the
+    /// tiled terminal batches, which sassy implements for the IUPAC profile
+    /// only.
+    ambiguous: AmbiguousSearcher,
+    /// The overhang-aware searcher for the read ends, keyed by the overhang
+    /// cost it was built with so a run at another error rate rebuilds it.
+    overhang: Option<(f32, AmbiguousSearcher)>,
     /// The normalized read, when the input is not its own normalization.
     normalized: Vec<u8>,
     /// The normalized read reversed, for the reverse strand of every search.
     reversed: Vec<u8>,
-    /// Candidate windows; see `candidate_windows`.
-    windows: WindowScratch,
+    /// Candidate windows as `(adapter, start, end)`; see `candidate_windows`.
+    windows: Vec<(usize, usize, usize)>,
     /// Masked end windows; see `search_residue`.
     mask: MaskScratch,
     /// Per-adapter end-seed flags for the head window; see `end_candidates`.
@@ -68,15 +60,21 @@ struct Scratch {
     tail_flags: Vec<bool>,
 }
 
-/// Candidate windows of one read as `(adapter, start, end)` triples.
-#[derive(Debug, Default)]
-struct WindowScratch {
-    /// Windows in seed-emission order.
-    emitted: Vec<(usize, usize, usize)>,
-    /// Windows grouped by adapter and merged: the interior search input.
-    grouped: Vec<(usize, usize, usize)>,
-    /// Per-adapter offsets into `grouped` while grouping.
-    offsets: Vec<usize>,
+impl ThreadState {
+    /// Creates the searchers with empty buffers.
+    fn new() -> Self {
+        Self {
+            plain: new_searcher(),
+            ambiguous: new_ambiguous_searcher(),
+            overhang: None,
+            normalized: Vec::new(),
+            reversed: Vec::new(),
+            windows: Vec::new(),
+            mask: MaskScratch::default(),
+            head_flags: Vec::new(),
+            tail_flags: Vec::new(),
+        }
+    }
 }
 
 /// What a catalog sequence is, which decides what a hit may do. Every role is
@@ -157,13 +155,6 @@ impl AdapterConfig {
         self.adapters = adapters;
         self.candidate_index = OnceLock::new();
     }
-
-    /// The overhang cost per base for the terminal search: the error rate, so
-    /// a partial adapter costs what its missing part would have been allowed
-    /// in edits.
-    fn alpha(&self) -> f32 {
-        self.error_rate as f32
-    }
 }
 
 /// Returns the edit budget for a `len`-base pattern at `rate`, rounded down.
@@ -200,11 +191,6 @@ impl Budget {
 /// read for that adapter instead of candidate windows.
 const MAX_SEED_EXPANSIONS: usize = 256;
 
-/// Upper bound on the seed automaton's DFA size. A DFA past it is rebuilt as
-/// a contiguous NFA, which is a few times slower per byte but grows with the
-/// seed count rather than the state count times the alphabet stride.
-const MAX_SEED_DFA_BYTES: usize = 64 << 20;
-
 /// Exact-seed index over the adapter set. Aho-Corasick partition seeds bound
 /// the interior search to candidate windows, and equal-length barcode entries
 /// are grouped into SIMD batches for the terminal search.
@@ -223,8 +209,9 @@ pub(crate) struct CandidateIndex {
     unfiltered: Vec<bool>,
     /// Equal-length adapter groups searched together over the end windows.
     terminal_batches: Vec<TerminalBatch>,
-    /// Adapters covered by a batch and skipped by the singleton search.
-    batched_adapters: Vec<bool>,
+    /// Adapters searched one pattern at a time over the end windows: those of
+    /// searchable length that no batch covers.
+    singletons: Vec<bool>,
     /// Automaton over every `END_SEED_LEN`-mer of the entries eligible for
     /// partial matching, both strands; `None` when there are none. Gates the
     /// overhang search of an end to the entries with an exact seed in it.
@@ -235,27 +222,14 @@ pub(crate) struct CandidateIndex {
     end_reach: usize,
 }
 
-/// The per-thread single-pattern searchers `search` chooses between.
-struct Searchers<'a> {
-    /// The DNA-profile searcher, for a plain pattern.
-    plain: &'a mut PlainSearcher,
-    /// The IUPAC-profile searcher, for a degenerate pattern.
-    ambiguous: &'a mut AmbiguousSearcher,
-    /// The IUPAC-profile searcher with overhang alignment, for the read ends.
-    overhang: &'a mut AmbiguousSearcher,
-}
-
 /// Equal-length adapters searched together through sassy's pattern-parallel
 /// API, which matches the forward and reverse-complement strands for the batch.
 #[derive(Debug, Clone)]
 struct TerminalBatch {
     /// Indices into `AdapterConfig::adapters`, in pattern order.
     adapter_indices: Vec<usize>,
-    /// The adapter sequences, in `adapter_indices` order.
-    patterns: Vec<Vec<u8>>,
-    /// `patterns` encoded once for the tiled search; `None` past
-    /// `MAX_TILED_PATTERN_LEN`, where the batch is searched from `patterns`.
-    encoded: Option<EncodedAdapterBatch>,
+    /// The adapter sequences encoded once for the tiled search.
+    encoded: EncodedAdapterBatch,
     /// The shared pattern length.
     len: usize,
     /// The shared terminal edit budget.
@@ -274,12 +248,18 @@ impl CandidateIndex {
             .iter()
             .map(|adapter| is_plain_acgt(&adapter.seq))
             .collect();
+        // A pattern below `MIN_PATTERN_LEN` takes part in no search: it gets
+        // no seeds, no batch and no singleton search.
+        let searchable: Vec<bool> = adapters
+            .iter()
+            .map(|adapter| adapter.seq.len() >= MIN_PATTERN_LEN)
+            .collect();
         let mut unfiltered = vec![false; adapters.len()];
         let (matcher, seed_adapters) = if include_interior {
             let mut seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
             for (adapter_idx, adapter) in adapters.iter().enumerate() {
-                let Budget { len, k_mid, .. } = budgets[adapter_idx];
-                if len < MIN_PATTERN_LEN || !adapter.role.splits() {
+                let Budget { k_mid, .. } = budgets[adapter_idx];
+                if !searchable[adapter_idx] || !adapter.role.splits() {
                     continue;
                 }
                 let pattern = adapter.seq.to_ascii_uppercase();
@@ -306,40 +286,36 @@ impl CandidateIndex {
             (None, Vec::new())
         };
 
-        // Sassy packs equal-length patterns across SIMD lanes. Only the roles
-        // without overhang alignment are batched: the tiled search is a
-        // whole-pattern search, and the barcode sets are where equal lengths
-        // occur in numbers. Singletons stay on the ordinary search path: a
-        // batch of one has no pattern-level parallelism and is slower over
-        // these terminal windows.
+        // Sassy packs equal-length patterns across SIMD lanes, one pattern per
+        // 64-bit limb. Only the roles without overhang alignment are batched:
+        // the tiled search is a whole-pattern search, and the barcode sets are
+        // where equal lengths occur in numbers. Singletons stay on the
+        // ordinary search path: a batch of one has no pattern-level
+        // parallelism and is slower over these terminal windows.
         let mut by_len: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (adapter_idx, adapter) in adapters.iter().enumerate() {
-            if adapter.seq.len() >= MIN_PATTERN_LEN && !adapter.role.overhangs() {
-                by_len
-                    .entry(adapter.seq.len())
-                    .or_default()
-                    .push(adapter_idx);
+            let len = adapter.seq.len();
+            if searchable[adapter_idx] && len <= MAX_TILED_PATTERN_LEN && !adapter.role.overhangs()
+            {
+                by_len.entry(len).or_default().push(adapter_idx);
             }
         }
         let mut terminal_batches = Vec::new();
-        let mut batched_adapters = vec![false; adapters.len()];
+        let mut singletons = searchable.clone();
         for (len, adapter_indices) in by_len {
             if adapter_indices.len() >= 2 {
-                let batch_patterns: Vec<Vec<u8>> = adapter_indices
+                let patterns: Vec<Vec<u8>> = adapter_indices
                     .iter()
                     .map(|&idx| adapters[idx].seq.clone())
                     .collect();
                 for &adapter_idx in &adapter_indices {
-                    batched_adapters[adapter_idx] = true;
+                    singletons[adapter_idx] = false;
                 }
-                let k_end = budgets[adapter_indices[0]].k_end;
-                let encoded = encode_patterns(&batch_patterns);
                 terminal_batches.push(TerminalBatch {
+                    k_end: budgets[adapter_indices[0]].k_end,
                     adapter_indices,
-                    patterns: batch_patterns,
-                    encoded,
+                    encoded: encode_patterns(&patterns),
                     len,
-                    k_end,
                 });
             }
         }
@@ -352,7 +328,7 @@ impl CandidateIndex {
         let mut end_reach = 0;
         for (adapter_idx, adapter) in adapters.iter().enumerate() {
             let Budget { len, k_end, .. } = budgets[adapter_idx];
-            if len < MIN_PATTERN_LEN || !adapter.role.overhangs() {
+            if !searchable[adapter_idx] || !adapter.role.overhangs() {
                 continue;
             }
             end_reach = end_reach.max(len + k_end);
@@ -382,7 +358,7 @@ impl CandidateIndex {
             plain,
             unfiltered,
             terminal_batches,
-            batched_adapters,
+            singletons,
             end_matcher,
             end_seed_adapters,
             end_reach,
@@ -423,21 +399,16 @@ impl CandidateIndex {
         }
     }
 
-    /// Fills `scratch.grouped` with the text spans that can hold an interior
-    /// hit, as `(adapter, start, end)` sorted by adapter then start: a radius
-    /// around every exact seed occurrence, merged per adapter, or the whole
-    /// text for an `unfiltered` adapter. `text` is a `normalized_read`; the
-    /// seed automaton matches uppercase bases only.
-    fn candidate_windows(&self, text: &[u8], scratch: &mut WindowScratch) {
-        let WindowScratch {
-            emitted,
-            grouped,
-            offsets,
-        } = scratch;
-        emitted.clear();
+    /// Fills `windows` with the text spans that can hold an interior hit, as
+    /// `(adapter, start, end)` sorted by adapter then start: a radius around
+    /// every exact seed occurrence, merged per adapter, or the whole text for
+    /// an `unfiltered` adapter. `text` is normalized (see `normalize_into`);
+    /// the seed automaton matches uppercase bases only.
+    fn candidate_windows(&self, text: &[u8], windows: &mut Vec<(usize, usize, usize)>) {
+        windows.clear();
         for (adapter_idx, &whole) in self.unfiltered.iter().enumerate() {
             if whole {
-                emitted.push((adapter_idx, 0, text.len()));
+                windows.push((adapter_idx, 0, text.len()));
             }
         }
         if let Some(matcher) = &self.matcher {
@@ -450,7 +421,7 @@ impl CandidateIndex {
                     // full-window `k_end` search to reproduce its span and tie
                     // behavior.
                     let radius = len + k_end;
-                    emitted.push((
+                    windows.push((
                         adapter_idx,
                         m.start().saturating_sub(radius),
                         m.end().saturating_add(radius).min(text.len()),
@@ -459,71 +430,36 @@ impl CandidateIndex {
             }
         }
 
-        // Groups the windows per adapter with a counting scatter and sorts
-        // each run on its own. The automaton emits in text order, so a run
-        // is nearly sorted already and costs a short insertion pass, where
-        // one sort of every window costs a comparison sort of hundreds.
-        let adapters = self.budgets.len();
-        offsets.clear();
-        offsets.resize(adapters + 1, 0);
-        for &(adapter_idx, _, _) in emitted.iter() {
-            offsets[adapter_idx + 1] += 1;
-        }
-        for adapter_idx in 0..adapters {
-            offsets[adapter_idx + 1] += offsets[adapter_idx];
-        }
-        grouped.clear();
-        grouped.resize(emitted.len(), (0, 0, 0));
-        for &window in emitted.iter() {
-            let slot = &mut offsets[window.0];
-            grouped[*slot] = window;
-            *slot += 1;
-        }
-
-        // Merges overlapping or touching windows of one adapter in place.
-        // After the scatter `offsets[a]` is the end of run `a`, and the
-        // merged prefix never reaches the run being read.
+        // Merges overlapping or touching windows of one adapter in place; the
+        // merged prefix never reaches the window being read.
+        windows.sort_unstable();
         let mut merged = 0;
-        let mut run_start = 0;
-        for &run_end in offsets[..adapters].iter() {
-            grouped[run_start..run_end].sort_unstable();
-            let first = merged;
-            for i in run_start..run_end {
-                let (_, start, end) = grouped[i];
-                if merged > first && start <= grouped[merged - 1].2 {
-                    grouped[merged - 1].2 = grouped[merged - 1].2.max(end);
-                } else {
-                    grouped[merged] = grouped[i];
-                    merged += 1;
-                }
+        for i in 0..windows.len() {
+            let (adapter_idx, start, end) = windows[i];
+            if merged > 0 && windows[merged - 1].0 == adapter_idx && start <= windows[merged - 1].2
+            {
+                windows[merged - 1].2 = windows[merged - 1].2.max(end);
+            } else {
+                windows[merged] = (adapter_idx, start, end);
+                merged += 1;
             }
-            run_start = run_end;
         }
-        grouped.truncate(merged);
+        windows.truncate(merged);
     }
 }
 
 /// Builds the overlapping-match automaton over `seeds`. The seed scan runs
 /// over every base of every read, so the automaton is a DFA: one table lookup
-/// per byte, against the contiguous NFA's per-state transition scan. Byte
-/// classes fold the bytes outside ACGT into one column and keep the table
-/// small. The automaton is case-sensitive over uppercase seeds: the scanned
-/// text is always a `normalized_read`, and a case-insensitive alphabet would
-/// double the table stride for nothing. A DFA past `MAX_SEED_DFA_BYTES`, or
-/// one the builder rejects, gives way to the contiguous NFA.
+/// per byte, against the contiguous NFA's per-state transition scan. The
+/// builder's default byte classes fold the bytes outside ACGT into one column
+/// and keep the table small. The automaton is case-sensitive over uppercase
+/// seeds: the scanned text is always normalized (see `normalize_into`), and a
+/// case-insensitive alphabet would double the table stride for nothing.
 fn seed_automaton(seeds: &[Vec<u8>]) -> AhoCorasick {
-    let build = |kind: AhoCorasickKind| {
-        AhoCorasick::builder()
-            .kind(Some(kind))
-            .byte_classes(true)
-            .prefilter(true)
-            .build(seeds)
-    };
-    match build(AhoCorasickKind::DFA) {
-        Ok(dfa) if dfa.memory_usage() <= MAX_SEED_DFA_BYTES => dfa,
-        _ => build(AhoCorasickKind::ContiguousNFA)
-            .expect("Adapter seeds are nonempty ASCII DNA patterns"),
-    }
+    AhoCorasick::builder()
+        .kind(Some(AhoCorasickKind::DFA))
+        .build(seeds)
+        .expect("Adapter seeds are nonempty ASCII DNA patterns")
 }
 
 /// Returns the exact seeds of one strand of `pattern`: `max_edits + 1` pieces,
@@ -655,9 +591,9 @@ enum Terminal {
 /// fills one lane of eight with a single pattern, and it measured slower on
 /// these short windows than the allocations cost.
 ///
-/// `text` is plain ACGT on every call; see `normalized_read`.
+/// `text` is plain ACGT on every call; see `normalize_into`.
 fn search(
-    searchers: &mut Searchers<'_>,
+    engine: &mut Engine<'_>,
     index: &CandidateIndex,
     adapter_idx: usize,
     pattern: &[u8],
@@ -666,19 +602,9 @@ fn search(
     accept: impl FnMut(Hit),
 ) {
     if index.plain[adapter_idx] {
-        for_each_hit(searchers.plain, pattern, &text, k, accept);
+        for_each_hit(engine.plain, pattern, &text, k, accept);
     } else {
-        for_each_hit(searchers.ambiguous, pattern, &text, k, accept);
-    }
-}
-
-/// Returns the strands of `read[start..end]`, given `reversed` as `read`
-/// reversed.
-fn strands<'a>(read: &'a [u8], reversed: &'a [u8], start: usize, end: usize) -> Strands<'a> {
-    let n = read.len();
-    Strands {
-        forward: &read[start..end],
-        reversed: &reversed[n - end..n - start],
+        for_each_hit(engine.ambiguous, pattern, &text, k, accept);
     }
 }
 
@@ -699,14 +625,17 @@ const AMBIGUOUS_READ_BASE: u8 = b'A';
 
 /// Returns the read as every searcher sees it: uppercase, with each byte
 /// outside ACGT rewritten to `AMBIGUOUS_READ_BASE`. An uppercase plain read,
-/// the common case, borrows unchanged and allocates nothing. Sassy's profiles
-/// fold case themselves; the seed automaton does not, so the text is folded
-/// once here rather than on every seed transition.
-pub(crate) fn normalized_read(window: &[u8]) -> Cow<'_, [u8]> {
+/// the common case, is returned as is; any other read is rewritten into
+/// `buf`, which keeps its capacity across calls. Sassy's profiles fold case
+/// themselves; the seed automaton does not, so the text is folded once here
+/// rather than on every seed transition.
+pub(crate) fn normalize_into<'a>(window: &'a [u8], buf: &'a mut Vec<u8>) -> &'a [u8] {
     if is_upper_acgt(window) {
-        return Cow::Borrowed(window);
+        return window;
     }
-    Cow::Owned(window.iter().map(|&b| normalize_base(b)).collect())
+    buf.clear();
+    buf.extend(window.iter().map(|&b| normalize_base(b)));
+    buf
 }
 
 /// Returns the normalized form of one read byte: its uppercase base, or
@@ -721,7 +650,7 @@ fn normalize_base(b: u8) -> u8 {
 }
 
 /// Returns whether every byte is an uppercase A/C/G/T, so that the window is
-/// its own `normalized_read`. Folded 32 bytes at a time without an early exit
+/// its own normalization. Folded 32 bytes at a time without an early exit
 /// and with the four comparisons or-ed rather than matched, which lets the
 /// scan vectorize; it runs over every base of every read.
 fn is_upper_acgt(seq: &[u8]) -> bool {
@@ -751,7 +680,7 @@ fn trace_hit(name: &str, start: usize, end: usize, cost: usize, action: Option<H
 
 /// What the trimmer did with an accepted adapter hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HitAction {
+enum HitAction {
     /// Terminal hit at the 5' end: the keep-boundary moved inward past it.
     TrimFivePrime,
     /// Terminal hit at the 3' end.
@@ -873,32 +802,20 @@ impl<'a> Keep<'a> {
     /// aligned, flush with the window end it hangs off, and within the edit
     /// budget of the aligned part alone. A whole-pattern hit always passes.
     fn partial_hit_is_valid(&self, adapter_idx: usize, hit: Hit) -> bool {
-        self.partial_hit_in(adapter_idx, hit, self.n)
-    }
-
-    /// `partial_hit_is_valid` for a hit in a text of length `text_len`.
-    fn partial_hit_in(&self, adapter_idx: usize, hit: Hit, text_len: usize) -> bool {
-        let len = self.adapters[adapter_idx].seq.len();
         let overhang = hit.left_overhang + hit.right_overhang;
         if overhang == 0 {
             return true;
         }
-        let overlap = len - overhang;
-        if overlap < MIN_OVERLAP {
-            return false;
-        }
-        if (hit.left_overhang > 0 && hit.start != 0)
-            || (hit.right_overhang > 0 && hit.end != text_len)
-        {
-            return false;
-        }
-        let overhang_cost = (self.error_rate * overhang as f64).floor() as usize;
-        hit.cost.saturating_sub(overhang_cost) <= partial_budget(self.error_rate, overlap)
+        let overlap = self.adapters[adapter_idx].seq.len() - overhang;
+        overlap >= MIN_OVERLAP
+            && (hit.left_overhang == 0 || hit.start == 0)
+            && (hit.right_overhang == 0 || hit.end == self.n)
+            && self.residue_within_budget(hit, overlap)
     }
 
-    /// Returns whether a residue hit whose `overlap` bases lie in unmasked text
-    /// is within the partial budget of that overlap, once the cost of the
-    /// pattern bases beyond the text end is discounted.
+    /// Returns whether a hit whose `overlap` bases lie in the text is within
+    /// the partial budget of that overlap, once the cost of the pattern bases
+    /// beyond the text end is discounted.
     fn residue_within_budget(&self, hit: Hit, overlap: usize) -> bool {
         let overhang = hit.left_overhang + hit.right_overhang;
         let overhang_cost = (self.error_rate * overhang as f64).floor() as usize;
@@ -996,7 +913,7 @@ impl<'a> Keep<'a> {
 /// every two-strand search copies nothing.
 #[derive(Debug, Clone, Copy)]
 struct Read<'a> {
-    /// The read as every searcher sees it; see `normalized_read`.
+    /// The read as every searcher sees it; see `normalize_into`.
     window: &'a [u8],
     /// `window` reversed.
     reversed: &'a [u8],
@@ -1005,7 +922,11 @@ struct Read<'a> {
 impl<'a> Read<'a> {
     /// Returns the strands of `window[start..end]`.
     fn strands(&self, start: usize, end: usize) -> Strands<'a> {
-        strands(self.window, self.reversed, start, end)
+        let n = self.window.len();
+        Strands {
+            forward: &self.window[start..end],
+            reversed: &self.reversed[n - end..n - start],
+        }
     }
 }
 
@@ -1020,14 +941,18 @@ struct Context<'a> {
     read: Read<'a>,
 }
 
-/// The per-thread searchers and buffers one read is processed with.
+/// The per-thread searchers and buffers one read is processed with, borrowed
+/// from the thread's `ThreadState` for the duration of `adapter_segments`.
 struct Engine<'a> {
-    /// The tiled searcher for the terminal batches.
-    tiled: &'a mut BatchedAdapterSearcher,
-    /// The single-pattern searchers.
-    searchers: Searchers<'a>,
-    /// Candidate windows of the interior search.
-    windows: &'a mut WindowScratch,
+    /// The DNA-profile searcher, for a plain pattern.
+    plain: &'a mut PlainSearcher,
+    /// The IUPAC-profile searcher, for a degenerate pattern and for the
+    /// terminal batches.
+    ambiguous: &'a mut AmbiguousSearcher,
+    /// The IUPAC-profile searcher with overhang alignment, for the read ends.
+    overhang: &'a mut AmbiguousSearcher,
+    /// Candidate windows of the interior search; see `candidate_windows`.
+    windows: &'a mut Vec<(usize, usize, usize)>,
     /// Masked end windows of the residue search.
     mask: &'a mut MaskScratch,
     /// Per-adapter end-seed flags for the head window; see `end_candidates`.
@@ -1047,29 +972,20 @@ type Span = (usize, usize);
 fn search_batched(
     ctx: Context<'_>,
     span: Span,
-    tiled: &mut BatchedAdapterSearcher,
+    searcher: &mut AmbiguousSearcher,
     keep: &mut Keep<'_>,
 ) {
     let (ws, we) = span;
     let n = we - ws;
-    let total = ctx.read.window.len();
-    let (window, reversed) = (ctx.read.window, ctx.read.reversed);
     for batch in &ctx.index.terminal_batches {
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, batch.len, batch.k_end);
+        let head = ctx.read.strands(ws, ws + head_end);
+        let tail = ctx.read.strands(ws + tail_start, we);
+        accept_batch_hits(batch, searcher, head, 0, Site::Head, keep);
         accept_batch_hits(
             batch,
-            tiled,
-            &window[ws..ws + head_end],
-            &reversed[total - (ws + head_end)..total - ws],
-            0,
-            Site::Head,
-            keep,
-        );
-        accept_batch_hits(
-            batch,
-            tiled,
-            &window[ws + tail_start..we],
-            &reversed[total - we..total - (ws + tail_start)],
+            searcher,
+            tail,
             tail_start,
             Site::Tail { head_end },
             keep,
@@ -1077,19 +993,17 @@ fn search_batched(
     }
 }
 
-/// Searches one batch over `text`, a window starting at `offset` in the span
-/// whose reversal is `reversed`, and passes every hit to `keep` at `site` in
-/// span coordinates.
+/// Searches one batch over `text`, a window starting at `offset` in the span,
+/// and passes every hit to `keep` at `site` in span coordinates.
 fn accept_batch_hits(
     batch: &TerminalBatch,
-    searcher: &mut BatchedAdapterSearcher,
-    text: &[u8],
-    reversed: &[u8],
+    searcher: &mut AmbiguousSearcher,
+    text: Strands<'_>,
     offset: usize,
     site: Site,
     keep: &mut Keep<'_>,
 ) {
-    let mut accept = |pattern_idx: usize, start: usize, end: usize, cost: usize| {
+    let accept = |pattern_idx: usize, start: usize, end: usize, cost: usize| {
         keep.accept(
             site,
             batch.adapter_indices[pattern_idx],
@@ -1102,38 +1016,31 @@ fn accept_batch_hits(
             },
         );
     };
-    match &batch.encoded {
-        Some(encoded) => {
-            encoded_pattern_hits(searcher, encoded, text, reversed, batch.k_end, accept);
-        },
-        None => {
-            for h in pattern_hits(searcher, &batch.patterns, text, batch.k_end) {
-                accept(h.pattern_idx, h.text_start, h.text_end, h.cost as usize);
-            }
-        },
-    }
+    encoded_pattern_hits(
+        searcher,
+        &batch.encoded,
+        text.forward,
+        text.reversed,
+        batch.k_end,
+        accept,
+    );
 }
 
 /// Searches every adapter without an equal-length partner over the two end
 /// windows of the span, one pattern at a time, for whole-pattern hits.
-fn search_singletons(
-    ctx: Context<'_>,
-    span: Span,
-    searchers: &mut Searchers<'_>,
-    keep: &mut Keep<'_>,
-) {
+fn search_singletons(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
     let (ws, we) = span;
     let n = we - ws;
     for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
-        let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
-        if len < MIN_PATTERN_LEN || ctx.index.batched_adapters[adapter_idx] {
+        if !ctx.index.singletons[adapter_idx] {
             continue;
         }
+        let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, len, k_end);
         let head = ctx.read.strands(ws, ws + head_end);
         let tail = ctx.read.strands(ws + tail_start, we);
         search(
-            searchers,
+            engine,
             ctx.index,
             adapter_idx,
             &adapter.seq,
@@ -1144,7 +1051,7 @@ fn search_singletons(
             },
         );
         search(
-            searchers,
+            engine,
             ctx.index,
             adapter_idx,
             &adapter.seq,
@@ -1159,8 +1066,10 @@ fn search_singletons(
 
 /// Searches the partial-matching entries with overhang alignment over each
 /// end window of the span that the whole-pattern pass left untrimmed, for
-/// the entries whose end seeds occur in that window. A partial hit flush with
-/// the read end trims it; see `Keep::partial_hit_is_valid`.
+/// the entries whose end seeds occur in that window. The end-seed flags are
+/// set only for the partial-matching entries (see `CandidateIndex::new`), so
+/// they gate the role as well as the seed. A partial hit flush with the read
+/// end trims it; see `Keep::partial_hit_is_valid`.
 fn search_partial(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
     let (ws, we) = span;
     let n = we - ws;
@@ -1168,13 +1077,10 @@ fn search_partial(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: &
     let tail_open = keep.hi == n;
     for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
         let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
-        if len < MIN_PATTERN_LEN || !adapter.role.overhangs() {
-            continue;
-        }
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, len, k_end);
         if head_open && engine.head_flags[adapter_idx] {
             let head = ctx.read.strands(ws, ws + head_end);
-            for_each_hit(engine.searchers.overhang, &adapter.seq, &head, k_end, |h| {
+            for_each_hit(engine.overhang, &adapter.seq, &head, k_end, |h| {
                 if h.left_overhang > 0 {
                     keep.accept(Site::Head, adapter_idx, h);
                 }
@@ -1182,7 +1088,7 @@ fn search_partial(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: &
         }
         if tail_open && engine.tail_flags[adapter_idx] {
             let tail = ctx.read.strands(ws + tail_start, we);
-            for_each_hit(engine.searchers.overhang, &adapter.seq, &tail, k_end, |h| {
+            for_each_hit(engine.overhang, &adapter.seq, &tail, k_end, |h| {
                 if h.right_overhang > 0 {
                     keep.accept(Site::Tail { head_end }, adapter_idx, shifted(h, tail_start));
                 }
@@ -1234,7 +1140,8 @@ impl MaskScratch {
 /// align at least `MIN_OVERLAP` unmasked bases within the partial budget of
 /// that overlap and lie inside the current keep boundaries, so a hit the
 /// plain pass already trimmed at the opposite end is not read as residue of
-/// this one; the masked stretch itself is trimmed with the hit.
+/// this one; the masked stretch itself is trimmed with the hit. The end-seed
+/// flags gate the entries as in `search_partial`.
 fn search_residue(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
     let (ws, we) = span;
     let n = we - ws;
@@ -1242,15 +1149,12 @@ fn search_residue(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: &
     let retry_head = keep.lo == 0;
     let retry_tail = keep.hi == n;
     for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
-        let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
-        if len < MIN_PATTERN_LEN || !adapter.role.splits() {
-            continue;
-        }
         let retry_head = retry_head && engine.head_flags[adapter_idx];
         let retry_tail = retry_tail && engine.tail_flags[adapter_idx];
-        if !retry_head && !retry_tail {
+        if !adapter.role.splits() || (!retry_head && !retry_tail) {
             continue;
         }
+        let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
         let reach = (keep.end_size + len + k_end).min(n);
         for &masked in RESIDUE_MASKS {
             if masked + MIN_OVERLAP > reach {
@@ -1258,7 +1162,7 @@ fn search_residue(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: &
             }
             if retry_head {
                 let text = engine.mask.fill(&window[ws..ws + reach], masked, true);
-                for_each_hit(engine.searchers.overhang, &adapter.seq, &text, k_end, |h| {
+                for_each_hit(engine.overhang, &adapter.seq, &text, k_end, |h| {
                     let overlap = h.end.saturating_sub(masked.max(h.start));
                     if h.start <= masked
                         && h.end <= keep.hi
@@ -1281,7 +1185,7 @@ fn search_residue(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: &
                 let start = n - reach;
                 let text = engine.mask.fill(&window[ws + start..we], masked, false);
                 let unmasked = reach - masked;
-                for_each_hit(engine.searchers.overhang, &adapter.seq, &text, k_end, |h| {
+                for_each_hit(engine.overhang, &adapter.seq, &text, k_end, |h| {
                     let overlap = unmasked.min(h.end).saturating_sub(h.start);
                     if h.end >= unmasked
                         && start + h.start >= keep.lo
@@ -1315,10 +1219,11 @@ fn shifted(hit: Hit, offset: usize) -> Hit {
 /// splitting role has no seeds and no windows.
 fn search_interior(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
     ctx.index.candidate_windows(ctx.read.window, engine.windows);
-    for &(adapter_idx, start, end) in engine.windows.grouped.iter() {
+    for i in 0..engine.windows.len() {
+        let (adapter_idx, start, end) = engine.windows[i];
         let Budget { k_mid, .. } = ctx.index.budgets[adapter_idx];
         search(
-            &mut engine.searchers,
+            engine,
             ctx.index,
             adapter_idx,
             &ctx.cfg.adapters[adapter_idx].seq,
@@ -1334,9 +1239,9 @@ fn search_interior(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut Keep<'_
 /// ends they left untrimmed.
 fn search_terminal(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
     if !ctx.index.terminal_batches.is_empty() {
-        search_batched(ctx, span, engine.tiled, keep);
+        search_batched(ctx, span, engine.ambiguous, keep);
     }
-    search_singletons(ctx, span, &mut engine.searchers, keep);
+    search_singletons(ctx, span, engine, keep);
     let (ws, we) = span;
     if keep.lo != 0 && keep.hi != we - ws {
         return;
@@ -1375,55 +1280,44 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
     let index = cfg
         .candidate_index
         .get_or_init(|| CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.split));
-    let alpha = cfg.alpha();
-    SCRATCH.with_borrow_mut(|scratch| {
-        let Scratch {
+    // The overhang cost per base of the terminal search is the error rate, so
+    // a partial adapter costs what its missing part would have been allowed
+    // in edits.
+    let alpha = cfg.error_rate as f32;
+    STATE.with_borrow_mut(|state| {
+        let ThreadState {
+            plain,
+            ambiguous,
+            overhang,
             normalized,
             reversed,
             windows,
             mask,
             head_flags,
             tail_flags,
-        } = scratch;
-        let window: &[u8] = if is_upper_acgt(window) {
-            window
-        } else {
-            normalized.clear();
-            normalized.extend(window.iter().map(|&b| normalize_base(b)));
-            normalized
-        };
+        } = state;
+        let window = normalize_into(window, normalized);
         reversed.clear();
         reversed.extend(window.iter().rev());
+        let overhang = match overhang {
+            Some((a, s)) if *a == alpha => s,
+            slot => &mut slot.insert((alpha, new_overhang_searcher(alpha))).1,
+        };
         let ctx = Context {
             cfg,
             index,
             read: Read { window, reversed },
         };
-        BATCH_SEARCHER.with_borrow_mut(|tiled| {
-            RC_SEARCHER.with_borrow_mut(|plain| {
-                RC_AMBIGUOUS.with_borrow_mut(|ambiguous| {
-                    RC_OVERHANG.with_borrow_mut(|slot| {
-                        let overhang = match slot {
-                            Some((a, s)) if *a == alpha => s,
-                            _ => &mut slot.insert((alpha, new_overhang_searcher(alpha))).1,
-                        };
-                        let mut engine = Engine {
-                            tiled,
-                            searchers: Searchers {
-                                plain,
-                                ambiguous,
-                                overhang,
-                            },
-                            windows,
-                            mask,
-                            head_flags,
-                            tail_flags,
-                        };
-                        segments_with(ctx, &mut engine)
-                    })
-                })
-            })
-        })
+        let mut engine = Engine {
+            plain,
+            ambiguous,
+            overhang,
+            windows,
+            mask,
+            head_flags,
+            tail_flags,
+        };
+        segments_with(ctx, &mut engine)
     })
 }
 
@@ -1539,10 +1433,10 @@ mod segment_tests {
 
     /// Returns `candidate_windows` grouped per adapter.
     fn windows_by_adapter(index: &CandidateIndex, text: &[u8]) -> Vec<Vec<(usize, usize)>> {
-        let mut scratch = WindowScratch::default();
-        index.candidate_windows(text, &mut scratch);
+        let mut windows = Vec::new();
+        index.candidate_windows(text, &mut windows);
         let mut by_adapter = vec![Vec::new(); index.budgets.len()];
-        for (adapter_idx, start, end) in scratch.grouped {
+        for (adapter_idx, start, end) in windows {
             by_adapter[adapter_idx].push((start, end));
         }
         by_adapter
@@ -1752,8 +1646,9 @@ mod segment_tests {
             if case % 2 == 0 {
                 text.make_ascii_lowercase();
             }
+            let mut buf = Vec::new();
             assert!(
-                !windows_by_adapter(&index, &normalized_read(&text))[0].is_empty(),
+                !windows_by_adapter(&index, normalize_into(&text, &mut buf))[0].is_empty(),
                 "Lossless seed filter rejected <=k edit case {case}"
             );
         }

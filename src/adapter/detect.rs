@@ -5,7 +5,7 @@
 //! full on every read.
 
 use super::search::{AmbiguousSearcher, hits, new_ambiguous_searcher};
-use super::{Adapter, Budget, MIN_PATTERN_LEN, Terminal, classify_terminal, normalized_read};
+use super::{Adapter, Budget, MIN_PATTERN_LEN, Terminal, classify_terminal, normalize_into};
 use rayon::prelude::*;
 
 /// Sample size below which presence detection is unreliable; callers skip it
@@ -21,10 +21,12 @@ pub fn presence_min(sample_size: usize) -> usize {
 
 /// Returns whether `ad` would act on `window`: a terminal hit (trimmed) or,
 /// when `split`, an interior hit (`cost <= k_mid`, split). Searches the same
-/// normalized text with the same budgets as `adapter_segments`, so presence is
-/// defined as having an effect on the read.
+/// normalized text (rewritten into `buf` when needed) with the same budgets
+/// as `adapter_segments`, so presence is defined as having an effect on the
+/// read.
 fn adapter_present_in(
     searcher: &mut AmbiguousSearcher,
+    buf: &mut Vec<u8>,
     window: &[u8],
     ad: &Adapter,
     budget: Budget,
@@ -35,9 +37,9 @@ fn adapter_present_in(
     if n == 0 || ad.seq.len() < MIN_PATTERN_LEN {
         return false;
     }
-    let window = normalized_read(window);
+    let window = normalize_into(window, buf);
     let end_size = end_size.min(n);
-    for h in hits(searcher, &ad.seq, &window, budget.k_end) {
+    for h in hits(searcher, &ad.seq, window, budget.k_end) {
         match classify_terminal(h.start, h.end, n, end_size) {
             // `Excise` acts either way: split when `split`, terminal-trim otherwise.
             Terminal::Five | Terminal::Three | Terminal::Excise => return true,
@@ -71,10 +73,12 @@ pub fn present(
             .par_iter()
             .filter_map(|ad| {
                 let mut searcher = new_ambiguous_searcher();
+                let mut buf = Vec::new();
                 let budget = Budget::new(ad.seq.len(), error_rate);
                 let mut count = 0usize;
                 for &seq in sample {
-                    if adapter_present_in(&mut searcher, seq, ad, budget, end_size, split) {
+                    if adapter_present_in(&mut searcher, &mut buf, seq, ad, budget, end_size, split)
+                    {
                         count += 1;
                         if count >= min_count {
                             return Some(ad.clone());
@@ -157,15 +161,19 @@ mod tests {
     #[test]
     fn adapter_present_in_terminal_and_interior() {
         let mut s = new_ambiguous_searcher();
+        let mut buf = Vec::new();
         let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", Role::Adapter);
         let budget = Budget::new(a.seq.len(), 0.2);
         // Terminal: adapter at the read start.
         let mut term = a.seq.clone();
         term.extend_from_slice(&[b'A'; 60]);
-        assert!(adapter_present_in(&mut s, &term, &a, budget, 150, false));
+        assert!(adapter_present_in(
+            &mut s, &mut buf, &term, &a, budget, 150, false
+        ));
         // Absent: pure-A read.
         assert!(!adapter_present_in(
             &mut s,
+            &mut buf,
             &[b'A'; 80],
             &a,
             budget,
@@ -176,11 +184,11 @@ mod tests {
         let mut inter = vec![b'A'; 300];
         inter.splice(150..150, a.seq.iter().copied());
         assert!(
-            adapter_present_in(&mut s, &inter, &a, budget, 20, true),
+            adapter_present_in(&mut s, &mut buf, &inter, &a, budget, 20, true),
             "Interior found when split"
         );
         assert!(
-            !adapter_present_in(&mut s, &inter, &a, budget, 20, false),
+            !adapter_present_in(&mut s, &mut buf, &inter, &a, budget, 20, false),
             "Interior ignored when ends-only"
         );
     }
@@ -221,17 +229,22 @@ mod tests {
             candidate_index: std::sync::OnceLock::new(),
         };
         let mut s = new_ambiguous_searcher();
+        let mut buf = Vec::new();
         let budget = Budget::new(a.seq.len(), 0.2);
         for r in &reads {
             assert_eq!(adapter_segments(r, &cfg), vec![(0, r.len())]);
-            assert!(!adapter_present_in(&mut s, r, &a, budget, 150, true));
+            assert!(!adapter_present_in(
+                &mut s, &mut buf, r, &a, budget, 150, true
+            ));
         }
 
         // The adapter after the run: detection and the trimmer both act.
         let mut planted = vec![b'N'; 60];
         planted.extend_from_slice(&a.seq);
         planted.extend(splitmix_dna(9, 80));
-        assert!(adapter_present_in(&mut s, &planted, &a, budget, 150, true));
+        assert!(adapter_present_in(
+            &mut s, &mut buf, &planted, &a, budget, 150, true
+        ));
         assert_ne!(adapter_segments(&planted, &cfg), vec![(0, planted.len())]);
     }
 }

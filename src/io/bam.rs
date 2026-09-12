@@ -9,6 +9,7 @@ use noodles_bam as bam;
 use noodles_bgzf as bgzf;
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::io::Write as _; // write_header / write_alignment_record
+use noodles_sam::alignment::record::Flags;
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::{self as sam};
 
@@ -27,15 +28,34 @@ fn workers_nonzero(workers: usize) -> NonZero<usize> {
     NonZero::new(workers.max(1)).unwrap_or(NonZero::<usize>::MIN)
 }
 
-/// Errors (naming the read) if the record is aligned or flagged
-/// reverse-complemented; only unaligned BAM (uBAM) input is supported.
-pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
-    let flags = rec.flags();
-    let name = || {
-        rec.name()
-            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-            .unwrap_or_else(|| "<unnamed>".to_string())
-    };
+/// The read name for a message, `<unnamed>` for a record without one.
+pub(crate) fn display_name(name: Option<&[u8]>) -> String {
+    name.map_or_else(
+        || "<unnamed>".to_string(),
+        |n| String::from_utf8_lossy(n).into_owned(),
+    )
+}
+
+/// The pre-spec lowercase spellings of the base-modification tags.
+///
+/// htslib still reads them (`sam_mods.c` falls back to `Mm` when `MM` is absent,
+/// and to `Ml` when `ML` is absent), so guppy and megalodon output decodes
+/// correctly in htslib-based tools, while whittle, which reads only the
+/// uppercase tags, would copy them through unchanged onto a trimmed sequence
+/// and relocate every call.
+pub(crate) const LEGACY_MOD_TAGS: [[u8; 2]; 2] = [*b"Mm", *b"Ml"];
+
+/// Refuses a record the workflows cannot trim, naming the read: one that is
+/// aligned, one flagged reverse-complemented, or one carrying a legacy
+/// `Mm`/`Ml` tag (`legacy_tag`, the first such tag it carries). Shared by the
+/// decoded guard (`ensure_trimmable`) and the raw-record guard in
+/// `workflow::bam`, so both refuse with the same message. `name` renders the
+/// read name for the message.
+pub(crate) fn refuse_untrimmable(
+    flags: Flags,
+    legacy_tag: Option<[u8; 2]>,
+    name: impl Fn() -> String,
+) -> anyhow::Result<()> {
     if !flags.is_unmapped() {
         anyhow::bail!(
             "read {} is aligned (mapped); only unaligned BAM (uBAM) input is supported",
@@ -57,58 +77,38 @@ pub fn ensure_unaligned(rec: &RecordBuf) -> anyhow::Result<()> {
             name()
         );
     }
-    Ok(())
-}
-
-/// The pre-spec lowercase spellings of the base-modification tags.
-///
-/// htslib still reads them (`sam_mods.c` falls back to `Mm` when `MM` is absent,
-/// and to `Ml` when `ML` is absent), so guppy and megalodon output decodes
-/// correctly in htslib-based tools, while whittle, which reads only the
-/// uppercase tags, would copy them through unchanged onto a trimmed sequence
-/// and relocate every call.
-pub(crate) const LEGACY_MOD_TAGS: [[u8; 2]; 2] = [*b"Mm", *b"Ml"];
-
-/// Errors if the record carries legacy `Mm`/`Ml` rather than `MM`/`ML`.
-///
-/// Refused rather than rewritten: supporting both spellings would require
-/// choosing which to emit, and rewriting the tag changes the record's schema.
-/// Refusing avoids the corruption that copying the tags through would produce.
-pub fn ensure_modern_mod_tags(rec: &RecordBuf) -> anyhow::Result<()> {
-    for t in LEGACY_MOD_TAGS {
-        if rec.data().get(&Tag::new(t[0], t[1])).is_some() {
-            anyhow::bail!(
-                "read {} carries the legacy `{}` base-modification tag; whittle rewrites only \
-                 the current `MM`/`ML` spelling, so trimming this record would leave its \
-                 modification calls pointing at the wrong bases",
-                rec.name()
-                    .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
-                    .unwrap_or_else(|| "<unnamed>".to_string()),
-                String::from_utf8_lossy(&t)
-            );
-        }
+    // A legacy tag is refused rather than rewritten: supporting both spellings
+    // would require choosing which to emit, and rewriting the tag changes the
+    // record's schema. Refusing avoids the corruption that copying the tag
+    // through would produce.
+    if let Some(t) = legacy_tag {
+        anyhow::bail!(
+            "read {} carries the legacy `{}` base-modification tag; whittle rewrites only \
+             the current `MM`/`ML` spelling, so trimming this record would leave its \
+             modification calls pointing at the wrong bases",
+            name(),
+            String::from_utf8_lossy(&t)
+        );
     }
     Ok(())
 }
 
-/// Opens a BAM reader (multithreaded BGZF when `workers > 1`) and returns the
-/// header and a `Send` owning raw-record iterator.
-pub fn reader(
-    input: Option<&Path>,
-    workers: usize,
-) -> anyhow::Result<(sam::Header, RawRecordIter)> {
-    let inner: Box<dyn io::Read + Send> = match input {
-        Some(p) => Box::new(File::open(p)?),
-        None => Box::new(io::stdin()),
-    };
-    reader_from(inner, workers)
+/// Errors (naming the read) if a decoded record is aligned, flagged
+/// reverse-complemented or carries a legacy `Mm`/`Ml` tag; see
+/// `refuse_untrimmable`. Only unaligned BAM (uBAM) input is supported.
+pub fn ensure_trimmable(rec: &RecordBuf) -> anyhow::Result<()> {
+    let legacy_tag = LEGACY_MOD_TAGS
+        .into_iter()
+        .find(|t| rec.data().get(&Tag::new(t[0], t[1])).is_some());
+    refuse_untrimmable(rec.flags(), legacy_tag, || {
+        display_name(rec.name().map(AsRef::as_ref))
+    })
 }
 
-/// Opens a BAM reader like `reader`, but over an already-open stream rather
-/// than a path or stdin. Used by the single-file dispatch so a stdin BAM whose
-/// first bytes were consumed for format sniffing (and chained back into
-/// `inner`) is read from the true start; reopening `io::stdin()` would drop
-/// those bytes. Multithreaded BGZF when `workers > 1`.
+/// Opens a BAM reader over an already-open stream and returns the header and a
+/// `Send` owning raw-record iterator. The single-file dispatch hands over a
+/// stream whose sniffed first bytes are chained back in front, so a stdin BAM
+/// is read from its true start. Multithreaded BGZF when `workers > 1`.
 pub fn reader_from(
     inner: Box<dyn io::Read + Send>,
     workers: usize,
@@ -417,12 +417,40 @@ mod tests {
         let mut rec = RecordBuf::default();
         *rec.flags_mut() = Flags::UNMAPPED;
         *rec.name_mut() = Some(b"r1".into());
-        assert!(ensure_unaligned(&rec).is_ok());
+        assert!(ensure_trimmable(&rec).is_ok());
 
         *rec.flags_mut() = Flags::empty(); // mapped
-        let err = ensure_unaligned(&rec).unwrap_err().to_string();
+        let err = ensure_trimmable(&rec).unwrap_err().to_string();
         assert!(err.contains("r1"));
         assert!(err.contains("aligned"));
+    }
+
+    /// The reverse-complement and legacy-tag refusals name the read and the
+    /// offending fact.
+    #[test]
+    fn reverse_and_legacy_tag_records_are_refused() {
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED | Flags::REVERSE_COMPLEMENTED;
+        *rec.name_mut() = Some(b"r1".into());
+        let err = ensure_trimmable(&rec).unwrap_err().to_string();
+        assert!(
+            err.contains("r1") && err.contains("reverse-complemented"),
+            "{err}"
+        );
+
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        rec.data_mut().insert(
+            Tag::new(b'M', b'l'),
+            noodles_sam::alignment::record_buf::data::field::Value::Array(
+                noodles_sam::alignment::record_buf::data::field::value::Array::UInt8(vec![1]),
+            ),
+        );
+        let err = ensure_trimmable(&rec).unwrap_err().to_string();
+        assert!(
+            err.contains("<unnamed>") && err.contains("legacy `Ml`"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -445,7 +473,7 @@ mod tests {
         sink.finish().unwrap();
 
         // The records are read back through a 4-worker multithreaded reader.
-        let (_h, records) = reader(Some(&path), 4).unwrap();
+        let (_h, records) = reader_from(Box::new(File::open(&path).unwrap()), 4).unwrap();
         let names: Vec<Vec<u8>> = records
             .map(|r| r.unwrap().name().map(|n| n.to_vec()).unwrap_or_default())
             .collect();

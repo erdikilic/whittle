@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rayon::prelude::*;
 
-pub use bam::{reconstruct_mods, reconstruct_record, run_bam, run_bam_to_fastq, run_raw_bam};
-pub use fastq::{run_fastq, run_fastq_seq};
+pub use bam::{run_bam_to_fastq, run_raw_bam};
+pub use fastq::run_fastq;
 
 use crate::config::Config;
 use crate::filter::{DropReason, FilterConfig};
@@ -81,15 +81,6 @@ where
     }
 }
 
-/// The output of rendering one input record.
-pub(crate) struct Rendered<T> {
-    /// Output items in the order they are written.
-    pub items: Vec<T>,
-    /// Whether the record carried a known per-base tag whose length disagrees
-    /// with the sequence length.
-    pub malformed_tags: bool,
-}
-
 /// Returns the render-pool size for a run: the settled budget, or the thread
 /// count when no budget was settled.
 pub(crate) fn render_pool_size(cfg: &Config) -> usize {
@@ -158,7 +149,8 @@ where
 /// rest of the input. With `cfg.ordered` the writer emits batches in input
 /// order; otherwise in completion order.
 ///
-/// The read-level counters are updated inside `render` by
+/// `render` returns the output items of one record, in the order they are
+/// written. The read-level counters are updated inside `render` by
 /// `process_read_segments`; this driver counts input reads and bases only.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_parallel<R, T, S, Weight, Render, WriteOne>(
@@ -176,7 +168,7 @@ where
     T: Send,
     S: Send,
     Weight: Fn(&R) -> usize + Sync,
-    Render: Fn(R, &Config) -> anyhow::Result<Rendered<T>> + Sync,
+    Render: Fn(R, &Config) -> anyhow::Result<Vec<T>> + Sync,
     WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
 {
     let render_workers = render_pool_size(cfg);
@@ -184,10 +176,9 @@ where
         .num_threads(render_workers)
         .build()?;
     let queue = (render_workers * policy.queue_per_worker).max(2);
-    let (tx, rx) = crossbeam_channel::bounded::<(usize, Vec<T>)>(queue);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<T>)>(queue);
     let ordered = cfg.ordered;
     let aborted = AtomicBool::new(false);
-    let malformed = AtomicU64::new(0);
     let render_err: FirstError<anyhow::Error> = FirstError::new();
     let write_err: FirstError<std::io::Error> = FirstError::new();
 
@@ -245,7 +236,6 @@ where
                     let mut out = Vec::with_capacity(batch.len());
                     let mut input_reads = 0u64;
                     let mut input_bases = 0u64;
-                    let mut malformed_reads = 0u64;
                     for rec in batch {
                         if aborted.load(Ordering::Relaxed) {
                             break;
@@ -260,10 +250,7 @@ where
                         input_reads += 1;
                         input_bases += weight(&rec) as u64;
                         match render(rec, cfg) {
-                            Ok(rendered) => {
-                                malformed_reads += u64::from(rendered.malformed_tags);
-                                out.extend(rendered.items);
-                            },
+                            Ok(items) => out.extend(items),
                             Err(e) => {
                                 render_err.record(e, &aborted);
                                 break;
@@ -276,7 +263,6 @@ where
                     counters
                         .input_bases
                         .fetch_add(input_bases, Ordering::Relaxed);
-                    malformed.fetch_add(malformed_reads, Ordering::Relaxed);
                     // Every batch is sent, empty ones included, so the ordered
                     // writer can advance past it. A closed channel means the
                     // writer is gone; nothing more can be written.
@@ -294,7 +280,7 @@ where
     if let Some(e) = write_err.take() {
         return Err(e.into());
     }
-    Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
+    Ok(counters.snapshot())
 }
 
 /// Live, thread-shared counters read by the progress ticker and finalized into `Stats`.
@@ -311,6 +297,11 @@ pub struct Counters {
     pub input_bases: AtomicU64,
     /// Sum of surviving segment lengths (bases) written to output.
     pub output_bases: AtomicU64,
+    /// Input reads carrying a known per-base tag (`ip`, `pw`, ...) whose array
+    /// length disagrees with the sequence length, or an `sa` coverage array
+    /// whose runs do not sum to it. The tag is left untouched and the count is
+    /// surfaced as a run-level advisory. Tracked by the BAM paths only.
+    pub malformed_tag_reads: AtomicU64,
     /// Input reads whose `MM`/`ML`/`MN` block was malformed (an `MN` that
     /// disagrees with the sequence length, an `ML` whose length disagrees with
     /// `MM`, an `MM` that does not parse to its end, or a non-`B:C` `ML`) and was
@@ -371,10 +362,7 @@ impl Counters {
     }
 
     /// Snapshots every counter into a `Stats` for end-of-run reporting.
-    /// `malformed_tag_reads` is threaded through separately: only the BAM
-    /// paths track it, and the parallel BAM path accumulates it in its own
-    /// local atomic rather than in `Counters`.
-    pub fn snapshot(&self, malformed_tag_reads: u64) -> Stats {
+    pub fn snapshot(&self) -> Stats {
         let input_reads = self.input_reads.load(Ordering::Relaxed);
         let reads_with_output = self.reads_with_output.load(Ordering::Relaxed);
         let reads_trimmed_to_nothing = self.reads_trimmed_to_nothing.load(Ordering::Relaxed);
@@ -405,7 +393,8 @@ impl Counters {
             barcode_tag_malformed_reads: self.barcode_tag_malformed_reads.load(Ordering::Relaxed),
             input_bases: self.input_bases.load(Ordering::Relaxed),
             output_bases: self.output_bases.load(Ordering::Relaxed),
-            malformed_tag_reads,
+            malformed_tag_reads: self.malformed_tag_reads.load(Ordering::Relaxed),
+            reads_with_output,
             reads_trimmed_to_nothing,
             reads_all_filtered,
             segments_dropped_short,
@@ -505,9 +494,9 @@ pub struct Stats {
     pub input_bases: u64,
     /// Sum of surviving segment lengths (bases) written to output.
     pub output_bases: u64,
-    /// Reads carrying a known per-base kinetics tag (`ip`, `pw`, ...) whose
-    /// array length did not match the sequence length: malformed and left
-    /// untouched. Surfaced as a run-level advisory; not an error.
+    /// Reads carrying a malformed per-base tag, left untouched; see
+    /// `Counters::malformed_tag_reads`. Surfaced as a run-level advisory; not
+    /// an error.
     pub malformed_tag_reads: u64,
     /// Input reads whose modification block was malformed and removed; see
     /// `Counters::malformed_mod_reads`.
@@ -517,6 +506,8 @@ pub struct Stats {
     /// Reads whose `bi` barcode tag was unusable under `--trim-barcodes`; see
     /// `Counters::barcode_tag_malformed_reads`.
     pub barcode_tag_malformed_reads: u64,
+    /// Read-level: input reads with at least one written segment.
+    pub reads_with_output: u64,
     /// Read-level: input reads that produced zero segments at all (empty
     /// read, fully consumed by adapter trimming, or an over-crop).
     /// `trim::apply` returned no intervals, so the per-segment filter loop
@@ -590,7 +581,7 @@ mod tests {
             .reads_trimmed_to_nothing
             .fetch_add(1, Ordering::Relaxed);
 
-        let stats = counters.snapshot(0);
+        let stats = counters.snapshot();
 
         assert_eq!(stats.input_reads, 3);
         assert_eq!(stats.output_reads, 2);
@@ -732,10 +723,7 @@ mod tests {
                     std::thread::sleep(std::time::Duration::from_micros(200));
                 }
                 counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-                Ok(Rendered {
-                    items: vec![n],
-                    malformed_tags: false,
-                })
+                Ok(vec![n])
             },
             |sink, n: &usize| {
                 sink.push(*n);
@@ -793,12 +781,7 @@ mod tests {
             |_: &usize| 1,
             &cfg,
             &mut sink,
-            |n, _cfg| {
-                Ok(Rendered {
-                    items: vec![n],
-                    malformed_tags: false,
-                })
-            },
+            |n, _cfg| Ok(vec![n]),
             |sink, n: &usize| {
                 sink.push(*n);
                 Ok(())
@@ -833,10 +816,7 @@ mod tests {
                 if n == 10 {
                     anyhow::bail!("record 10 is malformed");
                 }
-                Ok(Rendered {
-                    items: vec![n],
-                    malformed_tags: false,
-                })
+                Ok(vec![n])
             },
             |sink, n: &usize| {
                 sink.push(*n);

@@ -8,7 +8,7 @@ use tracing_subscriber::fmt::FormattedFields;
 /// Maps the CLI verbosity and quiet flags to a tracing level. `WHITTLE_LOG`,
 /// when set, is applied separately in `init` and overrides this unless `quiet`
 /// is set; `quiet` yields WARN regardless of `WHITTLE_LOG`.
-pub fn level_from(verbosity: u8, quiet: bool) -> LevelFilter {
+fn level_from(verbosity: u8, quiet: bool) -> LevelFilter {
     if quiet {
         LevelFilter::WARN
     } else {
@@ -28,12 +28,13 @@ use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::workflow::{Counters, Stats};
 
@@ -44,31 +45,15 @@ const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// unknown (no byte count to drive a determinate bar).
 const SPINNER_TICK: Duration = Duration::from_millis(120);
 
-/// Resolves the periodic-log cadence for `Mode::Line`: 30 s by default, 10 s at
-/// `-v`/`-vv`; `WHITTLE_PROGRESS_INTERVAL` (integer seconds) overrides either.
-/// Pure: the environment value is a parameter, so tests run without mutating
-/// process environment, which races across parallel test threads.
-/// `resolve_log_interval` reads the variable and delegates here.
-fn log_interval_from(verbosity: u8, env_override: Option<&str>) -> Duration {
-    if let Some(secs) = env_override.and_then(|s| s.parse::<u64>().ok()) {
-        return Duration::from_secs(secs);
-    }
+/// Returns the periodic-log cadence of `Mode::Line`: 30 s by default, 10 s at
+/// `-v`/`-vv`. The ticker sleeps in `TICK_INTERVAL` steps so `stop_ticker`
+/// joins promptly, and logs only once this cadence has elapsed.
+fn log_interval(verbosity: u8) -> Duration {
     if verbosity >= 1 {
         Duration::from_secs(10)
     } else {
         Duration::from_secs(30)
     }
-}
-
-/// Reads `WHITTLE_PROGRESS_INTERVAL` and resolves the periodic-log cadence
-/// through `log_interval_from`. An unset, empty, or non-numeric value is
-/// ignored. The ticker sleeps in `TICK_INTERVAL` steps so `stop_ticker` joins
-/// promptly, and logs only once this cadence has elapsed.
-fn resolve_log_interval(verbosity: u8) -> Duration {
-    log_interval_from(
-        verbosity,
-        std::env::var("WHITTLE_PROGRESS_INTERVAL").ok().as_deref(),
-    )
 }
 
 /// Custom event formatter: `[YYYY-MM-DD HH:MM:SS] [LEVEL] Message`, replacing
@@ -180,7 +165,7 @@ impl<'a> MakeWriter<'a> for MpWriter {
 /// state, and `verbosity`. Exactly one applies: bar and line-log output never
 /// coexist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Mode {
+enum Mode {
     /// `--quiet`: warnings and errors only. No bar, no progress line, no
     /// summary.
     Off,
@@ -192,9 +177,8 @@ pub(crate) enum Mode {
     /// No periodic log lines, no debug.
     Bar,
     /// `-v`/`-vv` on a TTY, or any non-TTY run: the full multi-line start
-    /// banner, a periodic progress line every `log_interval` (see
-    /// `resolve_log_interval`), debug and trace output (per level), and the
-    /// summary. No bar.
+    /// banner, a periodic progress line every `log_interval`, debug and trace
+    /// output (per level), and the summary. No bar.
     Line,
 }
 
@@ -202,20 +186,18 @@ pub(crate) enum Mode {
 /// `Mode::Bar`) the bar or spinner it drives. Created in the binary.
 pub struct ProgressHandle {
     /// The indicatif `MultiProgress` that log writes are suspended around.
-    pub(crate) multi: MultiProgress,
+    multi: MultiProgress,
     /// The output mode selected by `init`.
-    pub(crate) mode: Mode,
+    mode: Mode,
     /// The ticker thread and its stop flag, while live.
     ticker: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
     /// The live bar or spinner in `Mode::Bar`.
     bar: Option<ProgressBar>,
-    /// Wall-clock start, set by `start`; consumed by `finish` to compute the
-    /// summary's `in <dur>` tail. `None` if `start` was never called, or after
-    /// `finish` has consumed it.
-    start: Option<Instant>,
+    /// Wall-clock start: construction time until `start` resets it once the
+    /// input is open; `finish` reports the elapsed time from it.
+    start: Instant,
     /// `Mode::Line` periodic-log cadence, resolved once in `init` from the
-    /// verbosity and `WHITTLE_PROGRESS_INTERVAL` (see `resolve_log_interval`).
-    /// Unused outside `Mode::Line`.
+    /// verbosity. Unused outside `Mode::Line`.
     log_interval: Duration,
 }
 
@@ -228,7 +210,7 @@ impl ProgressHandle {
             mode: Mode::Off,
             ticker: None,
             bar: None,
-            start: None,
+            start: Instant::now(),
             log_interval: Duration::from_secs(30),
         }
     }
@@ -258,7 +240,7 @@ impl ProgressHandle {
         // human-readable summary, but `elapsed_seconds` in `--summary-json` is
         // still reported.
         let start = Instant::now();
-        self.start = Some(start);
+        self.start = start;
         if matches!(self.mode, Mode::Off | Mode::Silent) {
             return;
         }
@@ -359,12 +341,12 @@ impl ProgressHandle {
     ///
     /// Returns the elapsed duration it reported, so `summary::Summary` quotes
     /// the same number.
-    pub fn finish(&mut self, stats: &Stats) -> Option<Duration> {
+    pub fn finish(&mut self, stats: &Stats) -> Duration {
         // Elapsed is taken before `stop_ticker`, which joins the ticker thread;
         // the thread notices the stop flag only when it wakes from its
         // `TICK_INTERVAL` sleep, so measuring afterward would charge up to a full
         // tick to a fast run.
-        let elapsed = self.start.take().map(|start| start.elapsed());
+        let elapsed = self.start.elapsed();
         self.stop_ticker();
 
         tracing::info!("{}", summary_line(stats, elapsed));
@@ -429,11 +411,9 @@ impl ProgressHandle {
 
     /// Logs the closing `Completed` line, the last line of a run. `output` is
     /// the path (or `<stdout>`) the reads went to; `elapsed` is the value
-    /// `finish` returned, and the line is omitted when it is `None`.
-    pub fn complete(&self, elapsed: Option<Duration>, output: &str) {
-        if let Some(d) = elapsed {
-            tracing::info!("{}", completed_line(d, output));
-        }
+    /// `finish` returned.
+    pub fn complete(&self, elapsed: Duration, output: &str) {
+        tracing::info!("{}", completed_line(elapsed, output));
     }
 }
 
@@ -488,15 +468,15 @@ fn log_filter(
     whittle_log: Option<&str>,
     verbosity: u8,
     quiet: bool,
-) -> (EnvFilter, bool, Option<Advisory>) {
-    let fallback = || EnvFilter::new(level_from(verbosity, quiet).to_string());
+) -> (Targets, bool, Option<Advisory>) {
+    let fallback = || Targets::new().with_default(level_from(verbosity, quiet));
     if quiet {
         return (fallback(), false, None);
     }
     let Some(spec) = whittle_log else {
         return (fallback(), false, None);
     };
-    match EnvFilter::builder().parse(spec) {
+    match spec.parse::<Targets>() {
         Ok(filter) => (filter, true, None),
         Err(e) => {
             let level = level_from(verbosity, false);
@@ -531,7 +511,7 @@ pub fn init(cfg: &mut Config) -> ProgressHandle {
         .with(
             fmt::layer()
                 .event_format(WhittleFormat { color: tty })
-                .with_ansi(tty)
+                .with_ansi(false)
                 .with_writer(MpWriter {
                     multi: multi.clone(),
                 }),
@@ -542,8 +522,8 @@ pub fn init(cfg: &mut Config) -> ProgressHandle {
         mode,
         ticker: None,
         bar: None,
-        start: None,
-        log_interval: resolve_log_interval(verbosity),
+        start: Instant::now(),
+        log_interval: log_interval(verbosity),
     }
 }
 
@@ -601,17 +581,14 @@ fn commas(n: u64) -> String {
 /// The end-of-run summary line: `Summary: 1 input reads, 3 output reads in
 /// 2.00s`. It carries no kept percentage, since `--qual-split` can turn one
 /// input read into several segments and a read-count percentage would exceed
-/// 100%. The trailing `in <dur>` clause is omitted when `elapsed` is `None`.
-fn summary_line(stats: &Stats, elapsed: Option<Duration>) -> String {
-    let mut msg = format!(
-        "Summary: {} input reads, {} output reads",
+/// 100%.
+fn summary_line(stats: &Stats, elapsed: Duration) -> String {
+    format!(
+        "Summary: {} input reads, {} output reads in {}",
         commas(stats.input_reads),
         commas(stats.output_reads),
-    );
-    if let Some(d) = elapsed {
-        msg.push_str(&format!(" in {}", human_dur(d)));
-    }
-    msg
+        human_dur(elapsed)
+    )
 }
 
 /// Human-readable base count for the yield summary's `Bases:` line: `12.4 Gbp`,
@@ -767,8 +744,7 @@ fn bar_message(input_reads: u64, output_reads: u64, bytes: u64, elapsed: Duratio
     s
 }
 
-/// Line-mode periodic progress log, emitted at INFO every `log_interval` (see
-/// `resolve_log_interval`): `Processed 1,200,000 input reads, 42%, 45k reads/s,
+/// Line-mode periodic progress log, emitted at INFO every `log_interval`: `Processed 1,200,000 input reads, 42%, 45k reads/s,
 /// 380 MB/s, ETA 00:00:40`. Fields, in order: full-precision input read count
 /// (reads consumed, not reads emitted, which differ under `--qual-split`),
 /// percent complete (if `total` bytes are known), reads/s, MB/s (if any bytes
@@ -807,7 +783,7 @@ mod tests {
             mode: Mode::Line,
             ticker: None,
             bar: None,
-            start: None,
+            start: Instant::now(),
             log_interval: Duration::from_secs(30),
         };
         h.start(None, Arc::new(Counters::default()));
@@ -823,7 +799,7 @@ mod tests {
             mode: Mode::Bar,
             ticker: None,
             bar: None,
-            start: None,
+            start: Instant::now(),
             log_interval: Duration::from_secs(30),
         };
         h.start(Some(1_000), Arc::new(Counters::default()));
@@ -937,7 +913,7 @@ mod tests {
             multi: MultiProgress::new(),
             bar: None,
             ticker: None,
-            start: None,
+            start: Instant::now(),
             log_interval: Duration::from_secs(30),
         };
         assert!(h.shows_lines());
@@ -1081,27 +1057,12 @@ mod tests {
         assert_eq!(human_bytes(1_000), "1.0 KB");
     }
 
+    /// The periodic-log cadence is 30 s by default and 10 s under any verbosity.
     #[test]
-    fn log_interval_defaults_to_30s_and_10s_when_verbose() {
-        assert_eq!(log_interval_from(0, None), Duration::from_secs(30));
-        assert_eq!(log_interval_from(1, None), Duration::from_secs(10));
-        assert_eq!(log_interval_from(2, None), Duration::from_secs(10));
-    }
-
-    #[test]
-    fn log_interval_env_override_wins_either_way() {
-        assert_eq!(log_interval_from(0, Some("5")), Duration::from_secs(5));
-        assert_eq!(log_interval_from(1, Some("60")), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn log_interval_ignores_unparseable_env_override() {
-        assert_eq!(
-            log_interval_from(0, Some("not-a-number")),
-            Duration::from_secs(30)
-        );
-        assert_eq!(log_interval_from(0, Some("")), Duration::from_secs(30));
-        assert_eq!(log_interval_from(1, Some("")), Duration::from_secs(10));
+    fn log_interval_is_30s_and_10s_when_verbose() {
+        assert_eq!(log_interval(0), Duration::from_secs(30));
+        assert_eq!(log_interval(1), Duration::from_secs(10));
+        assert_eq!(log_interval(2), Duration::from_secs(10));
     }
 
     #[test]
@@ -1124,23 +1085,10 @@ mod tests {
             output_reads: 3,
             ..Default::default()
         };
-        let s = summary_line(&stats, Some(Duration::from_secs(2)));
+        let s = summary_line(&stats, Duration::from_secs(2));
         assert_eq!(s, "Summary: 1 input reads, 3 output reads in 2.00s");
         assert!(!s.contains('%'));
         assert!(!s.contains("Kept"));
-    }
-
-    #[test]
-    fn summary_line_omits_duration_when_elapsed_unknown() {
-        let stats = Stats {
-            input_reads: 5,
-            output_reads: 5,
-            ..Default::default()
-        };
-        assert_eq!(
-            summary_line(&stats, None),
-            "Summary: 5 input reads, 5 output reads"
-        );
     }
 
     #[test]
