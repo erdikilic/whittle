@@ -38,11 +38,11 @@ fn adapter_present_in(
     let window = normalized_read(window);
     let end_size = end_size.min(n);
     for h in hits(searcher, &ad.seq, &window, budget.k_end) {
-        match classify_terminal(h.start, h.end, n, end_size, ad.end) {
+        match classify_terminal(h.start, h.end, n, end_size) {
             // `Excise` acts either way: split when `split`, terminal-trim otherwise.
             Terminal::Five | Terminal::Three | Terminal::Excise => return true,
             Terminal::None => {
-                if split && h.cost <= budget.k_mid {
+                if split && ad.role.splits() && h.cost <= budget.k_mid {
                     return true;
                 }
             },
@@ -90,14 +90,14 @@ pub fn present(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::{AdapterConfig, End, adapter_segments};
+    use crate::adapter::{AdapterConfig, Role, adapter_segments};
 
     /// Builds an adapter from its parts.
-    fn ad(name: &str, seq: &[u8], end: End) -> Adapter {
+    fn ad(name: &str, seq: &[u8], role: Role) -> Adapter {
         Adapter {
             name: name.into(),
             seq: seq.to_vec(),
-            end,
+            role,
         }
     }
 
@@ -138,7 +138,7 @@ mod tests {
             reads.push(r);
         }
         let seqs: Vec<&[u8]> = reads.iter().map(|r| r.as_slice()).collect();
-        let adapters = vec![ad("P", p, End::Both), ad("Q", q, End::Both)];
+        let adapters = vec![ad("P", p, Role::Adapter), ad("Q", q, Role::Adapter)];
         let kept = present(
             &seqs,
             &adapters,
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn adapter_present_in_terminal_and_interior() {
         let mut s = new_ambiguous_searcher();
-        let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", End::Both);
+        let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", Role::Adapter);
         let budget = Budget::new(a.seq.len(), 0.2);
         // Terminal: adapter at the read start.
         let mut term = a.seq.clone();
@@ -189,7 +189,7 @@ mod tests {
     /// with the trimmer, which rewrites the run before searching.
     #[test]
     fn ambiguity_runs_in_reads_are_not_evidence() {
-        let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", End::Both);
+        let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", Role::Adapter);
         let reads: Vec<Vec<u8>> = (0..200u64)
             .map(|i| {
                 let mut r = vec![b'N'; 60];
@@ -217,6 +217,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
         let mut s = new_ambiguous_searcher();

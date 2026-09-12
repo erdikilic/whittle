@@ -77,8 +77,8 @@ tell a real input from a stale prior output, and merging over either loses data.
 | `--update-moves` | Rewrite ONT signal tags through trimming instead of dropping them (BAM-to-BAM) |
 | `--remove-tag <TAG>` | Remove this two-character aux tag from every output record; repeatable (BAM input) |
 | `--strip-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM input) |
-| `-a, --adapter-fasta <FILE>` | Adapter/primer FASTA; enables adapter trimming |
-| `--adapter-preset {none,ont}` | Built-in adapter catalog (default `none`; `ont` enables trimming) |
+| `-a, --adapter-fasta <FILE>` | Adapter/primer FASTA (IUPAC codes allowed; `primer` or `barcode` in a header description makes that entry trim ends only); enables adapter trimming |
+| `--adapter-preset <KITS>` | Built-in kit presets, comma-separated: `lsk114`, `rad114`, `rbk114`, `nbd114`, `pcb114`, `rpb114`, `mab114`, `rna004`, `pacbio`, `ont`, `all`; enables adapter trimming |
 | `--adapter-error-rate <F>` | End-match tolerance as a fraction of adapter length (default 0.2); requires an adapter source |
 | `--adapter-end-size <N>` | End-zone width searched for terminal adapters (default 150); requires an adapter source |
 | `--adapter-ends-only` | Trim ends only; never split on an interior adapter |
@@ -126,7 +126,7 @@ and is counted under `warnings.barcode_tag_malformed_reads`.
 The positions come from a BAM aux tag, so the flag requires BAM input and is
 refused on FASTQ rather than accepted and ignored.
 
-An adapter source is `--adapter-fasta`, `--adapter-preset ont`, or
+An adapter source is `--adapter-fasta`, `--adapter-preset`, or
 `--adapter-infer`. The tuning flags `--adapter-error-rate`, `--adapter-end-size`,
 and `--adapter-sample` are rejected without one, since they would otherwise be
 accepted and ignored.

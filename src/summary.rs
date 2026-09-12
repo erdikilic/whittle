@@ -454,6 +454,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         });
         c.adapter_sample = 5_000;

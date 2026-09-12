@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn adapter_stage_runs_before_quality_op() {
-        use crate::adapter::{Adapter, AdapterConfig, End};
+        use crate::adapter::{Adapter, AdapterConfig, Role};
         let adapter = b"ACGTACGTACGT";
         let mut seq = adapter.to_vec();
         seq.extend_from_slice(b"GGGGGGGGGGGG");
@@ -179,11 +179,12 @@ mod tests {
             adapters: vec![Adapter {
                 name: "a".into(),
                 seq: adapter.to_vec(),
-                end: End::Five,
+                role: Role::Adapter,
             }],
             error_rate: 0.2,
             end_size: 20,
             split: false,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
         assert_eq!(apply(&seq, &phred, &plan, Some(&ac), None), vec![(12, 24)]);

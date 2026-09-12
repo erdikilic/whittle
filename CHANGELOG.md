@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Adapter trimming was reworked around three defects measured on simulated
+  reads with known adapter placements. Partial adapters at read ends are now
+  trimmed: a truncated rear adapter or a front adapter missing its first bases
+  aligns flush with the end when at least 10 bases match exactly, with the
+  error rate applied to the rest. Hits are classified by position alone, so a
+  rear-adapter entry matching the read start (as the reverse complement of the
+  front adapter) trims it instead of being excised behind a few leading bases.
+  Every piece an interior excision creates is searched again at its new end,
+  so a primer, barcode, or truncated adapter left next to a chimeric junction
+  is trimmed as it would be at a physical read end; an adapter remnant hidden
+  behind up to 36 unalignable bases is found by a masked search. Excisions
+  separated by fewer bases than `--min-length`, or by at most 11 bases, merge
+  into one instead of emitting the residue between them as a read.
+- `--adapter-preset` takes a comma-separated list of kit tokens (`lsk114`,
+  `rad114`/`ulk114`, `rbk114`, `nbd114`, `pcb114`/`pcs114`, `rpb114`,
+  `mab114`, `rna004`, `pacbio`, `ont`, `all`) instead of `ont` alone. A kit
+  preset searches only the sequences its library can contain, which removes
+  the spurious trims and splits the full catalog produced on reads carrying
+  sequence resembling another kit's primers. Every catalog entry has a role:
+  adapters split reads at interior hits, primers and barcodes trim read ends
+  only; an amplicon-only preset (`mab114`) promotes its primers to adapters.
+  The catalog gains the MAB114 kit (degenerate 16S 27F/1492R and ITS1F/ITS4
+  primers, MAB flanks, 24 barcodes) and the PacBio SMRTbell adapter and C2
+  primer; the RAB 16S kit-9 entries are dropped in favor of the degenerate
+  primers.
+- A FASTA entry whose header description contains the word `primer` or
+  `barcode` is trimmed at read ends only; every other entry is an adapter.
+  Entry names are the first word of the header.
+- Conservative ab-initio inference now splits reads on its end-facing anchor
+  instead of trimming ends only; `--adapter-infer-policy aggressive` still
+  trims with the full consensus. A discovered consensus without a drop-trim
+  boundary whose anchor lies inward of another candidate's anchor in the reads
+  carrying both is dropped as the insert-facing remainder of that candidate
+  (a conserved gene start behind a primer), instead of trimming and splitting
+  real sequence.
+
 ## [0.2.0] - 2026-09-04
 
 ### Added

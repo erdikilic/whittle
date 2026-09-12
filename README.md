@@ -20,7 +20,7 @@ whittle filters and trims long reads (ONT, PacBio) in FASTQ, gzip/BGZF-compresse
 
 - **Correct modification tags.** `MM`/`ML`/`MN` are rebuilt for every trimmed or split uBAM read, and checked against an independent `htslib` decoder.
 - **Trim-aware tags.** Per-base kinetics (`ip`/`pw` and the other per-base arrays) are sliced along with the sequence. ONT signal tags (`mv`/`ts`/`ns` and related) are dropped, or rewritten in dorado's subread convention with `--update-moves`.
-- **Adapter trimming.** Terminal trimming plus interior chimera splitting, driven by a built-in ONT catalog, a user-supplied FASTA (IUPAC codes included, so a degenerate primer matches every variant it covers), or ab-initio discovery.
+- **Adapter trimming.** Terminal trimming, partial-adapter trimming at read ends, and interior chimera splitting with junction cleanup, driven by built-in per-kit presets (ONT kit-14 kits, MAB114 amplicons, PacBio SMRTbell), a user-supplied FASTA (IUPAC codes included, so a degenerate primer matches every variant it covers), or ab-initio discovery.
 - **Formats.** FASTQ, gzip/BGZF-compressed FASTQ, and unaligned BAM, plus BAM-to-FASTQ conversion. Formats are auto-detected, including BGZF FASTQ or BAM piped over stdin.
 - **Pipeline-friendly.** `--summary-json` writes the run's counters and resolved settings as JSON, even under `--quiet`.
 - **Fast and self-contained.** Multithreaded throughout, with a thread budget that adapts to the workload, and no external `htslib` to build or run.
@@ -91,7 +91,7 @@ Formats come from the path extension, a stream sniff, or `--in-format`/`--out-fo
 |---|---|
 | [docs/cli.md](docs/cli.md) | Every flag, format selection, folder input, logging and progress |
 | [docs/tags.md](docs/tags.md) | How `MM`/`ML`/`MN`, kinetics, and ONT signal tags are kept in register |
-| [docs/adapters.md](docs/adapters.md) | Adapter trimming, presence detection, ab-initio inference, the ONT catalog |
+| [docs/adapters.md](docs/adapters.md) | Adapter trimming, presence detection, ab-initio inference, the kit presets |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Building, testing, commit conventions, style |
 
 ## Limitations

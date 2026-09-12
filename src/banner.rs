@@ -150,9 +150,10 @@ pub(crate) fn filters_and_trim_line(
     format!("Filters: {filters_str}; trim: {trim_str}")
 }
 
-/// The startup banner's `Adapters: ...` line: adapter count, `trim + split` or
-/// `ends-only`, error rate, end-zone size, and whether presence detection
-/// samples. `None` when adapter trimming is off, so the caller skips the line.
+/// The startup banner's `Adapters: ...` line: sequence count with its role
+/// breakdown, `trim + split` or `ends-only`, error rate, end-zone size, and
+/// whether presence detection samples. `None` when adapter trimming is off,
+/// so the caller skips the line.
 ///
 /// Under inference the count is `0` rather than `a.adapters.len()`: in report
 /// mode that field may hold a FASTA only as naming references for
@@ -188,15 +189,34 @@ pub(crate) fn adapter_banner_line(
             policy: AdapterInferPolicy::Aggressive,
         } => " \u{b7} infer report \u{b7} aggressive",
     };
-    let n_adapters = if adapter_infer == AdapterInfer::Off {
-        a.adapters.len()
+    let (n_adapters, roles) = if adapter_infer == AdapterInfer::Off {
+        (a.adapters.len(), role_breakdown(&a.adapters))
     } else {
-        0
+        (0, String::new())
     };
     Some(format!(
-        "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp · {sample}{infer_suffix}",
-        n_adapters, a.error_rate, a.end_size
+        "Adapters: {n_adapters} sequences{roles} · {mode} · error {:.2} · end-zone {} bp · {sample}{infer_suffix}",
+        a.error_rate, a.end_size
     ))
+}
+
+/// Returns ` (N adapter, M primer, K barcode)` for a mixed set, or an empty
+/// string when every entry has the same role.
+fn role_breakdown(adapters: &[crate::adapter::Adapter]) -> String {
+    use crate::adapter::Role;
+    let counts: Vec<(Role, usize)> = [Role::Adapter, Role::Primer, Role::Barcode]
+        .into_iter()
+        .map(|role| (role, adapters.iter().filter(|a| a.role == role).count()))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    if counts.len() < 2 {
+        return String::new();
+    }
+    let parts: Vec<String> = counts
+        .iter()
+        .map(|(role, n)| format!("{n} {}", role.label()))
+        .collect();
+    format!(" ({})", parts.join(", "))
 }
 
 /// Shell-quotes a single argument: bare when non-empty and every character is
@@ -263,7 +283,7 @@ mod tests {
             quality: None,
         }
     }
-    use crate::adapter::{Adapter, AdapterConfig, End};
+    use crate::adapter::{Adapter, AdapterConfig, Role};
 
     #[test]
     fn operation_line_collapses_matching_families() {
@@ -477,11 +497,12 @@ mod tests {
             adapters: vec![Adapter {
                 name: "a".into(),
                 seq: b"ACGTACGTACGT".to_vec(),
-                end: End::Both,
+                role: Role::Adapter,
             }],
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
         let line = adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off).unwrap();
@@ -502,11 +523,12 @@ mod tests {
             adapters: vec![Adapter {
                 name: "a".into(),
                 seq: b"ACGTACGTACGT".to_vec(),
-                end: End::Both,
+                role: Role::Adapter,
             }],
             error_rate: 0.2,
             end_size: 150,
             split: false,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
         assert!(
@@ -523,6 +545,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
         let trim_line = adapter_banner_line(

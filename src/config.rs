@@ -284,7 +284,7 @@ pub struct Config {
     /// Fixed crops and the quality-trim operation.
     pub trim: TrimPlan,
     /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
-    /// `--adapter-preset ont` was given (adapter trimming off, no per-read cost).
+    /// `--adapter-preset` was given (adapter trimming off, no per-read cost).
     pub adapters: Option<crate::adapter::AdapterConfig>,
     /// Whether ab-initio adapter inference runs and whether inferred adapters
     /// are also used for trimming.

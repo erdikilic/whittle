@@ -3881,7 +3881,7 @@ mod tests {
 
     #[test]
     fn interior_adapter_split_reconstructs_mods_per_segment() {
-        use crate::adapter::{Adapter, AdapterConfig, End};
+        use crate::adapter::{Adapter, AdapterConfig, Role};
         // Seq (64 bp): [flank1: C + 23 A][adapter GGGGTTTTGGGGTTTT (no C/A)][flank2: C + 23 A].
         // Only two Cs, at positions 0 and 40. `C+m,0,0;` marks both, with ML
         // [100, 200].
@@ -3902,11 +3902,12 @@ mod tests {
             adapters: vec![Adapter {
                 name: "mid".into(),
                 seq: b"GGGGTTTTGGGGTTTT".to_vec(),
-                end: End::Both,
+                role: Role::Adapter,
             }],
             error_rate: 0.2,
             end_size: 8, // adapter at [24,40) is interior, more than 8 from both ends of 64 bp
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         });
 

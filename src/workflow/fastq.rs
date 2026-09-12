@@ -313,28 +313,31 @@ mod tests {
     /// with a gap signals that the read was split.
     #[test]
     fn split_produces_long_survivor_and_short_segment_drop() {
-        use crate::adapter::{Adapter, AdapterConfig, End};
+        use crate::adapter::{Adapter, AdapterConfig, Role};
 
         let adapter = b"GGGGTTTTGGGGTTTT"; // 16 bp, no A/C, so it cannot match the flanks
         let mut seq = vec![b'A'; 24]; // long flank, survives the length filter
         seq.extend_from_slice(adapter);
-        seq.extend_from_slice(&[b'C'; 4]); // short flank, TooShort
+        // Short flank, TooShort; longer than the flank slack, so the adapter
+        // stage emits it instead of folding it into the excision.
+        seq.extend_from_slice(&[b'C'; 12]);
         let phred = vec![40u8; seq.len()];
 
         let mut cfg = test_cfg(1);
-        cfg.filter.min_length = 5;
+        cfg.filter.min_length = 13;
         cfg.adapters = Some(AdapterConfig {
             adapters: vec![Adapter {
                 name: "mid".into(),
                 seq: adapter.to_vec(),
-                end: End::Both,
+                role: Role::Adapter,
             }],
             error_rate: 0.1,
-            // With `end_size` 1, both flanks (24 and 4 bases from the match)
+            // With `end_size` 1, both flanks (24 and 12 bases from the match)
             // sit outside the end zone, so the adapter is interior and the
             // read splits rather than being terminal-trimmed.
             end_size: 1,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         });
         let recs = vec![Ok(rec("r1", &seq, phred))];

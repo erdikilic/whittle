@@ -163,20 +163,10 @@ Remove the per\-base kinetics and alignment\-count arrays (ip pw fi fp ri rp sa 
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<ADAPTER_FASTA>\fR
-Adapter FASTA; each sequence must be at least 11 bp. Enables adapter trimming
+Adapter FASTA; each sequence must be at least 11 bp and may use IUPAC codes. An entry whose header description contains the word primer or barcode is trimmed at read ends only; every other entry also splits reads at interior hits. Enables adapter trimming
 .TP
-\fB\-\-adapter\-preset\fR \fI<ADAPTER_PRESET>\fR [default: none]
-Built\-in ONT adapter catalog. Enables adapter trimming. Defaults to none
-.br
-
-.br
-\fIPossible values:\fR
-.RS 14
-.IP \(bu 2
-none: Do not load a built\-in adapter catalog
-.IP \(bu 2
-ont: Load the built\-in Oxford Nanopore adapter and barcode catalog
-.RE
+\fB\-\-adapter\-preset\fR \fI<KITS>\fR
+Built\-in kit presets, comma\-separated: lsk114, rad114 (ulk114), rbk114, nbd114, pcb114 (pcs114), rpb114, mab114, rna004, pacbio, ont (every ONT kit), all. Enables adapter trimming. Defaults to none
 .TP
 \fB\-\-adapter\-error\-rate\fR \fI<ADAPTER_ERROR_RATE>\fR
 End\-match tolerance as a fraction of adapter length; interior splits use half. Requires an adapter source. Defaults to 0.2
@@ -204,7 +194,7 @@ report: Print inferred FASTA to stdout and do not write read output
 .RE
 .TP
 \fB\-\-adapter\-infer\-policy\fR \fI<ADAPTER_INFER_POLICY>\fR [default: conservative]
-Trust policy for inferred consensuses. Aggressive uses the complete consensus and permits splitting unless ends\-only is set. Defaults to conservative
+Trust policy for inferred consensuses. Conservative trims and splits with a short end\-facing anchor; aggressive uses the complete consensus. Defaults to conservative
 .br
 
 .br

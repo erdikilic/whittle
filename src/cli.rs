@@ -169,13 +169,17 @@ struct Cli {
     #[arg(long, help_heading = "Tags")]
     strip_kinetics: bool,
 
-    /// Adapter FASTA; each sequence must be at least 11 bp. Enables adapter
-    /// trimming.
+    /// Adapter FASTA; each sequence must be at least 11 bp and may use IUPAC
+    /// codes. An entry whose header description contains the word primer or
+    /// barcode is trimmed at read ends only; every other entry also splits
+    /// reads at interior hits. Enables adapter trimming.
     #[arg(short = 'a', long, help_heading = "Adapter trimming")]
     adapter_fasta: Option<PathBuf>,
-    /// Built-in ONT adapter catalog. Enables adapter trimming. Defaults to none.
-    #[arg(long, value_enum, default_value_t = AdapterPresetArg::None, help_heading = "Adapter trimming")]
-    adapter_preset: AdapterPresetArg,
+    /// Built-in kit presets, comma-separated: lsk114, rad114 (ulk114), rbk114,
+    /// nbd114, pcb114 (pcs114), rpb114, mab114, rna004, pacbio, ont (every
+    /// ONT kit), all. Enables adapter trimming. Defaults to none.
+    #[arg(long, value_name = "KITS", help_heading = "Adapter trimming")]
+    adapter_preset: Option<String>,
     /// End-match tolerance as a fraction of adapter length; interior splits use
     /// half. Requires an adapter source. Defaults to 0.2.
     #[arg(long, help_heading = "Adapter trimming")]
@@ -202,9 +206,9 @@ struct Cli {
         help_heading = "Adapter trimming"
     )]
     adapter_infer: Option<AdapterInferActionArg>,
-    /// Trust policy for inferred consensuses. Aggressive uses the complete
-    /// consensus and permits splitting unless ends-only is set. Defaults to
-    /// conservative.
+    /// Trust policy for inferred consensuses. Conservative trims and splits
+    /// with a short end-facing anchor; aggressive uses the complete consensus.
+    /// Defaults to conservative.
     #[arg(
         long,
         value_enum,
@@ -327,14 +331,6 @@ impl From<QualModeArg> for QualMode {
             QualModeArg::Median => QualMode::Median,
         }
     }
-}
-
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum AdapterPresetArg {
-    /// Do not load a built-in adapter catalog.
-    None,
-    /// Load the built-in Oxford Nanopore adapter and barcode catalog.
-    Ont,
 }
 
 /// Parses the command line into a validated `Config`.
@@ -541,7 +537,7 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
     }
     // Under inference the preset is not searched for trimming, since inference
     // builds its own set; it is retained only to name discovered adapters.
-    if adapter_infer != AdapterInfer::Off && c.adapter_preset != AdapterPresetArg::None {
+    if adapter_infer != AdapterInfer::Off && preset_kits(c)?.is_some() {
         advisories.push(Advisory::warn(
             "--adapter-preset is ignored for trimming under --adapter-infer \
              (used only for naming discovered adapters)",
@@ -570,8 +566,8 @@ fn resolve_adapters(
     advisories: &mut Vec<Advisory>,
 ) -> anyhow::Result<Option<crate::adapter::AdapterConfig>> {
     let mut adapter_seqs: Vec<crate::adapter::Adapter> = Vec::new();
-    if c.adapter_preset == AdapterPresetArg::Ont {
-        adapter_seqs.extend(crate::adapter::preset::preset_ont());
+    if let Some(kits) = preset_kits(c)? {
+        adapter_seqs.extend(crate::adapter::preset::preset(&kits));
     }
     // Only the FASTA entries are carried onward as naming references under
     // inference; `infer::discover` looks up the built-in catalog itself.
@@ -618,21 +614,25 @@ fn resolve_adapters(
     } else {
         fasta_adapters
     };
-    let infer_forces_ends_only =
-        adapter_infer != AdapterInfer::Off && !adapter_infer.is_aggressive();
-    if infer_forces_ends_only && !c.adapter_ends_only {
-        advisories.push(Advisory::info(
-            "Conservative adapter inference trims read ends only; use \
-             --adapter-infer-policy aggressive to enable full-consensus interior splitting",
-        ));
-    }
     Ok(Some(crate::adapter::AdapterConfig {
         adapters: trim_adapters,
         error_rate,
         end_size,
-        split: !c.adapter_ends_only && !infer_forces_ends_only,
+        split: !c.adapter_ends_only,
+        min_piece: c.min_length,
         candidate_index: std::sync::OnceLock::new(),
     }))
+}
+
+/// Parses `--adapter-preset` into the kits it names, or `None` when it is
+/// absent or names nothing.
+fn preset_kits(c: &Cli) -> anyhow::Result<Option<Vec<crate::adapter::preset::Kit>>> {
+    let Some(spec) = &c.adapter_preset else {
+        return Ok(None);
+    };
+    let kits = crate::adapter::preset::parse_presets(spec)
+        .map_err(|e| anyhow::anyhow!("--adapter-preset: {e}"))?;
+    Ok((!kits.is_empty()).then_some(kits))
 }
 
 /// Rejects an explicit adapter tuning flag given without an adapter source.
@@ -644,7 +644,7 @@ fn require_adapter_source(c: &Cli) -> anyhow::Result<()> {
     ];
     if let Some((flag, _)) = explicit.iter().find(|(_, given)| *given) {
         anyhow::bail!(
-            "{flag} requires an adapter source (--adapter-fasta, --adapter-preset ont, or \
+            "{flag} requires an adapter source (--adapter-fasta, --adapter-preset, or \
              --adapter-infer)"
         );
     }
@@ -697,12 +697,30 @@ fn resolve_sample(
     Ok(0)
 }
 
+/// Returns the role a FASTA header assigns: `primer` or `barcode` as a
+/// whole word in the description after the name selects that role, and any
+/// other header is an adapter.
+fn fasta_role(head: &str) -> crate::adapter::Role {
+    let description = head
+        .split_once(char::is_whitespace)
+        .map_or("", |(_, rest)| rest);
+    let mut words = description
+        .split(|c: char| c.is_whitespace() || matches!(c, '=' | ':' | ',' | ';'))
+        .filter(|w| !w.is_empty());
+    match words.find(|w| w.eq_ignore_ascii_case("primer") || w.eq_ignore_ascii_case("barcode")) {
+        Some(w) if w.eq_ignore_ascii_case("primer") => crate::adapter::Role::Primer,
+        Some(_) => crate::adapter::Role::Barcode,
+        None => crate::adapter::Role::Adapter,
+    }
+}
+
 /// Reads adapter sequences from a FASTA. Whitespace is removed, lowercase is
 /// uppercased, and `U` is folded to `T`. IUPAC ambiguity codes are kept and
 /// searched as the bases they stand for; an entry containing any other byte is
 /// skipped with a warning advisory, as is an entry shorter than
 /// `adapter::MIN_PATTERN_LEN`, the matcher's minimum pattern length. An entry
 /// averaging two or more bases per position is kept with a warning advisory.
+/// The header description selects the role; see `fasta_role`.
 fn read_adapter_fasta(
     path: &std::path::Path,
     advisories: &mut Vec<crate::config::Advisory>,
@@ -725,7 +743,12 @@ fn read_adapter_fasta(
             .into_iter()
             .map(|b| if b == b'U' { b'T' } else { b })
             .collect();
-        let name = String::from_utf8_lossy(rec.head()).into_owned();
+        let head = String::from_utf8_lossy(rec.head()).into_owned();
+        let role = fasta_role(&head);
+        let name = head
+            .split_once(char::is_whitespace)
+            .map_or(head.as_str(), |(name, _)| name)
+            .to_string();
 
         // IUPAC ambiguity codes are searched as the bases they stand for, as a
         // degenerate primer requires. A byte outside the nucleotide alphabet
@@ -766,11 +789,7 @@ fn read_adapter_fasta(
             )));
         }
 
-        out.push(crate::adapter::Adapter {
-            name,
-            seq,
-            end: crate::adapter::End::Both,
-        });
+        out.push(crate::adapter::Adapter { name, seq, role });
     }
     Ok(out)
 }

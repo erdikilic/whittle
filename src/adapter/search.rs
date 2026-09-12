@@ -108,15 +108,49 @@ impl RcSearchAble for Strands<'_> {
 
 /// One approximate match of a pattern in the text. Strand is not exposed: a
 /// reverse-complement hit occupies the same text span, which is all the trimmer
-/// needs.
+/// needs. The overhang fields are in text orientation and are zero unless the
+/// searcher was built with an overhang cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
     /// Start of the span in the text, inclusive.
     pub start: usize,
     /// End of the span in the text, exclusive.
     pub end: usize,
-    /// Edit distance of the match.
+    /// Alignment cost: the edit distance of the aligned part plus the overhang
+    /// cost, `floor(alpha * overhang)` per overhanging side.
     pub cost: usize,
+    /// Pattern bases hanging off the text start.
+    pub left_overhang: usize,
+    /// Pattern bases hanging off the text end.
+    pub right_overhang: usize,
+}
+
+impl Hit {
+    /// Builds a hit from a sassy match of a `pattern_len`-base pattern. A
+    /// reverse-complement match aligns the pattern end at the text start, so
+    /// its pattern-side overhangs swap sides in text orientation.
+    fn from_match(m: &sassy::Match, pattern_len: usize) -> Self {
+        let (head, tail) = (m.pattern_start, pattern_len - m.pattern_end);
+        let (left_overhang, right_overhang) = match m.strand {
+            sassy::Strand::Fwd => (head, tail),
+            sassy::Strand::Rc => (tail, head),
+        };
+        Hit {
+            start: m.text_start,
+            end: m.text_end,
+            // Sassy's `Match::cost` is `pa_types::Cost`, an `i32` signed for other
+            // algorithms in that crate; a returned match is within the
+            // non-negative `k` budget, so the cast is lossless.
+            cost: m.cost as usize,
+            left_overhang,
+            right_overhang,
+        }
+    }
+
+    /// Pattern bases aligned inside the text.
+    pub fn overlap(&self, pattern_len: usize) -> usize {
+        pattern_len - self.left_overhang - self.right_overhang
+    }
 }
 
 /// Returns a fresh DNA-profile searcher over both strands.
@@ -127,6 +161,14 @@ pub fn new_searcher() -> PlainSearcher {
 /// Returns a fresh IUPAC-profile searcher over both strands.
 pub fn new_ambiguous_searcher() -> AmbiguousSearcher {
     Searcher::<Iupac>::new_rc()
+}
+
+/// Returns a fresh IUPAC-profile searcher over both strands that also reports
+/// partial matches hanging off either text end, each overhanging base costing
+/// `alpha` (0 to 1). Sassy implements overhang alignment for the IUPAC profile
+/// only.
+pub fn new_overhang_searcher(alpha: f32) -> AmbiguousSearcher {
+    Searcher::<Iupac>::new_rc_with_overhang(alpha.clamp(0.0, 1.0))
 }
 
 /// Returns a fresh IUPAC-profile searcher over the forward strand only. Used by
@@ -218,14 +260,7 @@ pub fn for_each_hit<P: Profile, T: RcSearchAble + ?Sized>(
     mut accept: impl FnMut(Hit),
 ) {
     for m in searcher.search(pattern, text, k) {
-        accept(Hit {
-            start: m.text_start,
-            end: m.text_end,
-            // Sassy's `Match::cost` is `pa_types::Cost`, an `i32` signed for other
-            // algorithms in that crate; a returned match is within the
-            // non-negative `k` budget, so the cast is lossless.
-            cost: m.cost as usize,
-        });
+        accept(Hit::from_match(&m, pattern.len()));
     }
 }
 

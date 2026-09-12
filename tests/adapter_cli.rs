@@ -1162,17 +1162,19 @@ fn produced_index_naming_end_to_end() {
     writeln!(
         fq,
         "@two_seg\n{}{adapter}{}\n+\n{}",
-        "A".repeat(10),
-        "A".repeat(10),
-        "I".repeat(36)
+        "A".repeat(14),
+        "A".repeat(14),
+        "I".repeat(44)
     )
     .unwrap();
+    // The 12-base flank is longer than the flank slack, so it is produced as a
+    // segment of its own and then rejected by `-l 13`.
     writeln!(
         fq,
         "@gap_seg\n{}{adapter}{}\n+\n{}",
-        "A".repeat(3),
-        "A".repeat(10),
-        "I".repeat(29)
+        "A".repeat(12),
+        "A".repeat(14),
+        "I".repeat(42)
     )
     .unwrap();
 
@@ -1189,7 +1191,7 @@ fn produced_index_naming_end_to_end() {
             "--adapter-end-size",
             "1",
             "-l",
-            "5",
+            "13",
             "-t",
             "1",
         ])
@@ -1203,12 +1205,12 @@ fn produced_index_naming_end_to_end() {
         "@one_seg\n{}\n+\n{}\n@two_seg_segment_1\n{}\n+\n{}\n@two_seg_segment_2\n{}\n+\n{}\n@gap_seg_segment_2\n{}\n+\n{}\n",
         "A".repeat(20),
         "I".repeat(20),
-        "A".repeat(10),
-        "I".repeat(10),
-        "A".repeat(10),
-        "I".repeat(10),
-        "A".repeat(10),
-        "I".repeat(10),
+        "A".repeat(14),
+        "I".repeat(14),
+        "A".repeat(14),
+        "I".repeat(14),
+        "A".repeat(14),
+        "I".repeat(14),
     );
     assert_eq!(
         String::from_utf8(out).unwrap(),
@@ -1231,18 +1233,19 @@ fn accounting_summary_end_to_end() {
     writeln!(fa, ">mid\n{adapter}").unwrap();
 
     let mut fq = tempfile::NamedTempFile::new().unwrap();
-    // Two clean reads: no adapter present, well above `-l 5`.
+    // Two clean reads: no adapter present, well above `-l 13`.
     writeln!(fq, "@clean1\n{}\n+\n{}", "A".repeat(20), "I".repeat(20)).unwrap();
     writeln!(fq, "@clean2\n{}\n+\n{}", "A".repeat(20), "I".repeat(20)).unwrap();
-    // Chimera: the interior adapter splits into a 3-bp flank (below `-l 5`,
-    // filtered as TooShort) and a 15-bp flank (survives): 1 read with output,
-    // 1 segment written, 1 segment dropped.
+    // Chimera: the interior adapter splits into a 12-bp flank (longer than the
+    // flank slack, so produced; below `-l 13`, so filtered as TooShort) and a
+    // 15-bp flank (survives): 1 read with output, 1 segment written, 1 segment
+    // dropped.
     writeln!(
         fq,
         "@chimera\n{}{adapter}{}\n+\n{}",
-        "A".repeat(3),
+        "A".repeat(12),
         "A".repeat(15),
-        "I".repeat(38)
+        "I".repeat(47)
     )
     .unwrap();
     // All-adapter: the read equals the adapter, so terminal trimming consumes it
@@ -1270,7 +1273,7 @@ fn accounting_summary_end_to_end() {
             "--adapter-end-size",
             "1",
             "-l",
-            "5",
+            "13",
             "-t",
             "1",
         ])
