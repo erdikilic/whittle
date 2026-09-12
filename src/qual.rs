@@ -110,11 +110,11 @@ pub fn median_q(phred: &[u8]) -> f64 {
 /// The read-quality summary used by the quality filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum QualMode {
-    /// Average error probabilities, then convert the result back to Phred Q.
+    /// Mean error probability, expressed as a Phred score.
     Mean,
-    /// Take the arithmetic mean of the per-base Phred scores.
+    /// Mean of the Phred scores.
     Arithmetic,
-    /// Take the median per-base Phred score.
+    /// Median Phred score.
     Median,
 }
 

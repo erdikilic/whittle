@@ -20,7 +20,9 @@ use crate::trim::{QualityOp, TrimPlan};
     version,
     disable_version_flag = true,
     about = "Tag-aware long-read trimmer",
-    long_about = None
+    long_about = None,
+    max_term_width = 100,
+    after_help = EXAMPLES
 )]
 struct Cli {
     /// Print version information and exit.
@@ -28,30 +30,41 @@ struct Cli {
     version: Option<bool>,
     /// Input FASTQ-family file, unaligned BAM, or directory; - means stdin.
     /// Defaults to stdin.
-    #[arg(short = 'i', long, help_heading = "Setup")]
+    #[arg(short = 'i', long, value_name = "PATH", help_heading = "Setup")]
     input: Option<PathBuf>,
     /// Output file, whose extension selects the format; - means stdout.
     /// Defaults to stdout.
-    #[arg(short = 'o', long, help_heading = "Setup")]
+    #[arg(short = 'o', long, value_name = "PATH", help_heading = "Setup")]
     output: Option<PathBuf>,
     /// Force the input format instead of detecting it from the path or stream.
-    #[arg(long, value_enum, help_heading = "Setup")]
+    #[arg(long, value_enum, value_name = "FORMAT", help_heading = "Setup")]
     in_format: Option<Format>,
     /// Force the output format instead of selecting it from the output path.
-    #[arg(long, value_enum, help_heading = "Setup")]
+    #[arg(long, value_enum, value_name = "FORMAT", help_heading = "Setup")]
     out_format: Option<Format>,
     /// Worker threads, at least 1; values above the CPU count are clamped to
     /// it. Defaults to all detected CPUs.
-    #[arg(short = 't', long, value_parser = parse_threads, help_heading = "Setup")]
+    #[arg(
+        short = 't',
+        long,
+        value_name = "N",
+        value_parser = parse_threads,
+        help_heading = "Setup"
+    )]
     threads: Option<u64>,
     /// Write records in input order when running with more than one thread.
     /// Without it, records are written as they finish, which is faster and uses
     /// less memory but is not reproducible between runs.
     #[arg(long, help_heading = "Setup")]
     ordered: bool,
-    /// BAM auxiliary tags copied into BAM-to-FASTQ headers: all, none, or a
-    /// list such as MM,ML,RG. Defaults to all.
-    #[arg(long, default_value = "all", help_heading = "Setup")]
+    /// Aux tags written into FASTQ headers on BAM or tagged FASTQ input: all,
+    /// none, or a list such as MM,ML,RG.
+    #[arg(
+        long,
+        default_value = "all",
+        value_name = "all|none|TAGS",
+        help_heading = "Tags"
+    )]
     fastq_tags: String,
     /// BGZF compression level (0-9) for BAM, .bgz and .gz output. Lower levels
     /// are faster and produce larger files. Ignored for plain FASTQ. Defaults
@@ -60,6 +73,7 @@ struct Cli {
     #[arg(
         short = 'c',
         long,
+        value_name = "0-9",
         value_parser = clap::value_parser!(u8).range(0..=9),
         help_heading = "Setup"
     )]
@@ -80,63 +94,97 @@ struct Cli {
     /// Progress reporting, independent of the log level: auto selects a bar on
     /// a terminal and periodic lines otherwise; bar and plain force one form;
     /// none disables progress and keeps the banner and summary. A bar falls
-    /// back to lines under -v or WHITTLE_LOG. Defaults to auto.
+    /// back to lines under -v or WHITTLE_LOG.
     #[arg(
         long,
         value_enum,
+        value_name = "MODE",
         default_value_t = ProgressMode::Auto,
         conflicts_with = "quiet",
         help_heading = "Logging"
     )]
     progress: ProgressMode,
 
-    /// Minimum post-trim segment length. Defaults to 1.
-    #[arg(short = 'l', long, default_value_t = 1, help_heading = "Filtering")]
+    /// Minimum post-trim segment length.
+    #[arg(
+        short = 'l',
+        long,
+        value_name = "N",
+        default_value_t = 1,
+        help_heading = "Filtering"
+    )]
     min_length: usize,
     /// Maximum post-trim segment length.
-    #[arg(short = 'L', long, help_heading = "Filtering")]
+    #[arg(short = 'L', long, value_name = "N", help_heading = "Filtering")]
     max_length: Option<usize>,
-    /// Minimum post-trim read quality under --qual-mode. Defaults to 0.
-    #[arg(short = 'q', long, default_value_t = 0.0, help_heading = "Filtering")]
+    /// Minimum post-trim read quality under --qual-mode.
+    #[arg(
+        short = 'q',
+        long,
+        value_name = "Q",
+        default_value_t = 0.0,
+        help_heading = "Filtering"
+    )]
     min_qual: f64,
-    /// Maximum post-trim read quality under --qual-mode. Defaults to 1000.
+    /// Maximum post-trim read quality under --qual-mode.
     #[arg(
         short = 'Q',
         long,
+        value_name = "Q",
         default_value_t = 1000.0,
         help_heading = "Filtering"
     )]
     max_qual: f64,
     /// Minimum post-trim GC fraction (0 to 1).
-    #[arg(short = 'g', long, help_heading = "Filtering")]
+    #[arg(short = 'g', long, value_name = "FRACTION", help_heading = "Filtering")]
     min_gc: Option<f64>,
     /// Maximum post-trim GC fraction (0 to 1).
-    #[arg(short = 'G', long, help_heading = "Filtering")]
+    #[arg(short = 'G', long, value_name = "FRACTION", help_heading = "Filtering")]
     max_gc: Option<f64>,
-    /// Read-quality summary used by the quality filters. Defaults to mean.
-    #[arg(short = 'm', long, value_enum, default_value_t = QualMode::Mean, help_heading = "Filtering")]
+    /// How a read's per-base Phred scores are summarized for -q and -Q.
+    #[arg(
+        short = 'm',
+        long,
+        value_enum,
+        value_name = "MODE",
+        default_value_t = QualMode::Mean,
+        help_heading = "Filtering"
+    )]
     qual_mode: QualMode,
 
     /// Remove this many bases from the 5' end, after barcode removal and
-    /// before adapter and quality trimming. Defaults to 0.
-    #[arg(short = 'H', long, default_value_t = 0, help_heading = "Trimming")]
+    /// before adapter and quality trimming.
+    #[arg(
+        short = 'H',
+        long,
+        value_name = "N",
+        default_value_t = 0,
+        help_heading = "Trimming"
+    )]
     head_crop: usize,
     /// Remove this many bases from the 3' end, after barcode removal and
-    /// before adapter and quality trimming. Defaults to 0.
-    #[arg(short = 'T', long, default_value_t = 0, help_heading = "Trimming")]
+    /// before adapter and quality trimming.
+    #[arg(
+        short = 'T',
+        long,
+        value_name = "N",
+        default_value_t = 0,
+        help_heading = "Trimming"
+    )]
     tail_crop: usize,
     /// Trim low-quality bases from both ends until each boundary reaches Q.
-    #[arg(long, help_heading = "Trimming")]
+    /// One of --qual-trim, --qual-best-segment and --qual-split per run.
+    #[arg(long, value_name = "Q", help_heading = "Trimming")]
     qual_trim: Option<u8>,
     /// Keep the longest contiguous segment whose bases are all at least Q.
-    #[arg(long, help_heading = "Trimming")]
+    #[arg(long, value_name = "Q", help_heading = "Trimming")]
     qual_best_segment: Option<u8>,
     /// Split at low-quality runs below Q and keep the surviving segments.
-    #[arg(long, help_heading = "Trimming")]
+    #[arg(long, value_name = "Q", help_heading = "Trimming")]
     qual_split: Option<u8>,
     /// Tolerate low-quality runs shorter than this many bases when splitting.
     /// Requires --qual-split. Defaults to 1.
-    #[arg(long, help_heading = "Trimming")]
+    #[arg(long, value_name = "N", help_heading = "Trimming")]
     qual_split_window: Option<usize>,
     /// Keep ONT signal tags consistent through trimming (slice mv, update ts,
     /// ns, sp and pi) for signal-aware tools such as Remora and Clair3 v2,
@@ -161,7 +209,12 @@ struct Cli {
     /// 11 bp are skipped. An entry whose header description contains the word
     /// primer or barcode is trimmed at read ends only; every other entry also
     /// splits reads at interior hits. Enables adapter trimming.
-    #[arg(short = 'a', long, help_heading = "Adapter trimming")]
+    #[arg(
+        short = 'a',
+        long,
+        value_name = "FILE",
+        help_heading = "Adapter trimming"
+    )]
     adapter_fasta: Option<PathBuf>,
     /// Built-in kit presets, comma-separated: lsk114, rad114 (ulk114), rbk114,
     /// nbd114, pcb114 (pcs114), rpb114, mab114, rna004, pacbio, ont (every
@@ -170,20 +223,20 @@ struct Cli {
     adapter_preset: Option<String>,
     /// End-match tolerance as a fraction of adapter length; interior splits use
     /// half. Requires an adapter source. Defaults to 0.2.
-    #[arg(long, help_heading = "Adapter trimming")]
+    #[arg(long, value_name = "FRACTION", help_heading = "Adapter trimming")]
     adapter_error_rate: Option<f64>,
     /// Bases at each read end searched for a terminal adapter. Requires an
     /// adapter source. Defaults to 150.
-    #[arg(long, help_heading = "Adapter trimming")]
+    #[arg(long, value_name = "BP", help_heading = "Adapter trimming")]
     adapter_end_size: Option<usize>,
     /// Trim adapters at read ends only; never split on interior adapters.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
-    /// Reads sampled for preset presence detection or ab-initio inference; 0
-    /// disables detection, otherwise at least 100. Ignored with
-    /// --adapter-fasta alone. Defaults to 2000 for preset detection and 40000
-    /// for inference.
-    #[arg(long, help_heading = "Adapter trimming")]
+    /// Reads inspected before trimming, to keep only the preset entries the
+    /// library carries or to infer adapters; at least 100, or 0 to search the
+    /// whole preset. Ignored with --adapter-fasta alone. Defaults to 2000 with
+    /// a preset and 40000 under --adapter-infer.
+    #[arg(long, value_name = "N", help_heading = "Adapter trimming")]
     adapter_sample: Option<usize>,
     /// Discover adapters de novo. Report prints the inferred FASTA and exits
     /// without writing read output. Defaults to trim when given no value.
@@ -192,15 +245,31 @@ struct Cli {
         value_enum,
         num_args = 0..=1,
         default_missing_value = "trim",
+        value_name = "ACTION",
         help_heading = "Adapter trimming"
     )]
     adapter_infer: Option<AdapterInferAction>,
     /// Trust policy for inferred consensuses. Conservative trims and splits
     /// with a short end-facing anchor; aggressive uses the complete consensus.
     /// Defaults to conservative.
-    #[arg(long, value_enum, help_heading = "Adapter trimming")]
+    #[arg(
+        long,
+        value_enum,
+        value_name = "POLICY",
+        help_heading = "Adapter trimming"
+    )]
     adapter_infer_policy: Option<AdapterInferPolicy>,
 }
+
+/// The examples block at the end of `--help`.
+const EXAMPLES: &str = "\
+Examples:
+  whittle -i reads.fastq.gz -o trimmed.fastq.gz -H 20 -T 20 --qual-trim 8 -l 500 -q 10 -t 8
+  whittle -i reads.bam -o trimmed.bam --qual-split 9 --qual-split-window 50 -l 1000
+  whittle -i reads.bam -o trimmed.bam --adapter-preset lsk114 -l 500
+  whittle -i 16s.fastq.gz -o trimmed.fastq.gz --adapter-preset mab114
+  samtools fastq -T MM,ML,MN reads.bam | whittle -o trimmed.fastq.gz -H 10 -T 10
+  whittle -i reads.bam -o reads.fastq.gz --quiet --summary-json qc.json";
 
 /// The default `--adapter-error-rate`.
 const DEFAULT_ADAPTER_ERROR_RATE: f64 = 0.2;

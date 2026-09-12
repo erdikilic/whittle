@@ -16,13 +16,13 @@ Print help (see a summary with \*(Aq\-h\*(Aq)
 \fB\-\-version\fR
 Print version information and exit
 .TP
-\fB\-i\fR, \fB\-\-input\fR \fI<INPUT>\fR
+\fB\-i\fR, \fB\-\-input\fR \fI<PATH>\fR
 Input FASTQ\-family file, unaligned BAM, or directory; \- means stdin. Defaults to stdin
 .TP
-\fB\-o\fR, \fB\-\-output\fR \fI<OUTPUT>\fR
+\fB\-o\fR, \fB\-\-output\fR \fI<PATH>\fR
 Output file, whose extension selects the format; \- means stdout. Defaults to stdout
 .TP
-\fB\-\-in\-format\fR \fI<IN_FORMAT>\fR
+\fB\-\-in\-format\fR \fI<FORMAT>\fR
 Force the input format instead of detecting it from the path or stream
 .br
 
@@ -39,7 +39,7 @@ fastq\-bgz: BGZF\-compressed FASTQ
 bam: Unaligned BAM
 .RE
 .TP
-\fB\-\-out\-format\fR \fI<OUT_FORMAT>\fR
+\fB\-\-out\-format\fR \fI<FORMAT>\fR
 Force the output format instead of selecting it from the output path
 .br
 
@@ -56,20 +56,27 @@ fastq\-bgz: BGZF\-compressed FASTQ
 bam: Unaligned BAM
 .RE
 .TP
-\fB\-t\fR, \fB\-\-threads\fR \fI<THREADS>\fR
+\fB\-t\fR, \fB\-\-threads\fR \fI<N>\fR
 Worker threads, at least 1; values above the CPU count are clamped to it. Defaults to all detected CPUs
 .TP
 \fB\-\-ordered\fR
 Write records in input order when running with more than one thread. Without it, records are written as they finish, which is faster and uses less memory but is not reproducible between runs
 .TP
-\fB\-\-fastq\-tags\fR \fI<FASTQ_TAGS>\fR [default: all]
-BAM auxiliary tags copied into BAM\-to\-FASTQ headers: all, none, or a list such as MM,ML,RG. Defaults to all
-.TP
-\fB\-c\fR, \fB\-\-compression\-level\fR \fI<COMPRESSION_LEVEL>\fR
+\fB\-c\fR, \fB\-\-compression\-level\fR \fI<0\-9>\fR
 BGZF compression level (0\-9) for BAM, .bgz and .gz output. Lower levels are faster and produce larger files. Ignored for plain FASTQ. Defaults to 4 for .gz and 6 for .bgz and BAM
 .TP
 \fB\-\-summary\-json\fR \fI<PATH>\fR
 Write a machine\-readable JSON run summary (counters plus the resolved settings) to this path. Written even under \-\-quiet
+.SH TAGS
+.TP
+\fB\-\-fastq\-tags\fR \fI<all|none|TAGS>\fR [default: all]
+Aux tags written into FASTQ headers on BAM or tagged FASTQ input: all, none, or a list such as MM,ML,RG
+.TP
+\fB\-\-remove\-tag\fR \fI<TAG>\fR
+Remove this two\-character aux tag from every output record. Repeatable. BAM or tagged FASTQ input
+.TP
+\fB\-\-strip\-kinetics\fR
+Remove the per\-base kinetics and alignment\-count arrays (ip pw fi fp ri rp sa sm sx). BAM or tagged FASTQ input
 .SH LOGGING
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
@@ -78,8 +85,8 @@ Increase logging detail: \-v is debug, \-vv is trace (at most two). Overridden b
 \fB\-\-quiet\fR
 Silence progress and info output; warnings and errors still print. Conflicts with \-v and \-\-progress
 .TP
-\fB\-\-progress\fR \fI<PROGRESS>\fR [default: auto]
-Progress reporting, independent of the log level: auto selects a bar on a terminal and periodic lines otherwise; bar and plain force one form; none disables progress and keeps the banner and summary. A bar falls back to lines under \-v or WHITTLE_LOG. Defaults to auto
+\fB\-\-progress\fR \fI<MODE>\fR [default: auto]
+Progress reporting, independent of the log level: auto selects a bar on a terminal and periodic lines otherwise; bar and plain force one form; none disables progress and keeps the banner and summary. A bar falls back to lines under \-v or WHITTLE_LOG
 .br
 
 .br
@@ -96,56 +103,56 @@ none: No progress reporting; the banner and summary still print
 .RE
 .SH FILTERING
 .TP
-\fB\-l\fR, \fB\-\-min\-length\fR \fI<MIN_LENGTH>\fR [default: 1]
-Minimum post\-trim segment length. Defaults to 1
+\fB\-l\fR, \fB\-\-min\-length\fR \fI<N>\fR [default: 1]
+Minimum post\-trim segment length
 .TP
-\fB\-L\fR, \fB\-\-max\-length\fR \fI<MAX_LENGTH>\fR
+\fB\-L\fR, \fB\-\-max\-length\fR \fI<N>\fR
 Maximum post\-trim segment length
 .TP
-\fB\-q\fR, \fB\-\-min\-qual\fR \fI<MIN_QUAL>\fR [default: 0]
-Minimum post\-trim read quality under \-\-qual\-mode. Defaults to 0
+\fB\-q\fR, \fB\-\-min\-qual\fR \fI<Q>\fR [default: 0]
+Minimum post\-trim read quality under \-\-qual\-mode
 .TP
-\fB\-Q\fR, \fB\-\-max\-qual\fR \fI<MAX_QUAL>\fR [default: 1000]
-Maximum post\-trim read quality under \-\-qual\-mode. Defaults to 1000
+\fB\-Q\fR, \fB\-\-max\-qual\fR \fI<Q>\fR [default: 1000]
+Maximum post\-trim read quality under \-\-qual\-mode
 .TP
-\fB\-g\fR, \fB\-\-min\-gc\fR \fI<MIN_GC>\fR
+\fB\-g\fR, \fB\-\-min\-gc\fR \fI<FRACTION>\fR
 Minimum post\-trim GC fraction (0 to 1)
 .TP
-\fB\-G\fR, \fB\-\-max\-gc\fR \fI<MAX_GC>\fR
+\fB\-G\fR, \fB\-\-max\-gc\fR \fI<FRACTION>\fR
 Maximum post\-trim GC fraction (0 to 1)
 .TP
-\fB\-m\fR, \fB\-\-qual\-mode\fR \fI<QUAL_MODE>\fR [default: mean]
-Read\-quality summary used by the quality filters. Defaults to mean
+\fB\-m\fR, \fB\-\-qual\-mode\fR \fI<MODE>\fR [default: mean]
+How a read\*(Aqs per\-base Phred scores are summarized for \-q and \-Q
 .br
 
 .br
 \fIPossible values:\fR
 .RS 14
 .IP \(bu 2
-mean: Average error probabilities, then convert the result back to Phred Q
+mean: Mean error probability, expressed as a Phred score
 .IP \(bu 2
-arithmetic: Take the arithmetic mean of the per\-base Phred scores
+arithmetic: Mean of the Phred scores
 .IP \(bu 2
-median: Take the median per\-base Phred score
+median: Median Phred score
 .RE
 .SH TRIMMING
 .TP
-\fB\-H\fR, \fB\-\-head\-crop\fR \fI<HEAD_CROP>\fR [default: 0]
-Remove this many bases from the 5\*(Aq end, after barcode removal and before adapter and quality trimming. Defaults to 0
+\fB\-H\fR, \fB\-\-head\-crop\fR \fI<N>\fR [default: 0]
+Remove this many bases from the 5\*(Aq end, after barcode removal and before adapter and quality trimming
 .TP
-\fB\-T\fR, \fB\-\-tail\-crop\fR \fI<TAIL_CROP>\fR [default: 0]
-Remove this many bases from the 3\*(Aq end, after barcode removal and before adapter and quality trimming. Defaults to 0
+\fB\-T\fR, \fB\-\-tail\-crop\fR \fI<N>\fR [default: 0]
+Remove this many bases from the 3\*(Aq end, after barcode removal and before adapter and quality trimming
 .TP
-\fB\-\-qual\-trim\fR \fI<QUAL_TRIM>\fR
-Trim low\-quality bases from both ends until each boundary reaches Q
+\fB\-\-qual\-trim\fR \fI<Q>\fR
+Trim low\-quality bases from both ends until each boundary reaches Q. One of \-\-qual\-trim, \-\-qual\-best\-segment and \-\-qual\-split per run
 .TP
-\fB\-\-qual\-best\-segment\fR \fI<QUAL_BEST_SEGMENT>\fR
+\fB\-\-qual\-best\-segment\fR \fI<Q>\fR
 Keep the longest contiguous segment whose bases are all at least Q
 .TP
-\fB\-\-qual\-split\fR \fI<QUAL_SPLIT>\fR
+\fB\-\-qual\-split\fR \fI<Q>\fR
 Split at low\-quality runs below Q and keep the surviving segments
 .TP
-\fB\-\-qual\-split\-window\fR \fI<QUAL_SPLIT_WINDOW>\fR
+\fB\-\-qual\-split\-window\fR \fI<N>\fR
 Tolerate low\-quality runs shorter than this many bases when splitting. Requires \-\-qual\-split. Defaults to 1
 .TP
 \fB\-\-update\-moves\fR
@@ -153,34 +160,27 @@ Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp an
 .TP
 \fB\-\-trim\-barcodes\fR
 Remove the barcode spans dorado recorded in the bi aux tag, before every other trimming stage. BAM or tagged FASTQ input
-.SH TAGS
-.TP
-\fB\-\-remove\-tag\fR \fI<TAG>\fR
-Remove this two\-character aux tag from every output record. Repeatable. BAM or tagged FASTQ input
-.TP
-\fB\-\-strip\-kinetics\fR
-Remove the per\-base kinetics and alignment\-count arrays (ip pw fi fp ri rp sa sm sx). BAM or tagged FASTQ input
 .SH "ADAPTER TRIMMING"
 .TP
-\fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<ADAPTER_FASTA>\fR
+\fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<FILE>\fR
 Adapter FASTA; sequences may use IUPAC codes, and entries shorter than 11 bp are skipped. An entry whose header description contains the word primer or barcode is trimmed at read ends only; every other entry also splits reads at interior hits. Enables adapter trimming
 .TP
 \fB\-\-adapter\-preset\fR \fI<KITS>\fR
 Built\-in kit presets, comma\-separated: lsk114, rad114 (ulk114), rbk114, nbd114, pcb114 (pcs114), rpb114, mab114, rna004, pacbio, ont (every ONT kit), all. Enables adapter trimming. Defaults to none
 .TP
-\fB\-\-adapter\-error\-rate\fR \fI<ADAPTER_ERROR_RATE>\fR
+\fB\-\-adapter\-error\-rate\fR \fI<FRACTION>\fR
 End\-match tolerance as a fraction of adapter length; interior splits use half. Requires an adapter source. Defaults to 0.2
 .TP
-\fB\-\-adapter\-end\-size\fR \fI<ADAPTER_END_SIZE>\fR
+\fB\-\-adapter\-end\-size\fR \fI<BP>\fR
 Bases at each read end searched for a terminal adapter. Requires an adapter source. Defaults to 150
 .TP
 \fB\-\-adapter\-ends\-only\fR
 Trim adapters at read ends only; never split on interior adapters
 .TP
-\fB\-\-adapter\-sample\fR \fI<ADAPTER_SAMPLE>\fR
-Reads sampled for preset presence detection or ab\-initio inference; 0 disables detection, otherwise at least 100. Ignored with \-\-adapter\-fasta alone. Defaults to 2000 for preset detection and 40000 for inference
+\fB\-\-adapter\-sample\fR \fI<N>\fR
+Reads inspected before trimming, to keep only the preset entries the library carries or to infer adapters; at least 100, or 0 to search the whole preset. Ignored with \-\-adapter\-fasta alone. Defaults to 2000 with a preset and 40000 under \-\-adapter\-infer
 .TP
-\fB\-\-adapter\-infer\fR [\fI<ADAPTER_INFER>\fR]
+\fB\-\-adapter\-infer\fR [\fI<ACTION>\fR]
 Discover adapters de novo. Report prints the inferred FASTA and exits without writing read output. Defaults to trim when given no value
 .br
 
@@ -193,7 +193,7 @@ trim: Trim reads with the inferred sequences
 report: Print inferred FASTA to stdout and do not write read output
 .RE
 .TP
-\fB\-\-adapter\-infer\-policy\fR \fI<ADAPTER_INFER_POLICY>\fR
+\fB\-\-adapter\-infer\-policy\fR \fI<POLICY>\fR
 Trust policy for inferred consensuses. Conservative trims and splits with a short end\-facing anchor; aggressive uses the complete consensus. Defaults to conservative
 .br
 
@@ -205,6 +205,14 @@ conservative: Use a short end\-facing anchor
 .IP \(bu 2
 aggressive: Use the complete recurrent consensus
 .RE
+.SH EXTRA
+Examples:
+  whittle \-i reads.fastq.gz \-o trimmed.fastq.gz \-H 20 \-T 20 \-\-qual\-trim 8 \-l 500 \-q 10 \-t 8
+  whittle \-i reads.bam \-o trimmed.bam \-\-qual\-split 9 \-\-qual\-split\-window 50 \-l 1000
+  whittle \-i reads.bam \-o trimmed.bam \-\-adapter\-preset lsk114 \-l 500
+  whittle \-i 16s.fastq.gz \-o trimmed.fastq.gz \-\-adapter\-preset mab114
+  samtools fastq \-T MM,ML,MN reads.bam | whittle \-o trimmed.fastq.gz \-H 10 \-T 10
+  whittle \-i reads.bam \-o reads.fastq.gz \-\-quiet \-\-summary\-json qc.json
 .SH VERSION
 0.2.0
 .SH AUTHORS

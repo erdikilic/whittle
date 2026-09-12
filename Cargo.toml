@@ -23,7 +23,7 @@ name = "whittle"
 path = "src/lib.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "wrap_help"] }
 anyhow = "1"
 
 rayon = "1"
