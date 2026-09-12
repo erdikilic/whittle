@@ -8,16 +8,18 @@ pub mod fastq;
 use std::io::Read;
 use std::path::Path;
 
-/// A read-file format as detected from an extension or stream header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A read-file format as detected from an extension or stream header, and
+/// the value of `--in-format`/`--out-format`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
     /// Plain FASTQ.
     Fastq,
     /// gzip-compressed FASTQ.
     FastqGz,
     /// BGZF-compressed FASTQ.
+    #[value(name = "fastq-bgz", alias = "fastq-bgzf")]
     FastqBgzf,
-    /// BAM (BGZF-framed).
+    /// Unaligned BAM.
     Bam,
 }
 
@@ -65,17 +67,12 @@ pub fn from_extension(path: &Path) -> Option<Format> {
     }
 }
 
-/// Detects the input format from the path extension, falling back to sniffing
-/// the first bytes when the extension is unknown or the input is stdin. A BGZF
-/// header is refused here: BAM and BGZF FASTQ share it, and only the decoded
-/// first block tells them apart (see `detect_bgzf_block`).
-pub fn detect_input(path: Option<&Path>, sniff: &[u8]) -> anyhow::Result<Format> {
-    if let Some(f) = path.and_then(from_extension) {
-        return Ok(f);
-    }
-    if is_bgzf(sniff) {
-        anyhow::bail!("BGZF input needs the block probe to tell BAM from FASTQ")
-    } else if sniff.starts_with(&[0x1f, 0x8b]) {
+/// Detects the input format from the first bytes of a stream whose extension
+/// does not decide it, or stdin: gzip magic is gzipped FASTQ and `@` is FASTQ.
+/// The caller has already ruled out a BGZF header, which BAM and BGZF FASTQ
+/// share; only the decoded first block tells them apart (`detect_bgzf_block`).
+pub fn detect_input(sniff: &[u8]) -> anyhow::Result<Format> {
+    if sniff.starts_with(&[0x1f, 0x8b]) {
         Ok(Format::FastqGz)
     } else if sniff.starts_with(b"BAM\x01") {
         // A bare (non-BGZF) BAM stream cannot be read: the reader always wraps
@@ -139,20 +136,28 @@ pub fn is_bgzf_file(path: &Path) -> bool {
         .is_ok_and(|()| is_bgzf(&header))
 }
 
+/// Fills `buf` from `source` until it is full or the source ends, since one
+/// `read` may return fewer bytes than asked for. Returns the number of bytes
+/// read.
+pub(crate) fn fill(source: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        let r = source.read(&mut buf[n..])?;
+        if r == 0 {
+            break;
+        }
+        n += r;
+    }
+    Ok(n)
+}
+
 /// Tells BGZF from plain gzip on a stream whose extension says `.gz`, by the
 /// first block header. The probed bytes are replayed ahead of `source`, so the
 /// stream is unchanged. BGZF is framed in independent blocks that inflate on
 /// several threads; plain gzip decodes on one.
 pub fn probe_gz(source: &mut Box<dyn Read + Send>) -> anyhow::Result<Format> {
     let mut probe = [0u8; 18];
-    let mut n = 0;
-    while n < probe.len() {
-        let r = source.read(&mut probe[n..])?;
-        if r == 0 {
-            break;
-        }
-        n += r;
-    }
+    let n = fill(source, &mut probe)?;
     let format = if is_bgzf(&probe[..n]) {
         Format::FastqBgzf
     } else {
@@ -240,12 +245,11 @@ mod tests {
 
     #[test]
     fn stdin_sniff_falls_back_to_magic() {
-        // No path: sniff. gzip magic `1f 8b` is `FastqGz`; `@` is `Fastq`.
-        assert_eq!(
-            detect_input(None, &[0x1f, 0x8b, 0x08]).unwrap(),
-            Format::FastqGz
-        );
-        assert_eq!(detect_input(None, b"@read").unwrap(), Format::Fastq);
+        // gzip magic `1f 8b` is `FastqGz`; `@` is `Fastq`.
+        assert_eq!(detect_input(&[0x1f, 0x8b, 0x08]).unwrap(), Format::FastqGz);
+        assert_eq!(detect_input(b"@read").unwrap(), Format::Fastq);
+        let err = detect_input(b"").unwrap_err().to_string();
+        assert!(err.contains("--in-format"), "Got: {err}");
     }
 
     /// A bare `BAM\x01` stream (no BGZF framing) cannot be read by the
@@ -253,7 +257,7 @@ mod tests {
     /// than claiming `Format::Bam` and surfacing an opaque BGZF error.
     #[test]
     fn naked_non_bgzf_bam_is_rejected() {
-        let err = detect_input(None, b"BAM\x01rest").unwrap_err().to_string();
+        let err = detect_input(b"BAM\x01rest").unwrap_err().to_string();
         assert!(
             err.to_ascii_lowercase().contains("bgzf"),
             "Message should name BGZF, got: {err}"
@@ -296,10 +300,11 @@ mod tests {
     }
 
     /// A BGZF header (gzip magic, FLG.FEXTRA, "BC" subfield) can carry BAM or
-    /// FASTQ; only the decoded block tells them apart.
+    /// FASTQ; `is_bgzf` tells it from a plain gzip header, whose length alone
+    /// does not decide.
     #[test]
-    fn bgzf_header_is_refused_by_the_byte_sniff() {
-        let mut bgzf = vec![
+    fn is_bgzf_needs_the_fextra_flag_and_the_bc_subfield() {
+        let mut header = vec![
             0x1f, 0x8b, 0x08, 0x04, // magic, CM=deflate, FLG=FEXTRA
             0x00, 0x00, 0x00, 0x00, // MTIME
             0x00, 0xff, // XFL, OS
@@ -307,19 +312,40 @@ mod tests {
             b'B', b'C', 0x02, 0x00, // "BC" subfield, SLEN=2
             0x1b, 0x00, // BSIZE
         ];
-        let err = detect_input(None, &bgzf).unwrap_err().to_string();
-        assert!(err.contains("block probe"), "Got: {err}");
+        assert!(is_bgzf(&header));
 
-        // A plain-gzip stream (FLG = 0, no BC) is `FastqGz` even with a
+        // A plain-gzip stream (FLG = 0, no BC) is not BGZF even with a
         // full-length header present.
-        bgzf[3] = 0x00; // clear FEXTRA
-        assert_eq!(detect_input(None, &bgzf).unwrap(), Format::FastqGz);
+        header[3] = 0x00; // clear FEXTRA
+        assert!(!is_bgzf(&header));
+        assert_eq!(detect_input(&header).unwrap(), Format::FastqGz);
 
         // A gzip-magic buffer shorter than a block header cannot be BGZF.
-        assert_eq!(
-            detect_input(None, &[0x1f, 0x8b, 0x08, 0x04]).unwrap(),
-            Format::FastqGz
-        );
+        assert!(!is_bgzf(&[0x1f, 0x8b, 0x08, 0x04]));
+    }
+
+    /// `fill` reads until the buffer is full or the source ends, across a
+    /// source that returns one byte per `read`.
+    #[test]
+    fn fill_reads_until_full_or_end() {
+        struct OneByte<'a>(&'a [u8]);
+        impl Read for OneByte<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                match (self.0.split_first(), buf.first_mut()) {
+                    (Some((&b, rest)), Some(slot)) => {
+                        *slot = b;
+                        self.0 = rest;
+                        Ok(1)
+                    },
+                    _ => Ok(0),
+                }
+            }
+        }
+        let mut buf = [0u8; 4];
+        assert_eq!(fill(&mut OneByte(b"abcdef"), &mut buf).unwrap(), 4);
+        assert_eq!(&buf, b"abcd");
+        assert_eq!(fill(&mut OneByte(b"ab"), &mut buf).unwrap(), 2);
+        assert_eq!(&buf[..2], b"ab");
     }
 
     #[test]

@@ -151,29 +151,48 @@ impl TagRemoval {
 }
 
 /// What an enabled ab-initio adapter inference run does with its discoveries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum AdapterInferAction {
-    /// Trimming with the inferred sequences.
+    /// Trim reads with the inferred sequences.
     Trim,
-    /// FASTA output of the inferred sequences, with no read output.
+    /// Print inferred FASTA to stdout and do not write read output.
     Report,
 }
 
+impl AdapterInferAction {
+    /// Lowercase label, as the banner and the summary print it.
+    pub fn label(self) -> &'static str {
+        match self {
+            AdapterInferAction::Trim => "trim",
+            AdapterInferAction::Report => "report",
+        }
+    }
+}
+
 /// How much of an inferred recurrent consensus is trusted as technical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum AdapterInferPolicy {
-    /// Trust only a short end-facing anchor; no inferred interior splitting.
+    /// Use a short end-facing anchor.
     Conservative,
-    /// Trust the complete recurrent consensus; interior splitting allowed.
+    /// Use the complete recurrent consensus.
     Aggressive,
+}
+
+impl AdapterInferPolicy {
+    /// Lowercase label, as the banner and the summary print it.
+    pub fn label(self) -> &'static str {
+        match self {
+            AdapterInferPolicy::Conservative => "conservative",
+            AdapterInferPolicy::Aggressive => "aggressive",
+        }
+    }
 }
 
 /// Whether ab-initio adapter inference runs, and its independent action and
 /// policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterInfer {
     /// Inference does not run.
-    #[default]
     Off,
     /// Inference runs with the given action and policy.
     Enabled {
@@ -246,23 +265,20 @@ impl Advisory {
 /// `--quiet` conflicts with `--progress` at parse time and outranks this
 /// setting. Progress and log level are separate so the summary can be kept
 /// while in-flight progress lines or the bar are suppressed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProgressMode {
     /// A bar on a terminal, periodic lines otherwise.
-    #[default]
     Auto,
-    /// The animated bar, even when output is redirected. Falls back to
-    /// periodic lines under `-v`/`-vv` or `WHITTLE_LOG`, since debug output and
-    /// a live bar cannot share a terminal.
+    /// The animated bar, unless -v or WHITTLE_LOG asks for log lines.
     Bar,
     /// Always periodic lines, never a bar.
     Plain,
-    /// No progress reporting. The banner, warnings and summary still print.
+    /// No progress reporting; the banner and summary still print.
     None,
 }
 
 /// Input and output endpoints and any forced formats.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IoConfig {
     /// Input path; `None` reads stdin.
     pub input: Option<PathBuf>,
@@ -284,7 +300,7 @@ pub struct Config {
     /// Fixed crops and the quality-trim operation.
     pub trim: TrimPlan,
     /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
-    /// `--adapter-preset ont` was given (adapter trimming off, no per-read cost).
+    /// `--adapter-preset` was given (adapter trimming off, no per-read cost).
     pub adapters: Option<crate::adapter::AdapterConfig>,
     /// Whether ab-initio adapter inference runs and whether inferred adapters
     /// are also used for trimming.
@@ -294,9 +310,8 @@ pub struct Config {
     /// Aux tags carried into FASTQ headers on BAM-to-FASTQ output.
     pub fastq_tags: FastqTags,
     /// Resolved render-pool size for this dispatch; `0` means the workflow falls
-    /// back to `threads` (tests and callers without a workload-aware budget).
-    /// Set by `settle` from `thread_budget(..).render` before the workflow
-    /// runs.
+    /// back to `threads`. Set by `settle` from `thread_budget(..).render`
+    /// before the workflow runs.
     pub render_workers: usize,
     /// Reads to sample for adapter-presence detection before trimming the full
     /// dataset. `0` disables detection (trim against the full active set).
@@ -314,11 +329,11 @@ pub struct Config {
     pub update_moves: bool,
     /// Whether the barcode spans dorado recorded in the `bi` aux tag are
     /// removed, as the outermost trimming stage. BAM input only; `cli::parse`
-    /// and `guards::guard_barcode_input` reject any other input format.
+    /// and `guards::guard_bam_only_flags` reject any other input format.
     pub trim_barcodes: bool,
     /// Aux tags removed from every output record (`--remove-tag`,
     /// `--strip-kinetics`). BAM input only; `cli::parse` and
-    /// `guards::guard_remove_tag_input` reject any other input format.
+    /// `guards::guard_bam_only_flags` reject any other input format.
     pub remove_tags: TagRemoval,
     /// Whether multithreaded runs write records in input order. When false,
     /// records are written in completion order.
@@ -349,6 +364,37 @@ pub struct Config {
     pub adapters_configured: Option<usize>,
 }
 
+impl Default for Config {
+    /// The command line's defaults: stdin to stdout, no trimming or filtering,
+    /// one thread, every tag, compression level 6, progress `auto`.
+    fn default() -> Self {
+        Config {
+            io: IoConfig::default(),
+            filter: crate::filter::FilterConfig::default(),
+            trim: crate::trim::TrimPlan::default(),
+            adapters: None,
+            adapter_infer: AdapterInfer::Off,
+            threads: 1,
+            fastq_tags: FastqTags::All,
+            render_workers: 0,
+            adapter_sample: 0,
+            compression_level: 6,
+            update_moves: false,
+            trim_barcodes: false,
+            remove_tags: TagRemoval::default(),
+            ordered: false,
+            verbosity: 0,
+            quiet: false,
+            threads_clamped: None,
+            summary_json: None,
+            advisories: Vec::new(),
+            progress: ProgressMode::Auto,
+            adapter_fasta: None,
+            adapters_configured: None,
+        }
+    }
+}
+
 impl Config {
     /// Every file the run writes, each paired with the flag that named it. The
     /// overwrite guards and the report-only advisories both derive from this
@@ -363,123 +409,30 @@ impl Config {
     }
 }
 
-/// How a `-t` total worker budget splits across the workflow stages. The split
-/// is workload-aware (see `thread_budget`): serial decode keeps up unless the
-/// input is BGZF, while render (MM/ML reconstruction, or the trim-only pass for
-/// FASTQ) and encode (bgzf or gzip compression) are weighted against each other
-/// by the cost of each stage for the dispatched (input, output) pair.
+/// How a `-t` total worker budget is spent. The render pool trims, rebuilds
+/// tags and compresses the output blocks, so it holds the whole budget; BGZF
+/// input adds decode workers that block whenever the pool is behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadBudget {
     /// Workers for input decoding.
     pub decode: usize,
-    /// Workers for the render pool (trimming and MM/ML reconstruction).
+    /// Workers for the render pool.
     pub render: usize,
-    /// Workers for output compression.
-    pub encode: usize,
 }
 
-impl ThreadBudget {
-    /// Sum across all three stages. May exceed the requested `-t` value at very
-    /// low counts, since `thread_budget` floors `render` and `encode` at 1 each;
-    /// the startup banner prints the requested count instead.
-    #[cfg(test)]
-    pub fn total(&self) -> usize {
-        self.decode + self.render + self.encode
-    }
-}
-
-/// The output compression stage's weight, for thread budgeting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EncodeKind {
-    /// No compression pool (plain FASTQ out).
-    None,
-    /// bgzf (BAM out): libdeflate, medium cost.
-    Bgzf,
-    /// gzip via gzp (FASTQ.gz out): heavier.
-    Gzip,
-}
-
-/// Splits a `-t` worker budget across decode, render, and encode. Parallel
-/// input receives multiple decode workers; otherwise decoding stays serial and
-/// the remaining workers are weighted toward the more expensive downstream
-/// stage.
-pub fn thread_budget(
-    total: usize,
-    render_heavy: bool,
-    parallel_decode: bool,
-    encode: EncodeKind,
-) -> ThreadBudget {
+/// Returns the budget for `total` workers. `parallel_decode` names BGZF input,
+/// whose blocks inflate in parallel: a quarter of the budget, at least one,
+/// decodes ahead of the pool.
+pub fn thread_budget(total: usize, parallel_decode: bool) -> ThreadBudget {
     let total = total.max(1);
-
-    if parallel_decode && total == 2 {
-        return ThreadBudget {
-            decode: 2,
-            render: 1,
-            encode: 1,
-        };
-    }
-
-    if parallel_decode && total >= 3 {
-        let (decode, render, encode_n) = match encode {
-            // The `min` matters at `total == 3`, where the `max(2)` floor would
-            // otherwise take both remaining workers and leave render with none.
-            // One worker is reserved for the writer thread and one for render, so
-            // decode can claim at most `total - 2`. Render takes precedence over
-            // parallel decode because a render pool of zero disables the stage.
-            EncodeKind::None if render_heavy => {
-                let decode = (total / 3).max(2).min(total - 2);
-                (decode, total - decode - 1, 1)
-            },
-            EncodeKind::None => {
-                let decode = (total * 2 / 3).max(2).min(total - 2);
-                (decode, total - decode - 1, 1)
-            },
-            EncodeKind::Gzip | EncodeKind::Bgzf if render_heavy => {
-                let render = (total * 2 / 5).max(1);
-                let remaining = total - render;
-                let decode = (remaining / 3).max(1);
-                (decode, render, remaining - decode)
-            },
-            EncodeKind::Gzip | EncodeKind::Bgzf => {
-                let render = 1;
-                let remaining = total - render;
-                let decode = (remaining / 3).max(1);
-                (decode, render, remaining - decode)
-            },
-        };
-        return ThreadBudget {
-            decode: decode.max(1),
-            render: render.max(1),
-            encode: encode_n.max(1),
-        };
-    }
-
-    let rest = total.saturating_sub(1).max(2); // >= 2 so both stages can get >= 1
-    let (render, encode_n) = match (render_heavy, encode) {
-        // No compression pool: render receives every remaining worker; the
-        // encode field is unused.
-        (_, EncodeKind::None) => (rest, 1),
-        // BAM in, bgzf out: split nearly evenly. Raw BAM field and tag
-        // conversion runs in the render pool alongside MM/ML reconstruction; the
-        // BGZF stage uses the other half for ordered block encoding.
-        (true, EncodeKind::Bgzf) if rest <= 4 => (rest / 2, rest.div_ceil(2)),
-        (true, EncodeKind::Bgzf) if rest <= 8 => (rest.div_ceil(2), rest / 2),
-        (true, EncodeKind::Bgzf) => {
-            let render = rest.div_ceil(2).max(1);
-            (render, rest - render)
-        },
-        // BAM input with gzip output slightly favors encoding.
-        (true, EncodeKind::Gzip) => (rest / 2, rest.div_ceil(2)),
-        // FASTQ rendering is light, so compressed output favors encoding.
-        (false, _) => {
-            let r = (rest / 6).max(1);
-            (r, rest - r)
-        },
+    let decode = if parallel_decode && total > 1 {
+        (total / 4).max(1)
+    } else {
+        1
     };
     ThreadBudget {
-        decode: 1,
-        render: render.max(1),
-        encode: encode_n.max(1),
+        decode,
+        render: total,
     }
 }
 
@@ -517,82 +470,42 @@ mod resolve_threads_tests {
     }
 }
 
-/// The output compression stage's weight for a given output format: `Bgzf` for
-/// BAM (always bgzf-compressed), `Gzip` for `FASTQ.gz`, `None` for plain FASTQ.
-/// Paired with `render_heavy_for`, this is everything `thread_budget` needs;
-/// `lib::plan_budget` resolves the budget from both exactly once, before the
-/// startup banner, and reuses it for the workflow dispatch.
-pub(crate) fn encode_kind_for(out_fmt: crate::io::Format) -> EncodeKind {
-    match out_fmt {
-        crate::io::Format::Bam => EncodeKind::Bgzf,
-        crate::io::Format::FastqGz => EncodeKind::Gzip,
-        crate::io::Format::FastqBgzf => EncodeKind::Bgzf,
-        crate::io::Format::Fastq => EncodeKind::None,
-    }
-}
-
-/// Whether the render stage has substantial per-record work. BAM input is
-/// render-heavy for every output format because the parallel path clones owned
-/// `RecordBuf`s before handing them to the writer. FASTQ input is trim-only
-/// unless adapter matching or ab-initio inference runs an approximate search
-/// per read, which is also heavy and receives a render-pool share.
-pub(crate) fn render_heavy_for(in_fmt: crate::io::Format, cfg: &Config) -> bool {
-    matches!(in_fmt, crate::io::Format::Bam)
-        || cfg.adapters.is_some()
-        || cfg.adapter_infer != AdapterInfer::Off
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every stage receives at least one worker at every thread count and input
-    /// combination. A stage with zero workers makes its consumer fall back to
-    /// its own default, so the banner would report a split the pipeline is not
-    /// using.
+    /// The render pool holds the whole budget; BGZF input adds a quarter of it
+    /// as decode workers, at least one, and a single worker stays sequential.
     #[test]
-    fn every_stage_gets_at_least_one_worker() {
-        for total in 0..=64usize {
-            for render_heavy in [false, true] {
-                for parallel_decode in [false, true] {
-                    for encode in [EncodeKind::None, EncodeKind::Gzip, EncodeKind::Bgzf] {
-                        let b = thread_budget(total, render_heavy, parallel_decode, encode);
-                        assert!(
-                            b.decode >= 1 && b.render >= 1 && b.encode >= 1,
-                            "total={total} render_heavy={render_heavy} \
-                             parallel_decode={parallel_decode} encode={encode:?} gave {b:?}"
-                        );
-                    }
-                }
+    fn thread_budget_gives_the_pool_every_worker() {
+        assert_eq!(
+            thread_budget(8, true),
+            ThreadBudget {
+                decode: 2,
+                render: 8
             }
-        }
-    }
-
-    /// With a real compression pool, the three stages must not claim more workers
-    /// than were asked for.
-    ///
-    /// `EncodeKind::None` is excluded: plain FASTQ output has no encode pool, so
-    /// its encode field counts the single writer thread rather than a budget
-    /// share, and the sum reads one high. `ThreadBudget::total` documents that
-    /// case.
-    #[test]
-    fn split_stays_within_the_requested_budget() {
-        for total in 3..=64usize {
-            for render_heavy in [false, true] {
-                for parallel_decode in [false, true] {
-                    for encode in [EncodeKind::Gzip, EncodeKind::Bgzf] {
-                        let b = thread_budget(total, render_heavy, parallel_decode, encode);
-                        assert!(
-                            b.total() <= total,
-                            "total={total} render_heavy={render_heavy} \
-                             parallel_decode={parallel_decode} encode={encode:?} gave {b:?} \
-                             summing to {}",
-                            b.total()
-                        );
-                    }
-                }
+        );
+        assert_eq!(
+            thread_budget(8, false),
+            ThreadBudget {
+                decode: 1,
+                render: 8
             }
-        }
+        );
+        assert_eq!(
+            thread_budget(2, true),
+            ThreadBudget {
+                decode: 1,
+                render: 2
+            }
+        );
+        assert_eq!(
+            thread_budget(1, true),
+            ThreadBudget {
+                decode: 1,
+                render: 1
+            }
+        );
     }
 
     /// `--strip-kinetics` folds in exactly the nine per-base arrays the BAM
@@ -691,72 +604,6 @@ mod tests {
     }
 
     #[test]
-    fn thread_budget_split() {
-        use EncodeKind::*;
-        assert_eq!(
-            thread_budget(8, true, false, Bgzf),
-            ThreadBudget {
-                decode: 1,
-                render: 4,
-                encode: 3
-            }
-        );
-        assert_eq!(
-            thread_budget(16, true, false, Bgzf),
-            ThreadBudget {
-                decode: 1,
-                render: 8,
-                encode: 7
-            }
-        );
-        assert_eq!(
-            thread_budget(4, true, false, Bgzf),
-            ThreadBudget {
-                decode: 1,
-                render: 1,
-                encode: 2
-            }
-        );
-        assert_eq!(
-            thread_budget(8, true, false, Gzip),
-            ThreadBudget {
-                decode: 1,
-                render: 3,
-                encode: 4
-            }
-        );
-        assert_eq!(
-            thread_budget(8, false, false, Gzip),
-            ThreadBudget {
-                decode: 1,
-                render: 1,
-                encode: 6
-            }
-        );
-        assert_eq!(
-            thread_budget(8, true, false, None),
-            ThreadBudget {
-                decode: 1,
-                render: 7,
-                encode: 1
-            }
-        );
-    }
-
-    #[test]
-    fn thread_budget_total_sums_all_three_stages() {
-        use EncodeKind::*;
-        for t in [1usize, 2, 8, 16] {
-            for rh in [true, false] {
-                for e in [None, Bgzf, Gzip] {
-                    let b = thread_budget(t, rh, false, e);
-                    assert_eq!(b.total(), b.decode + b.render + b.encode);
-                }
-            }
-        }
-    }
-
-    #[test]
     fn carries_rules() {
         assert!(FastqTags::All.carries(b"RG"));
         assert!(FastqTags::All.carries_mods());
@@ -771,25 +618,5 @@ mod tests {
         // MN alone does not enable the mod block.
         let mn_only = FastqTags::parse("MN").unwrap();
         assert!(!mn_only.carries_mods());
-    }
-
-    #[test]
-    fn bgzf_fastq_plain_output_favors_parallel_decode() {
-        assert_eq!(
-            thread_budget(16, false, true, EncodeKind::None),
-            ThreadBudget {
-                decode: 10,
-                render: 5,
-                encode: 1,
-            }
-        );
-        assert_eq!(
-            thread_budget(2, false, true, EncodeKind::None),
-            ThreadBudget {
-                decode: 2,
-                render: 1,
-                encode: 1,
-            }
-        );
     }
 }

@@ -2,185 +2,173 @@
 
 use super::{MmGroup, ModCode, Mods};
 
-/// An `MM` string holding a byte the group grammar does not accept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MalformedMm {
-    /// Byte offset of the first unexpected byte.
-    pub offset: usize,
-}
-
-/// One group token read in place: its header fields, its code and delta
-/// counts, and the offset of the first byte the grammar rejects, which is
-/// `token.len()` for a well-formed group.
-struct GroupScan {
+/// The header of one group token, read in place: `[A-Za-z][+-]` then either
+/// a run of single-letter codes or one numeric ChEBI id, then an optional
+/// `.`/`?` status. `tail` is the rest of the token, the `(,[0-9]+)*` delta
+/// list.
+struct GroupHead<'a> {
     base: u8,
     strand: u8,
+    /// The code text: letters, or the digits of a ChEBI id when `chebi`.
+    codes: &'a [u8],
+    chebi: bool,
     status: Option<u8>,
-    codes: usize,
-    deltas: usize,
-    stop: usize,
+    tail: &'a [u8],
 }
 
-/// Reads one group token without allocating. Codes and deltas are handed to
-/// `on_code` and `on_delta` as they are read, so `parse` collects them while
-/// the counting scan discards them. The grammar is the SAM tag grammar:
-/// `[A-Za-z][+-]([a-z]+|[0-9]+)[.?]?(,[0-9]+)*`.
-fn scan_group(
-    token: &[u8],
-    mut on_code: impl FnMut(ModCode),
-    mut on_delta: impl FnMut(usize),
-) -> GroupScan {
-    let mut scan = GroupScan {
-        base: 0,
-        strand: 0,
-        status: None,
-        codes: 0,
-        deltas: 0,
-        stop: 0,
-    };
-    let Some(&base) = token.first().filter(|b| b.is_ascii_alphabetic()) else {
-        return scan;
-    };
-    scan.base = base;
-    scan.stop = 1;
-    let Some(&strand) = token.get(1).filter(|s| matches!(s, b'+' | b'-')) else {
-        return scan;
-    };
-    scan.strand = strand;
-
-    let mut i = 2;
-    if i < token.len() && token[i].is_ascii_digit() {
-        // Saturating: a corrupt over-long id clamps instead of overflowing.
-        let mut id = 0u32;
-        while i < token.len() && token[i].is_ascii_digit() {
-            id = id
-                .saturating_mul(10)
-                .saturating_add(u32::from(token[i] - b'0'));
-            i += 1;
-        }
-        on_code(ModCode::Chebi(id));
-        scan.codes = 1;
-    } else {
-        while i < token.len() && token[i].is_ascii_alphabetic() {
-            on_code(ModCode::Char(token[i]));
-            scan.codes += 1;
-            i += 1;
-        }
-    }
-    scan.stop = i;
-    if scan.codes == 0 {
-        return scan;
+impl GroupHead<'_> {
+    /// The number of modification codes the group lists. A ChEBI id is one.
+    fn code_count(&self) -> usize {
+        if self.chebi { 1 } else { self.codes.len() }
     }
 
-    if i < token.len() && matches!(token[i], b'.' | b'?') {
-        scan.status = Some(token[i]);
-        i += 1;
-    }
-
-    while i < token.len() && token[i] == b',' {
-        i += 1;
-        let digits = i;
-        let mut n = 0usize;
-        while i < token.len() && token[i].is_ascii_digit() {
-            // Saturating for the same reason as the ChEBI id; a delta this
-            // large lies outside any window and is dropped by `reconstruct`.
-            n = n
-                .saturating_mul(10)
-                .saturating_add(usize::from(token[i] - b'0'));
-            i += 1;
+    /// The group's codes as `ModCode`s.
+    fn mod_codes(&self) -> Vec<ModCode> {
+        if self.chebi {
+            // Saturating: a corrupt over-long id clamps instead of overflowing.
+            let id = self.codes.iter().fold(0u32, |id, &d| {
+                id.saturating_mul(10).saturating_add(u32::from(d - b'0'))
+            });
+            vec![ModCode::Chebi(id)]
+        } else {
+            self.codes.iter().map(|&c| ModCode::Char(c)).collect()
         }
-        if i == digits {
-            break;
-        }
-        on_delta(n);
-        scan.deltas += 1;
     }
-    scan.stop = i;
-    scan
 }
 
-/// Returns the group tokens of `mm` with their byte offsets. The empty remainder after
-/// a final `;` is not a token; an empty token anywhere else is one, and fails
-/// the grammar like any group without a code.
-fn group_tokens(mm: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
+/// Reads a group token's header. `None` when the token does not start with
+/// `[A-Za-z][+-]([a-z]+|[0-9]+)`.
+fn group_head(token: &[u8]) -> Option<GroupHead<'_>> {
+    let (&base, rest) = token.split_first()?;
+    if !base.is_ascii_alphabetic() {
+        return None;
+    }
+    let (&strand, rest) = rest.split_first()?;
+    if !matches!(strand, b'+' | b'-') {
+        return None;
+    }
+    let chebi = rest.first().is_some_and(u8::is_ascii_digit);
+    let code_len = rest
+        .iter()
+        .take_while(|b| {
+            if chebi {
+                b.is_ascii_digit()
+            } else {
+                b.is_ascii_alphabetic()
+            }
+        })
+        .count();
+    if code_len == 0 {
+        return None;
+    }
+    let (codes, mut tail) = rest.split_at(code_len);
+    let mut status = None;
+    if let Some((&s, rest)) = tail.split_first()
+        && matches!(s, b'.' | b'?')
+    {
+        status = Some(s);
+        tail = rest;
+    }
+    Some(GroupHead {
+        base,
+        strand,
+        codes,
+        chebi,
+        status,
+        tail,
+    })
+}
+
+/// Reads the deltas of a group's tail, `(,[0-9]+)*`, in place: `Some(delta)`
+/// per listed position, then `None` once when the tail holds a byte the
+/// grammar rejects. A single trailing comma lists no position and is accepted.
+fn deltas(tail: &[u8]) -> impl Iterator<Item = Option<usize>> + '_ {
+    let mut rest = tail;
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        let Some((&b',', digits)) = rest.split_first() else {
+            done = true;
+            return (!rest.is_empty()).then_some(None);
+        };
+        let n = digits.iter().take_while(|b| b.is_ascii_digit()).count();
+        if n == 0 {
+            done = true;
+            return (!digits.is_empty()).then_some(None);
+        }
+        // Saturating: a delta this large lies outside any window and is dropped
+        // by `reconstruct`.
+        let delta = digits[..n].iter().fold(0usize, |d, &b| {
+            d.saturating_mul(10).saturating_add(usize::from(b - b'0'))
+        });
+        rest = &digits[n..];
+        Some(Some(delta))
+    })
+}
+
+/// Returns the group tokens of `mm`. The empty remainder after a final `;` is
+/// not a token; an empty token anywhere else is one, and fails the grammar
+/// like any group without a code.
+fn group_tokens(mm: &[u8]) -> impl Iterator<Item = &[u8]> {
     let len = mm.len();
     let mut next = 0usize;
-    mm.split(|&b| b == b';').filter_map(move |token| {
+    mm.split(|&b| b == b';').filter(move |token| {
         let start = next;
         next += token.len() + 1;
-        (start < len).then_some((start, token))
+        start < len
     })
 }
 
 /// Returns the number of `ML` bytes a well-formed record carrying this `MM`
-/// string must have: one per listed position per mod code, summed over groups. Counts
-/// without allocating, so a caller can check `ML` on the hot path without
-/// building the groups. `Err` when `mm` does not conform to the grammar.
-pub fn expected_ml_len(mm: &[u8]) -> Result<usize, MalformedMm> {
+/// string must have: one per listed position per mod code, summed over groups.
+/// Counts without allocating, so a caller can check `ML` on the hot path
+/// without building the groups. `None` when `mm` does not conform to the
+/// grammar `[A-Za-z][+-]([a-z]+|[0-9]+)[.?]?(,[0-9]+)*` to its end.
+pub fn expected_ml_len(mm: &[u8]) -> Option<usize> {
     let mut total = 0usize;
-    for (start, token) in group_tokens(mm) {
-        let scan = scan_group(token, |_| {}, |_| {});
-        if scan.codes == 0 || scan.stop != token.len() {
-            return Err(MalformedMm {
-                offset: start + scan.stop,
-            });
-        }
-        total += scan.deltas * scan.codes;
+    for token in group_tokens(mm) {
+        let head = group_head(token)?;
+        let positions = deltas(head.tail).try_fold(0usize, |n, delta| delta.map(|_| n + 1))?;
+        total += positions * head.code_count();
     }
-    Ok(total)
+    Some(total)
 }
 
-/// Parses a raw `MM:Z` string plus its `ML:B,C` array into groups. A group is
-/// read up to its first unexpected byte and the remainder of that group is
-/// skipped; the groups after it are still read. `parse_checked` refuses such
-/// strings instead.
+/// Parses a raw `MM:Z` string plus its `ML:B,C` array into groups. A group
+/// without a usable header contributes nothing, and a group is read up to its
+/// first unexpected byte; the groups after it are still read. The workflows
+/// validate `MM` with `expected_ml_len` first, so a production parse sees only
+/// well-formed strings.
 pub fn parse(mm: &[u8], ml: &[u8]) -> Mods {
-    parse_inner(mm, ml).0
-}
-
-/// Parses like `parse` but refuses an `MM` string that does not conform to the
-/// group grammar to its end.
-pub fn parse_checked(mm: &[u8], ml: &[u8]) -> Result<Mods, MalformedMm> {
-    match parse_inner(mm, ml) {
-        (mods, None) => Ok(mods),
-        (_, Some(offset)) => Err(MalformedMm { offset }),
-    }
-}
-
-/// Returns the parsed groups and the offset of the first unexpected byte, if any.
-fn parse_inner(mm: &[u8], ml: &[u8]) -> (Mods, Option<usize>) {
     let mut groups = Vec::new();
     let mut ml_pos = 0usize;
-    let mut malformed = None;
 
-    for (start, token) in group_tokens(mm) {
-        let mut codes = Vec::new();
-        let mut deltas = Vec::new();
-        let scan = scan_group(token, |c| codes.push(c), |d| deltas.push(d));
-        if (scan.codes == 0 || scan.stop != token.len()) && malformed.is_none() {
-            malformed = Some(start + scan.stop);
-        }
-        if scan.codes == 0 {
+    for token in group_tokens(mm) {
+        let Some(head) = group_head(token) else {
             continue;
-        }
+        };
+        let codes = head.mod_codes();
+        let deltas: Vec<usize> = deltas(head.tail).map_while(|delta| delta).collect();
 
         // This group's ML bytes: positions * codes, position-major.
-        let want = deltas.len() * scan.codes;
+        let want = deltas.len() * codes.len();
         let end = (ml_pos + want).min(ml.len());
         let group_ml = ml[ml_pos..end].to_vec();
         ml_pos = end;
 
         groups.push(MmGroup {
-            base: scan.base,
-            strand: scan.strand,
+            base: head.base,
+            strand: head.strand,
             codes,
-            status: scan.status,
+            status: head.status,
             deltas,
             ml: group_ml,
         });
     }
 
-    (Mods { groups }, malformed)
+    Mods { groups }
 }
 
 #[cfg(test)]
@@ -261,7 +249,7 @@ mod tests {
             b"",
             b"C+m,0",
         ] {
-            let parsed = parse_checked(mm, &[]).unwrap();
+            let parsed = parse(mm, &[]);
             let want: usize = parsed
                 .groups
                 .iter()
@@ -269,54 +257,56 @@ mod tests {
                 .sum();
             assert_eq!(
                 expected_ml_len(mm),
-                Ok(want),
+                Some(want),
                 "Counting scan disagreed for {}",
                 String::from_utf8_lossy(mm)
             );
         }
     }
 
-    /// Every departure from the grammar is reported at the offending byte by
-    /// both the checked parse and the counting scan.
+    /// The validator accepts well-formed strings and the grammar's accepted
+    /// oddities (a trailing comma, uppercase codes, an empty string) with the
+    /// declared `ML` length, and rejects every malformed shape.
     #[test]
-    fn malformed_strings_report_the_first_unexpected_byte() {
-        for (mm, offset) in [
-            (&b"C+m,5,1x,7;"[..], 7),
-            (b"C+m,0;;A+a,1;", 6),
-            (b"C+m,,1;", 4),
-            (b"C,5;", 1),
-            (b"C+;", 2),
-            (b"+m,0;", 0),
-            (b";", 0),
-            (b"C+m,0,1;C+h,2 ;", 13),
-        ] {
-            let want = Some(MalformedMm { offset });
-            assert_eq!(
-                parse_checked(mm, &[]).err(),
-                want,
-                "{}",
-                String::from_utf8_lossy(mm)
-            );
-            assert_eq!(
-                expected_ml_len(mm).err(),
-                want,
-                "{}",
-                String::from_utf8_lossy(mm)
-            );
+    fn expected_ml_len_rejects_every_malformed_shape() {
+        let cases: &[(&[u8], Option<usize>)] = &[
+            (b"", Some(0)),
+            (b"C+m,0,5;", Some(2)),
+            (b"C+m,0;A+a,1,2;", Some(3)),
+            (b"C+mh,1,2;", Some(4)),
+            (b"C+MH,1,2;", Some(4)),
+            (b"C+12345,3;", Some(1)),
+            (b"C+12345;", Some(0)),
+            (b"C+m?,1;", Some(1)),
+            (b"C+m.,1;", Some(1)),
+            (b"C+m;", Some(0)),
+            (b"C+m", Some(0)),
+            (b"C+m,", Some(0)),
+            (b"C+m,1,", Some(1)),
+            (b"C+m,1,;A+a,2", Some(2)),
+            (b"N-x,0", Some(1)),
+            (b";", None),
+            (b"C+m?.,1;", None),
+            (b"C+m,,1;", None),
+            (b"C+;", None),
+            (b"C+", None),
+            (b"+m,1;", None),
+            (b"Cm,1;", None),
+            (b"C*m,1;", None),
+            (b"C+m,a;", None),
+            (b"C+m,1 ;", None),
+            (b"C+m,1;;C+h;", None),
+            (b"C+m1;", None),
+            (b"C+m,1;junk", None),
+            (b"C+m,1;C+h,2,x", None),
+            (b"C+m,-1;", None),
+            (b"C+m,1.5;", None),
+            (b"9+m,1;", None),
+            (b"C+m,5,1x,7;", None),
+            (b"C,5;", None),
+        ];
+        for &(mm, want) in cases {
+            assert_eq!(expected_ml_len(mm), want, "{}", String::from_utf8_lossy(mm));
         }
-    }
-
-    /// The lenient parse keeps what precedes the unexpected byte and still
-    /// reads the groups after it.
-    #[test]
-    fn lenient_parse_keeps_the_readable_prefix_of_a_malformed_group() {
-        let m = parse(b"C+m,5,1x,7;A+a,2;", &[1, 2, 3]);
-        assert_eq!(m.groups.len(), 2);
-        assert_eq!(m.groups[0].deltas, vec![5, 1]);
-        assert_eq!(m.groups[0].ml, vec![1, 2]);
-        assert_eq!(m.groups[1].deltas, vec![2]);
-        assert_eq!(m.groups[1].ml, vec![3]);
-        // A group without a usable header contributes nothing.
-        assert_eq!(parse(b"C+;A+a,2;", &[3]).groups.len(), 1);
     }
 }

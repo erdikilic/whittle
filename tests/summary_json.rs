@@ -261,7 +261,10 @@ fn parse_time_advisories_respect_the_level_filter() {
     std::fs::write(&input, "@r1\nACGTACGTACGT\n+\nIIIIIIIIIIII\n").unwrap();
     let out = dir.path().join("out.fastq");
 
-    // Conservative inference raises an INFO advisory, which --quiet must drop.
+    // Report mode with a naming FASTA raises an INFO advisory, which --quiet
+    // must drop; the ignored preset raises a WARN one, which it must keep.
+    let fasta = dir.path().join("names.fa");
+    std::fs::write(&fasta, ">ref\nACGTACGTACGTACGT\n").unwrap();
     let args = [
         "-i",
         input.to_str().unwrap(),
@@ -269,8 +272,10 @@ fn parse_time_advisories_respect_the_level_filter() {
         out.to_str().unwrap(),
         "--adapter-preset",
         "ont",
+        "--adapter-fasta",
+        fasta.to_str().unwrap(),
         "--adapter-infer",
-        "trim",
+        "report",
     ];
 
     whittle()
@@ -278,7 +283,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "Conservative adapter inference trims read ends only",
+            "--adapter-infer report with --adapter-fasta",
         ));
 
     whittle()
@@ -289,7 +294,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         // The INFO advisory is filtered out; the WARN one still belongs on stderr,
         // since --quiet keeps warnings.
         .stderr(
-            predicate::str::contains("Conservative adapter inference")
+            predicate::str::contains("--adapter-infer report with --adapter-fasta")
                 .not()
                 .and(predicate::str::contains("--adapter-preset is ignored")),
         );

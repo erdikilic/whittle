@@ -4,15 +4,15 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use super::{Counters, FASTQ_BATCH, Rendered, Stats, process_read_segments, run_parallel};
+use super::{BatchSink, Counters, FASTQ_BATCH, Stats, process_read_segments, run_bytes_parallel};
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
 use crate::trim;
 
 /// Runs the single-threaded FASTQ workflow: trims, filters each produced segment
-/// and writes the survivors.
-pub fn run_fastq_seq<W: Write>(
+/// and writes the survivors straight to `writer`.
+fn run_fastq_seq<W: Write>(
     records: impl Iterator<Item = anyhow::Result<ReadRecord>>,
     writer: &mut W,
     cfg: &Config,
@@ -24,36 +24,20 @@ pub fn run_fastq_seq<W: Write>(
         counters
             .input_bases
             .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
-        let _read = super::read_span(&rec.name);
-        let _read = _read.enter();
-        let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref(), None);
-        process_read_segments(
-            &produced,
-            &rec.seq,
-            &rec.qual,
-            &cfg.filter,
-            counters,
-            |idx, total, s, e| {
-                write_segment(
-                    writer,
-                    &rec.name,
-                    &rec.seq[s..e],
-                    &rec.qual[s..e],
-                    total,
-                    idx,
-                )?;
-                Ok(())
-            },
-        )?;
+        render_record(&rec, cfg, counters, writer)?;
     }
-    Ok(counters.snapshot(0))
+    Ok(counters.snapshot())
 }
 
 /// Trims one record, filters each produced segment through
-/// `process_read_segments`, and renders the survivors into `buf`. Writing into
-/// an in-memory `Vec<u8>` cannot fail, so the `expect` is an assertion rather
-/// than error handling.
-fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut Vec<u8>) {
+/// `process_read_segments`, and writes the survivors to `w`: the output stream
+/// on the sequential path, a per-record buffer on the parallel one.
+fn render_record<W: Write>(
+    rec: &ReadRecord,
+    cfg: &Config,
+    counters: &Counters,
+    w: &mut W,
+) -> anyhow::Result<()> {
     let _read = super::read_span(&rec.name);
     let _read = _read.enter();
     let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref(), None);
@@ -64,55 +48,46 @@ fn render_record(rec: &ReadRecord, cfg: &Config, counters: &Counters, buf: &mut 
         &cfg.filter,
         counters,
         |idx, total, s, e| {
-            write_segment(
-                &mut *buf,
-                &rec.name,
-                &rec.seq[s..e],
-                &rec.qual[s..e],
-                total,
-                idx,
-            )?;
+            write_segment(w, &rec.name, &rec.seq[s..e], &rec.qual[s..e], total, idx)?;
             Ok(())
         },
     )
-    .expect("Writing FASTQ segments into an in-memory Vec<u8> cannot fail");
 }
 
 /// Runs the FASTQ workflow: sequential when `cfg.threads <= 1`; otherwise
 /// records render on a rayon pool and drain through `run_parallel`, in input
-/// order under `cfg.ordered` and in completion order otherwise.
-pub fn run_fastq<W, I>(
+/// order under `cfg.ordered` and in completion order otherwise. A writer that
+/// takes compressed blocks (see `BatchSink::block_level`) has each batch
+/// compressed on the pool.
+pub(crate) fn run_fastq<W, I>(
     records: I,
     writer: &mut W,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
 where
-    W: Write + Send,
+    W: BatchSink,
     I: Iterator<Item = anyhow::Result<ReadRecord>> + Send,
 {
     if cfg.threads <= 1 {
         return run_fastq_seq(records, writer, cfg, counters);
     }
-    run_parallel(
+    let render = |rec: ReadRecord, cfg: &Config| {
+        let mut buf = Vec::with_capacity(rec.seq.len().saturating_mul(2) + rec.name.len() + 6);
+        render_record(&rec, cfg, counters, &mut buf)?;
+        Ok(if buf.is_empty() {
+            Vec::new()
+        } else {
+            vec![buf]
+        })
+    };
+    run_bytes_parallel(
         records,
         FASTQ_BATCH,
-        |rec: &ReadRecord| rec.seq.len(),
+        |rec| rec.seq.len(),
         cfg,
         writer,
-        |rec, cfg| {
-            let mut buf = Vec::with_capacity(rec.seq.len().saturating_mul(2) + rec.name.len() + 6);
-            render_record(&rec, cfg, counters, &mut buf);
-            Ok(Rendered {
-                items: if buf.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![buf]
-                },
-                malformed_tags: false,
-            })
-        },
-        |writer, buf: &Vec<u8>| writer.write_all(buf),
+        render,
         counters,
     )
 }
@@ -313,28 +288,31 @@ mod tests {
     /// with a gap signals that the read was split.
     #[test]
     fn split_produces_long_survivor_and_short_segment_drop() {
-        use crate::adapter::{Adapter, AdapterConfig, End};
+        use crate::adapter::{Adapter, AdapterConfig, Role};
 
         let adapter = b"GGGGTTTTGGGGTTTT"; // 16 bp, no A/C, so it cannot match the flanks
         let mut seq = vec![b'A'; 24]; // long flank, survives the length filter
         seq.extend_from_slice(adapter);
-        seq.extend_from_slice(&[b'C'; 4]); // short flank, TooShort
+        // Short flank, TooShort; longer than the flank slack, so the adapter
+        // stage emits it instead of folding it into the excision.
+        seq.extend_from_slice(&[b'C'; 12]);
         let phred = vec![40u8; seq.len()];
 
         let mut cfg = test_cfg(1);
-        cfg.filter.min_length = 5;
+        cfg.filter.min_length = 13;
         cfg.adapters = Some(AdapterConfig {
             adapters: vec![Adapter {
                 name: "mid".into(),
                 seq: adapter.to_vec(),
-                end: End::Both,
+                role: Role::Adapter,
             }],
             error_rate: 0.1,
-            // With `end_size` 1, both flanks (24 and 4 bases from the match)
+            // With `end_size` 1, both flanks (24 and 12 bases from the match)
             // sit outside the end zone, so the adapter is interior and the
             // read splits rather than being terminal-trimmed.
             end_size: 1,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         });
         let recs = vec![Ok(rec("r1", &seq, phred))];
@@ -453,6 +431,7 @@ mod tests {
                 Ok(())
             }
         }
+        impl BatchSink for FailAfter {}
 
         let cfg = test_cfg(4);
         // Enough records to exceed the bounded channel capacity before the

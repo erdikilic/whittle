@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Adapter trimming handles partial adapters, classifies hits by position, and
+  cleans up chimeric junctions. A rear adapter cut short by the read end, or a
+  front adapter missing its first bases, is trimmed when at least 10 of its
+  bases align flush with the end; the first 10 bases must match exactly and
+  the error rate applies to the rest. A hit in the head zone trims the 5' end
+  and a hit in the tail zone the 3' end, whichever catalog entry matched.
+  Every piece an interior excision creates is searched again at its new end,
+  so a primer, barcode, or truncated adapter next to a junction is trimmed as
+  at a physical read end, and an adapter remnant followed by up to 36
+  unalignable bases is found by a masked search. Excisions separated by fewer
+  bases than `--min-length`, or by at most 11 bases, merge into one.
+- `--adapter-preset` takes a comma-separated list of kit tokens: `lsk114`,
+  `rad114` (`ulk114`), `rbk114`, `nbd114`, `pcb114` (`pcs114`), `rpb114`,
+  `mab114`, `rna004`, `pacbio`, `ont` (every ONT kit), and `all`. A kit
+  preset searches only the sequences its library can contain. Every catalog
+  entry has a role: adapters split reads at interior hits, primers and
+  barcodes trim read ends only, and an amplicon-only preset (`mab114`)
+  promotes its primers to adapters. The catalog gains the MAB114 kit
+  (degenerate 16S 27F/1492R and ITS1F/ITS4 primers, MAB flanks, 24 barcodes)
+  and the PacBio SMRTbell adapter and C2 primer; the RAB 16S kit-9 entries
+  are replaced by the degenerate primers.
+- A FASTA entry whose header description contains the word `primer` or
+  `barcode` is trimmed at read ends only; every other entry is an adapter.
+  Entry names are the first word of the header.
+- Conservative ab-initio inference splits reads on its end-facing anchor.
+  A discovered consensus without a drop-trim boundary whose anchor lies
+  inward of another candidate's anchor in the reads carrying both is dropped
+  as that candidate's insert-facing remainder.
+- `.fastq.gz` output is BGZF-framed gzip, written by the same libdeflate
+  encoder as `.fastq.bgz` and BAM output. Every gzip reader accepts the
+  file, whittle reads it back block-parallel, and the file is about 0.2%
+  larger at the same compression level. The `gzp` dependency and its C build
+  are gone, as are five other transitive crates.
+- `WHITTLE_PROGRESS_INTERVAL` is removed; periodic progress lines are logged
+  every 30 s, or every 10 s under `-v`. `WHITTLE_LOG` accepts target and
+  level directives (`whittle::adapter=trace`) and no longer matches span
+  fields.
+- `elapsed_seconds` in `--summary-json` is always a number.
+- In a folder of BAM inputs, the read-group mismatch warning is logged when
+  the differing file is opened rather than before processing starts.
+
+### Removed
+- Internal code paths with no effect on output: the long-CIGAR expansion no
+  unaligned record carries, a second MM grammar validator, adapter search
+  batches for entries over 64 bp, and the mirror enums between the command
+  line and the configuration. Output is byte-identical for every input.
+
 ## [0.2.0] - 2026-09-04
 
 ### Added

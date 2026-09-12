@@ -108,14 +108,25 @@ pub fn median_q(phred: &[u8]) -> f64 {
 }
 
 /// The read-quality summary used by the quality filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum QualMode {
-    /// Error-probability mean (the ONT read Q).
+    /// Average error probabilities, then convert the result back to Phred Q.
     Mean,
-    /// Arithmetic mean of the Phred integers.
+    /// Take the arithmetic mean of the per-base Phred scores.
     Arithmetic,
-    /// Median Phred score.
+    /// Take the median per-base Phred score.
     Median,
+}
+
+impl QualMode {
+    /// Lowercase label, as the banner and the summary print it.
+    pub fn label(self) -> &'static str {
+        match self {
+            QualMode::Mean => "mean",
+            QualMode::Arithmetic => "arithmetic",
+            QualMode::Median => "median",
+        }
+    }
 }
 
 /// Returns the read quality of `phred` under `mode`; `0.0` for an empty slice.

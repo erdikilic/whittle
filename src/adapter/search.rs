@@ -1,11 +1,11 @@
 //! Approximate sequence search over sassy's DNA and IUPAC profiles.
 //!
 //! The DNA profile is faster and panics on any byte outside A/C/G/T; the IUPAC
-//! profile accepts ambiguity codes and is the only one with a batched pattern
+//! profile accepts ambiguity codes and is the only one with a tiled pattern
 //! search. Each entry point states which profile it uses and why.
 
 use sassy::profiles::{Dna, Iupac, Profile};
-use sassy::{CachedRev, EncodedPatterns, RcSearchAble, Searcher};
+use sassy::{EncodedPatterns, RcSearchAble, Searcher};
 
 /// The fast searcher: sassy's DNA profile, for all-ACGT patterns against
 /// all-ACGT text.
@@ -18,12 +18,10 @@ use sassy::{CachedRev, EncodedPatterns, RcSearchAble, Searcher};
 pub type PlainSearcher = Searcher<Dna>;
 
 /// The general searcher: sassy's IUPAC profile, which handles ambiguity codes in
-/// the pattern (a degenerate primer) and in the text (an `N` in a read).
+/// the pattern (a degenerate primer) and in the text (an `N` in a read). Sassy
+/// implements the tiled pattern search for this profile only, so it also
+/// serves `encoded_pattern_hits`.
 pub type AmbiguousSearcher = Searcher<Iupac>;
-
-/// The batched, pattern-parallel searcher. Sassy implements `search_patterns`
-/// only for IUPAC, so the batched path is always ambiguity-safe.
-pub type BatchedAdapterSearcher = Searcher<Iupac>;
 
 /// Equal-length patterns encoded once for the tiled search, one encoding per
 /// strand. Built by `encode_patterns`, searched by `encoded_pattern_hits`.
@@ -33,8 +31,8 @@ pub type BatchedAdapterSearcher = Searcher<Iupac>;
 /// reverse-complemented patterns over the forward text. The two are the same
 /// alignments, but the local-minimum rule picks the rightmost end position of
 /// a flat cost run and the traceback then fixes the start, so searching the
-/// reversed text puts the tie on the same read position as `pattern_hits` and
-/// `hits` and keeps every span identical.
+/// reversed text puts the tie on the same read position as `hits` and keeps
+/// every span identical.
 #[derive(Debug, Clone)]
 pub struct EncodedAdapterBatch {
     /// The patterns as given, for the forward text.
@@ -108,15 +106,44 @@ impl RcSearchAble for Strands<'_> {
 
 /// One approximate match of a pattern in the text. Strand is not exposed: a
 /// reverse-complement hit occupies the same text span, which is all the trimmer
-/// needs.
+/// needs. The overhang fields are in text orientation and are zero unless the
+/// searcher was built with an overhang cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
     /// Start of the span in the text, inclusive.
     pub start: usize,
     /// End of the span in the text, exclusive.
     pub end: usize,
-    /// Edit distance of the match.
+    /// Alignment cost: the edit distance of the aligned part plus the overhang
+    /// cost, `floor(alpha * overhang)` per overhanging side.
     pub cost: usize,
+    /// Pattern bases hanging off the text start.
+    pub left_overhang: usize,
+    /// Pattern bases hanging off the text end.
+    pub right_overhang: usize,
+}
+
+impl Hit {
+    /// Builds a hit from a sassy match of a `pattern_len`-base pattern. A
+    /// reverse-complement match aligns the pattern end at the text start, so
+    /// its pattern-side overhangs swap sides in text orientation.
+    fn from_match(m: &sassy::Match, pattern_len: usize) -> Self {
+        let (head, tail) = (m.pattern_start, pattern_len - m.pattern_end);
+        let (left_overhang, right_overhang) = match m.strand {
+            sassy::Strand::Fwd => (head, tail),
+            sassy::Strand::Rc => (tail, head),
+        };
+        Hit {
+            start: m.text_start,
+            end: m.text_end,
+            // Sassy's `Match::cost` is `pa_types::Cost`, an `i32` signed for other
+            // algorithms in that crate; a returned match is within the
+            // non-negative `k` budget, so the cast is lossless.
+            cost: m.cost as usize,
+            left_overhang,
+            right_overhang,
+        }
+    }
 }
 
 /// Returns a fresh DNA-profile searcher over both strands.
@@ -129,6 +156,14 @@ pub fn new_ambiguous_searcher() -> AmbiguousSearcher {
     Searcher::<Iupac>::new_rc()
 }
 
+/// Returns a fresh IUPAC-profile searcher over both strands that also reports
+/// partial matches hanging off either text end, each overhanging base costing
+/// `alpha` (0 to 1). Sassy implements overhang alignment for the IUPAC profile
+/// only.
+pub fn new_overhang_searcher(alpha: f32) -> AmbiguousSearcher {
+    Searcher::<Iupac>::new_rc_with_overhang(alpha.clamp(0.0, 1.0))
+}
+
 /// Returns a fresh IUPAC-profile searcher over the forward strand only. Used by
 /// the inference k-mer recount, where each read-end window is already
 /// strand-oriented and reverse-complement hits would inflate the per-window
@@ -137,37 +172,34 @@ pub fn new_searcher_fwd() -> AmbiguousSearcher {
     Searcher::<Iupac>::new_fwd()
 }
 
-/// Returns a fresh pattern-batched searcher over both strands.
-pub fn new_batched_searcher() -> BatchedAdapterSearcher {
-    Searcher::<Iupac>::new_rc()
-}
-
-/// Encodes equal-length patterns for `encoded_pattern_hits`, or returns `None`
-/// past `MAX_TILED_PATTERN_LEN`, where the caller keeps `pattern_hits`. The
-/// encoding holds the bit profiles of every pattern on both strands, which
-/// `pattern_hits` rebuilds on each call.
-pub fn encode_patterns(patterns: &[Vec<u8>]) -> Option<EncodedAdapterBatch> {
-    let len = patterns.first().map_or(0, Vec::len);
-    if !(1..=MAX_TILED_PATTERN_LEN).contains(&len) {
-        return None;
-    }
+/// Encodes equal-length patterns of 1 to `MAX_TILED_PATTERN_LEN` bases for
+/// `encoded_pattern_hits`. The encoding holds the bit profiles of every
+/// pattern on both strands.
+pub fn encode_patterns(patterns: &[Vec<u8>]) -> EncodedAdapterBatch {
+    debug_assert!(
+        patterns
+            .first()
+            .is_some_and(|p| (1..=MAX_TILED_PATTERN_LEN).contains(&p.len()))
+    );
     // A forward-only searcher encodes the given strand alone; the reverse
     // strand is its own encoding.
     let mut encoder = Searcher::<Iupac>::new_fwd();
     let complements: Vec<Vec<u8>> = patterns.iter().map(|p| Iupac::complement(p)).collect();
-    Some(EncodedAdapterBatch {
+    EncodedAdapterBatch {
         forward: encoder.encode_patterns(patterns),
         complement: encoder.encode_patterns(&complements),
-    })
+    }
 }
 
 /// Searches a pre-encoded batch over both strands of `text`, one pattern per
 /// SIMD lane, and calls `accept` with each hit's pattern index, text span and
 /// cost. `reversed` is `text` reversed, which the caller keeps per read so the
 /// reverse strand needs no copy. Hits are the rightmost local minima within
-/// `k`, exactly as `pattern_hits` returns them.
+/// `k`, as `hits` returns them. The tiled search uses only the searcher's
+/// pattern-tiling state, which its single-pattern searches never touch, so
+/// one IUPAC searcher serves both.
 pub fn encoded_pattern_hits(
-    searcher: &mut BatchedAdapterSearcher,
+    searcher: &mut AmbiguousSearcher,
     encoded: &EncodedAdapterBatch,
     text: &[u8],
     reversed: &[u8],
@@ -189,21 +221,6 @@ pub fn encoded_pattern_hits(
     }
 }
 
-/// Searches equal-length patterns together, packing them across SIMD lanes.
-/// This retains `search`'s reverse-text semantics while avoiding the repeated
-/// short-text setup of calling `search` once per pattern.
-pub fn pattern_hits(
-    searcher: &mut BatchedAdapterSearcher,
-    patterns: &[Vec<u8>],
-    text: &[u8],
-    k: usize,
-) -> Vec<sassy::Match> {
-    // `search_patterns` processes SIMD-sized chunks internally; the cached
-    // reversal keeps sassy from rebuilding the reversed text once per chunk.
-    let cached_text = CachedRev::new(text, true);
-    searcher.search_patterns(patterns, &cached_text, k)
-}
-
 /// Calls `accept` with every match of `pattern` in `text` within `k` edits,
 /// as a text span. The strands searched depend on how `searcher` was built:
 /// `new_searcher` matches both strands, `new_searcher_fwd` the forward strand
@@ -218,14 +235,23 @@ pub fn for_each_hit<P: Profile, T: RcSearchAble + ?Sized>(
     mut accept: impl FnMut(Hit),
 ) {
     for m in searcher.search(pattern, text, k) {
-        accept(Hit {
-            start: m.text_start,
-            end: m.text_end,
-            // Sassy's `Match::cost` is `pa_types::Cost`, an `i32` signed for other
-            // algorithms in that crate; a returned match is within the
-            // non-negative `k` budget, so the cast is lossless.
-            cost: m.cost as usize,
-        });
+        accept(Hit::from_match(&m, pattern.len()));
+    }
+}
+
+/// Calls `accept` with the text index and every match of `pattern` in each of
+/// `texts` within `k` edits. The texts share one pattern encoding and run in
+/// parallel SIMD lanes, so two end windows cost about one search instead of
+/// two; the spans are those `for_each_hit` reports on each text alone.
+pub fn for_each_hit_in_texts<P: Profile, T: RcSearchAble>(
+    searcher: &mut Searcher<P>,
+    pattern: &[u8],
+    texts: &[T],
+    k: usize,
+    mut accept: impl FnMut(usize, Hit),
+) {
+    for m in searcher.search_texts(pattern, texts, k) {
+        accept(m.text_idx, Hit::from_match(&m, pattern.len()));
     }
 }
 

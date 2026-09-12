@@ -119,8 +119,8 @@ fn explicit_gz_output_roundtrips_through_parallel_encoder() {
     std::fs::write(&input, "@r1\nACGTACGTAC\n+\nIIIIIIIIII\n").unwrap();
     let out = dir.path().join("out.fastq.gz");
 
-    // -t 4 exercises gzp's multi-threaded encoder rather than the single-thread
-    // case.
+    // -t 4 gives the BGZF encoder more than one worker; the output is
+    // multi-member gzip that a plain gzip decoder reads back.
     whittle()
         .arg("-i")
         .arg(&input)

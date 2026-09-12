@@ -4,13 +4,15 @@ pub(crate) mod bam;
 mod fastq;
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rayon::prelude::*;
 
-pub use bam::{reconstruct_mods, reconstruct_record, run_bam, run_bam_to_fastq, run_raw_bam};
-pub use fastq::{run_fastq, run_fastq_seq};
+pub(crate) use bam::run_bam_to_fastq;
+pub use bam::run_raw_bam;
+pub(crate) use fastq::run_fastq;
 
 use crate::config::Config;
 use crate::filter::{DropReason, FilterConfig};
@@ -29,15 +31,15 @@ pub(crate) struct BatchPolicy {
 
 /// FASTQ batches: owned records that render to a small buffer each.
 pub(crate) const FASTQ_BATCH: BatchPolicy = BatchPolicy {
-    target_weight: 512 * 1024,
-    max_items: 32,
-    queue_per_worker: 4,
+    target_weight: 2 * 1024 * 1024,
+    max_items: 128,
+    queue_per_worker: 2,
 };
 
 /// BAM batches: records that decode to large owned buffers.
 pub(crate) const BAM_BATCH: BatchPolicy = BatchPolicy {
-    target_weight: 256 * 1024,
-    max_items: 4,
+    target_weight: 1024 * 1024,
+    max_items: 16,
     queue_per_worker: 1,
 };
 
@@ -81,13 +83,59 @@ where
     }
 }
 
-/// The output of rendering one input record.
-pub(crate) struct Rendered<T> {
-    /// Output items in the order they are written.
-    pub items: Vec<T>,
-    /// Whether the record carried a known per-base tag whose length disagrees
-    /// with the sequence length.
-    pub malformed_tags: bool,
+/// A sink of rendered text batches: plain bytes, or BGZF blocks the render
+/// workers compressed.
+pub(crate) trait BatchSink: Write + Send {
+    /// The BGZF level when the sink takes blocks compressed on the render
+    /// pool; `None` for a sink that takes the rendered bytes as they are.
+    fn block_level(&self) -> Option<u8> {
+        None
+    }
+}
+
+impl BatchSink for Vec<u8> {}
+
+impl BatchSink for crate::io::fastq::FastqOut {
+    fn block_level(&self) -> Option<u8> {
+        crate::io::fastq::FastqOut::block_level(self)
+    }
+}
+
+/// Runs `run_parallel` for a workflow whose items are rendered text: each
+/// batch is concatenated and, for a block sink, compressed on the pool.
+pub(crate) fn run_bytes_parallel<R, W, Weight, Render>(
+    records: impl Iterator<Item = anyhow::Result<R>> + Send,
+    policy: BatchPolicy,
+    weight: Weight,
+    cfg: &Config,
+    writer: &mut W,
+    render: Render,
+    counters: &Counters,
+) -> anyhow::Result<Stats>
+where
+    R: Send,
+    W: BatchSink,
+    Weight: Fn(&R) -> usize + Sync,
+    Render: Fn(R, &Config) -> anyhow::Result<Vec<Vec<u8>>> + Sync,
+{
+    let level = writer.block_level();
+    run_parallel(
+        records,
+        policy,
+        weight,
+        cfg,
+        writer,
+        render,
+        |items: Vec<Vec<u8>>| {
+            let bytes = items.concat();
+            match level {
+                Some(level) => crate::io::fastq::encode_blocks(level, &bytes),
+                None => Ok(bytes),
+            }
+        },
+        |writer, bytes: &Vec<u8>| writer.write_all(bytes),
+        counters,
+    )
 }
 
 /// Returns the render-pool size for a run: the settled budget, or the thread
@@ -158,36 +206,41 @@ where
 /// rest of the input. With `cfg.ordered` the writer emits batches in input
 /// order; otherwise in completion order.
 ///
-/// The read-level counters are updated inside `render` by
+/// `render` returns the output items of one record, in the order they are
+/// written; `pack` turns a batch's items into the unit the writer takes, on
+/// the pool, so a compressing sink has its blocks compressed by the render
+/// workers. The read-level counters are updated inside `render` by
 /// `process_read_segments`; this driver counts input reads and bases only.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_parallel<R, T, S, Weight, Render, WriteOne>(
+pub(crate) fn run_parallel<R, T, P, S, Weight, Render, Pack, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
     policy: BatchPolicy,
     weight: Weight,
     cfg: &Config,
     sink: &mut S,
     render: Render,
+    pack: Pack,
     write_one: WriteOne,
     counters: &Counters,
 ) -> anyhow::Result<Stats>
 where
     R: Send,
     T: Send,
+    P: Send,
     S: Send,
     Weight: Fn(&R) -> usize + Sync,
-    Render: Fn(R, &Config) -> anyhow::Result<Rendered<T>> + Sync,
-    WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
+    Render: Fn(R, &Config) -> anyhow::Result<Vec<T>> + Sync,
+    Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
+    WriteOne: Fn(&mut S, &P) -> std::io::Result<()> + Send,
 {
     let render_workers = render_pool_size(cfg);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(render_workers)
         .build()?;
     let queue = (render_workers * policy.queue_per_worker).max(2);
-    let (tx, rx) = crossbeam_channel::bounded::<(usize, Vec<T>)>(queue);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, P)>(queue);
     let ordered = cfg.ordered;
     let aborted = AtomicBool::new(false);
-    let malformed = AtomicU64::new(0);
     let render_err: FirstError<anyhow::Error> = FirstError::new();
     let write_err: FirstError<std::io::Error> = FirstError::new();
 
@@ -206,14 +259,12 @@ where
         let write_err = &write_err;
         s.spawn(move || {
             let mut next = 0usize;
-            let mut pending: BTreeMap<usize, Vec<T>> = BTreeMap::new();
+            let mut pending: BTreeMap<usize, P> = BTreeMap::new();
             let mut errored = false;
-            let mut write_batch = |batch: &[T]| -> bool {
-                for item in batch {
-                    if let Err(e) = write_one(sink, item) {
-                        write_err.record(e, aborted_ref);
-                        return false;
-                    }
+            let mut write_batch = |batch: &P| -> bool {
+                if let Err(e) = write_one(sink, batch) {
+                    write_err.record(e, aborted_ref);
+                    return false;
                 }
                 true
             };
@@ -245,7 +296,6 @@ where
                     let mut out = Vec::with_capacity(batch.len());
                     let mut input_reads = 0u64;
                     let mut input_bases = 0u64;
-                    let mut malformed_reads = 0u64;
                     for rec in batch {
                         if aborted.load(Ordering::Relaxed) {
                             break;
@@ -260,10 +310,7 @@ where
                         input_reads += 1;
                         input_bases += weight(&rec) as u64;
                         match render(rec, cfg) {
-                            Ok(rendered) => {
-                                malformed_reads += u64::from(rendered.malformed_tags);
-                                out.extend(rendered.items);
-                            },
+                            Ok(items) => out.extend(items),
                             Err(e) => {
                                 render_err.record(e, &aborted);
                                 break;
@@ -276,11 +323,17 @@ where
                     counters
                         .input_bases
                         .fetch_add(input_bases, Ordering::Relaxed);
-                    malformed.fetch_add(malformed_reads, Ordering::Relaxed);
+                    let packed = match pack(out) {
+                        Ok(packed) => packed,
+                        Err(e) => {
+                            render_err.record(e.into(), &aborted);
+                            return;
+                        },
+                    };
                     // Every batch is sent, empty ones included, so the ordered
                     // writer can advance past it. A closed channel means the
                     // writer is gone; nothing more can be written.
-                    if tx.send((idx, out)).is_err() {
+                    if tx.send((idx, packed)).is_err() {
                         aborted.store(true, Ordering::Relaxed);
                     }
                 });
@@ -294,7 +347,7 @@ where
     if let Some(e) = write_err.take() {
         return Err(e.into());
     }
-    Ok(counters.snapshot(malformed.load(Ordering::Relaxed)))
+    Ok(counters.snapshot())
 }
 
 /// Live, thread-shared counters read by the progress ticker and finalized into `Stats`.
@@ -311,6 +364,11 @@ pub struct Counters {
     pub input_bases: AtomicU64,
     /// Sum of surviving segment lengths (bases) written to output.
     pub output_bases: AtomicU64,
+    /// Input reads carrying a known per-base tag (`ip`, `pw`, ...) whose array
+    /// length disagrees with the sequence length, or an `sa` coverage array
+    /// whose runs do not sum to it. The tag is left untouched and the count is
+    /// surfaced as a run-level advisory. Tracked by the BAM paths only.
+    pub malformed_tag_reads: AtomicU64,
     /// Input reads whose `MM`/`ML`/`MN` block was malformed (an `MN` that
     /// disagrees with the sequence length, an `ML` whose length disagrees with
     /// `MM`, an `MM` that does not parse to its end, or a non-`B:C` `ML`) and was
@@ -371,10 +429,7 @@ impl Counters {
     }
 
     /// Snapshots every counter into a `Stats` for end-of-run reporting.
-    /// `malformed_tag_reads` is threaded through separately: only the BAM
-    /// paths track it, and the parallel BAM path accumulates it in its own
-    /// local atomic rather than in `Counters`.
-    pub fn snapshot(&self, malformed_tag_reads: u64) -> Stats {
+    pub fn snapshot(&self) -> Stats {
         let input_reads = self.input_reads.load(Ordering::Relaxed);
         let reads_with_output = self.reads_with_output.load(Ordering::Relaxed);
         let reads_trimmed_to_nothing = self.reads_trimmed_to_nothing.load(Ordering::Relaxed);
@@ -405,7 +460,8 @@ impl Counters {
             barcode_tag_malformed_reads: self.barcode_tag_malformed_reads.load(Ordering::Relaxed),
             input_bases: self.input_bases.load(Ordering::Relaxed),
             output_bases: self.output_bases.load(Ordering::Relaxed),
-            malformed_tag_reads,
+            malformed_tag_reads: self.malformed_tag_reads.load(Ordering::Relaxed),
+            reads_with_output,
             reads_trimmed_to_nothing,
             reads_all_filtered,
             segments_dropped_short,
@@ -505,9 +561,9 @@ pub struct Stats {
     pub input_bases: u64,
     /// Sum of surviving segment lengths (bases) written to output.
     pub output_bases: u64,
-    /// Reads carrying a known per-base kinetics tag (`ip`, `pw`, ...) whose
-    /// array length did not match the sequence length: malformed and left
-    /// untouched. Surfaced as a run-level advisory; not an error.
+    /// Reads carrying a malformed per-base tag, left untouched; see
+    /// `Counters::malformed_tag_reads`. Surfaced as a run-level advisory; not
+    /// an error.
     pub malformed_tag_reads: u64,
     /// Input reads whose modification block was malformed and removed; see
     /// `Counters::malformed_mod_reads`.
@@ -517,6 +573,8 @@ pub struct Stats {
     /// Reads whose `bi` barcode tag was unusable under `--trim-barcodes`; see
     /// `Counters::barcode_tag_malformed_reads`.
     pub barcode_tag_malformed_reads: u64,
+    /// Read-level: input reads with at least one written segment.
+    pub reads_with_output: u64,
     /// Read-level: input reads that produced zero segments at all (empty
     /// read, fully consumed by adapter trimming, or an over-crop).
     /// `trim::apply` returned no intervals, so the per-segment filter loop
@@ -546,7 +604,7 @@ mod tests {
     #[test]
     fn batches_stop_at_weight_or_record_limit() {
         let by_weight: Vec<Vec<usize>> = Batches::new(
-            vec![200_000usize; 5].into_iter(),
+            vec![800_000usize; 5].into_iter(),
             |n: &usize| *n,
             FASTQ_BATCH,
         )
@@ -554,10 +612,10 @@ mod tests {
         assert_eq!(by_weight.iter().map(Vec::len).collect::<Vec<_>>(), [3, 2]);
 
         let bam: Vec<Vec<usize>> =
-            Batches::new(vec![1usize; 17].into_iter(), |n: &usize| *n, BAM_BATCH).collect();
+            Batches::new(vec![1usize; 65].into_iter(), |n: &usize| *n, BAM_BATCH).collect();
         assert_eq!(
             bam.iter().map(Vec::len).collect::<Vec<_>>(),
-            [4, 4, 4, 4, 1]
+            [16, 16, 16, 16, 1]
         );
     }
 
@@ -590,7 +648,7 @@ mod tests {
             .reads_trimmed_to_nothing
             .fetch_add(1, Ordering::Relaxed);
 
-        let stats = counters.snapshot(0);
+        let stats = counters.snapshot();
 
         assert_eq!(stats.input_reads, 3);
         assert_eq!(stats.output_reads, 2);
@@ -732,13 +790,11 @@ mod tests {
                     std::thread::sleep(std::time::Duration::from_micros(200));
                 }
                 counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-                Ok(Rendered {
-                    items: vec![n],
-                    malformed_tags: false,
-                })
+                Ok(vec![n])
             },
-            |sink, n: &usize| {
-                sink.push(*n);
+            Ok,
+            |sink, batch: &Vec<usize>| {
+                sink.extend_from_slice(batch);
                 Ok(())
             },
             &counters,
@@ -793,14 +849,10 @@ mod tests {
             |_: &usize| 1,
             &cfg,
             &mut sink,
-            |n, _cfg| {
-                Ok(Rendered {
-                    items: vec![n],
-                    malformed_tags: false,
-                })
-            },
-            |sink, n: &usize| {
-                sink.push(*n);
+            |n, _cfg| Ok(vec![n]),
+            Ok,
+            |sink, batch: &Vec<usize>| {
+                sink.extend_from_slice(batch);
                 Ok(())
             },
             &counters,
@@ -833,13 +885,11 @@ mod tests {
                 if n == 10 {
                     anyhow::bail!("record 10 is malformed");
                 }
-                Ok(Rendered {
-                    items: vec![n],
-                    malformed_tags: false,
-                })
+                Ok(vec![n])
             },
-            |sink, n: &usize| {
-                sink.push(*n);
+            Ok,
+            |sink, batch: &Vec<usize>| {
+                sink.extend_from_slice(batch);
                 Ok(())
             },
             &counters,

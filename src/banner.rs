@@ -5,8 +5,8 @@
 //! `obs` owns the end-of-run counterparts; both use the same `output_desc`
 //! text.
 
-use crate::config::{AdapterInfer, AdapterInferAction, AdapterInferPolicy};
-use crate::{config, filter, io, qual, trim};
+use crate::config::AdapterInfer;
+use crate::{config, filter, io, trim};
 
 /// The startup banner's operation line, also the wording of bar mode's single
 /// start line: `Trimming FASTQ` when input and output share a `Format::family`
@@ -22,60 +22,37 @@ pub(crate) fn operation_line(in_fmt: io::Format, out_fmt: io::Format) -> String 
 
 /// The startup banner's `Output: ...` line: `Output: <stdout>` when writing to
 /// stdout (no compression detail), else `Output: {path}`, with
-/// `(gzip|bgzf level {level}, {encode_workers} workers)` appended for compressed
-/// output formats (gzip for `FASTQ.gz`, bgzf for BAM; plain FASTQ gets no suffix).
+/// `(bgzf level {level})` appended for the compressed output formats.
 pub(crate) fn output_banner_line(
     output: Option<&std::path::Path>,
     out_fmt: io::Format,
     level: u8,
-    encode_workers: usize,
 ) -> String {
     let Some(path) = output else {
         return "Output: <stdout>".to_string();
     };
     let mut line = format!("Output: {}", path.display());
     match out_fmt {
-        io::Format::Bam => {
-            line.push_str(&format!(" (bgzf level {level}, {encode_workers} workers)"));
-        },
-        io::Format::FastqGz => {
-            line.push_str(&format!(" (gzip level {level}, {encode_workers} workers)"));
-        },
-        io::Format::FastqBgzf => {
-            line.push_str(&format!(" (bgzf level {level}, {encode_workers} workers)"));
+        io::Format::Bam | io::Format::FastqGz | io::Format::FastqBgzf => {
+            line.push_str(&format!(" (bgzf level {level})"));
         },
         io::Format::Fastq => {},
     }
     line
 }
 
-/// The startup banner's `Threads: ...` line: the resolved worker count, then the
-/// per-stage split with `ThreadBudget`'s decode/render/encode renamed to the
-/// user-facing read/trim/write, as `Threads: 8 (read 1, trim 4, write 3)`.
-///
-/// The header is the requested count, not the sum of the three stages: the
-/// budget floors each stage at 1, so the sum can exceed `-t` and would read as
-/// a second, larger total. For the same reason `threads <= 1` prints
-/// `Threads: 1 (sequential)` instead of a three-thread split for a run that is
-/// single-threaded.
+/// The startup banner's `Threads: ...` line: the resolved worker count, then
+/// the pool that trims and compresses and the decode workers ahead of it, as
+/// `Threads: 8 (trim and compress 8, decode 2)`. `threads <= 1` prints
+/// `Threads: 1 (sequential)`.
 pub(crate) fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> String {
     if threads <= 1 {
         return "Threads: 1 (sequential)".to_string();
     }
     format!(
-        "Threads: {threads} (read {}, trim {}, write {})",
-        b.decode, b.render, b.encode
+        "Threads: {threads} (trim and compress {}, decode {})",
+        b.render, b.decode
     )
-}
-
-/// Lowercase label for a `QualMode`, used only in the startup banner's Filters
-/// line (`{qual_mode} quality >=...`).
-pub(crate) fn qual_mode_label(mode: qual::QualMode) -> &'static str {
-    match mode {
-        qual::QualMode::Mean => "mean",
-        qual::QualMode::Arithmetic => "arithmetic",
-        qual::QualMode::Median => "median",
-    }
 }
 
 /// The startup banner's `Filters: ...; trim: ...` line. Only active clauses
@@ -106,7 +83,7 @@ pub(crate) fn filters_and_trim_line(
 
     let qual_active = filter.min_qual > 0.0 || filter.max_qual < 1000.0;
     if qual_active {
-        let mut quality = format!("{} quality", qual_mode_label(filter.qual_mode));
+        let mut quality = format!("{} quality", filter.qual_mode.label());
         if filter.min_qual > 0.0 {
             quality.push_str(&format!(" >={}", filter.min_qual));
         }
@@ -150,9 +127,10 @@ pub(crate) fn filters_and_trim_line(
     format!("Filters: {filters_str}; trim: {trim_str}")
 }
 
-/// The startup banner's `Adapters: ...` line: adapter count, `trim + split` or
-/// `ends-only`, error rate, end-zone size, and whether presence detection
-/// samples. `None` when adapter trimming is off, so the caller skips the line.
+/// The startup banner's `Adapters: ...` line: sequence count with its role
+/// breakdown, `trim + split` or `ends-only`, error rate, end-zone size, and
+/// whether presence detection samples. `None` when adapter trimming is off,
+/// so the caller skips the line.
 ///
 /// Under inference the count is `0` rather than `a.adapters.len()`: in report
 /// mode that field may hold a FASTA only as naming references for
@@ -170,33 +148,39 @@ pub(crate) fn adapter_banner_line(
         "sample off".to_string()
     };
     let infer_suffix = match adapter_infer {
-        AdapterInfer::Off => "",
-        AdapterInfer::Enabled {
-            action: AdapterInferAction::Trim,
-            policy: AdapterInferPolicy::Conservative,
-        } => " \u{b7} infer trim \u{b7} conservative",
-        AdapterInfer::Enabled {
-            action: AdapterInferAction::Trim,
-            policy: AdapterInferPolicy::Aggressive,
-        } => " \u{b7} infer trim \u{b7} aggressive",
-        AdapterInfer::Enabled {
-            action: AdapterInferAction::Report,
-            policy: AdapterInferPolicy::Conservative,
-        } => " \u{b7} infer report \u{b7} conservative",
-        AdapterInfer::Enabled {
-            action: AdapterInferAction::Report,
-            policy: AdapterInferPolicy::Aggressive,
-        } => " \u{b7} infer report \u{b7} aggressive",
+        AdapterInfer::Off => String::new(),
+        AdapterInfer::Enabled { action, policy } => {
+            format!(" \u{b7} infer {} \u{b7} {}", action.label(), policy.label())
+        },
     };
-    let n_adapters = if adapter_infer == AdapterInfer::Off {
-        a.adapters.len()
+    let (n_adapters, roles) = if adapter_infer == AdapterInfer::Off {
+        (a.adapters.len(), role_breakdown(&a.adapters))
     } else {
-        0
+        (0, String::new())
     };
     Some(format!(
-        "Adapters: {} sequences · {mode} · error {:.2} · end-zone {} bp · {sample}{infer_suffix}",
-        n_adapters, a.error_rate, a.end_size
+        "Adapters: {n_adapters} sequences{roles} · {mode} · error {:.2} · end-zone {} bp · {sample}{infer_suffix}",
+        a.error_rate, a.end_size
     ))
+}
+
+/// Returns ` (N adapter, M primer, K barcode)` for a mixed set, or an empty
+/// string when every entry has the same role.
+fn role_breakdown(adapters: &[crate::adapter::Adapter]) -> String {
+    use crate::adapter::Role;
+    let counts: Vec<(Role, usize)> = [Role::Adapter, Role::Primer, Role::Barcode]
+        .into_iter()
+        .map(|role| (role, adapters.iter().filter(|a| a.role == role).count()))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    if counts.len() < 2 {
+        return String::new();
+    }
+    let parts: Vec<String> = counts
+        .iter()
+        .map(|(role, n)| format!("{n} {}", role.label()))
+        .collect();
+    format!(" ({})", parts.join(", "))
 }
 
 /// Shell-quotes a single argument: bare when non-empty and every character is
@@ -243,6 +227,7 @@ pub(crate) fn output_desc(output: Option<&std::path::Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AdapterInferAction, AdapterInferPolicy};
 
     fn base_filter() -> filter::FilterConfig {
         filter::FilterConfig {
@@ -252,7 +237,7 @@ mod tests {
             max_qual: 1000.0,
             min_gc: None,
             max_gc: None,
-            qual_mode: qual::QualMode::Mean,
+            qual_mode: crate::qual::QualMode::Mean,
         }
     }
 
@@ -263,7 +248,7 @@ mod tests {
             quality: None,
         }
     }
-    use crate::adapter::{Adapter, AdapterConfig, End};
+    use crate::adapter::{Adapter, AdapterConfig, Role};
 
     #[test]
     fn operation_line_collapses_matching_families() {
@@ -292,7 +277,7 @@ mod tests {
     fn output_banner_line_plain_fastq_has_no_suffix() {
         let p = std::path::Path::new("/tmp/out.fastq");
         assert_eq!(
-            output_banner_line(Some(p), io::Format::Fastq, 6, 3),
+            output_banner_line(Some(p), io::Format::Fastq, 6),
             "Output: /tmp/out.fastq"
         );
     }
@@ -301,13 +286,13 @@ mod tests {
     fn output_banner_line_appends_compression_detail() {
         let p = std::path::Path::new("/tmp/out.fastq.gz");
         assert_eq!(
-            output_banner_line(Some(p), io::Format::FastqGz, 6, 4),
-            "Output: /tmp/out.fastq.gz (gzip level 6, 4 workers)"
+            output_banner_line(Some(p), io::Format::FastqGz, 6),
+            "Output: /tmp/out.fastq.gz (bgzf level 6)"
         );
         let p = std::path::Path::new("/tmp/out.bam");
         assert_eq!(
-            output_banner_line(Some(p), io::Format::Bam, 3, 5),
-            "Output: /tmp/out.bam (bgzf level 3, 5 workers)"
+            output_banner_line(Some(p), io::Format::Bam, 3),
+            "Output: /tmp/out.bam (bgzf level 3)"
         );
     }
 
@@ -315,44 +300,20 @@ mod tests {
     fn output_banner_line_stdout_has_no_compression_detail() {
         // Even for a format that would otherwise show a compression suffix.
         assert_eq!(
-            output_banner_line(None, io::Format::Bam, 6, 3),
+            output_banner_line(None, io::Format::Bam, 6),
             "Output: <stdout>"
         );
     }
 
     #[test]
-    fn threads_banner_line_shows_requested_threads_not_the_stage_sum() {
-        let b = config::thread_budget(8, true, false, config::EncodeKind::Bgzf);
+    fn threads_banner_line_names_the_pool_and_the_decoders() {
+        let b = config::thread_budget(8, true);
         assert_eq!(
             threads_banner_line(8, b),
-            format!(
-                "Threads: 8 (read {}, trim {}, write {})",
-                b.decode, b.render, b.encode
-            )
+            "Threads: 8 (trim and compress 8, decode 2)"
         );
-        // Concrete figure too, so a change in `thread_budget`'s split is noticed here.
-        assert_eq!(
-            threads_banner_line(8, b),
-            "Threads: 8 (read 1, trim 4, write 3)"
-        );
-    }
-
-    #[test]
-    fn threads_banner_line_header_is_requested_even_when_stage_sum_differs() {
-        // The banner reports the requested limit, not the sum of stage fields.
-        let b = config::thread_budget(8, true, false, config::EncodeKind::None);
-        assert_eq!(b.total(), 9);
-        assert_eq!(
-            threads_banner_line(8, b),
-            "Threads: 8 (read 1, trim 7, write 1)"
-        );
-    }
-
-    #[test]
-    fn threads_banner_line_sequential_for_one_or_fewer() {
-        // A single-threaded run collapses to a plain `sequential` label rather
-        // than a `(read 1, trim 1, write 1)` split.
-        let b = config::thread_budget(1, true, false, config::EncodeKind::Bgzf);
+        // A single-threaded run collapses to a plain `sequential` label.
+        let b = config::thread_budget(1, true);
         assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");
     }
 
@@ -456,7 +417,7 @@ mod tests {
         f.max_qual = 30.0;
         f.min_gc = Some(0.4);
         f.max_gc = Some(0.6);
-        f.qual_mode = qual::QualMode::Median;
+        f.qual_mode = crate::qual::QualMode::Median;
 
         let mut t = base_trim();
         t.head = 10;
@@ -477,11 +438,12 @@ mod tests {
             adapters: vec![Adapter {
                 name: "a".into(),
                 seq: b"ACGTACGTACGT".to_vec(),
-                end: End::Both,
+                role: Role::Adapter,
             }],
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
         let line = adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off).unwrap();
@@ -502,11 +464,12 @@ mod tests {
             adapters: vec![Adapter {
                 name: "a".into(),
                 seq: b"ACGTACGTACGT".to_vec(),
-                end: End::Both,
+                role: Role::Adapter,
             }],
             error_rate: 0.2,
             end_size: 150,
             split: false,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
         assert!(
@@ -523,6 +486,7 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
         let trim_line = adapter_banner_line(

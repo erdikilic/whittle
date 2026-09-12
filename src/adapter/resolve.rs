@@ -125,7 +125,7 @@ where
 }
 
 /// Buffers at most `n` records, stopping when the input is exhausted.
-pub(crate) fn buffer_prefix<R>(
+fn buffer_prefix<R>(
     records: &mut impl Iterator<Item = anyhow::Result<R>>,
     n: usize,
 ) -> anyhow::Result<Vec<R>> {
@@ -205,7 +205,7 @@ where
         }
 
         let discovered = with_sequences(&sample, &seq_of, |seqs| {
-            infer::discover_with_policy(seqs, &base, cfg.adapter_infer.is_aggressive())
+            infer::discover(seqs, &base, cfg.adapter_infer.is_aggressive())
         });
         log_discovered(&discovered, s);
 
@@ -254,15 +254,7 @@ where
         ac.adapters.clone()
     } else {
         let detected = with_sequences(&sample, &seq_of, |seqs| {
-            detect::present(
-                seqs,
-                &ac.adapters,
-                ac.error_rate,
-                ac.end_size,
-                ac.split,
-                detect::presence_min(s),
-                cfg.threads,
-            )
+            detect::present(seqs, &ac, detect::presence_min(s), cfg.threads)
         });
         if detected.is_empty() {
             tracing::warn!(

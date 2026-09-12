@@ -633,15 +633,16 @@ fn infer_on_ubam_preserves_mm_ml() {
 
 // Filtering one sibling segment does not change the retained segment's MM/ML.
 
-/// Twelve-base retained flank with C at indices 1, 4, 7, and 10.
-const KEPT_FLANK: &[u8] = b"ACGGCGGCGGCG";
+/// Fourteen-base retained flank with C at indices 1, 4, 7, and 10.
+const KEPT_FLANK: &[u8] = b"ACGGCGGCGGCGGA";
 /// 16-bp interior adapter, G/T only: it cannot match the all-A/C flanks, and it
 /// is the adapter `tests/adapter_cli.rs`'s naming test uses.
 const SPLIT_ADAPTER: &[u8] = b"GGGGTTTTGGGGTTTT";
-/// 4-bp sibling segment, below `-l 5`, filtered after the split. It contains no
-/// `C`, so it cannot perturb `KEPT_FLANK`'s C-occurrence indexing even though
-/// MM counts occurrences over the whole original read.
-const SHORT_FLANK: &[u8] = b"TTTT";
+/// 12-bp sibling segment, longer than the adapter stage's flank slack so it is
+/// produced, and below `-l 13`, so it is filtered after the split. It contains
+/// no `C`, so it cannot perturb `KEPT_FLANK`'s C-occurrence indexing even
+/// though MM counts occurrences over the whole original read.
+const SHORT_FLANK: &[u8] = b"TTTTTTTTTTTT";
 
 /// Writes a one-record uBAM: `seq`, quality 40 throughout, and `KEPT_FLANK`'s
 /// mod tag (`C+m,0,1,0;`, ML `[250,5,200]`, MN `seq.len()`).
@@ -679,8 +680,8 @@ fn write_mods_fixture(path: &Path, seq: &[u8]) {
 fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Split case: `KEPT_FLANK`, the interior adapter, and a 4-bp sibling that
-    // `-l 5` filters after the split.
+    // Split case: `KEPT_FLANK`, the interior adapter, and a 12-bp sibling that
+    // `-l 13` filters after the split.
     let mut split_seq = KEPT_FLANK.to_vec();
     split_seq.extend_from_slice(SPLIT_ADAPTER);
     split_seq.extend_from_slice(SHORT_FLANK);
@@ -688,7 +689,7 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     let split_out = dir.path().join("split_out.ubam");
     write_mods_fixture(&split_in, &split_seq);
 
-    // Reference: the same 12-bp kept flank with the same mod tag, run with no
+    // Reference: the same 14-bp kept flank with the same mod tag, run with no
     // adapter config, so the short sibling and the adapter are absent.
     let solo_in = dir.path().join("solo_in.ubam");
     let solo_out = dir.path().join("solo_out.ubam");
@@ -719,7 +720,7 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
             "--adapter-end-size",
             "1",
             "-l",
-            "5",
+            "13",
             "-t",
             "1",
         ])
@@ -739,7 +740,7 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
             "-o",
             solo_out.to_str().unwrap(),
             "-l",
-            "5",
+            "13",
             "-t",
             "1",
         ])
@@ -751,7 +752,7 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     assert_eq!(
         split_names.len(),
         1,
-        "The 4-bp sibling is filtered, not written"
+        "The 12-bp sibling is filtered, not written"
     );
     assert!(
         split_names.contains_key("r1_segment_1"),
@@ -767,7 +768,7 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     b.sort();
     assert_eq!(
         a, b,
-        "The kept segment's MM/ML equals the same 12-bp flank run without the \
+        "The kept segment's MM/ML equals the same 14-bp flank run without the \
          filtered sibling: split={split_mods:?} solo={solo_mods:?}"
     );
     assert!(

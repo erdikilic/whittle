@@ -47,34 +47,25 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
     Ok(())
 }
 
-/// Rejects `--trim-barcodes` on any input format other than BAM.
+/// Rejects the BAM-only flags on any input format other than BAM.
 ///
-/// The barcode spans come from the `bi` aux tag, which only a BAM record
-/// carries, so on FASTQ the flag would be accepted and silently do nothing.
-/// `cli::parse` applies this to the format an explicit `--in-format` or a known
-/// extension names, and `run` applies it again once detection has classified a
-/// stream.
-pub(crate) fn guard_barcode_input(cfg: &Config, in_fmt: io::Format) -> anyhow::Result<()> {
-    if cfg.trim_barcodes && in_fmt != io::Format::Bam {
+/// `--trim-barcodes` reads the `bi` aux tag and `--remove-tag` and
+/// `--strip-kinetics` name BAM auxiliary tags, which only a BAM record carries,
+/// so on FASTQ they would be accepted and silently do nothing. `cli::parse`
+/// applies this to the format an explicit `--in-format` or a known extension
+/// names, and `run` applies it again once detection has classified a stream.
+pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::Result<()> {
+    if in_fmt == io::Format::Bam {
+        return Ok(());
+    }
+    if cfg.trim_barcodes {
         anyhow::bail!(
             "--trim-barcodes reads barcode spans from the BAM `bi` aux tag and requires BAM \
              input (got {})",
             in_fmt.label()
         );
     }
-    Ok(())
-}
-
-/// Rejects `--remove-tag` and `--strip-kinetics` on any input format other than
-/// BAM.
-///
-/// Both name BAM auxiliary tags, which only a BAM record carries, so on FASTQ
-/// they would be accepted and silently do nothing. Applied where
-/// `guard_barcode_input` is: `cli::parse` checks the format an explicit
-/// `--in-format` or a known extension names, and `run` checks again once
-/// detection has classified a stream.
-pub(crate) fn guard_remove_tag_input(cfg: &Config, in_fmt: io::Format) -> anyhow::Result<()> {
-    if !cfg.remove_tags.is_empty() && in_fmt != io::Format::Bam {
+    if !cfg.remove_tags.is_empty() {
         anyhow::bail!(
             "{} removes BAM auxiliary tags and requires BAM input (got {})",
             cfg.remove_tags.flags(),

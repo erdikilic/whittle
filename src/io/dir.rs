@@ -1,6 +1,7 @@
 //! Directory inputs: classification of a folder's read files and chained readers over them.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -161,12 +162,13 @@ pub fn fastq_records(
                 let format = match from_extension(&p) {
                     Some(Format::FastqGz) => crate::io::probe_gz(&mut inner)?,
                     Some(other) => other,
-                    None => Format::Fastq,
+                    None => unreachable!("`classify` admits only files with a read-file extension"),
                 };
                 match format {
                     Format::FastqBgzf => crate::io::fastq::reader_from_bgzf(inner, bgzf_workers),
                     Format::FastqGz => Ok(crate::io::fastq::reader_from(inner, true)),
-                    Format::Fastq | Format::Bam => Ok(crate::io::fastq::reader_from(inner, false)),
+                    Format::Fastq => Ok(crate::io::fastq::reader_from(inner, false)),
+                    Format::Bam => unreachable!("`classify` admits no BAM into a FASTQ folder"),
                 }
             });
             match reader {
@@ -185,6 +187,12 @@ type BamRecordIter = crate::io::bam::RawRecordIter;
 /// the first are read and discarded, records stream lazily under the first
 /// header. `Err` on empty `paths`; each file is opened exactly once.
 ///
+/// With `check_read_groups`, each later header's `@RG` id set is compared with
+/// the first file's when that file is reached, and the first difference is
+/// warned about once: only the first file's header is written, so records from
+/// a differing file can reference read groups absent from the merged output
+/// header. Meant for BAM output; FASTQ output writes no header.
+///
 /// `workers` is the multithreaded BGZF decode worker count, passed to every
 /// per-file reader. Chaining N files does not oversubscribe: `Chain`/`FlatMap`
 /// open each reader lazily and drop the exhausted one first, so only one
@@ -193,6 +201,7 @@ pub fn bam_reader(
     paths: &[PathBuf],
     workers: usize,
     counters: Arc<Counters>,
+    check_read_groups: bool,
 ) -> anyhow::Result<(sam::Header, BamRecordIter)> {
     let (first, rest) = paths
         .split_first()
@@ -207,12 +216,27 @@ pub fn bam_reader(
     };
     let (header, first_records) =
         crate::io::bam::reader_from(counted(first, counters.clone())?, workers)?;
+    let first_path = first.clone();
+    let first_read_groups = read_group_ids(&header);
+    let mut warned = false;
     let rest = rest.to_vec();
     let rest_records = rest.into_iter().flat_map(move |p| -> BamRecordIter {
         match counted(&p, counters.clone())
             .and_then(|inner| crate::io::bam::reader_from(inner, workers))
         {
-            Ok((_hdr, recs)) => recs,
+            Ok((hdr, recs)) => {
+                if check_read_groups && !warned && read_group_ids(&hdr) != first_read_groups {
+                    warned = true;
+                    tracing::warn!(
+                        first = %first_path.display(),
+                        other = %p.display(),
+                        "The folder's BAM files have different @RG sets; only the first file's \
+                         header is written, so records from other files may reference read \
+                         groups missing from the merged output header"
+                    );
+                }
+                recs
+            },
             Err(e) => Box::new(std::iter::once(Err(e))),
         }
     });
@@ -220,44 +244,9 @@ pub fn bam_reader(
     Ok((header, records))
 }
 
-/// Returns the set of `@RG` ids declared in a BAM file's header: empty when the
-/// header declares none, `None` when the file cannot be opened or its header
-/// cannot be read.
-fn bam_read_group_ids(path: &Path) -> Option<std::collections::BTreeSet<Vec<u8>>> {
-    let (header, _records) = crate::io::bam::reader(Some(path), 1).ok()?;
-    Some(header.read_groups().keys().map(|k| k.to_vec()).collect())
-}
-
-/// Names the first BAM whose `@RG` id set differs from the first file's, if any.
-/// Best-effort: files that fail to open are skipped. Supports the warning that
-/// folder merge keeps only the first header.
-fn first_rg_mismatch(paths: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
-    let mut iter = paths.iter();
-    let first = iter.next()?;
-    let first_rgs = bam_read_group_ids(first)?;
-    for p in iter {
-        if let Some(rgs) = bam_read_group_ids(p)
-            && rgs != first_rgs
-        {
-            return Some((first.clone(), p.clone()));
-        }
-    }
-    None
-}
-
-/// Warns once when folder BAM inputs do not share the same `@RG` set. Folder
-/// merge writes the first file's header, so later records can otherwise refer
-/// to read groups absent from the output header. This check reads headers only.
-pub fn warn_on_bam_header_mismatch(paths: &[PathBuf]) {
-    if let Some((first, offender)) = first_rg_mismatch(paths) {
-        tracing::warn!(
-            first = %first.display(),
-            other = %offender.display(),
-            "The folder's BAM files have different @RG sets; only the first file's \
-             header is written, so records from other files may reference read \
-             groups missing from the merged output header"
-        );
-    }
+/// Returns the set of `@RG` ids a header declares.
+fn read_group_ids(header: &sam::Header) -> BTreeSet<Vec<u8>> {
+    header.read_groups().keys().map(|k| k.to_vec()).collect()
 }
 
 #[cfg(test)]

@@ -10,8 +10,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::config::{AdapterInfer, AdapterInferAction, AdapterInferPolicy, Config, FastqTags};
-use crate::qual::QualMode;
+use crate::config::{AdapterInfer, Config, FastqTags};
 use crate::trim::QualityOp;
 use crate::workflow::Stats;
 
@@ -30,8 +29,8 @@ pub struct Summary {
     input: String,
     /// Output path, or `<stdout>`.
     output: String,
-    /// Wall-clock processing time. `None` when the caller never started a timer.
-    elapsed_seconds: Option<f64>,
+    /// Wall-clock processing time.
+    elapsed_seconds: f64,
     params: Params,
     reads: Reads,
     bases: Bases,
@@ -165,7 +164,7 @@ impl Summary {
         stats: &Stats,
         command: String,
         output: String,
-        elapsed: Option<std::time::Duration>,
+        elapsed: std::time::Duration,
     ) -> Self {
         Summary {
             schema_version: SCHEMA_VERSION,
@@ -178,15 +177,12 @@ impl Summary {
                 .as_deref()
                 .map_or_else(|| "<stdin>".to_string(), |p| p.display().to_string()),
             output,
-            elapsed_seconds: elapsed.map(|d| d.as_secs_f64()),
+            elapsed_seconds: elapsed.as_secs_f64(),
             params: Params::from_config(cfg),
             reads: Reads {
                 input: stats.input_reads,
                 output: stats.output_reads,
-                with_output: stats
-                    .input_reads
-                    .saturating_sub(stats.reads_trimmed_to_nothing)
-                    .saturating_sub(stats.reads_all_filtered),
+                with_output: stats.reads_with_output,
                 trimmed_to_nothing: stats.reads_trimmed_to_nothing,
                 all_filtered: stats.reads_all_filtered,
             },
@@ -238,11 +234,7 @@ impl Params {
             max_qual: cfg.filter.max_qual,
             min_gc: cfg.filter.min_gc,
             max_gc: cfg.filter.max_gc,
-            qual_mode: match cfg.filter.qual_mode {
-                QualMode::Mean => "mean",
-                QualMode::Arithmetic => "arithmetic",
-                QualMode::Median => "median",
-            },
+            qual_mode: cfg.filter.qual_mode.label(),
             head_crop: cfg.trim.head,
             tail_crop: cfg.trim.tail,
             quality_op: cfg.trim.quality.as_ref().map(|op| match op {
@@ -291,25 +283,11 @@ impl Params {
                 sample: cfg.adapter_sample,
                 infer: match cfg.adapter_infer {
                     AdapterInfer::Off => "off",
-                    AdapterInfer::Enabled {
-                        action: AdapterInferAction::Trim,
-                        ..
-                    } => "trim",
-                    AdapterInfer::Enabled {
-                        action: AdapterInferAction::Report,
-                        ..
-                    } => "report",
+                    AdapterInfer::Enabled { action, .. } => action.label(),
                 },
                 infer_policy: match cfg.adapter_infer {
                     AdapterInfer::Off => None,
-                    AdapterInfer::Enabled {
-                        policy: AdapterInferPolicy::Conservative,
-                        ..
-                    } => Some("conservative"),
-                    AdapterInfer::Enabled {
-                        policy: AdapterInferPolicy::Aggressive,
-                        ..
-                    } => Some("aggressive"),
+                    AdapterInfer::Enabled { policy, .. } => Some(policy.label()),
                 },
             }),
         }
@@ -340,7 +318,7 @@ mod tests {
                 max_qual: 1000.0,
                 min_gc: None,
                 max_gc: None,
-                qual_mode: QualMode::Mean,
+                qual_mode: crate::qual::QualMode::Mean,
             },
             trim: TrimPlan {
                 head: 20,
@@ -350,25 +328,8 @@ mod tests {
                     window: 50,
                 }),
             },
-            adapters: None,
-            adapter_infer: AdapterInfer::Off,
             threads: 8,
-            fastq_tags: FastqTags::All,
-            render_workers: 0,
-            adapter_sample: 0,
-            compression_level: 6,
-            update_moves: false,
-            ordered: false,
-            verbosity: 0,
-            quiet: false,
-            threads_clamped: None,
-            summary_json: None,
-            advisories: Vec::new(),
-            adapter_fasta: None,
-            progress: crate::config::ProgressMode::Auto,
-            adapters_configured: None,
-            trim_barcodes: false,
-            remove_tags: crate::config::TagRemoval::default(),
+            ..Config::default()
         }
     }
 
@@ -382,6 +343,7 @@ mod tests {
             malformed_mod_reads: 0,
             undo_tags_dropped_reads: 0,
             barcode_tag_malformed_reads: 0,
+            reads_with_output: 92,
             reads_trimmed_to_nothing: 5,
             reads_all_filtered: 3,
             segments_dropped_short: 7,
@@ -405,7 +367,7 @@ mod tests {
             &stats(),
             "whittle -i reads.bam".into(),
             "out.fastq".into(),
-            None,
+            std::time::Duration::ZERO,
         );
         let v = value(&s);
         assert_eq!(v["reads"]["input"], 100);
@@ -417,18 +379,14 @@ mod tests {
     }
 
     #[test]
-    fn derived_read_bucket_saturates_instead_of_underflowing() {
-        let mut st = stats();
-        st.input_reads = 1;
-        st.reads_trimmed_to_nothing = 5;
-        st.reads_all_filtered = 3;
-        let s = Summary::new(&cfg(), &st, String::new(), String::new(), None);
-        assert_eq!(value(&s)["reads"]["with_output"], 0);
-    }
-
-    #[test]
     fn params_record_the_resolved_run() {
-        let s = Summary::new(&cfg(), &stats(), String::new(), String::new(), None);
+        let s = Summary::new(
+            &cfg(),
+            &stats(),
+            String::new(),
+            String::new(),
+            std::time::Duration::ZERO,
+        );
         let v = value(&s);
         assert_eq!(v["schema_version"], 1);
         assert_eq!(v["tool"], "whittle");
@@ -454,11 +412,18 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         });
         c.adapter_sample = 5_000;
         c.adapters_configured = Some(124);
-        let s = Summary::new(&c, &stats(), String::new(), String::new(), None);
+        let s = Summary::new(
+            &c,
+            &stats(),
+            String::new(),
+            String::new(),
+            std::time::Duration::ZERO,
+        );
         let v = value(&s);
         // Both figures are reported: detection narrowed 124 down to 0 here.
         assert_eq!(v["params"]["adapters"]["configured"], 124);
@@ -475,23 +440,26 @@ mod tests {
     fn fastq_tag_list_renders_as_a_comma_list() {
         let mut c = cfg();
         c.fastq_tags = FastqTags::Only(BTreeSet::from([*b"MM", *b"ML", *b"RG"]));
-        let s = Summary::new(&c, &stats(), String::new(), String::new(), None);
+        let s = Summary::new(
+            &c,
+            &stats(),
+            String::new(),
+            String::new(),
+            std::time::Duration::ZERO,
+        );
         assert_eq!(value(&s)["params"]["fastq_tags"], "ML,MM,RG");
     }
 
     #[test]
-    fn elapsed_is_seconds_and_omitted_when_unknown() {
+    fn elapsed_is_seconds() {
         let s = Summary::new(
             &cfg(),
             &stats(),
             String::new(),
             String::new(),
-            Some(std::time::Duration::from_millis(2500)),
+            std::time::Duration::from_millis(2500),
         );
         assert_eq!(value(&s)["elapsed_seconds"], 2.5);
-
-        let s = Summary::new(&cfg(), &stats(), String::new(), String::new(), None);
-        assert!(value(&s)["elapsed_seconds"].is_null());
     }
 
     /// A stdin or stdout run names its endpoints, so the summary file records
@@ -500,7 +468,13 @@ mod tests {
     fn stdin_and_stdout_get_explicit_labels() {
         let mut c = cfg();
         c.io.input = None;
-        let s = Summary::new(&c, &stats(), String::new(), "<stdout>".into(), None);
+        let s = Summary::new(
+            &c,
+            &stats(),
+            String::new(),
+            "<stdout>".into(),
+            std::time::Duration::ZERO,
+        );
         let v = value(&s);
         assert_eq!(v["input"], "<stdin>");
         assert_eq!(v["output"], "<stdout>");
@@ -510,9 +484,15 @@ mod tests {
     fn write_creates_a_parseable_file_ending_in_a_newline() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("summary.json");
-        Summary::new(&cfg(), &stats(), String::new(), String::new(), None)
-            .write(&path)
-            .unwrap();
+        Summary::new(
+            &cfg(),
+            &stats(),
+            String::new(),
+            String::new(),
+            std::time::Duration::ZERO,
+        )
+        .write(&path)
+        .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.ends_with("}\n"));
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();

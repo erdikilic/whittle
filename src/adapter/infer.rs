@@ -7,7 +7,19 @@
 //! from GPL source. Pure and format-neutral.
 
 use crate::adapter::search::{AmbiguousSearcher, hits, is_plain_acgt, new_ambiguous_searcher};
-use crate::adapter::{Adapter, AdapterConfig, End, MIN_PATTERN_LEN, edit_budget};
+use crate::adapter::{Adapter, AdapterConfig, MIN_PATTERN_LEN, Role, edit_budget};
+
+/// The read end a discovered consensus faces, which selects the side of its
+/// conservative anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// Discovered in the 5' windows.
+    Five,
+    /// Discovered in the 3' windows.
+    Three,
+    /// Discovered at both ends.
+    Both,
+}
 
 /// k-mer length used for end-window counting and assembly graph nodes.
 const KMER_K: usize = 16;
@@ -512,10 +524,77 @@ fn stride_sample<'a>(windows: &[&'a [u8]], cap: usize) -> Vec<&'a [u8]> {
     windows.iter().step_by(step).copied().collect()
 }
 
+/// Fraction of the windows holding two candidates in which the inner one must
+/// lie inward of the outer one for it to count as insert-facing sequence.
+const INWARD_FRAC: f64 = 0.5;
+
+/// Removes every candidate without a drop-trim boundary whose terminal anchor
+/// lies inward of another candidate's anchor in the windows carrying both:
+/// for a 5' end, one that starts past the midpoint of the other's occurrence;
+/// for a 3' end, one that ends before it. Such a candidate is the
+/// insert-facing remainder of a longer recurrent sequence (a conserved gene
+/// start behind a primer), which the outer candidate's uncertain region
+/// already describes and which would trim or split real sequence. A candidate
+/// with a sharp boundary is kept wherever it lies, since a primer inward of an
+/// adapter is technical sequence of its own. Anchors are compared rather than
+/// whole consensuses because a consensus nearly as long as the window aligns
+/// from its start whatever it holds.
+fn drop_inward_candidates(
+    candidates: Vec<(Vec<u8>, f64)>,
+    windows: &[&[u8]],
+    base: &AdapterConfig,
+    end: End,
+) -> Vec<(Vec<u8>, f64)> {
+    let mut fwd = crate::adapter::search::new_searcher_fwd();
+    let anchors: Vec<Vec<u8>> = candidates
+        .iter()
+        .map(|(seq, _)| conservative_terminal_anchor(seq, end))
+        .collect();
+    let occurrences: Vec<Vec<Option<(usize, usize)>>> = anchors
+        .iter()
+        .map(|anchor| {
+            let k = edit_budget(base.error_rate, anchor.len());
+            windows
+                .iter()
+                .map(|wnd| {
+                    hits(&mut fwd, anchor, wnd, k)
+                        .into_iter()
+                        .min_by_key(|h| h.start)
+                        .map(|h| (h.start, h.end))
+                })
+                .collect()
+        })
+        .collect();
+    let inward_of = |inner: usize, outer: usize| -> bool {
+        let half = anchors[outer].len() / 2;
+        let (mut both, mut inward) = (0usize, 0usize);
+        for (a, b) in occurrences[outer].iter().zip(&occurrences[inner]) {
+            let (Some(a), Some(b)) = (a, b) else {
+                continue;
+            };
+            both += 1;
+            let lies_inward = match end {
+                End::Five | End::Both => b.0 >= a.0 + half,
+                End::Three => b.1 + half <= a.1,
+            };
+            inward += usize::from(lies_inward);
+        }
+        both > 0 && inward as f64 >= INWARD_FRAC * both as f64
+    };
+    (0..candidates.len())
+        .filter(|&i| {
+            candidates[i].0.len() <= CONSERVATIVE_ANCHOR_LEN
+                || !(0..candidates.len()).any(|j| j != i && inward_of(i, j))
+        })
+        .map(|i| candidates[i].clone())
+        .collect()
+}
+
 /// Assembles one end's candidates: counts k-mers, reweights them by 2-error
-/// window frequency, peels paths, and drop-trims each. Returns `(trimmed
-/// consensus, support)` per candidate.
-fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
+/// window frequency, peels paths, drop-trims each, and removes the candidates
+/// that lie inward of another. Returns `(trimmed consensus, support)` per
+/// candidate.
+fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, f64)> {
     if windows.len() < 3 {
         return Vec::new();
     }
@@ -562,35 +641,23 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig) -> Vec<(Vec<u8>, f64)> {
         let support = present as f64 / n_recount as f64;
         out.push((trimmed, support));
     }
-    out
+    drop_inward_candidates(out, &recount, base, end)
 }
 
-/// Runs ab-initio discovery under the conservative policy: per-end `assemble`,
-/// folds shared 5'/3' discoveries into `End::Both` via `merge_both_ends`, drops
-/// anything too short or too weakly supported, then annotates each survivor
-/// with its catalog matches. The run path calls `discover_with_policy`
-/// directly; this is the library entry point for callers without a policy of
-/// their own.
-pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
-    discover_with_policy(sample, base, false)
-}
-
-/// Discovers adapters with an explicit boundary policy. Conservative mode (the
-/// default exposed by [`discover`]) trims with a short physical-end-facing
-/// anchor and never asserts that the complete recurrent consensus is technical.
-/// Aggressive mode trims the full consensus. Survivors are named `inferred_N`
-/// in presentation order (support descending, then sequence ascending) and
-/// carry their catalog matches from the ONT catalog plus `base.adapters` (extra
-/// naming references, such as a `--adapter-fasta` under report mode) as
-/// `name_hits`.
-pub fn discover_with_policy(
-    sample: &[&[u8]],
-    base: &AdapterConfig,
-    aggressive: bool,
-) -> Vec<InferredAdapter> {
+/// Discovers adapters ab initio: per-end `assemble`, folds shared 5'/3'
+/// discoveries into `End::Both` via `merge_both_ends`, drops anything too
+/// short or too weakly supported, then annotates each survivor with its
+/// catalog matches. Conservative mode trims with a short physical-end-facing
+/// anchor and never asserts that the complete recurrent consensus is
+/// technical; `aggressive` mode trims the full consensus. Survivors are named
+/// `inferred_N` in presentation order (support descending, then sequence
+/// ascending) and carry their catalog matches from the ONT catalog plus
+/// `base.adapters` (extra naming references, such as a `--adapter-fasta`
+/// under report mode) as `name_hits`.
+pub fn discover(sample: &[&[u8]], base: &AdapterConfig, aggressive: bool) -> Vec<InferredAdapter> {
     let (five_w, three_w) = end_windows(sample, WINDOW_LEN);
-    let five = assemble(&five_w, base);
-    let three = assemble(&three_w, base);
+    let five = assemble(&five_w, base, End::Five);
+    let three = assemble(&three_w, base, End::Three);
 
     // A dual-end consensus inherits the strongest fuzzy-equivalent recovery
     // from either end, including reverse-complement representations.
@@ -647,7 +714,11 @@ pub fn discover_with_policy(
                 conservative_terminal_anchor(&assembled_seq, end)
             };
             InferredAdapter {
-                adapter: Adapter { name, seq, end },
+                adapter: Adapter {
+                    name,
+                    seq,
+                    role: Role::Adapter,
+                },
                 assembled_seq,
                 support,
                 name_hits,
@@ -891,7 +962,7 @@ mod tests {
         let refs = vec![Adapter {
             name: "SQK-TEST".into(),
             seq: b"ACGTACGTACGTACGT".to_vec(),
-            end: End::Both,
+            role: Role::Adapter,
         }];
         let hits = name_against(b"ACGTACGTACGTACGT", &refs, 0.2);
         assert_eq!(hits[0].0, "SQK-TEST");
@@ -907,7 +978,7 @@ mod tests {
         let refs = vec![Adapter {
             name: "REF".into(),
             seq: reference.to_vec(),
-            end: End::Both,
+            role: Role::Adapter,
         }];
         let mutate = |count: usize| -> Vec<u8> {
             let mut seq = reference.to_vec();
@@ -949,9 +1020,10 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base);
+        let found = discover(&sample, &base, false);
         assert!(!found.is_empty(), "The planted adapter is discovered");
         for (i, d) in found.iter().enumerate() {
             assert_eq!(d.adapter.name, format!("inferred_{}", i + 1));
@@ -988,9 +1060,10 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base);
+        let found = discover(&sample, &base, false);
         assert!(
             found.is_empty(),
             "An N run is not adapter evidence (got {found:?})"
@@ -1033,9 +1106,10 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base);
+        let found = discover(&sample, &base, false);
         assert!(!found.is_empty(), "At least one adapter discovered");
         // The top candidate is a 5' or both-end adapter close to the planted
         // sequence.
@@ -1102,23 +1176,26 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base);
+        let found = discover(&sample, &base, false);
 
-        let both = found
-            .iter()
-            .find(|d| d.adapter.end == End::Both)
-            .expect("The shared 5'/3' adapter is discovered as a single End::Both entry");
-
-        // Near-match to the planted adapter; recovery is approximate.
+        // The merged entry is the one near the planted adapter; recovery is
+        // approximate, so the match is within 25% edit distance.
         let mut s = new_ambiguous_searcher();
         let k = (0.25 * adapter.len() as f64).ceil() as usize;
-        assert!(
-            !hits(&mut s, &both.adapter.seq, adapter, k).is_empty()
-                || !hits(&mut s, adapter, &both.adapter.seq, k).is_empty(),
-            "Both adapter (seq {:?}) must be within 25% edit distance of the planted adapter",
-            String::from_utf8_lossy(&both.adapter.seq)
+        let near: Vec<&InferredAdapter> = found
+            .iter()
+            .filter(|d| {
+                !hits(&mut s, &d.adapter.seq, adapter, k).is_empty()
+                    || !hits(&mut s, adapter, &d.adapter.seq, k).is_empty()
+            })
+            .collect();
+        assert_eq!(
+            near.len(),
+            1,
+            "The shared 5'/3' adapter is discovered as a single entry: {found:?}"
         );
 
         // The reported support reflects the stronger 3' end, not the weaker 5'
@@ -1126,10 +1203,10 @@ mod tests {
         // produces carry that value and are dropped independently because
         // 0.18 < `KEEP_SUPPORT`.
         assert!(
-            both.support > 0.7,
-            "Both adapter's support ({}) must reflect the max across ends \
+            near[0].support > 0.7,
+            "Merged adapter's support ({}) must reflect the max across ends \
              (the 3' end recovers at about 1.0), not the weaker 5' end alone (about 0.18)",
-            both.support
+            near[0].support
         );
     }
 
@@ -1157,9 +1234,10 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base);
+        let found = discover(&sample, &base, false);
         assert!(
             found.is_empty(),
             "No spurious adapter in clean reads (got {found:?})"
@@ -1237,9 +1315,10 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base);
+        let found = discover(&sample, &base, false);
         assert!(
             !found.is_empty(),
             "Adapter present in a clear majority of reads after the first \
@@ -1283,9 +1362,10 @@ mod tests {
             error_rate: 0.2,
             end_size: 150,
             split: true,
+            min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base);
+        let found = discover(&sample, &base, false);
         assert!(
             !found.is_empty(),
             "Lowercase reads must be inferable (got {found:?})"

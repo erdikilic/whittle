@@ -36,10 +36,10 @@ struct Cli {
     output: Option<PathBuf>,
     /// Force the input format instead of detecting it from the path or stream.
     #[arg(long, value_enum, help_heading = "Setup")]
-    in_format: Option<FormatArg>,
+    in_format: Option<Format>,
     /// Force the output format instead of selecting it from the output path.
     #[arg(long, value_enum, help_heading = "Setup")]
-    out_format: Option<FormatArg>,
+    out_format: Option<Format>,
     /// Worker threads, at least 1; values above the CPU count are clamped to
     /// it. Defaults to all detected CPUs.
     #[arg(
@@ -91,11 +91,11 @@ struct Cli {
     #[arg(
         long,
         value_enum,
-        default_value_t = ProgressArg::Auto,
+        default_value_t = ProgressMode::Auto,
         conflicts_with = "quiet",
         help_heading = "Logging"
     )]
-    progress: ProgressArg,
+    progress: ProgressMode,
 
     /// Minimum post-trim segment length. Defaults to 1.
     #[arg(short = 'l', long, default_value_t = 1, help_heading = "Filtering")]
@@ -121,8 +121,8 @@ struct Cli {
     #[arg(short = 'G', long, help_heading = "Filtering")]
     max_gc: Option<f64>,
     /// Read-quality summary used by the quality filters. Defaults to mean.
-    #[arg(short = 'm', long, value_enum, default_value_t = QualModeArg::Mean, help_heading = "Filtering")]
-    qual_mode: QualModeArg,
+    #[arg(short = 'm', long, value_enum, default_value_t = QualMode::Mean, help_heading = "Filtering")]
+    qual_mode: QualMode,
 
     /// Remove this many bases from the 5' end before other trimming. Defaults
     /// to 0.
@@ -169,13 +169,17 @@ struct Cli {
     #[arg(long, help_heading = "Tags")]
     strip_kinetics: bool,
 
-    /// Adapter FASTA; each sequence must be at least 11 bp. Enables adapter
-    /// trimming.
+    /// Adapter FASTA; each sequence must be at least 11 bp and may use IUPAC
+    /// codes. An entry whose header description contains the word primer or
+    /// barcode is trimmed at read ends only; every other entry also splits
+    /// reads at interior hits. Enables adapter trimming.
     #[arg(short = 'a', long, help_heading = "Adapter trimming")]
     adapter_fasta: Option<PathBuf>,
-    /// Built-in ONT adapter catalog. Enables adapter trimming. Defaults to none.
-    #[arg(long, value_enum, default_value_t = AdapterPresetArg::None, help_heading = "Adapter trimming")]
-    adapter_preset: AdapterPresetArg,
+    /// Built-in kit presets, comma-separated: lsk114, rad114 (ulk114), rbk114,
+    /// nbd114, pcb114 (pcs114), rpb114, mab114, rna004, pacbio, ont (every
+    /// ONT kit), all. Enables adapter trimming. Defaults to none.
+    #[arg(long, value_name = "KITS", help_heading = "Adapter trimming")]
+    adapter_preset: Option<String>,
     /// End-match tolerance as a fraction of adapter length; interior splits use
     /// half. Requires an adapter source. Defaults to 0.2.
     #[arg(long, help_heading = "Adapter trimming")]
@@ -187,9 +191,9 @@ struct Cli {
     /// Trim adapters at read ends only; never split on interior adapters.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
-    /// Reads sampled for preset detection or ab-initio inference; inference
-    /// requires at least 100. Requires an adapter source. Defaults to 0 for
-    /// preset detection and 40000 for inference.
+    /// Reads sampled for preset presence detection or ab-initio inference; 0
+    /// disables detection, otherwise at least 100. Requires an adapter source.
+    /// Defaults to 2000 for preset detection and 40000 for inference.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_sample: Option<usize>,
     /// Discover adapters de novo. Report prints the inferred FASTA and exits
@@ -201,18 +205,18 @@ struct Cli {
         default_missing_value = "trim",
         help_heading = "Adapter trimming"
     )]
-    adapter_infer: Option<AdapterInferActionArg>,
-    /// Trust policy for inferred consensuses. Aggressive uses the complete
-    /// consensus and permits splitting unless ends-only is set. Defaults to
-    /// conservative.
+    adapter_infer: Option<AdapterInferAction>,
+    /// Trust policy for inferred consensuses. Conservative trims and splits
+    /// with a short end-facing anchor; aggressive uses the complete consensus.
+    /// Defaults to conservative.
     #[arg(
         long,
         value_enum,
-        default_value_t = AdapterInferPolicyArg::Conservative,
+        default_value_t = AdapterInferPolicy::Conservative,
         requires = "adapter_infer",
         help_heading = "Adapter trimming"
     )]
-    adapter_infer_policy: AdapterInferPolicyArg,
+    adapter_infer_policy: AdapterInferPolicy,
 }
 
 /// The default `--adapter-error-rate`.
@@ -221,120 +225,13 @@ const DEFAULT_ADAPTER_ERROR_RATE: f64 = 0.2;
 const DEFAULT_ADAPTER_END_SIZE: usize = 150;
 /// The default `--adapter-sample` under `--adapter-infer`.
 const DEFAULT_INFER_SAMPLE: usize = 40_000;
+/// The default `--adapter-sample` for preset presence detection.
+const DEFAULT_PRESET_SAMPLE: usize = 2_000;
 
 /// Returns the clap `Command` for the CLI. `examples/gen-man.rs` renders the
 /// man page from it, so the page and the parser share one definition.
 pub fn command() -> clap::Command {
     <Cli as clap::CommandFactory>::command()
-}
-
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum ProgressArg {
-    /// A bar on a terminal, periodic lines otherwise.
-    Auto,
-    /// The animated bar, unless -v or WHITTLE_LOG asks for log lines.
-    Bar,
-    /// Always periodic lines, never a bar.
-    Plain,
-    /// No progress reporting; the banner and summary still print.
-    None,
-}
-
-impl From<ProgressArg> for ProgressMode {
-    fn from(value: ProgressArg) -> Self {
-        match value {
-            ProgressArg::Auto => ProgressMode::Auto,
-            ProgressArg::Bar => ProgressMode::Bar,
-            ProgressArg::Plain => ProgressMode::Plain,
-            ProgressArg::None => ProgressMode::None,
-        }
-    }
-}
-
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum AdapterInferActionArg {
-    /// Trim reads with the inferred sequences.
-    Trim,
-    /// Print inferred FASTA to stdout and do not write read output.
-    Report,
-}
-
-impl From<AdapterInferActionArg> for AdapterInferAction {
-    fn from(value: AdapterInferActionArg) -> Self {
-        match value {
-            AdapterInferActionArg::Trim => Self::Trim,
-            AdapterInferActionArg::Report => Self::Report,
-        }
-    }
-}
-
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum AdapterInferPolicyArg {
-    /// Use a short end-facing anchor and disable inferred interior splitting.
-    Conservative,
-    /// Use the complete recurrent consensus and allow interior splitting.
-    Aggressive,
-}
-
-impl From<AdapterInferPolicyArg> for AdapterInferPolicy {
-    fn from(value: AdapterInferPolicyArg) -> Self {
-        match value {
-            AdapterInferPolicyArg::Conservative => Self::Conservative,
-            AdapterInferPolicyArg::Aggressive => Self::Aggressive,
-        }
-    }
-}
-
-#[derive(clap::ValueEnum, Debug, Clone, Copy)]
-enum FormatArg {
-    /// Plain FASTQ.
-    Fastq,
-    /// gzip-compressed FASTQ.
-    FastqGz,
-    /// BGZF-compressed FASTQ.
-    #[value(name = "fastq-bgz", alias = "fastq-bgzf")]
-    FastqBgzf,
-    /// Unaligned BAM.
-    Bam,
-}
-
-impl From<FormatArg> for Format {
-    fn from(f: FormatArg) -> Self {
-        match f {
-            FormatArg::Fastq => Format::Fastq,
-            FormatArg::FastqGz => Format::FastqGz,
-            FormatArg::FastqBgzf => Format::FastqBgzf,
-            FormatArg::Bam => Format::Bam,
-        }
-    }
-}
-
-#[derive(clap::ValueEnum, Debug, Clone, Copy)]
-enum QualModeArg {
-    /// Average error probabilities, then convert the result back to Phred Q.
-    Mean,
-    /// Take the arithmetic mean of the per-base Phred scores.
-    Arithmetic,
-    /// Take the median per-base Phred score.
-    Median,
-}
-
-impl From<QualModeArg> for QualMode {
-    fn from(m: QualModeArg) -> Self {
-        match m {
-            QualModeArg::Mean => QualMode::Mean,
-            QualModeArg::Arithmetic => QualMode::Arithmetic,
-            QualModeArg::Median => QualMode::Median,
-        }
-    }
-}
-
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum AdapterPresetArg {
-    /// Do not load a built-in adapter catalog.
-    None,
-    /// Load the built-in Oxford Nanopore adapter and barcode catalog.
-    Ont,
 }
 
 /// Parses the command line into a validated `Config`.
@@ -379,8 +276,8 @@ pub fn parse() -> anyhow::Result<Config> {
         io: IoConfig {
             input: c.input,
             output: c.output,
-            in_format: c.in_format.map(Into::into),
-            out_format: c.out_format.map(Into::into),
+            in_format: c.in_format,
+            out_format: c.out_format,
         },
         filter: FilterConfig {
             min_length: c.min_length,
@@ -389,7 +286,7 @@ pub fn parse() -> anyhow::Result<Config> {
             max_qual: c.max_qual,
             min_gc: c.min_gc,
             max_gc: c.max_gc,
-            qual_mode: c.qual_mode.into(),
+            qual_mode: c.qual_mode,
         },
         trim: TrimPlan {
             head: c.head_crop,
@@ -410,7 +307,7 @@ pub fn parse() -> anyhow::Result<Config> {
         threads_clamped,
         summary_json: c.summary_json,
         advisories,
-        progress: c.progress.into(),
+        progress: c.progress,
         adapter_fasta: c.adapter_fasta,
         adapters_configured: None,
         trim_barcodes: c.trim_barcodes,
@@ -425,8 +322,7 @@ pub fn parse() -> anyhow::Result<Config> {
         .in_format
         .or_else(|| cfg.io.input.as_deref().and_then(crate::io::from_extension))
     {
-        crate::guards::guard_barcode_input(&cfg, fmt)?;
-        crate::guards::guard_remove_tag_input(&cfg, fmt)?;
+        crate::guards::guard_bam_only_flags(&cfg, fmt)?;
     }
     Ok(cfg)
 }
@@ -452,12 +348,9 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
             c.min_length
         );
     }
-    // NaN compares false against everything, so it slips past the ordering
-    // check below and disables the filter; an infinite or negative bound is
-    // outside the Phred domain.
-    if c.min_qual.is_nan() || c.max_qual.is_nan() {
-        anyhow::bail!("--min-qual and --max-qual must be numbers (got NaN)");
-    }
+    // NaN compares false against everything, so it would slip past the ordering
+    // check below and disable the filter; `is_finite` rejects it together with
+    // the infinite bounds, which are outside the Phred domain.
     for (flag, value) in [("--min-qual", c.min_qual), ("--max-qual", c.max_qual)] {
         if !value.is_finite() || value < 0.0 {
             anyhow::bail!("{flag} ({value}) must be a finite quality of at least 0");
@@ -491,7 +384,7 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
 /// writer default.
 fn compression_level_for(c: &Cli) -> u8 {
     let out_is_gz = match c.out_format {
-        Some(FormatArg::FastqGz) => true,
+        Some(Format::FastqGz) => true,
         Some(_) => false,
         None => c.output.as_deref().and_then(crate::io::from_extension) == Some(Format::FastqGz),
     };
@@ -519,8 +412,8 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
     let adapter_infer = c
         .adapter_infer
         .map_or(AdapterInfer::Off, |action| AdapterInfer::Enabled {
-            action: action.into(),
-            policy: c.adapter_infer_policy.into(),
+            action,
+            policy: c.adapter_infer_policy,
         });
 
     // Trim mode excludes an explicit FASTA; report mode allows one so the
@@ -541,7 +434,7 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
     }
     // Under inference the preset is not searched for trimming, since inference
     // builds its own set; it is retained only to name discovered adapters.
-    if adapter_infer != AdapterInfer::Off && c.adapter_preset != AdapterPresetArg::None {
+    if adapter_infer != AdapterInfer::Off && preset_kits(c)?.is_some() {
         advisories.push(Advisory::warn(
             "--adapter-preset is ignored for trimming under --adapter-infer \
              (used only for naming discovered adapters)",
@@ -569,13 +462,18 @@ fn resolve_adapters(
     adapter_infer: AdapterInfer,
     advisories: &mut Vec<Advisory>,
 ) -> anyhow::Result<Option<crate::adapter::AdapterConfig>> {
+    // Under inference the trimming set is discovered later, so the preset
+    // sequences are dropped here and only the FASTA entries are carried onward,
+    // as naming references for `infer::discover`, which looks up the built-in
+    // catalog itself. A report-only FASTA is never trimmed against: discovery
+    // replaces the set before dispatch and report mode exits first. Under
+    // `Trim` a FASTA is rejected by `resolve_infer`.
     let mut adapter_seqs: Vec<crate::adapter::Adapter> = Vec::new();
-    if c.adapter_preset == AdapterPresetArg::Ont {
-        adapter_seqs.extend(crate::adapter::preset::preset_ont());
+    if adapter_infer == AdapterInfer::Off
+        && let Some(kits) = preset_kits(c)?
+    {
+        adapter_seqs.extend(crate::adapter::preset::preset(&kits));
     }
-    // Only the FASTA entries are carried onward as naming references under
-    // inference; `infer::discover` looks up the built-in catalog itself.
-    let mut fasta_adapters: Vec<crate::adapter::Adapter> = Vec::new();
     if let Some(path) = &c.adapter_fasta {
         let from_fasta = read_adapter_fasta(path, advisories)?;
         if from_fasta.is_empty() {
@@ -586,7 +484,6 @@ fn resolve_adapters(
                 crate::adapter::MIN_PATTERN_LEN
             );
         }
-        fasta_adapters = from_fasta.clone();
         adapter_seqs.extend(from_fasta);
     }
 
@@ -608,31 +505,25 @@ fn resolve_adapters(
     if end_size == 0 {
         anyhow::bail!("--adapter-end-size must be >= 1");
     }
-    // Under inference the trimming set is discovered later, so the preset
-    // sequences are dropped here. A report-only FASTA is carried in this field
-    // only as naming references for `infer::discover`: discovery replaces the
-    // field before dispatch and report mode exits first, so the FASTA is never
-    // trimmed against. Under `Trim` a FASTA is rejected by `resolve_infer`.
-    let trim_adapters = if adapter_infer == AdapterInfer::Off {
-        adapter_seqs
-    } else {
-        fasta_adapters
-    };
-    let infer_forces_ends_only =
-        adapter_infer != AdapterInfer::Off && !adapter_infer.is_aggressive();
-    if infer_forces_ends_only && !c.adapter_ends_only {
-        advisories.push(Advisory::info(
-            "Conservative adapter inference trims read ends only; use \
-             --adapter-infer-policy aggressive to enable full-consensus interior splitting",
-        ));
-    }
     Ok(Some(crate::adapter::AdapterConfig {
-        adapters: trim_adapters,
+        adapters: adapter_seqs,
         error_rate,
         end_size,
-        split: !c.adapter_ends_only && !infer_forces_ends_only,
+        split: !c.adapter_ends_only,
+        min_piece: c.min_length,
         candidate_index: std::sync::OnceLock::new(),
     }))
+}
+
+/// Parses `--adapter-preset` into the kits it names, or `None` when it is
+/// absent or names nothing.
+fn preset_kits(c: &Cli) -> anyhow::Result<Option<Vec<crate::adapter::preset::Kit>>> {
+    let Some(spec) = &c.adapter_preset else {
+        return Ok(None);
+    };
+    let kits = crate::adapter::preset::parse_presets(spec)
+        .map_err(|e| anyhow::anyhow!("--adapter-preset: {e}"))?;
+    Ok((!kits.is_empty()).then_some(kits))
 }
 
 /// Rejects an explicit adapter tuning flag given without an adapter source.
@@ -644,7 +535,7 @@ fn require_adapter_source(c: &Cli) -> anyhow::Result<()> {
     ];
     if let Some((flag, _)) = explicit.iter().find(|(_, given)| *given) {
         anyhow::bail!(
-            "{flag} requires an adapter source (--adapter-fasta, --adapter-preset ont, or \
+            "{flag} requires an adapter source (--adapter-fasta, --adapter-preset, or \
              --adapter-infer)"
         );
     }
@@ -653,8 +544,8 @@ fn require_adapter_source(c: &Cli) -> anyhow::Result<()> {
 
 /// Resolves the sample size for presence detection or inference.
 ///
-/// An omitted value means the mode default: 0 (detection off) with inference
-/// off, 40000 with inference on. An explicit value must be 0 or at least
+/// An omitted value means the mode default: 2000 with inference off, 40000
+/// with inference on. An explicit value must be 0 or at least
 /// `MIN_SAMPLE_FOR_DETECTION`, and 0 is rejected under inference, which needs a
 /// sample. Presence detection is preset-only: a user-supplied FASTA is a curated
 /// set that is searched in full, since sampling could drop a rare custom
@@ -668,7 +559,7 @@ fn resolve_sample(
     let min = crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION;
     let requested = match c.adapter_sample {
         None if adapter_infer != AdapterInfer::Off => DEFAULT_INFER_SAMPLE,
-        None => 0,
+        None => DEFAULT_PRESET_SAMPLE,
         Some(n) => {
             if n != 0 && n < min {
                 anyhow::bail!(
@@ -688,7 +579,7 @@ fn resolve_sample(
     if adapter_infer != AdapterInfer::Off || c.adapter_fasta.is_none() {
         return Ok(requested);
     }
-    if requested > 0 {
+    if c.adapter_sample.is_some_and(|n| n > 0) {
         advisories.push(Advisory::warn(
             "--adapter-sample is ignored with --adapter-fasta (presence detection is \
              preset-only)",
@@ -697,12 +588,30 @@ fn resolve_sample(
     Ok(0)
 }
 
+/// Returns the role a FASTA header assigns: `primer` or `barcode` as a
+/// whole word in the description after the name selects that role, and any
+/// other header is an adapter.
+fn fasta_role(head: &str) -> crate::adapter::Role {
+    let description = head
+        .split_once(char::is_whitespace)
+        .map_or("", |(_, rest)| rest);
+    let mut words = description
+        .split(|c: char| c.is_whitespace() || matches!(c, '=' | ':' | ',' | ';'))
+        .filter(|w| !w.is_empty());
+    match words.find(|w| w.eq_ignore_ascii_case("primer") || w.eq_ignore_ascii_case("barcode")) {
+        Some(w) if w.eq_ignore_ascii_case("primer") => crate::adapter::Role::Primer,
+        Some(_) => crate::adapter::Role::Barcode,
+        None => crate::adapter::Role::Adapter,
+    }
+}
+
 /// Reads adapter sequences from a FASTA. Whitespace is removed, lowercase is
 /// uppercased, and `U` is folded to `T`. IUPAC ambiguity codes are kept and
 /// searched as the bases they stand for; an entry containing any other byte is
 /// skipped with a warning advisory, as is an entry shorter than
 /// `adapter::MIN_PATTERN_LEN`, the matcher's minimum pattern length. An entry
 /// averaging two or more bases per position is kept with a warning advisory.
+/// The header description selects the role; see `fasta_role`.
 fn read_adapter_fasta(
     path: &std::path::Path,
     advisories: &mut Vec<crate::config::Advisory>,
@@ -725,7 +634,12 @@ fn read_adapter_fasta(
             .into_iter()
             .map(|b| if b == b'U' { b'T' } else { b })
             .collect();
-        let name = String::from_utf8_lossy(rec.head()).into_owned();
+        let head = String::from_utf8_lossy(rec.head()).into_owned();
+        let role = fasta_role(&head);
+        let name = head
+            .split_once(char::is_whitespace)
+            .map_or(head.as_str(), |(name, _)| name)
+            .to_string();
 
         // IUPAC ambiguity codes are searched as the bases they stand for, as a
         // degenerate primer requires. A byte outside the nucleotide alphabet
@@ -766,17 +680,13 @@ fn read_adapter_fasta(
             )));
         }
 
-        out.push(crate::adapter::Adapter {
-            name,
-            seq,
-            end: crate::adapter::End::Both,
-        });
+        out.push(crate::adapter::Adapter { name, seq, role });
     }
     Ok(out)
 }
 
-/// Builds a `Config` directly for integration tests. `head_crop` and
-/// `tail_crop` are fixed crops.
+/// Builds a `Config` for integration tests: BAM in and out, the given crops,
+/// one thread, quiet.
 #[doc(hidden)]
 pub fn config_for_test(
     input: &std::path::Path,
@@ -804,39 +714,14 @@ pub fn config_for_test_threads(
             in_format: Some(Format::Bam),
             out_format: Some(Format::Bam),
         },
-        filter: FilterConfig {
-            min_length: 1,
-            max_length: usize::MAX,
-            min_qual: 0.0,
-            max_qual: 1000.0,
-            min_gc: None,
-            max_gc: None,
-            qual_mode: QualMode::Mean,
-        },
         trim: TrimPlan {
             head: head_crop,
             tail: tail_crop,
             quality: None,
         },
-        adapters: None,
-        adapter_infer: crate::config::AdapterInfer::Off,
         threads: threads.max(1),
-        fastq_tags: FastqTags::All,
-        render_workers: 0,
-        adapter_sample: 0,
-        compression_level: 6,
-        update_moves: false,
-        ordered: false,
-        verbosity: 0,
         quiet: true,
-        threads_clamped: None,
-        summary_json: None,
-        trim_barcodes: false,
-        remove_tags: TagRemoval::default(),
-        advisories: Vec::new(),
-        adapter_fasta: None,
-        progress: crate::config::ProgressMode::Auto,
-        adapters_configured: None,
+        ..Config::default()
     }
 }
 
