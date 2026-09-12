@@ -4,7 +4,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use super::{Counters, FASTQ_BATCH, Stats, process_read_segments, run_parallel};
+use super::{BatchSink, Counters, FASTQ_BATCH, Stats, process_read_segments, run_bytes_parallel};
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
@@ -56,36 +56,38 @@ fn render_record<W: Write>(
 
 /// Runs the FASTQ workflow: sequential when `cfg.threads <= 1`; otherwise
 /// records render on a rayon pool and drain through `run_parallel`, in input
-/// order under `cfg.ordered` and in completion order otherwise.
-pub fn run_fastq<W, I>(
+/// order under `cfg.ordered` and in completion order otherwise. A writer that
+/// takes compressed blocks (see `BatchSink::block_level`) has each batch
+/// compressed on the pool.
+pub(crate) fn run_fastq<W, I>(
     records: I,
     writer: &mut W,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
 where
-    W: Write + Send,
+    W: BatchSink,
     I: Iterator<Item = anyhow::Result<ReadRecord>> + Send,
 {
     if cfg.threads <= 1 {
         return run_fastq_seq(records, writer, cfg, counters);
     }
-    run_parallel(
+    let render = |rec: ReadRecord, cfg: &Config| {
+        let mut buf = Vec::with_capacity(rec.seq.len().saturating_mul(2) + rec.name.len() + 6);
+        render_record(&rec, cfg, counters, &mut buf)?;
+        Ok(if buf.is_empty() {
+            Vec::new()
+        } else {
+            vec![buf]
+        })
+    };
+    run_bytes_parallel(
         records,
         FASTQ_BATCH,
-        |rec: &ReadRecord| rec.seq.len(),
+        |rec| rec.seq.len(),
         cfg,
         writer,
-        |rec, cfg| {
-            let mut buf = Vec::with_capacity(rec.seq.len().saturating_mul(2) + rec.name.len() + 6);
-            render_record(&rec, cfg, counters, &mut buf)?;
-            Ok(if buf.is_empty() {
-                Vec::new()
-            } else {
-                vec![buf]
-            })
-        },
-        |writer, buf: &Vec<u8>| writer.write_all(buf),
+        render,
         counters,
     )
 }
@@ -429,6 +431,7 @@ mod tests {
                 Ok(())
             }
         }
+        impl BatchSink for FailAfter {}
 
         let cfg = test_cfg(4);
         // Enough records to exceed the bounded channel capacity before the

@@ -1,5 +1,6 @@
 //! FASTQ reading and writing: streaming record iterators over plain, gzip and BGZF input, and segment writers with optional SAM-style header tags.
 
+use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 
 use flate2::bufread::MultiGzDecoder;
@@ -507,87 +508,106 @@ const OUTPUT_BUFFER_CAPACITY: usize = 1 << 20;
 /// The buffered destination of a FASTQ writer.
 type BufferedOutput = BufWriter<Box<dyn Write + Send>>;
 
-/// FASTQ output writer: a plain buffered writer, or a BGZF writer for the
-/// compressed formats. `FastqGz` and `FastqBgzf` share the BGZF writer: BGZF
-/// is a valid multi-member gzip stream, so `.fastq.gz` output decodes with
-/// every gzip tool and `MultiGzDecoder`, and also inflates block-parallel
-/// when read back. One encode worker compresses in the writing thread; more
-/// take the multithreaded writer, whose worker channel costs a single thread
-/// more than it gains.
+/// FASTQ output writer: a plain buffered writer, or BGZF for the compressed
+/// formats. `FastqGz` and `FastqBgzf` share the BGZF framing: BGZF is a valid
+/// multi-member gzip stream, so `.fastq.gz` output decodes with every gzip
+/// tool and `MultiGzDecoder`, and also inflates block-parallel when read
+/// back. `Bgzf` compresses in the writing thread for a sequential run;
+/// `Blocks` takes blocks the render workers compressed (see
+/// `workflow::run_parallel`).
 pub(crate) enum FastqOut {
     /// Plain buffered output.
     Plain(BufferedOutput),
     /// BGZF output compressed in the writing thread.
     Bgzf(noodles_bgzf::io::Writer<BufferedOutput>),
-    /// BGZF output compressed by a worker pool.
-    BgzfMulti(noodles_bgzf::io::MultithreadedWriter<BufferedOutput>),
+    /// Pre-compressed BGZF blocks.
+    Blocks {
+        /// The output.
+        inner: BufferedOutput,
+        /// The BGZF DEFLATE level the render workers compress at.
+        level: u8,
+    },
 }
 
 impl Write for FastqOut {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            FastqOut::Plain(w) => w.write(buf),
+            FastqOut::Plain(w) | FastqOut::Blocks { inner: w, .. } => w.write(buf),
             FastqOut::Bgzf(w) => w.write(buf),
-            FastqOut::BgzfMulti(w) => w.write(buf),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            FastqOut::Plain(w) => w.flush(),
+            FastqOut::Plain(w) | FastqOut::Blocks { inner: w, .. } => w.flush(),
             FastqOut::Bgzf(w) => w.flush(),
-            FastqOut::BgzfMulti(w) => w.flush(),
         }
     }
 }
 
 impl FastqOut {
+    /// The BGZF level the render workers compress at, for a `Blocks` sink.
+    pub(crate) fn block_level(&self) -> Option<u8> {
+        match self {
+            FastqOut::Blocks { level, .. } => Some(*level),
+            FastqOut::Plain(_) | FastqOut::Bgzf(_) => None,
+        }
+    }
+
     /// Finalizes the writer: the BGZF variants write their last block and the
-    /// BGZF EOF block through `finish`, and every variant then flushes the
-    /// output buffer, whose write error surfaces here. Must be called before
-    /// returning success; the encoder's `Drop` swallows errors.
+    /// BGZF EOF block, and every variant then flushes the output buffer, whose
+    /// write error surfaces here. Must be called before returning success;
+    /// the encoder's `Drop` swallows errors.
     pub(crate) fn finish(self) -> anyhow::Result<()> {
         let mut inner = match self {
             FastqOut::Plain(w) => w,
             FastqOut::Bgzf(w) => w.finish()?,
-            FastqOut::BgzfMulti(mut w) => w.finish()?,
+            FastqOut::Blocks { mut inner, .. } => {
+                inner.write_all(&crate::io::bam::eof_block())?;
+                inner
+            },
         };
         inner.flush()?;
         Ok(())
     }
 }
 
-/// Builds the FASTQ output writer over a file or stdout: a multithreaded BGZF
-/// writer at `cfg.compression_level` for `FastqGz` and `FastqBgzf`, and a
-/// plain buffered writer for `Fastq`. `gz_workers` is the caller's encode
-/// share of the `-t` budget; the compressed formats clamp it to at least one
-/// thread and plain output ignores it.
+/// Compresses `data` into BGZF blocks at `level`: the bytes of a BGZF stream
+/// fragment with complete blocks and no EOF block, which a `FastqOut::Blocks`
+/// writes through.
+pub(crate) fn encode_blocks(level: u8, data: &[u8]) -> std::io::Result<Vec<u8>> {
+    let clevel = crate::io::bam::compression_level(level).map_err(std::io::Error::other)?;
+    let mut w = noodles_bgzf::io::writer::Builder::default()
+        .set_compression_level(clevel)
+        .build_from_writer(Vec::new());
+    w.write_all(data)?;
+    w.flush()?;
+    Ok(w.into_inner())
+}
+
+/// Builds the FASTQ output writer over a file or stdout: for `FastqGz` and
+/// `FastqBgzf`, a BGZF writer at `cfg.compression_level` compressing in the
+/// writing thread, or a `Blocks` sink when `parallel`; a plain buffered
+/// writer for `Fastq`.
 pub(crate) fn writer(
     cfg: &Config,
     out_fmt: crate::io::Format,
-    gz_workers: usize,
+    parallel: bool,
 ) -> anyhow::Result<FastqOut> {
-    let base: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
-        Some(p) => Box::new(std::fs::File::create(p)?),
-        None => Box::new(std::io::stdout()),
+    let inner: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
+        Some(p) => Box::new(File::create(p)?),
+        None => Box::new(io::stdout()),
     };
-    let base = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, base);
+    let base = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, inner);
     match out_fmt {
         crate::io::Format::FastqGz | crate::io::Format::FastqBgzf => {
-            let level = noodles_bgzf::io::writer::CompressionLevel::new(cfg.compression_level)
-                .ok_or_else(|| anyhow::anyhow!("invalid BGZF compression level"))?;
-            if gz_workers <= 1 {
-                let w = noodles_bgzf::io::writer::Builder::default()
-                    .set_compression_level(level)
-                    .build_from_writer(base);
-                return Ok(FastqOut::Bgzf(w));
+            let level = cfg.compression_level;
+            if parallel {
+                return Ok(FastqOut::Blocks { inner: base, level });
             }
-            let workers =
-                std::num::NonZero::new(gz_workers).unwrap_or(std::num::NonZero::<usize>::MIN);
-            let w = noodles_bgzf::io::multithreaded_writer::Builder::default()
-                .set_compression_level(level)
-                .set_worker_count(workers)
+            let w = noodles_bgzf::io::writer::Builder::default()
+                .set_compression_level(crate::io::bam::compression_level(level)?)
                 .build_from_writer(base);
-            Ok(FastqOut::BgzfMulti(w))
+            Ok(FastqOut::Bgzf(w))
         },
         crate::io::Format::Fastq => Ok(FastqOut::Plain(base)),
         crate::io::Format::Bam => unreachable!("BAM output is written by `io::bam::writer`"),
@@ -734,7 +754,7 @@ mod tests {
         let path = dir.path().join("o.fastq.gz");
         let mut cfg = crate::cli::config_for_test(&path, &path, 0, 0);
         cfg.io.output = Some(path.clone());
-        let mut w = writer(&cfg, crate::io::Format::FastqGz, 0).unwrap();
+        let mut w = writer(&cfg, crate::io::Format::FastqGz, false).unwrap();
         w.write_all(b"@r1\nACGT\n+\nIIII\n").unwrap();
         w.finish().unwrap();
 

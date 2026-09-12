@@ -22,49 +22,36 @@ pub(crate) fn operation_line(in_fmt: io::Format, out_fmt: io::Format) -> String 
 
 /// The startup banner's `Output: ...` line: `Output: <stdout>` when writing to
 /// stdout (no compression detail), else `Output: {path}`, with
-/// `(gzip|bgzf level {level}, {encode_workers} workers)` appended for compressed
-/// output formats (gzip for `FASTQ.gz`, bgzf for BAM; plain FASTQ gets no suffix).
+/// `(bgzf level {level})` appended for the compressed output formats.
 pub(crate) fn output_banner_line(
     output: Option<&std::path::Path>,
     out_fmt: io::Format,
     level: u8,
-    encode_workers: usize,
 ) -> String {
     let Some(path) = output else {
         return "Output: <stdout>".to_string();
     };
     let mut line = format!("Output: {}", path.display());
     match out_fmt {
-        io::Format::Bam => {
-            line.push_str(&format!(" (bgzf level {level}, {encode_workers} workers)"));
-        },
-        io::Format::FastqGz => {
-            line.push_str(&format!(" (gzip level {level}, {encode_workers} workers)"));
-        },
-        io::Format::FastqBgzf => {
-            line.push_str(&format!(" (bgzf level {level}, {encode_workers} workers)"));
+        io::Format::Bam | io::Format::FastqGz | io::Format::FastqBgzf => {
+            line.push_str(&format!(" (bgzf level {level})"));
         },
         io::Format::Fastq => {},
     }
     line
 }
 
-/// The startup banner's `Threads: ...` line: the resolved worker count, then the
-/// per-stage split with `ThreadBudget`'s decode/render/encode renamed to the
-/// user-facing read/trim/write, as `Threads: 8 (read 1, trim 4, write 3)`.
-///
-/// The header is the requested count, not the sum of the three stages: the
-/// budget floors each stage at 1, so the sum can exceed `-t` and would read as
-/// a second, larger total. For the same reason `threads <= 1` prints
-/// `Threads: 1 (sequential)` instead of a three-thread split for a run that is
-/// single-threaded.
+/// The startup banner's `Threads: ...` line: the resolved worker count, then
+/// the pool that trims and compresses and the decode workers ahead of it, as
+/// `Threads: 8 (trim and compress 8, decode 2)`. `threads <= 1` prints
+/// `Threads: 1 (sequential)`.
 pub(crate) fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> String {
     if threads <= 1 {
         return "Threads: 1 (sequential)".to_string();
     }
     format!(
-        "Threads: {threads} (read {}, trim {}, write {})",
-        b.decode, b.render, b.encode
+        "Threads: {threads} (trim and compress {}, decode {})",
+        b.render, b.decode
     )
 }
 
@@ -290,7 +277,7 @@ mod tests {
     fn output_banner_line_plain_fastq_has_no_suffix() {
         let p = std::path::Path::new("/tmp/out.fastq");
         assert_eq!(
-            output_banner_line(Some(p), io::Format::Fastq, 6, 3),
+            output_banner_line(Some(p), io::Format::Fastq, 6),
             "Output: /tmp/out.fastq"
         );
     }
@@ -299,13 +286,13 @@ mod tests {
     fn output_banner_line_appends_compression_detail() {
         let p = std::path::Path::new("/tmp/out.fastq.gz");
         assert_eq!(
-            output_banner_line(Some(p), io::Format::FastqGz, 6, 4),
-            "Output: /tmp/out.fastq.gz (gzip level 6, 4 workers)"
+            output_banner_line(Some(p), io::Format::FastqGz, 6),
+            "Output: /tmp/out.fastq.gz (bgzf level 6)"
         );
         let p = std::path::Path::new("/tmp/out.bam");
         assert_eq!(
-            output_banner_line(Some(p), io::Format::Bam, 3, 5),
-            "Output: /tmp/out.bam (bgzf level 3, 5 workers)"
+            output_banner_line(Some(p), io::Format::Bam, 3),
+            "Output: /tmp/out.bam (bgzf level 3)"
         );
     }
 
@@ -313,44 +300,20 @@ mod tests {
     fn output_banner_line_stdout_has_no_compression_detail() {
         // Even for a format that would otherwise show a compression suffix.
         assert_eq!(
-            output_banner_line(None, io::Format::Bam, 6, 3),
+            output_banner_line(None, io::Format::Bam, 6),
             "Output: <stdout>"
         );
     }
 
     #[test]
-    fn threads_banner_line_shows_requested_threads_not_the_stage_sum() {
-        let b = config::thread_budget(8, true, false, config::EncodeKind::Bgzf);
+    fn threads_banner_line_names_the_pool_and_the_decoders() {
+        let b = config::thread_budget(8, true);
         assert_eq!(
             threads_banner_line(8, b),
-            format!(
-                "Threads: 8 (read {}, trim {}, write {})",
-                b.decode, b.render, b.encode
-            )
+            "Threads: 8 (trim and compress 8, decode 2)"
         );
-        // Concrete figure too, so a change in `thread_budget`'s split is noticed here.
-        assert_eq!(
-            threads_banner_line(8, b),
-            "Threads: 8 (read 1, trim 4, write 3)"
-        );
-    }
-
-    #[test]
-    fn threads_banner_line_header_is_requested_even_when_stage_sum_differs() {
-        // The banner reports the requested limit, not the sum of stage fields.
-        let b = config::thread_budget(8, true, false, config::EncodeKind::None);
-        assert_eq!(b.total(), 9);
-        assert_eq!(
-            threads_banner_line(8, b),
-            "Threads: 8 (read 1, trim 7, write 1)"
-        );
-    }
-
-    #[test]
-    fn threads_banner_line_sequential_for_one_or_fewer() {
-        // A single-threaded run collapses to a plain `sequential` label rather
-        // than a `(read 1, trim 1, write 1)` split.
-        let b = config::thread_budget(1, true, false, config::EncodeKind::Bgzf);
+        // A single-threaded run collapses to a plain `sequential` label.
+        let b = config::thread_budget(1, true);
         assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");
     }
 

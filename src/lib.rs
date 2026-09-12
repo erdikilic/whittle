@@ -27,7 +27,6 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 
-use config::AdapterInfer;
 pub use config::Config;
 use io::Format;
 
@@ -133,12 +132,7 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
         "Input format detected"
     );
 
-    let budget = plan_budget(
-        cfg,
-        in_fmt,
-        out_fmt,
-        matches!(in_fmt, Format::FastqBgzf | Format::Bam),
-    );
+    let budget = plan_budget(cfg, matches!(in_fmt, Format::FastqBgzf | Format::Bam));
 
     let mut warnings: Vec<String> = Vec::new();
     warnings.extend(mismatch_warn);
@@ -202,7 +196,7 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
             Some(Format::FastqGz) => io::is_bgzf_file(p),
             _ => false,
         });
-    let budget = plan_budget(cfg, family_fmt, out_fmt, bgzf_input);
+    let budget = plan_budget(cfg, bgzf_input);
     let counters = Arc::new(workflow::Counters::default());
 
     // Summed unconditionally, not only when the banner prints: it also drives
@@ -293,26 +287,10 @@ fn detect_format(
     Ok((fmt, Box::new(std::io::Cursor::new(replay).chain(source))))
 }
 
-/// Splits the `-t` worker budget for a dispatch once, so the banner's
-/// `Threads:` line and the workflow use the same numbers.
-///
-/// BGZF containers (BAM and bgzf FASTQ) decode block-parallel, but only when
-/// render is light: adapter search (preset, FASTA, or inference) makes render
-/// the bottleneck instead, and the decode share goes there.
-fn plan_budget(
-    cfg: &Config,
-    in_fmt: Format,
-    out_fmt: Format,
-    bgzf_input: bool,
-) -> config::ThreadBudget {
-    let parallel_decode =
-        bgzf_input && cfg.adapters.is_none() && cfg.adapter_infer == AdapterInfer::Off;
-    config::thread_budget(
-        cfg.threads,
-        config::render_heavy_for(in_fmt, cfg),
-        parallel_decode,
-        config::encode_kind_for(out_fmt),
-    )
+/// Returns the thread budget of a run: the render pool takes the whole `-t`
+/// budget, and BGZF input adds decode workers ahead of it.
+fn plan_budget(cfg: &Config, bgzf_input: bool) -> config::ThreadBudget {
+    config::thread_budget(cfg.threads, bgzf_input)
 }
 
 /// Where the records come from: one stream (a file or stdin, with any sniffed
@@ -357,7 +335,6 @@ impl Session {
             threads = cfg.threads,
             decode = budget.decode,
             render = budget.render,
-            encode = budget.encode,
             "Processing started"
         );
         Session {
@@ -400,7 +377,7 @@ impl Session {
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
                     &out_header,
-                    self.budget.encode,
+                    cfg.threads > 1,
                     cfg.compression_level,
                 )?;
                 let stats =
@@ -418,7 +395,7 @@ impl Session {
                 else {
                     return Ok(());
                 };
-                let mut writer = io::fastq::writer(cfg, out_fmt, self.budget.encode)?;
+                let mut writer = io::fastq::writer(cfg, out_fmt, cfg.threads > 1)?;
                 let stats = workflow::run_bam_to_fastq(records, &mut writer, cfg, &self.counters)?;
                 writer.finish()?;
                 self.finish(obs, &stats, cfg)
@@ -435,7 +412,7 @@ impl Session {
                 else {
                     return Ok(());
                 };
-                let mut writer = io::fastq::writer(cfg, out_fmt, self.budget.encode)?;
+                let mut writer = io::fastq::writer(cfg, out_fmt, cfg.threads > 1)?;
                 let stats = workflow::run_fastq(records, &mut writer, cfg, &self.counters)?;
                 writer.finish()?;
                 self.finish(obs, &stats, cfg)
@@ -597,12 +574,7 @@ fn announce(
         tracing::info!("{}", s.input_line);
         tracing::info!(
             "{}",
-            banner::output_banner_line(
-                cfg.io.output.as_deref(),
-                s.out_fmt,
-                cfg.compression_level,
-                s.budget.encode
-            )
+            banner::output_banner_line(cfg.io.output.as_deref(), s.out_fmt, cfg.compression_level)
         );
         tracing::info!("{}", banner::threads_banner_line(cfg.threads, s.budget));
         tracing::info!("{}", banner::filters_and_trim_line(&cfg.filter, &cfg.trim));
@@ -695,22 +667,6 @@ fn note_tags_ignored(cfg: &Config, in_fmt: Format, out_fmt: Format) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn encode_kind_for_maps_output_format() {
-        assert_eq!(
-            config::encode_kind_for(io::Format::Bam),
-            config::EncodeKind::Bgzf
-        );
-        assert_eq!(
-            config::encode_kind_for(io::Format::FastqGz),
-            config::EncodeKind::Bgzf
-        );
-        assert_eq!(
-            config::encode_kind_for(io::Format::Fastq),
-            config::EncodeKind::None
-        );
-    }
-
     fn a_read() -> crate::record::ReadRecord {
         crate::record::ReadRecord {
             name: b"r1".to_vec(),
@@ -730,7 +686,6 @@ mod tests {
         let budget = config::ThreadBudget {
             decode: 1,
             render: 5,
-            encode: 2,
         };
 
         let records = vec![Ok(a_read())].into_iter();
@@ -756,7 +711,6 @@ mod tests {
         let budget = config::ThreadBudget {
             decode: 1,
             render: 1,
-            encode: 1,
         };
         let records = (0..7).map(|_| Ok(a_read()));
         let got = settle(records, &mut cfg, budget, |r| {
@@ -773,12 +727,5 @@ mod tests {
             quiet: true,
             ..Config::default()
         }
-    }
-
-    #[test]
-    fn render_heavy_for_treats_bam_as_heavy() {
-        let cfg = base_config();
-        assert!(!config::render_heavy_for(io::Format::Fastq, &cfg));
-        assert!(config::render_heavy_for(io::Format::Bam, &cfg));
     }
 }

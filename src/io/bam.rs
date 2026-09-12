@@ -155,76 +155,138 @@ const OUTPUT_BUFFER_CAPACITY: usize = 1 << 20;
 /// The buffered destination of a BAM sink.
 type BufferedOutput = BufWriter<Box<dyn Write + Send>>;
 
-/// A BAM output sink: single-threaded BGZF (`-t 1`) or multithreaded BGZF.
+/// A BAM output sink. `Single` compresses in the writing thread for a
+/// sequential run; `Blocks` takes BGZF blocks the render workers compressed
+/// (see `workflow::run_parallel`) and writes the bytes through.
 pub enum BamSink {
     /// Single-threaded BGZF writer.
     Single(bam::io::Writer<bgzf::io::Writer<BufferedOutput>>),
-    /// Multithreaded BGZF writer.
-    Multi(bam::io::Writer<bgzf::io::MultithreadedWriter<BufferedOutput>>),
+    /// Pre-compressed BGZF blocks, header already written.
+    Blocks {
+        /// The output, positioned after the header blocks.
+        inner: BufferedOutput,
+        /// The BGZF DEFLATE level the render workers compress at.
+        level: u8,
+    },
 }
 
-/// Builds the sink with the header written; multithreaded BGZF when
-/// `workers > 1`. `level` is the BGZF DEFLATE compression level (0-9 per the
-/// CLI, though libdeflate accepts up to 12) and is applied to both encoders.
+/// Builds the sink with the header written: `Blocks` when `parallel`,
+/// `Single` otherwise. `level` is the BGZF DEFLATE compression level (0-9 per
+/// the CLI, though libdeflate accepts up to 12).
 pub fn writer(
     output: Option<&Path>,
     header: &sam::Header,
-    workers: usize,
+    parallel: bool,
     level: u8,
 ) -> anyhow::Result<BamSink> {
-    let clevel = bgzf::io::writer::CompressionLevel::new(level)
-        .ok_or_else(|| anyhow::anyhow!("invalid bgzf compression level {level} (expected 0-12)"))?;
+    let clevel = compression_level(level)?;
     let inner: Box<dyn Write + Send> = match output {
         Some(p) => Box::new(File::create(p)?),
         None => Box::new(io::stdout()),
     };
     let inner = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, inner);
-    if workers > 1 {
-        let mt = bgzf::io::multithreaded_writer::Builder::default()
-            .set_compression_level(clevel)
-            .set_worker_count(workers_nonzero(workers))
-            .build_from_writer(inner);
-        let mut w = bam::io::Writer::from(mt);
-        w.write_header(header)?;
-        Ok(BamSink::Multi(w))
-    } else {
-        // The single-threaded BGZF writer is built explicitly rather than through
-        // `bam::io::Writer::new`, which would force the default level.
-        let bgzf_w = bgzf::io::writer::Builder::default()
-            .set_compression_level(clevel)
-            .build_from_writer(inner);
-        let mut w = bam::io::Writer::from(bgzf_w);
-        w.write_header(header)?;
-        Ok(BamSink::Single(w))
+    // The single-threaded BGZF writer is built explicitly rather than through
+    // `bam::io::Writer::new`, which would force the default level.
+    let bgzf_w = bgzf::io::writer::Builder::default()
+        .set_compression_level(clevel)
+        .build_from_writer(inner);
+    let mut w = bam::io::Writer::from(bgzf_w);
+    w.write_header(header)?;
+    if !parallel {
+        return Ok(BamSink::Single(w));
     }
+    let mut bgzf_w = w.into_inner();
+    bgzf_w.flush()?;
+    Ok(BamSink::Blocks {
+        inner: bgzf_w.into_inner(),
+        level,
+    })
+}
+
+/// Returns the BGZF compression level for `level`, or an error naming the
+/// accepted range.
+pub(crate) fn compression_level(level: u8) -> anyhow::Result<bgzf::io::writer::CompressionLevel> {
+    bgzf::io::writer::CompressionLevel::new(level)
+        .ok_or_else(|| anyhow::anyhow!("invalid bgzf compression level {level} (expected 0-12)"))
+}
+
+/// Encodes `records` under `header` into BGZF blocks at `level`: the bytes of
+/// a BGZF stream fragment with complete blocks and no EOF block, which a
+/// `BamSink::Blocks` writes through.
+pub fn encode_blocks<'a>(
+    header: &sam::Header,
+    level: u8,
+    records: impl IntoIterator<Item = &'a RecordBuf>,
+) -> io::Result<Vec<u8>> {
+    let clevel = compression_level(level).map_err(io::Error::other)?;
+    let bgzf_w = bgzf::io::writer::Builder::default()
+        .set_compression_level(clevel)
+        .build_from_writer(Vec::new());
+    let mut w = bam::io::Writer::from(bgzf_w);
+    for rec in records {
+        w.write_alignment_record(header, rec)?;
+    }
+    let mut bgzf_w = w.into_inner();
+    bgzf_w.flush()?;
+    Ok(bgzf_w.into_inner())
+}
+
+/// The BGZF EOF block: the empty block every BGZF stream ends with.
+pub(crate) fn eof_block() -> Vec<u8> {
+    bgzf::io::Writer::new(Vec::new())
+        .finish()
+        .expect("An in-memory BGZF writer finishes without I/O errors")
 }
 
 impl BamSink {
-    /// Writes one decoded record under `header`.
+    /// Writes one decoded record under `header`; `Single` only.
     pub fn write_record(&mut self, header: &sam::Header, rec: &RecordBuf) -> io::Result<()> {
         match self {
             BamSink::Single(w) => w.write_alignment_record(header, rec),
-            BamSink::Multi(w) => w.write_alignment_record(header, rec),
+            BamSink::Blocks { .. } => Err(io::Error::other(
+                "a block sink takes compressed blocks, not records",
+            )),
         }
     }
 
-    /// Writes one raw record under `header` without decoding it.
+    /// Writes one raw record under `header` without decoding it; `Single` only.
     pub fn write_raw_record(&mut self, header: &sam::Header, rec: &bam::Record) -> io::Result<()> {
         match self {
             BamSink::Single(w) => w.write_record(header, rec),
-            BamSink::Multi(w) => w.write_record(header, rec),
+            BamSink::Blocks { .. } => Err(io::Error::other(
+                "a block sink takes compressed blocks, not records",
+            )),
         }
     }
 
-    /// Finalizes the stream: the BGZF encoder flushes its last block and
-    /// writes the EOF block, then the output buffer is flushed to the file.
-    /// Both encoders hand back the buffer from `finish`, so the flush error
-    /// surfaces here; the encoders' `Drop` impls swallow errors, so the call
-    /// must be explicit.
+    /// Writes compressed BGZF blocks through; `Blocks` only.
+    pub fn write_blocks(&mut self, blocks: &[u8]) -> io::Result<()> {
+        match self {
+            BamSink::Blocks { inner, .. } => inner.write_all(blocks),
+            BamSink::Single(_) => Err(io::Error::other(
+                "a record sink takes records, not compressed blocks",
+            )),
+        }
+    }
+
+    /// The BGZF level the render workers compress at, for a `Blocks` sink.
+    pub fn block_level(&self) -> Option<u8> {
+        match self {
+            BamSink::Blocks { level, .. } => Some(*level),
+            BamSink::Single(_) => None,
+        }
+    }
+
+    /// Finalizes the stream: the last block and the EOF block are written,
+    /// then the output buffer is flushed to the file. The encoder's `Drop`
+    /// swallows errors, so the call must be explicit.
     pub fn finish(self) -> anyhow::Result<()> {
         let mut inner = match self {
             BamSink::Single(w) => w.into_inner().finish()?,
-            BamSink::Multi(w) => w.into_inner().finish()?,
+            BamSink::Blocks { mut inner, .. } => {
+                inner.write_all(&eof_block())?;
+                inner
+            },
         };
         inner.flush()?;
         Ok(())
@@ -459,17 +521,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mt.bam");
 
-        // Two unmapped records go through a 4-worker multithreaded `BamSink`.
+        // Two unmapped records go through a block `BamSink`, compressed as one
+        // batch the way a render worker does it.
         let header = sam::Header::default();
-        let mut sink = writer(Some(&path), &header, 4, 6).unwrap();
+        let mut sink = writer(Some(&path), &header, true, 6).unwrap();
+        let mut records = Vec::new();
         for name in [b"r1".as_slice(), b"r2".as_slice()] {
             let mut rec = RecordBuf::default();
             *rec.flags_mut() = Flags::UNMAPPED;
             *rec.name_mut() = Some(name.into());
             *rec.sequence_mut() = b"ACGT".to_vec().into();
             *rec.quality_scores_mut() = vec![40u8; 4].into();
-            sink.write_record(&header, &rec).unwrap();
+            records.push(rec);
         }
+        let blocks = encode_blocks(&header, 6, &records).unwrap();
+        sink.write_blocks(&blocks).unwrap();
         sink.finish().unwrap();
 
         // The records are read back through a 4-worker multithreaded reader.

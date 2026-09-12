@@ -12,7 +12,9 @@ use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 
-use super::{BAM_BATCH, Counters, Stats, process_read_segments, run_parallel};
+use super::{
+    BAM_BATCH, BatchSink, Counters, Stats, process_read_segments, run_bytes_parallel, run_parallel,
+};
 use crate::config::{Config, FastqTags, TagRemoval};
 use crate::io::fastq::{push_aux_field, push_mods_aux, push_record_body};
 use crate::{mods, trim};
@@ -1377,19 +1379,22 @@ fn run_bam_seq(
 /// pool and hands the decoded record to `render`, which returns the record's
 /// output items. The per-segment filter and counters are updated inside
 /// `render` by `process_read_segments`.
-fn run_bam_parallel<T, S, Render, WriteOne>(
+fn run_bam_parallel<T, P, S, Render, Pack, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
     cfg: &Config,
     sink: &mut S,
     render: Render,
+    pack: Pack,
     write_one: WriteOne,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
 where
     T: Send,
+    P: Send,
     S: Send,
     Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
-    WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
+    Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
+    WriteOne: Fn(&mut S, &P) -> std::io::Result<()> + Send,
 {
     run_parallel(
         records,
@@ -1398,9 +1403,33 @@ where
         cfg,
         sink,
         |rec, cfg| render(&decode_raw_record(&rec)?, cfg),
+        pack,
         write_one,
         counters,
     )
+}
+
+/// Compresses a batch of output records into BGZF blocks at the sink's level.
+fn pack_bam_blocks(
+    header: &sam::Header,
+    level: u8,
+    records: Vec<BamOutputRecord>,
+) -> std::io::Result<Vec<u8>> {
+    use noodles_sam::alignment::io::Write as _;
+    let clevel = crate::io::bam::compression_level(level).map_err(std::io::Error::other)?;
+    let bgzf_w = noodles_bgzf::io::writer::Builder::default()
+        .set_compression_level(clevel)
+        .build_from_writer(Vec::new());
+    let mut w = bam::io::Writer::from(bgzf_w);
+    for rec in &records {
+        match rec {
+            BamOutputRecord::Raw(record) => w.write_record(header, record)?,
+            BamOutputRecord::Decoded(record) => w.write_alignment_record(header, record)?,
+        }
+    }
+    let mut bgzf_w = w.into_inner();
+    bgzf_w.flush()?;
+    Ok(bgzf_w.into_inner())
 }
 
 /// A record ready to write: the untouched raw input or a rebuilt decoded record.
@@ -1658,6 +1687,9 @@ fn run_raw_bam_full_window_parallel(
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
+    let level = sink
+        .block_level()
+        .expect("A parallel run writes through a block sink");
     run_parallel(
         records,
         BAM_BATCH,
@@ -1670,10 +1702,8 @@ fn run_raw_bam_full_window_parallel(
                 .into_iter()
                 .collect())
         },
-        |sink, output| match output {
-            BamOutputRecord::Raw(record) => sink.write_raw_record(header, record),
-            BamOutputRecord::Decoded(record) => sink.write_record(header, record),
-        },
+        |records| pack_bam_blocks(header, level, records),
+        |sink, blocks: &Vec<u8>| sink.write_blocks(blocks),
         counters,
     )
 }
@@ -1721,22 +1751,26 @@ pub(crate) fn run_bam(
     if cfg.threads <= 1 {
         return run_bam_seq(header, records, sink, cfg, counters);
     }
+    let level = sink
+        .block_level()
+        .expect("A parallel run writes through a block sink");
     run_bam_parallel(
         records,
         cfg,
         sink,
-        // Render: the survivors of one record, as `Vec<RecordBuf>`.
+        // Render: the survivors of one record.
         |rec, cfg| {
             let mut items = Vec::new();
             render_bam_read(rec, cfg, counters, |out| {
-                items.push(out);
+                items.push(BamOutputRecord::Decoded(out));
                 Ok(())
             })?;
             Ok(items)
         },
-        // Write: encode and write on the writer thread (BGZF compression is
-        // multithreaded).
-        |sink, rec| sink.write_record(header, rec),
+        // Pack: encode and compress the batch on the pool.
+        |records| pack_bam_blocks(header, level, records),
+        // Write: the compressed blocks, on the writer thread.
+        |sink, blocks: &Vec<u8>| sink.write_blocks(blocks),
         counters,
     )
 }
@@ -1899,7 +1933,7 @@ fn run_bam_to_fastq_seq<W: Write>(
 /// tags copied). Sequential for `cfg.threads <= 1`; otherwise renders on a
 /// rayon pool and drains through `run_bam_parallel`'s bounded channel, in
 /// input order under `cfg.ordered` and in completion order otherwise.
-pub fn run_bam_to_fastq<W: Write + Send>(
+pub(crate) fn run_bam_to_fastq<W: BatchSink>(
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
     writer: &mut W,
     cfg: &Config,
@@ -1908,24 +1942,25 @@ pub fn run_bam_to_fastq<W: Write + Send>(
     if cfg.threads <= 1 {
         return run_bam_to_fastq_seq(records, writer, cfg, counters);
     }
-    run_bam_parallel(
+    run_bytes_parallel(
         records,
+        BAM_BATCH,
+        |record: &bam::Record| record.sequence().len(),
         cfg,
         writer,
         // Render: the survivors of one record, as `Vec<Vec<u8>>` of rendered
         // FASTQ segments. Each segment's buffer is taken as an item, so the
         // next segment renders into a fresh one.
         |rec, cfg| {
+            let rec = decode_raw_record(&rec)?;
             let mut items = Vec::new();
             let mut buf = Vec::new();
-            render_bam_fastq_read(rec, cfg, counters, &mut buf, |buf| {
+            render_bam_fastq_read(&rec, cfg, counters, &mut buf, |buf| {
                 items.push(std::mem::take(buf));
                 Ok(())
             })?;
             Ok(items)
         },
-        // Write: append the rendered bytes to the `FastqOut` writer.
-        |w, buf| w.write_all(buf),
         counters,
     )
 }
@@ -2029,7 +2064,7 @@ mod tests {
         let header = sam::Header::default();
         let dir = tempfile::tempdir().unwrap();
         let mut sink =
-            crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, 1, 6).unwrap();
+            crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, false, 6).unwrap();
 
         let cfg = Config {
             quiet: true,
@@ -2428,7 +2463,7 @@ mod tests {
                 let header = sam::Header::default();
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("o.bam");
-                let mut sink = crate::io::bam::writer(Some(&path), &header, 1, 6).unwrap();
+                let mut sink = crate::io::bam::writer(Some(&path), &header, false, 6).unwrap();
                 let counters = Arc::new(Counters::default());
                 let stats = run_bam(
                     &header,
@@ -3114,7 +3149,7 @@ mod tests {
         // t1: single-threaded BGZF sink, written to a temporary file.
         let dir = tempfile::tempdir().unwrap();
         let p1 = dir.path().join("t1.bam");
-        let mut sink1 = crate::io::bam::writer(Some(&p1), &header, 1, 6).unwrap();
+        let mut sink1 = crate::io::bam::writer(Some(&p1), &header, false, 6).unwrap();
         run_bam(
             &header,
             recs.iter().map(|r| Ok(raw_record(r))),
@@ -3129,7 +3164,7 @@ mod tests {
         // t8: multithreaded sink to a temporary file (the multithreaded writer
         // needs an owned `Write + Send`).
         let p8 = dir.path().join("t8.bam");
-        let mut sink8 = crate::io::bam::writer(Some(&p8), &header, 8, 6).unwrap();
+        let mut sink8 = crate::io::bam::writer(Some(&p8), &header, true, 6).unwrap();
         run_bam(
             &header,
             recs.iter().map(|r| Ok(raw_record(r))),
@@ -3176,11 +3211,12 @@ mod tests {
             &cfg,
             &mut sink,
             |_rec, _cfg| anyhow::Ok(vec![()]),
-            |sink, _item: &()| -> io::Result<()> {
+            Ok,
+            |sink, batch: &Vec<()>| -> io::Result<()> {
                 if sink.written >= sink.limit {
                     return Err(io::Error::new(io::ErrorKind::BrokenPipe, "boom"));
                 }
-                sink.written += 1;
+                sink.written += batch.len();
                 Ok(())
             },
             &Arc::new(Counters::default()),
@@ -3217,7 +3253,8 @@ mod tests {
             &cfg,
             &mut sink,
             |_rec, _cfg| anyhow::Ok(vec![()]),
-            |_sink: &mut NullSink, _item: &()| -> io::Result<()> { Ok(()) },
+            Ok,
+            |_sink: &mut NullSink, _batch: &Vec<()>| -> io::Result<()> { Ok(()) },
             &Arc::new(Counters::default()),
         );
         assert!(
@@ -3851,7 +3888,7 @@ mod tests {
         let header = sam::Header::default();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("o.bam");
-        let mut sink = crate::io::bam::writer(Some(&path), &header, 1, 6).unwrap();
+        let mut sink = crate::io::bam::writer(Some(&path), &header, false, 6).unwrap();
         let stats = run_bam(
             &header,
             recs.iter().map(|r| Ok(raw_record(r))),

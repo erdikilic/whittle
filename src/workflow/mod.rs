@@ -4,13 +4,15 @@ pub(crate) mod bam;
 mod fastq;
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rayon::prelude::*;
 
-pub use bam::{run_bam_to_fastq, run_raw_bam};
-pub use fastq::run_fastq;
+pub(crate) use bam::run_bam_to_fastq;
+pub use bam::run_raw_bam;
+pub(crate) use fastq::run_fastq;
 
 use crate::config::Config;
 use crate::filter::{DropReason, FilterConfig};
@@ -29,15 +31,15 @@ pub(crate) struct BatchPolicy {
 
 /// FASTQ batches: owned records that render to a small buffer each.
 pub(crate) const FASTQ_BATCH: BatchPolicy = BatchPolicy {
-    target_weight: 512 * 1024,
-    max_items: 32,
-    queue_per_worker: 4,
+    target_weight: 2 * 1024 * 1024,
+    max_items: 128,
+    queue_per_worker: 2,
 };
 
 /// BAM batches: records that decode to large owned buffers.
 pub(crate) const BAM_BATCH: BatchPolicy = BatchPolicy {
-    target_weight: 256 * 1024,
-    max_items: 4,
+    target_weight: 1024 * 1024,
+    max_items: 16,
     queue_per_worker: 1,
 };
 
@@ -79,6 +81,61 @@ where
         }
         (!batch.is_empty()).then_some(batch)
     }
+}
+
+/// A sink of rendered text batches: plain bytes, or BGZF blocks the render
+/// workers compressed.
+pub(crate) trait BatchSink: Write + Send {
+    /// The BGZF level when the sink takes blocks compressed on the render
+    /// pool; `None` for a sink that takes the rendered bytes as they are.
+    fn block_level(&self) -> Option<u8> {
+        None
+    }
+}
+
+impl BatchSink for Vec<u8> {}
+
+impl BatchSink for crate::io::fastq::FastqOut {
+    fn block_level(&self) -> Option<u8> {
+        crate::io::fastq::FastqOut::block_level(self)
+    }
+}
+
+/// Runs `run_parallel` for a workflow whose items are rendered text: each
+/// batch is concatenated and, for a block sink, compressed on the pool.
+pub(crate) fn run_bytes_parallel<R, W, Weight, Render>(
+    records: impl Iterator<Item = anyhow::Result<R>> + Send,
+    policy: BatchPolicy,
+    weight: Weight,
+    cfg: &Config,
+    writer: &mut W,
+    render: Render,
+    counters: &Counters,
+) -> anyhow::Result<Stats>
+where
+    R: Send,
+    W: BatchSink,
+    Weight: Fn(&R) -> usize + Sync,
+    Render: Fn(R, &Config) -> anyhow::Result<Vec<Vec<u8>>> + Sync,
+{
+    let level = writer.block_level();
+    run_parallel(
+        records,
+        policy,
+        weight,
+        cfg,
+        writer,
+        render,
+        |items: Vec<Vec<u8>>| {
+            let bytes = items.concat();
+            match level {
+                Some(level) => crate::io::fastq::encode_blocks(level, &bytes),
+                None => Ok(bytes),
+            }
+        },
+        |writer, bytes: &Vec<u8>| writer.write_all(bytes),
+        counters,
+    )
 }
 
 /// Returns the render-pool size for a run: the settled budget, or the thread
@@ -150,33 +207,38 @@ where
 /// order; otherwise in completion order.
 ///
 /// `render` returns the output items of one record, in the order they are
-/// written. The read-level counters are updated inside `render` by
+/// written; `pack` turns a batch's items into the unit the writer takes, on
+/// the pool, so a compressing sink has its blocks compressed by the render
+/// workers. The read-level counters are updated inside `render` by
 /// `process_read_segments`; this driver counts input reads and bases only.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_parallel<R, T, S, Weight, Render, WriteOne>(
+pub(crate) fn run_parallel<R, T, P, S, Weight, Render, Pack, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
     policy: BatchPolicy,
     weight: Weight,
     cfg: &Config,
     sink: &mut S,
     render: Render,
+    pack: Pack,
     write_one: WriteOne,
     counters: &Counters,
 ) -> anyhow::Result<Stats>
 where
     R: Send,
     T: Send,
+    P: Send,
     S: Send,
     Weight: Fn(&R) -> usize + Sync,
     Render: Fn(R, &Config) -> anyhow::Result<Vec<T>> + Sync,
-    WriteOne: Fn(&mut S, &T) -> std::io::Result<()> + Send,
+    Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
+    WriteOne: Fn(&mut S, &P) -> std::io::Result<()> + Send,
 {
     let render_workers = render_pool_size(cfg);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(render_workers)
         .build()?;
     let queue = (render_workers * policy.queue_per_worker).max(2);
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<T>)>(queue);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, P)>(queue);
     let ordered = cfg.ordered;
     let aborted = AtomicBool::new(false);
     let render_err: FirstError<anyhow::Error> = FirstError::new();
@@ -197,14 +259,12 @@ where
         let write_err = &write_err;
         s.spawn(move || {
             let mut next = 0usize;
-            let mut pending: BTreeMap<usize, Vec<T>> = BTreeMap::new();
+            let mut pending: BTreeMap<usize, P> = BTreeMap::new();
             let mut errored = false;
-            let mut write_batch = |batch: &[T]| -> bool {
-                for item in batch {
-                    if let Err(e) = write_one(sink, item) {
-                        write_err.record(e, aborted_ref);
-                        return false;
-                    }
+            let mut write_batch = |batch: &P| -> bool {
+                if let Err(e) = write_one(sink, batch) {
+                    write_err.record(e, aborted_ref);
+                    return false;
                 }
                 true
             };
@@ -263,10 +323,17 @@ where
                     counters
                         .input_bases
                         .fetch_add(input_bases, Ordering::Relaxed);
+                    let packed = match pack(out) {
+                        Ok(packed) => packed,
+                        Err(e) => {
+                            render_err.record(e.into(), &aborted);
+                            return;
+                        },
+                    };
                     // Every batch is sent, empty ones included, so the ordered
                     // writer can advance past it. A closed channel means the
                     // writer is gone; nothing more can be written.
-                    if tx.send((idx, out)).is_err() {
+                    if tx.send((idx, packed)).is_err() {
                         aborted.store(true, Ordering::Relaxed);
                     }
                 });
@@ -537,7 +604,7 @@ mod tests {
     #[test]
     fn batches_stop_at_weight_or_record_limit() {
         let by_weight: Vec<Vec<usize>> = Batches::new(
-            vec![200_000usize; 5].into_iter(),
+            vec![800_000usize; 5].into_iter(),
             |n: &usize| *n,
             FASTQ_BATCH,
         )
@@ -545,10 +612,10 @@ mod tests {
         assert_eq!(by_weight.iter().map(Vec::len).collect::<Vec<_>>(), [3, 2]);
 
         let bam: Vec<Vec<usize>> =
-            Batches::new(vec![1usize; 17].into_iter(), |n: &usize| *n, BAM_BATCH).collect();
+            Batches::new(vec![1usize; 65].into_iter(), |n: &usize| *n, BAM_BATCH).collect();
         assert_eq!(
             bam.iter().map(Vec::len).collect::<Vec<_>>(),
-            [4, 4, 4, 4, 1]
+            [16, 16, 16, 16, 1]
         );
     }
 
@@ -725,8 +792,9 @@ mod tests {
                 counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
                 Ok(vec![n])
             },
-            |sink, n: &usize| {
-                sink.push(*n);
+            Ok,
+            |sink, batch: &Vec<usize>| {
+                sink.extend_from_slice(batch);
                 Ok(())
             },
             &counters,
@@ -782,8 +850,9 @@ mod tests {
             &cfg,
             &mut sink,
             |n, _cfg| Ok(vec![n]),
-            |sink, n: &usize| {
-                sink.push(*n);
+            Ok,
+            |sink, batch: &Vec<usize>| {
+                sink.extend_from_slice(batch);
                 Ok(())
             },
             &counters,
@@ -818,8 +887,9 @@ mod tests {
                 }
                 Ok(vec![n])
             },
-            |sink, n: &usize| {
-                sink.push(*n);
+            Ok,
+            |sink, batch: &Vec<usize>| {
+                sink.extend_from_slice(batch);
                 Ok(())
             },
             &counters,
