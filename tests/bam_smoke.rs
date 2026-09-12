@@ -72,7 +72,7 @@ fn bam_to_bam_end_to_end() {
         .assert()
         .success();
 
-    // Read back the output BAM: check @PG provenance and reconstructed records.
+    // The output BAM read back: `@PG` provenance and the reconstructed records.
     let mut reader = bam::io::Reader::new(std::fs::File::open(&out_path).unwrap());
     let header = reader.read_header().unwrap();
 

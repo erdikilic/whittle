@@ -100,7 +100,7 @@ fn folder_merge_bam_two_files() {
         .assert()
         .success();
 
-    // Read the merged BAM back: 2 records, @PG whittle present.
+    // The merged BAM read back: 2 records and a `@PG` whittle line.
     let mut r = bam::io::Reader::new(File::open(&out).unwrap());
     let hdr = r.read_header().unwrap();
     assert!(

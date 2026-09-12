@@ -325,8 +325,7 @@ pub fn push_aux_field(out: &mut Vec<u8>, tag: [u8; 2], value: &Value) {
 /// One `B:C` array element as text: `,` and the decimal digits of the value,
 /// with the length of the used prefix. Indexed by value. `ML` and the
 /// per-base kinetics arrays hold tens of thousands of elements per record, so
-/// each element is a fixed-width table copy rather than a digit loop, which
-/// measures 15% faster on BAM-to-FASTQ output with every tag.
+/// each element is a fixed-width table copy rather than a digit loop.
 const COMMA_U8: [([u8; 4], usize); 256] = {
     let mut t = [([0u8; 4], 0usize); 256];
     let mut i = 0;
@@ -746,8 +745,8 @@ mod tests {
         assert_eq!(msg.matches("FASTQ parse error").count(), 1, "{msg}");
     }
 
-    /// A zero encode share still builds the writer, and `.fastq.gz` output is
-    /// BGZF-framed gzip that a plain gzip decoder reads back.
+    /// The sequential `.fastq.gz` writer emits BGZF-framed gzip that a plain
+    /// gzip decoder reads back.
     #[test]
     fn gz_writer_clamps_zero_workers_and_writes_bgzf() {
         let dir = tempfile::tempdir().unwrap();

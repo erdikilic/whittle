@@ -78,7 +78,7 @@ fn trimmed_output_mods_match_oracle() {
     let output = dir.path().join("out.ubam");
     write_fixture(&input);
 
-    // Trim the first 3 bases (head-crop 3) through the library `run`.
+    // A head crop of 3 through the library `run`.
     let cfg = whittle::cli::config_for_test(&input, &output, 3, 0);
     let mut h = whittle::obs::ProgressHandle::disabled();
     whittle::run(cfg, &mut h).unwrap();
@@ -162,7 +162,7 @@ fn trimmed_output_multimod_mods_match_oracle() {
         "Multi-mod trimmed set equals the original filtered to [2,8) and offset by 2"
     );
 
-    // Guard against a trivial pass: the surviving set contains more than one
+    // Guards against a trivial pass: the surviving set contains more than one
     // distinct mod code and is non-empty.
     let codes: std::collections::HashSet<char> = b.iter().map(|t| t.2).collect();
     assert!(
@@ -320,8 +320,9 @@ fn filter_offset(mods: &[ModCall], head: usize, orig_len: usize) -> Vec<ModCall>
         .collect()
 }
 
-/// Real-data sweep over the uBAM named by `WHITTLE_UBAM`:
-///   WHITTLE_UBAM=/path/to/real.ubam cargo test --test bam_mods_oracle -- --ignored
+/// Real-data sweep over the uBAM named by `WHITTLE_UBAM`. Ignored by default:
+/// `WHITTLE_UBAM=/path/to/real.ubam cargo test --test bam_mods_oracle` runs it
+/// only when `--ignored` is passed through to the test binary.
 #[test]
 #[ignore = "needs WHITTLE_UBAM=<real uBAM>"]
 fn real_ubam_oracle_sweep() {
@@ -834,7 +835,7 @@ fn strand_and_ambiguity_groups_survive_untrimmed_round_trip() {
         "A no-op run neither moves, drops, nor relabels any modification call"
     );
 
-    // Guard against a trivial pass: all three groups are present.
+    // Guards against a trivial pass: all three groups are present.
     assert_eq!(before.len(), 6, "Fixture decodes to six calls");
     let canonical: std::collections::HashSet<char> = before.iter().map(|t| t.1).collect();
     assert!(

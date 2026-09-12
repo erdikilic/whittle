@@ -179,7 +179,8 @@ pub fn fastq_records(
     ))
 }
 
-/// Alias of `crate::io::bam::RawRecordIter` used by `bam_reader`.
+/// The boxed raw-record stream, used for each file's reader and for the chain
+/// `bam_reader` returns.
 type BamRecordIter = crate::io::bam::RawRecordIter;
 
 /// Returns the first file's header plus one chained record stream over every

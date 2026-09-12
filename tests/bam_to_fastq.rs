@@ -160,7 +160,7 @@ fn bam_to_fastq_gz_roundtrips() {
         &out,
     );
 
-    // Decode the gz output and compare it to the plain conversion.
+    // The gz output decodes to the plain conversion.
     let mut gz = flate2::read::MultiGzDecoder::new(std::fs::File::open(&out).unwrap());
     let mut decoded = String::new();
     gz.read_to_string(&mut decoded).unwrap();
@@ -184,7 +184,7 @@ fn cross_check_fastq_header_mods_equal_bam_path() {
     run(&["--out-format", "fastq", "--head-crop", "2"], &inp, &fq);
     run(&["--out-format", "bam", "--head-crop", "2"], &inp, &ba);
 
-    // Extract MM/ML/MN from the BAM read2.
+    // The MM/ML/MN block of the BAM output's read2.
     let mut reader = bam::io::Reader::new(std::fs::File::open(&ba).unwrap());
     let header = reader.read_header().unwrap();
     let mut buf = RecordBuf::default();
@@ -203,7 +203,7 @@ fn cross_check_fastq_header_mods_equal_bam_path() {
                 Some(Value::Int32(n)) => *n,
                 other => panic!("No MN in the BAM output: {other:?}"),
             };
-            // Render the same SAM-text block the FASTQ path would.
+            // The SAM-text block the FASTQ path renders for the same tags.
             let mut expect = format!("MM:Z:{}", String::from_utf8(mm).unwrap());
             expect.push_str("\tML:B:C");
             for b in &ml {
@@ -223,8 +223,8 @@ fn cross_check_fastq_header_mods_equal_bam_path() {
     );
 }
 
-/// The single-file BAM-to-FASTQ path is covered above; this test exercises
-/// `run_folder`'s BAM-family-to-FASTQ arm by pointing `-i` at a directory.
+/// Points `-i` at a directory, so the conversion runs through `run_folder`'s
+/// BAM-family-to-FASTQ arm rather than the single-file path.
 #[test]
 fn folder_dispatch_bam_to_fastq() {
     let dir = tempfile::tempdir().unwrap();

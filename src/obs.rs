@@ -529,7 +529,8 @@ pub fn init(cfg: &mut Config) -> ProgressHandle {
 
 /// Compact magnitude for live progress fields: `750`, `145k`, `1.2M`.
 fn human_count(n: u64) -> String {
-    // Promote values that would round to 1000k so the result stays normalized.
+    // A value that would round to 1000k is promoted so the result stays
+    // normalized.
     if n >= 999_500 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
@@ -595,7 +596,7 @@ fn summary_line(stats: &Stats, elapsed: Duration) -> String {
 /// `460.0 Mbp`, `8.2 kbp`, `500 bp`. Uses decimal units and one decimal place
 /// for kbp and larger values.
 fn human_bases(n: u64) -> String {
-    // Promote values that would round to 1000.0 in the current unit.
+    // A value that would round to 1000.0 in its unit is promoted to the next.
     if n >= 999_950_000 {
         format!("{:.1} Gbp", n as f64 / 1_000_000_000.0)
     } else if n >= 999_950 {
@@ -697,7 +698,7 @@ pub fn human_dur(d: Duration) -> String {
         // Below the value `{:.2}s` would round up to "60.00s".
         format!("{secs:.2}s")
     } else if secs < 3599.5 {
-        // Round to the nearest second so 59.996s reads "1m00s".
+        // Rounded to the nearest second, so 59.996s reads "1m00s".
         let total = secs.round() as u64;
         format!("{}m{:02}s", total / 60, total % 60)
     } else {

@@ -142,7 +142,7 @@ pub struct AdapterConfig {
     /// than this merge into one, since the bases between them would be
     /// discarded by the length filter anyway. Follows `--min-length`.
     pub min_piece: usize,
-    /// Exact-seed automaton for lossless whole-read candidate filtering, built
+    /// Exact-seed index for lossless whole-read candidate filtering, built
     /// lazily once presence detection or inference has finalized `adapters`.
     pub(crate) candidate_index: OnceLock<CandidateIndex>,
 }
@@ -190,9 +190,10 @@ impl Budget {
 /// read for that adapter instead of candidate windows.
 const MAX_SEED_EXPANSIONS: usize = 256;
 
-/// Exact-seed index over the adapter set. Aho-Corasick partition seeds bound
-/// the interior search to candidate windows, and equal-length barcode entries
-/// are grouped into SIMD batches for the terminal search.
+/// Exact-seed index over the adapter set. Partition seeds, looked up through a
+/// prefix table, bound the interior search to candidate windows, and
+/// equal-length barcode entries are grouped into SIMD batches for the terminal
+/// search.
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateIndex {
     /// Table over the interior seeds of every splitting adapter; `None` when
@@ -387,7 +388,7 @@ impl CandidateIndex {
     /// `(adapter, start, end)` sorted by adapter then start: a radius around
     /// every exact seed occurrence, merged per adapter, or the whole text for
     /// an `unfiltered` adapter. `text` is normalized (see `normalize_into`);
-    /// the seed automaton matches uppercase bases only.
+    /// the seed table encodes uppercase bases only.
     fn candidate_windows(&self, text: &[u8], windows: &mut Vec<(usize, usize, usize)>) {
         windows.clear();
         for (adapter_idx, &whole) in self.unfiltered.iter().enumerate() {
@@ -437,8 +438,8 @@ const MAX_SEED_PREFIX_LEN: usize = 10;
 /// Exact-seed index over a table of every prefix code. The scan encodes the
 /// text two bits per base in one rolling word and looks each prefix up, one
 /// table read per base; a hit is confirmed against the whole seed before it
-/// is reported, so a longer seed matches no more often than it would through
-/// an automaton over the whole seed.
+/// is reported, so a longer seed matches no more often than an exact search
+/// for the whole seed would.
 #[derive(Debug, Clone)]
 struct SeedTable {
     /// Prefix length: the shortest seed, capped at `MAX_SEED_PREFIX_LEN`.
@@ -638,8 +639,8 @@ enum Terminal {
 /// Sassy's per-pattern search rebuilds the pattern profile and the
 /// complemented pattern on every call, a few allocations each. The tiled
 /// searcher would avoid them, but its column-major scan has no early exit and
-/// fills one lane of eight with a single pattern, and it measured slower on
-/// these short windows than the allocations cost.
+/// fills one lane of eight with a single pattern, which costs more on these
+/// short windows than the allocations do.
 ///
 /// `text` is plain ACGT on every call; see `normalize_into`.
 fn search(
@@ -677,8 +678,8 @@ const AMBIGUOUS_READ_BASE: u8 = b'A';
 /// outside ACGT rewritten to `AMBIGUOUS_READ_BASE`. An uppercase plain read,
 /// the common case, is returned as is; any other read is rewritten into
 /// `buf`, which keeps its capacity across calls. Sassy's profiles fold case
-/// themselves; the seed automaton does not, so the text is folded once here
-/// rather than on every seed transition.
+/// themselves; the seed table does not, so the text is folded once here
+/// rather than on every lookup.
 pub(crate) fn normalize_into<'a>(window: &'a [u8], buf: &'a mut Vec<u8>) -> &'a [u8] {
     if is_upper_acgt(window) {
         return window;

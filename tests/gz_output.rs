@@ -82,7 +82,6 @@ fn plain_output_by_default_even_with_gz_input() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("reads.fastq.gz");
 
-    // Build a small gzipped FASTQ input.
     let mut enc = GzEncoder::new(
         std::fs::File::create(&input).unwrap(),
         Compression::default(),
@@ -119,8 +118,9 @@ fn explicit_gz_output_roundtrips_through_parallel_encoder() {
     std::fs::write(&input, "@r1\nACGTACGTAC\n+\nIIIIIIIIII\n").unwrap();
     let out = dir.path().join("out.fastq.gz");
 
-    // -t 4 gives the BGZF encoder more than one worker; the output is
-    // multi-member gzip that a plain gzip decoder reads back.
+    // -t 4 takes the parallel path, where the render workers compress the
+    // BGZF blocks; the output is multi-member gzip that a plain gzip decoder
+    // reads back.
     whittle()
         .arg("-i")
         .arg(&input)

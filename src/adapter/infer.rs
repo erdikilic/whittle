@@ -260,7 +260,7 @@ fn bounded_heaviest_path(
         by_suffix.entry(code & suffix_mask).or_default().push(i);
     }
 
-    // Prefer greater support, then the smaller code for deterministic ties.
+    // Greater support first, then the smaller code for deterministic ties.
     let weight_desc_code_asc = |&a: &usize, &b: &usize| {
         nodes[a]
             .1
@@ -315,8 +315,8 @@ fn bounded_heaviest_path(
     chain.push(seed);
     chain.extend(forward.iter().copied());
 
-    // Build the consensus: the first node emits k bases, each subsequent node
-    // emits its last base.
+    // The consensus: the first node emits k bases, each subsequent node its
+    // last base.
     let mut cons = decode_kmer(nodes[chain[0]].0, k);
     let mut profile: Vec<u32> = vec![nodes[chain[0]].1; k];
     let mut weight: u64 = nodes[chain[0]].1 as u64;
@@ -402,7 +402,8 @@ fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize) -> Vec<(Vec<u8>, Vec<u32>)> 
         if (weight as f64) < MIN_PATH_WEIGHT_FRAC * fw as f64 {
             break;
         }
-        // Remove the nodes used by this path so the next peel finds a different one.
+        // The nodes this path used are removed so the next peel finds a
+        // different one.
         let used: std::collections::HashSet<u64> =
             cons.windows(k).filter_map(encode_kmer).collect();
         nodes.retain(|(code, _)| !used.contains(code));
@@ -608,7 +609,8 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
     if exact.is_empty() {
         return Vec::new();
     }
-    // Bound recount cost while sampling the complete input range uniformly.
+    // The recount sample is capped and spread uniformly over the complete
+    // input range.
     let recount = stride_sample(windows, RECOUNT_WINDOWS);
     let n_recount = recount.len();
 
@@ -1275,8 +1277,9 @@ mod tests {
     }
 
     /// The adapter occurs only in the latter half of an 8001-read sample, so
-    /// the bounded recount has to cover the complete input range. Runs on
-    /// demand: `cargo test --lib discover_is_not_order_biased_by_recount_window_cap -- --ignored`.
+    /// the bounded recount has to cover the complete input range. Ignored by
+    /// default; `cargo test --lib` runs it only when `--ignored` is passed
+    /// through to the test binary.
     #[test]
     #[ignore]
     fn discover_is_not_order_biased_by_recount_window_cap() {

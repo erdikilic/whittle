@@ -318,11 +318,10 @@ fn detection_output_equals_full_set_for_present_adapter() {
         (res.stdout.clone(), res.stderr.clone())
     };
 
-    // Detection ON (explicit opt-in sampling, since detection defaults to
-    // off): narrows the catalog.
+    // Detection on, with a sample larger than the input so every read is
+    // sampled: narrows the catalog.
     let (detect_on, detect_on_err) = run(&["--adapter-sample", "10000"]);
-    // Detection OFF (the default; 0 is passed explicitly for clarity): trims
-    // against the full catalog.
+    // Detection off: trims against the full catalog.
     let (detect_off, _) = run(&["--adapter-sample", "0"]);
 
     assert!(!detect_on.is_empty(), "Detection-on output is non-empty");

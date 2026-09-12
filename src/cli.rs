@@ -379,7 +379,7 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
 }
 
 /// Resolves the compression level. An explicit `-c` wins; otherwise gzip FASTQ
-/// output uses level 4, where libdeflate runs markedly faster than level 6 for
+/// output uses level 4, which libdeflate compresses faster than level 6 for
 /// about 2% more output, and BGZF (BAM and `.bgz`) uses level 6, the BGZF
 /// writer default.
 fn compression_level_for(c: &Cli) -> u8 {

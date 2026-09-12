@@ -38,7 +38,7 @@ pub(crate) fn display_name(name: Option<&[u8]>) -> String {
 
 /// The pre-spec lowercase spellings of the base-modification tags.
 ///
-/// htslib still reads them (`sam_mods.c` falls back to `Mm` when `MM` is absent,
+/// htslib reads them (`sam_mods.c` falls back to `Mm` when `MM` is absent,
 /// and to `Ml` when `ML` is absent), so guppy and megalodon output decodes
 /// correctly in htslib-based tools, while whittle, which reads only the
 /// uppercase tags, would copy them through unchanged onto a trimmed sequence
