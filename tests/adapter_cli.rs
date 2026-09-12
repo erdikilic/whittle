@@ -229,11 +229,11 @@ fn tiny_input_skips_detection() {
     );
 }
 
-/// Presence detection is opt-in: `--adapter-sample` defaults to 0, so a preset
-/// run without the flag never engages detection (no `Adapter presence` line)
-/// and trims the preset adapter present in every read against the full catalog.
+/// Presence detection is on by default for a preset: a run without
+/// `--adapter-sample` narrows the catalog to the entries the sampled prefix
+/// carries and still trims the adapter present in every read.
 #[test]
-fn default_does_not_run_detection() {
+fn default_runs_detection() {
     let front = "CCTGTACTTCGTTCAGTTACGTATTGC"; // LSK114 front, real preset entry
     // Long insert: see `detection_output_equals_full_set_for_present_adapter`
     // for why a short insert can be consumed entirely by the catalog's paired
@@ -263,8 +263,8 @@ fn default_does_not_run_detection() {
     let out = res.get_output();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !stderr.contains("Adapter presence"),
-        "Detection is off by default (no --adapter-sample given): {stderr}"
+        stderr.contains("Adapter presence: sampled prefix narrowed the adapter set"),
+        "Detection runs by default: {stderr}"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -273,7 +273,7 @@ fn default_does_not_run_detection() {
     );
     assert!(
         !stdout.contains(&format!("{front}{insert}")),
-        "Preset adapter is trimmed off by default (full-set search): {stdout}"
+        "Preset adapter is trimmed off by default: {stdout}"
     );
 }
 

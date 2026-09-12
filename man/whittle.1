@@ -178,7 +178,7 @@ Bases at each read end searched for a terminal adapter. Requires an adapter sour
 Trim adapters at read ends only; never split on interior adapters
 .TP
 \fB\-\-adapter\-sample\fR \fI<ADAPTER_SAMPLE>\fR
-Reads sampled for preset detection or ab\-initio inference; inference requires at least 100. Requires an adapter source. Defaults to 0 for preset detection and 40000 for inference
+Reads sampled for preset presence detection or ab\-initio inference; 0 disables detection, otherwise at least 100. Requires an adapter source. Defaults to 2000 for preset detection and 40000 for inference
 .TP
 \fB\-\-adapter\-infer\fR [\fI<ADAPTER_INFER>\fR]
 Discover adapters de novo. Report prints the inferred FASTA and exits without writing read output. Defaults to trim when given no value

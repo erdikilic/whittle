@@ -35,7 +35,6 @@ noodles-bgzf = { version = "0.51.0", features = ["libdeflate"] }
 
 flate2 = { version = "1", features = ["zlib-rs"], default-features = false }
 
-aho-corasick = "1"
 
 sassy = { version = "0.2", default-features = false }
 ensure_simd = "0.1"

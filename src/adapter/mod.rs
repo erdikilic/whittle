@@ -16,11 +16,10 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use aho_corasick::{AhoCorasick, AhoCorasickKind};
 use search::{
     AmbiguousSearcher, EncodedAdapterBatch, Hit, MAX_TILED_PATTERN_LEN, PlainSearcher, Strands,
-    encode_patterns, encoded_pattern_hits, for_each_hit, is_plain_acgt, iupac_bases,
-    new_ambiguous_searcher, new_overhang_searcher, new_searcher,
+    encode_patterns, encoded_pattern_hits, for_each_hit, for_each_hit_in_texts, is_plain_acgt,
+    iupac_bases, new_ambiguous_searcher, new_overhang_searcher, new_searcher,
 };
 
 thread_local! {
@@ -196,11 +195,9 @@ const MAX_SEED_EXPANSIONS: usize = 256;
 /// are grouped into SIMD batches for the terminal search.
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateIndex {
-    /// Automaton over every seed expansion (see `seed_automaton`); `None`
-    /// when no adapter has seeds.
-    matcher: Option<AhoCorasick>,
-    /// Adapters owning each seed, indexed by automaton pattern id.
-    seed_adapters: Vec<Vec<usize>>,
+    /// Table over the interior seeds of every splitting adapter; `None` when
+    /// no adapter has seeds.
+    seeds: Option<SeedTable>,
     /// Per-adapter edit budgets, computed once per adapter set.
     budgets: Vec<Budget>,
     /// Per-adapter `is_plain_acgt`, which selects the search profile.
@@ -212,12 +209,10 @@ pub(crate) struct CandidateIndex {
     /// Adapters searched one pattern at a time over the end windows: those of
     /// searchable length that no batch covers.
     singletons: Vec<bool>,
-    /// Automaton over every `END_SEED_LEN`-mer of the entries eligible for
+    /// Table over every `END_SEED_LEN`-mer of the entries eligible for
     /// partial matching, both strands; `None` when there are none. Gates the
     /// overhang search of an end to the entries with an exact seed in it.
-    end_matcher: Option<AhoCorasick>,
-    /// Adapters owning each end seed, indexed by automaton pattern id.
-    end_seed_adapters: Vec<Vec<usize>>,
+    end_seeds: Option<SeedTable>,
     /// The longest end-window reach over the partial-matching entries.
     end_reach: usize,
 }
@@ -255,7 +250,7 @@ impl CandidateIndex {
             .map(|adapter| adapter.seq.len() >= MIN_PATTERN_LEN)
             .collect();
         let mut unfiltered = vec![false; adapters.len()];
-        let (matcher, seed_adapters) = if include_interior {
+        let seeds = if include_interior {
             let mut seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
             for (adapter_idx, adapter) in adapters.iter().enumerate() {
                 let Budget { k_mid, .. } = budgets[adapter_idx];
@@ -278,12 +273,9 @@ impl CandidateIndex {
                 }
             }
 
-            let patterns: Vec<Vec<u8>> = seeds.keys().cloned().collect();
-            let seed_adapters: Vec<Vec<usize>> = seeds.into_values().collect();
-            let matcher = (!patterns.is_empty()).then(|| seed_automaton(&patterns));
-            (matcher, seed_adapters)
+            SeedTable::new(seeds)
         } else {
-            (None, Vec::new())
+            None
         };
 
         // Sassy packs equal-length patterns across SIMD lanes, one pattern per
@@ -347,20 +339,16 @@ impl CandidateIndex {
                 }
             }
         }
-        let end_patterns: Vec<Vec<u8>> = end_seeds.keys().cloned().collect();
-        let end_seed_adapters: Vec<Vec<usize>> = end_seeds.into_values().collect();
-        let end_matcher = (!end_patterns.is_empty()).then(|| seed_automaton(&end_patterns));
+        let end_seeds = SeedTable::new(end_seeds);
 
         Self {
-            matcher,
-            seed_adapters,
+            seeds,
             budgets,
             plain,
             unfiltered,
             terminal_batches,
             singletons,
-            end_matcher,
-            end_seed_adapters,
+            end_seeds,
             end_reach,
         }
     }
@@ -382,21 +370,17 @@ impl CandidateIndex {
         head.resize(adapters, false);
         tail.clear();
         tail.resize(adapters, false);
-        let Some(matcher) = &self.end_matcher else {
+        let Some(table) = &self.end_seeds else {
             return;
         };
         let n = we - ws;
         let reach = (end_size + self.end_reach).min(n);
-        for m in matcher.find_overlapping_iter(&window[ws..ws + reach]) {
-            for &adapter_idx in &self.end_seed_adapters[m.pattern().as_usize()] {
-                head[adapter_idx] = true;
-            }
-        }
-        for m in matcher.find_overlapping_iter(&window[we - reach..we]) {
-            for &adapter_idx in &self.end_seed_adapters[m.pattern().as_usize()] {
-                tail[adapter_idx] = true;
-            }
-        }
+        table.scan(&window[ws..ws + reach], |adapter_idx, _| {
+            head[adapter_idx] = true
+        });
+        table.scan(&window[we - reach..we], |adapter_idx, _| {
+            tail[adapter_idx] = true
+        });
     }
 
     /// Fills `windows` with the text spans that can hold an interior hit, as
@@ -411,23 +395,21 @@ impl CandidateIndex {
                 windows.push((adapter_idx, 0, text.len()));
             }
         }
-        if let Some(matcher) = &self.matcher {
-            for m in matcher.find_overlapping_iter(text) {
-                for &adapter_idx in &self.seed_adapters[m.pattern().as_usize()] {
-                    let Budget { len, k_end, .. } = self.budgets[adapter_idx];
-                    // The exact seed lies inside the `<= k_mid` alignment. A
-                    // radius of pattern length + `k_end` on each side contains
-                    // that entire alignment and enough context for the
-                    // full-window `k_end` search to reproduce its span and tie
-                    // behavior.
-                    let radius = len + k_end;
-                    windows.push((
-                        adapter_idx,
-                        m.start().saturating_sub(radius),
-                        m.end().saturating_add(radius).min(text.len()),
-                    ));
-                }
-            }
+        if let Some(table) = &self.seeds {
+            table.scan(text, |adapter_idx, (start, end)| {
+                let Budget { len, k_end, .. } = self.budgets[adapter_idx];
+                // The exact seed lies inside the `<= k_mid` alignment. A
+                // radius of pattern length + `k_end` on each side contains
+                // that entire alignment and enough context for the
+                // full-window `k_end` search to reproduce its span and tie
+                // behavior.
+                let radius = len + k_end;
+                windows.push((
+                    adapter_idx,
+                    start.saturating_sub(radius),
+                    end.saturating_add(radius).min(text.len()),
+                ));
+            });
         }
 
         // Merges overlapping or touching windows of one adapter in place; the
@@ -448,19 +430,87 @@ impl CandidateIndex {
     }
 }
 
-/// Builds the overlapping-match automaton over `seeds`. The seed scan runs
-/// over every base of every read, so the automaton is a DFA: one table lookup
-/// per byte, against the contiguous NFA's per-state transition scan. The
-/// builder's default byte classes fold the bytes outside ACGT into one column
-/// and keep the table small. The automaton is case-sensitive over uppercase
-/// seeds: the scanned text is always normalized (see `normalize_into`), and a
-/// case-insensitive alphabet would double the table stride for nothing.
-fn seed_automaton(seeds: &[Vec<u8>]) -> AhoCorasick {
-    AhoCorasick::builder()
-        .kind(Some(AhoCorasickKind::DFA))
-        .build(seeds)
-        .expect("Adapter seeds are nonempty ASCII DNA patterns")
+/// Longest prefix the seed table indexes. Its table holds `4^len` entries of
+/// two bytes; the cap keeps it inside the second-level cache.
+const MAX_SEED_PREFIX_LEN: usize = 10;
+
+/// Exact-seed index over a table of every prefix code. The scan encodes the
+/// text two bits per base in one rolling word and looks each prefix up, one
+/// table read per base; a hit is confirmed against the whole seed before it
+/// is reported, so a longer seed matches no more often than it would through
+/// an automaton over the whole seed.
+#[derive(Debug, Clone)]
+struct SeedTable {
+    /// Prefix length: the shortest seed, capped at `MAX_SEED_PREFIX_LEN`.
+    prefix: usize,
+    /// Per prefix code, one plus the index into `lists`; zero for no seed.
+    slots: Vec<u16>,
+    /// Per slot, the `(adapter, seed)` pairs whose seed begins with the prefix.
+    lists: Vec<Vec<(usize, Vec<u8>)>>,
 }
+
+impl SeedTable {
+    /// Builds the table over `seeds`, each mapped to the adapters owning it.
+    /// `None` when there are no seeds.
+    fn new(seeds: BTreeMap<Vec<u8>, Vec<usize>>) -> Option<Self> {
+        let prefix = seeds.keys().map(Vec::len).min()?.min(MAX_SEED_PREFIX_LEN);
+        let mut slots = vec![0u16; 1 << (2 * prefix)];
+        let mut lists: Vec<Vec<(usize, Vec<u8>)>> = Vec::new();
+        for (seed, owners) in seeds {
+            let code = seed[..prefix].iter().fold(0usize, |code, &b| {
+                (code << 2) | usize::from(BASE_CODE[usize::from(b)])
+            });
+            if slots[code] == 0 {
+                lists.push(Vec::new());
+                slots[code] = u16::try_from(lists.len()).expect("Seed lists fit a u16 slot");
+            }
+            let list = &mut lists[usize::from(slots[code]) - 1];
+            list.extend(owners.into_iter().map(|adapter| (adapter, seed.clone())));
+        }
+        Some(SeedTable {
+            prefix,
+            slots,
+            lists,
+        })
+    }
+
+    /// Calls `hit` with the owning adapter and the `[start, end)` span of every
+    /// seed occurrence in `text`, which is normalized ACGT (see
+    /// `normalize_into`). The loop body is a code lookup, a shift and a slot
+    /// load per base; the slot slice is cut to exactly the code range so the
+    /// index needs no bounds check.
+    fn scan(&self, text: &[u8], mut hit: impl FnMut(usize, (usize, usize))) {
+        let prefix = self.prefix;
+        if text.len() < prefix {
+            return;
+        }
+        let mask = (1usize << (2 * prefix)) - 1;
+        let slots = &self.slots[..=mask];
+        let mut code = text[..prefix - 1].iter().fold(0usize, |code, &b| {
+            (code << 2) | usize::from(BASE_CODE[usize::from(b)])
+        });
+        for (i, &b) in text[prefix - 1..].iter().enumerate() {
+            code = ((code << 2) | usize::from(BASE_CODE[usize::from(b)])) & mask;
+            let slot = slots[code];
+            if slot != 0 {
+                for (adapter, seed) in &self.lists[usize::from(slot) - 1] {
+                    if text[i..].starts_with(seed) {
+                        hit(*adapter, (i, i + seed.len()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The two-bit code of a normalized base: A 0, C 1, G 2, T 3.
+const BASE_CODE: [u8; 256] = {
+    let mut t = [0u8; 256];
+    t[b'C' as usize] = 1;
+    t[b'G' as usize] = 2;
+    t[b'T' as usize] = 3;
+    t
+};
 
 /// Returns the exact seeds of one strand of `pattern`: `max_edits + 1` pieces,
 /// each expanded over its ambiguity codes. At most `max_edits` edits leave one
@@ -779,6 +829,8 @@ struct Keep<'a> {
     hi: usize,
     /// Accepted excisions, merged by `into_cuts`.
     interior: Vec<(usize, usize)>,
+    /// The adapters whose hits trimmed or excised, for presence detection.
+    acted: Vec<usize>,
 }
 
 impl<'a> Keep<'a> {
@@ -795,6 +847,7 @@ impl<'a> Keep<'a> {
             lo: 0,
             hi: n,
             interior: Vec::new(),
+            acted: Vec::new(),
         }
     }
 
@@ -866,6 +919,7 @@ impl<'a> Keep<'a> {
             _ => return,
         };
         trace_hit(&adapter.name, start, end, cost, Some(action));
+        self.acted.push(adapter_idx);
         match action {
             HitAction::TrimFivePrime => self.lo = self.lo.max(end),
             HitAction::TrimThreePrime => self.hi = self.hi.min(start),
@@ -1037,30 +1091,22 @@ fn search_singletons(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep
         }
         let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, len, k_end);
-        let head = ctx.read.strands(ws, ws + head_end);
-        let tail = ctx.read.strands(ws + tail_start, we);
-        search(
-            engine,
-            ctx.index,
-            adapter_idx,
-            &adapter.seq,
-            head,
-            k_end,
-            |h| {
+        let windows = [
+            ctx.read.strands(ws, ws + head_end),
+            ctx.read.strands(ws + tail_start, we),
+        ];
+        let accept = |text_idx: usize, h: Hit| {
+            if text_idx == 0 {
                 keep.accept(Site::Head, adapter_idx, h);
-            },
-        );
-        search(
-            engine,
-            ctx.index,
-            adapter_idx,
-            &adapter.seq,
-            tail,
-            k_end,
-            |h| {
+            } else {
                 keep.accept(Site::Tail { head_end }, adapter_idx, shifted(h, tail_start));
-            },
-        );
+            }
+        };
+        if ctx.index.plain[adapter_idx] {
+            for_each_hit_in_texts(engine.plain, &adapter.seq, &windows, k_end, accept);
+        } else {
+            for_each_hit_in_texts(engine.ambiguous, &adapter.seq, &windows, k_end, accept);
+        }
     }
 }
 
@@ -1270,6 +1316,25 @@ fn search_terminal(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: 
 ///
 /// Returns `[start, end)` spans in `window` coordinates.
 pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
+    segments_tallied(window, cfg, None)
+}
+
+/// `adapter_segments` that also marks in `acted` every adapter whose hit
+/// trimmed or excised part of `window`, for presence detection.
+pub(crate) fn adapter_segments_tallied(
+    window: &[u8],
+    cfg: &AdapterConfig,
+    acted: &mut [bool],
+) -> Vec<(usize, usize)> {
+    segments_tallied(window, cfg, Some(acted))
+}
+
+/// Runs the search passes over per-thread state; see `adapter_segments`.
+fn segments_tallied(
+    window: &[u8],
+    cfg: &AdapterConfig,
+    acted: Option<&mut [bool]>,
+) -> Vec<(usize, usize)> {
     let n = window.len();
     if n == 0 {
         return vec![];
@@ -1317,19 +1382,32 @@ pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize
             head_flags,
             tail_flags,
         };
-        segments_with(ctx, &mut engine)
+        segments_with(ctx, &mut engine, acted)
     })
 }
 
 /// The search passes behind `adapter_segments`, over per-thread searchers.
-fn segments_with(ctx: Context<'_>, engine: &mut Engine<'_>) -> Vec<(usize, usize)> {
+/// `acted` receives the adapters that trimmed or excised, when given.
+fn segments_with(
+    ctx: Context<'_>,
+    engine: &mut Engine<'_>,
+    mut acted: Option<&mut [bool]>,
+) -> Vec<(usize, usize)> {
     let cfg = ctx.cfg;
     let n = ctx.read.window.len();
+    let mut tally = |keep: &Keep<'_>| {
+        if let Some(acted) = acted.as_deref_mut() {
+            for &adapter_idx in &keep.acted {
+                acted[adapter_idx] = true;
+            }
+        }
+    };
     let mut keep = Keep::new(cfg, n, cfg.split);
     search_terminal(ctx, (0, n), engine, &mut keep);
     if cfg.split {
         search_interior(ctx, engine, &mut keep);
     }
+    tally(&keep);
     let (lo, hi, cuts) = keep.into_cuts(cfg.min_piece);
     if lo >= hi {
         return vec![];
@@ -1351,6 +1429,7 @@ fn segments_with(ctx: Context<'_>, engine: &mut Engine<'_>) -> Vec<(usize, usize
         }
         let mut keep = Keep::new(cfg, e - s, false);
         search_terminal(ctx, (s, e), engine, &mut keep);
+        tally(&keep);
         if keep.lo < keep.hi {
             segs.push((s + keep.lo, s + keep.hi));
         }
@@ -1447,8 +1526,7 @@ mod segment_tests {
     /// seed filter. Every other pass is shared with `adapter_segments`.
     fn reference_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
         let mut index = CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.split);
-        index.matcher = None;
-        index.seed_adapters.clear();
+        index.seeds = None;
         for (adapter_idx, adapter) in cfg.adapters.iter().enumerate() {
             index.unfiltered[adapter_idx] =
                 cfg.split && adapter.role.splits() && adapter.seq.len() >= MIN_PATTERN_LEN;
@@ -1793,7 +1871,7 @@ mod segment_tests {
         let index = CandidateIndex::new(&c.adapters, c.error_rate, true);
         assert_eq!(index.unfiltered, vec![true]);
         assert!(
-            index.matcher.is_none(),
+            index.seeds.is_none(),
             "No seed is built for an unfiltered adapter"
         );
         assert_eq!(windows_by_adapter(&index, &w), vec![vec![(0, w.len())]]);

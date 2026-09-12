@@ -4,8 +4,7 @@
 //! `presence_min` of the sampled reads, so a large catalog is not searched in
 //! full on every read.
 
-use super::search::{AmbiguousSearcher, hits, new_ambiguous_searcher};
-use super::{Adapter, Budget, MIN_PATTERN_LEN, Terminal, classify_terminal, normalize_into};
+use super::{Adapter, AdapterConfig, adapter_segments_tallied};
 use rayon::prelude::*;
 
 /// Sample size below which presence detection is unreliable; callers skip it
@@ -19,48 +18,12 @@ pub fn presence_min(sample_size: usize) -> usize {
     (sample_size / 500).max(3)
 }
 
-/// Returns whether `ad` would act on `window`: a terminal hit (trimmed) or,
-/// when `split`, an interior hit (`cost <= k_mid`, split). Searches the same
-/// normalized text (rewritten into `buf` when needed) with the same budgets
-/// as `adapter_segments`, so presence is defined as having an effect on the
-/// read.
-fn adapter_present_in(
-    searcher: &mut AmbiguousSearcher,
-    buf: &mut Vec<u8>,
-    window: &[u8],
-    ad: &Adapter,
-    budget: Budget,
-    end_size: usize,
-    split: bool,
-) -> bool {
-    let n = window.len();
-    if n == 0 || ad.seq.len() < MIN_PATTERN_LEN {
-        return false;
-    }
-    let window = normalize_into(window, buf);
-    let end_size = end_size.min(n);
-    for h in hits(searcher, &ad.seq, window, budget.k_end) {
-        match classify_terminal(h.start, h.end, n, end_size) {
-            // `Excise` acts either way: split when `split`, terminal-trim otherwise.
-            Terminal::Five | Terminal::Three | Terminal::Excise => return true,
-            Terminal::None => {
-                if split && ad.role.splits() && h.cost <= budget.k_mid {
-                    return true;
-                }
-            },
-        }
-    }
-    false
-}
-
-/// Retains the adapters that would act on at least `min_count` of the sampled
-/// reads. Order is preserved.
+/// Retains the adapters of `cfg` that trim or excise at least `min_count` of
+/// the sampled reads, running the same search passes the trimming pass runs.
+/// Order is preserved.
 pub fn present(
     sample: &[&[u8]],
-    adapters: &[Adapter],
-    error_rate: f64,
-    end_size: usize,
-    split: bool,
+    cfg: &AdapterConfig,
     min_count: usize,
     threads: usize,
 ) -> Vec<Adapter> {
@@ -68,33 +31,43 @@ pub fn present(
         .num_threads(threads.max(1))
         .build()
         .expect("A positive Rayon worker count builds a pool");
-    pool.install(|| {
-        adapters
+    let n = cfg.adapters.len();
+    let counts = pool.install(|| {
+        sample
             .par_iter()
-            .filter_map(|ad| {
-                let mut searcher = new_ambiguous_searcher();
-                let mut buf = Vec::new();
-                let budget = Budget::new(ad.seq.len(), error_rate);
-                let mut count = 0usize;
-                for &seq in sample {
-                    if adapter_present_in(&mut searcher, &mut buf, seq, ad, budget, end_size, split)
-                    {
-                        count += 1;
-                        if count >= min_count {
-                            return Some(ad.clone());
-                        }
+            .fold(
+                || vec![0usize; n],
+                |mut counts, &read| {
+                    let mut acted = vec![false; n];
+                    adapter_segments_tallied(read, cfg, &mut acted);
+                    for (count, hit) in counts.iter_mut().zip(acted) {
+                        *count += usize::from(hit);
                     }
-                }
-                None
-            })
-            .collect()
-    })
+                    counts
+                },
+            )
+            .reduce(
+                || vec![0usize; n],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(b) {
+                        *x += y;
+                    }
+                    a
+                },
+            )
+    });
+    cfg.adapters
+        .iter()
+        .zip(counts)
+        .filter(|(_, count)| *count >= min_count)
+        .map(|(adapter, _)| adapter.clone())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::{AdapterConfig, Role, adapter_segments};
+    use crate::adapter::{Role, adapter_segments};
 
     /// Builds an adapter from its parts.
     fn ad(name: &str, seq: &[u8], role: Role) -> Adapter {
@@ -102,6 +75,18 @@ mod tests {
             name: name.into(),
             seq: seq.to_vec(),
             role,
+        }
+    }
+
+    /// Builds a configuration at error rate 0.2 with the given end zone.
+    fn cfg(adapters: Vec<Adapter>, end_size: usize, split: bool) -> AdapterConfig {
+        AdapterConfig {
+            adapters,
+            error_rate: 0.2,
+            end_size,
+            split,
+            min_piece: 1,
+            candidate_index: std::sync::OnceLock::new(),
         }
     }
 
@@ -125,7 +110,7 @@ mod tests {
     #[test]
     fn presence_min_boundaries() {
         assert_eq!(presence_min(0), 3);
-        assert_eq!(presence_min(1000), 3); // 1000/500 = 2 -> max(3,2)=3
+        assert_eq!(presence_min(1000), 3);
         assert_eq!(presence_min(10000), 20);
     }
 
@@ -133,25 +118,21 @@ mod tests {
     /// Q, P is kept and Q is dropped.
     #[test]
     fn keeps_present_drops_absent() {
-        let p = b"GGGGTTTTGGGGTTTTGGGG"; // 20bp
-        let q = b"ACGACGACGACGACGACGAC"; // 20bp, absent (and not P's revcomp)
+        let p = b"GGGGTTTTGGGGTTTTGGGG";
+        let q = b"ACGACGACGACGACGACGAC";
         let mut reads: Vec<Vec<u8>> = Vec::new();
         for _ in 0..200 {
             let mut r = p.to_vec();
-            r.extend_from_slice(&[b'A'; 60]); // insert with no P/Q content
+            r.extend_from_slice(&[b'A'; 60]);
             reads.push(r);
         }
         let seqs: Vec<&[u8]> = reads.iter().map(|r| r.as_slice()).collect();
-        let adapters = vec![ad("P", p, Role::Adapter), ad("Q", q, Role::Adapter)];
-        let kept = present(
-            &seqs,
-            &adapters,
-            0.2,
+        let c = cfg(
+            vec![ad("P", p, Role::Adapter), ad("Q", q, Role::Adapter)],
             150,
             true,
-            presence_min(seqs.len()),
-            2,
         );
+        let kept = present(&seqs, &c, presence_min(seqs.len()), 2);
         let names: Vec<&str> = kept.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, vec!["P"], "Present kept, absent dropped");
     }
@@ -159,38 +140,26 @@ mod tests {
     /// A terminal hit counts, an absent adapter does not, and an interior hit
     /// counts only when splitting is on.
     #[test]
-    fn adapter_present_in_terminal_and_interior() {
-        let mut s = new_ambiguous_searcher();
-        let mut buf = Vec::new();
+    fn tally_marks_terminal_and_interior_hits() {
         let a = ad("a", b"GGGGTTTTGGGGTTTTGGGG", Role::Adapter);
-        let budget = Budget::new(a.seq.len(), 0.2);
-        // Terminal: adapter at the read start.
         let mut term = a.seq.clone();
         term.extend_from_slice(&[b'A'; 60]);
-        assert!(adapter_present_in(
-            &mut s, &mut buf, &term, &a, budget, 150, false
-        ));
-        // Absent: pure-A read.
-        assert!(!adapter_present_in(
-            &mut s,
-            &mut buf,
-            &[b'A'; 80],
-            &a,
-            budget,
-            150,
-            true
-        ));
-        // Interior (deep, split on): adapter in the middle of a long read.
+        let mut acted = [false];
+        adapter_segments_tallied(&term, &cfg(vec![a.clone()], 150, false), &mut acted);
+        assert!(acted[0], "Terminal hit counts");
+
+        let mut acted = [false];
+        adapter_segments_tallied(&[b'A'; 80], &cfg(vec![a.clone()], 150, true), &mut acted);
+        assert!(!acted[0], "An absent adapter does not count");
+
         let mut inter = vec![b'A'; 300];
         inter.splice(150..150, a.seq.iter().copied());
-        assert!(
-            adapter_present_in(&mut s, &mut buf, &inter, &a, budget, 20, true),
-            "Interior found when split"
-        );
-        assert!(
-            !adapter_present_in(&mut s, &mut buf, &inter, &a, budget, 20, false),
-            "Interior ignored when ends-only"
-        );
+        let mut acted = [false];
+        adapter_segments_tallied(&inter, &cfg(vec![a.clone()], 20, true), &mut acted);
+        assert!(acted[0], "Interior found when split");
+        let mut acted = [false];
+        adapter_segments_tallied(&inter, &cfg(vec![a.clone()], 20, false), &mut acted);
+        assert!(!acted[0], "Interior ignored when ends-only");
     }
 
     /// Sixty `N`s then random bases: no adapter is present, and detection agrees
@@ -206,45 +175,23 @@ mod tests {
             })
             .collect();
         let seqs: Vec<&[u8]> = reads.iter().map(|r| r.as_slice()).collect();
-        let kept = present(
-            &seqs,
-            std::slice::from_ref(&a),
-            0.2,
-            150,
-            true,
-            presence_min(seqs.len()),
-            2,
-        );
+        let c = cfg(vec![a.clone()], 150, true);
+        let kept = present(&seqs, &c, presence_min(seqs.len()), 2);
         assert!(
             kept.is_empty(),
             "An N run is not adapter evidence: {kept:?}"
         );
-
-        let cfg = AdapterConfig {
-            adapters: vec![a.clone()],
-            error_rate: 0.2,
-            end_size: 150,
-            split: true,
-            min_piece: 1,
-            candidate_index: std::sync::OnceLock::new(),
-        };
-        let mut s = new_ambiguous_searcher();
-        let mut buf = Vec::new();
-        let budget = Budget::new(a.seq.len(), 0.2);
         for r in &reads {
-            assert_eq!(adapter_segments(r, &cfg), vec![(0, r.len())]);
-            assert!(!adapter_present_in(
-                &mut s, &mut buf, r, &a, budget, 150, true
-            ));
+            assert_eq!(adapter_segments(r, &c), vec![(0, r.len())]);
         }
 
         // The adapter after the run: detection and the trimmer both act.
         let mut planted = vec![b'N'; 60];
         planted.extend_from_slice(&a.seq);
         planted.extend(splitmix_dna(9, 80));
-        assert!(adapter_present_in(
-            &mut s, &mut buf, &planted, &a, budget, 150, true
-        ));
-        assert_ne!(adapter_segments(&planted, &cfg), vec![(0, planted.len())]);
+        let mut acted = [false];
+        adapter_segments_tallied(&planted, &c, &mut acted);
+        assert!(acted[0]);
+        assert_ne!(adapter_segments(&planted, &c), vec![(0, planted.len())]);
     }
 }

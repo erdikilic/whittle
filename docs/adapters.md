@@ -54,13 +54,14 @@ every other trim, so `MM`/`ML`/`MN` and the per-base tags stay correct (see
 
 ## Presence detection
 
-A union preset such as `ont` holds far more sequences than any single run uses.
-`--adapter-sample <N>` (N >= 100) checks which adapters occur in the first N
-reads, then trims the rest against only that set. This is faster and avoids
-spurious trims from absent catalog entries; a kit preset is small enough that
-it is rarely needed.
+A preset holds sequences a given library does not carry: the primers of a
+kit's cDNA variant, or most of a union such as `ont`. Presence detection runs
+the trimming passes over the first `--adapter-sample` reads (default 2000,
+minimum 100) and keeps the entries that trimmed or split at least 0.2% of
+them, then trims the rest of the input against that set. This is faster and
+avoids spurious trims from absent entries.
 
-Detection is off by default (`--adapter-sample 0`) and preset-only; a custom
+Detection is preset-only; `--adapter-sample 0` turns it off, and a custom
 `--adapter-fasta` is always searched in full. If detection finds nothing (an
 ordered file with clean reads first can look adapter-free), whittle warns and
 falls back to the full set rather than skipping trimming for the rest of the run.

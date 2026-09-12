@@ -254,15 +254,7 @@ where
         ac.adapters.clone()
     } else {
         let detected = with_sequences(&sample, &seq_of, |seqs| {
-            detect::present(
-                seqs,
-                &ac.adapters,
-                ac.error_rate,
-                ac.end_size,
-                ac.split,
-                detect::presence_min(s),
-                cfg.threads,
-            )
+            detect::present(seqs, &ac, detect::presence_min(s), cfg.threads)
         });
         if detected.is_empty() {
             tracing::warn!(

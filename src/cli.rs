@@ -191,9 +191,9 @@ struct Cli {
     /// Trim adapters at read ends only; never split on interior adapters.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
-    /// Reads sampled for preset detection or ab-initio inference; inference
-    /// requires at least 100. Requires an adapter source. Defaults to 0 for
-    /// preset detection and 40000 for inference.
+    /// Reads sampled for preset presence detection or ab-initio inference; 0
+    /// disables detection, otherwise at least 100. Requires an adapter source.
+    /// Defaults to 2000 for preset detection and 40000 for inference.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_sample: Option<usize>,
     /// Discover adapters de novo. Report prints the inferred FASTA and exits
@@ -225,6 +225,8 @@ const DEFAULT_ADAPTER_ERROR_RATE: f64 = 0.2;
 const DEFAULT_ADAPTER_END_SIZE: usize = 150;
 /// The default `--adapter-sample` under `--adapter-infer`.
 const DEFAULT_INFER_SAMPLE: usize = 40_000;
+/// The default `--adapter-sample` for preset presence detection.
+const DEFAULT_PRESET_SAMPLE: usize = 2_000;
 
 /// Returns the clap `Command` for the CLI. `examples/gen-man.rs` renders the
 /// man page from it, so the page and the parser share one definition.
@@ -542,8 +544,8 @@ fn require_adapter_source(c: &Cli) -> anyhow::Result<()> {
 
 /// Resolves the sample size for presence detection or inference.
 ///
-/// An omitted value means the mode default: 0 (detection off) with inference
-/// off, 40000 with inference on. An explicit value must be 0 or at least
+/// An omitted value means the mode default: 2000 with inference off, 40000
+/// with inference on. An explicit value must be 0 or at least
 /// `MIN_SAMPLE_FOR_DETECTION`, and 0 is rejected under inference, which needs a
 /// sample. Presence detection is preset-only: a user-supplied FASTA is a curated
 /// set that is searched in full, since sampling could drop a rare custom
@@ -557,7 +559,7 @@ fn resolve_sample(
     let min = crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION;
     let requested = match c.adapter_sample {
         None if adapter_infer != AdapterInfer::Off => DEFAULT_INFER_SAMPLE,
-        None => 0,
+        None => DEFAULT_PRESET_SAMPLE,
         Some(n) => {
             if n != 0 && n < min {
                 anyhow::bail!(
@@ -577,7 +579,7 @@ fn resolve_sample(
     if adapter_infer != AdapterInfer::Off || c.adapter_fasta.is_none() {
         return Ok(requested);
     }
-    if requested > 0 {
+    if c.adapter_sample.is_some_and(|n| n > 0) {
         advisories.push(Advisory::warn(
             "--adapter-sample is ignored with --adapter-fasta (presence detection is \
              preset-only)",

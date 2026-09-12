@@ -1757,7 +1757,6 @@ dependencies = [
 name = "whittle"
 version = "0.2.0"
 dependencies = [
- "aho-corasick",
  "anyhow",
  "assert_cmd",
  "clap",

@@ -239,6 +239,22 @@ pub fn for_each_hit<P: Profile, T: RcSearchAble + ?Sized>(
     }
 }
 
+/// Calls `accept` with the text index and every match of `pattern` in each of
+/// `texts` within `k` edits. The texts share one pattern encoding and run in
+/// parallel SIMD lanes, so two end windows cost about one search instead of
+/// two; the spans are those `for_each_hit` reports on each text alone.
+pub fn for_each_hit_in_texts<P: Profile, T: RcSearchAble>(
+    searcher: &mut Searcher<P>,
+    pattern: &[u8],
+    texts: &[T],
+    k: usize,
+    mut accept: impl FnMut(usize, Hit),
+) {
+    for m in searcher.search_texts(pattern, texts, k) {
+        accept(m.text_idx, Hit::from_match(&m, pattern.len()));
+    }
+}
+
 /// Returns all matches of `pattern` in `text` within `k` edits, as text spans.
 /// See `for_each_hit`.
 pub fn hits<P: Profile>(

@@ -82,7 +82,7 @@ tell a real input from a stale prior output, and merging over either loses data.
 | `--adapter-error-rate <F>` | End-match tolerance as a fraction of adapter length (default 0.2); requires an adapter source |
 | `--adapter-end-size <N>` | End-zone width searched for terminal adapters (default 150); requires an adapter source |
 | `--adapter-ends-only` | Trim ends only; never split on an interior adapter |
-| `--adapter-sample <N>` | Reads sampled for preset detection or inference (defaults `0` and `40000`, respectively); requires an adapter source |
+| `--adapter-sample <N>` | Reads sampled for preset presence detection or inference (defaults `2000` and `40000`; `0` disables detection); requires an adapter source |
 | `--adapter-infer [trim\|report]` | Discover adapters de novo; omitted value defaults to `trim` |
 | `--adapter-infer-policy {conservative,aggressive}` | Trust policy for inferred adapters (default `conservative`); requires `--adapter-infer` |
 | `-v`, `-vv` | Stage detail, then per-read decisions; higher counts are rejected |
