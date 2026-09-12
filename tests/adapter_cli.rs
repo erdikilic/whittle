@@ -509,7 +509,7 @@ fn infer_policy_requires_an_inference_operation() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "--adapter-infer [<ADAPTER_INFER>]",
+            "--adapter-infer-policy requires --adapter-infer",
         ));
 }
 

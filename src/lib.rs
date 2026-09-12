@@ -90,7 +90,29 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     let mut source: Box<dyn Read + Send> = Box::new(BufReader::new(raw));
 
     let in_fmt = match cfg.io.in_format {
-        Some(f) => f,
+        // A forced format is checked against the stream: a wrong `--in-format`
+        // would otherwise read zero records and exit 0, or fail inside a
+        // decoder with a message that names no flag.
+        Some(forced) => {
+            let (detected, replayed) = detect_format(in_path, source).with_context(|| {
+                format!(
+                    "--in-format {} but the input does not look like {}",
+                    forced.label(),
+                    forced.label()
+                )
+            })?;
+            source = replayed;
+            match detected {
+                None => forced,
+                Some(d) if io::forced_format_accepts(forced, d) => d,
+                Some(d) => anyhow::bail!(
+                    "--in-format {} but the input is {}; drop the flag or pass --in-format {}",
+                    forced.label(),
+                    d.label(),
+                    d.flag_value()
+                ),
+            }
+        },
         None => match in_path.and_then(io::from_extension) {
             // A `.gz` extension covers both plain gzip and BGZF; the first block
             // header decides, and BGZF gets a block-parallel decode share.
@@ -99,7 +121,9 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
             None => {
                 let (fmt, replayed) = detect_format(in_path, source)?;
                 source = replayed;
-                fmt
+                fmt.ok_or_else(|| {
+                    anyhow::anyhow!("cannot determine input format; pass --in-format")
+                })?
             },
         },
     };
@@ -137,6 +161,12 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     let mut warnings: Vec<String> = Vec::new();
     warnings.extend(mismatch_warn);
     warnings.extend(out_mismatch_warn);
+    if cfg.io.out_format.is_none() {
+        warnings.extend(io::unknown_extension_warning(
+            cfg.io.output.as_deref(),
+            out_fmt,
+        ));
+    }
     if is_no_op(cfg, in_fmt == out_fmt) {
         warnings.push(NO_OP_WARNING.to_string());
     }
@@ -262,12 +292,17 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
 fn detect_format(
     in_path: Option<&Path>,
     mut source: Box<dyn Read + Send>,
-) -> anyhow::Result<(Format, Box<dyn Read + Send>)> {
+) -> anyhow::Result<(Option<Format>, Box<dyn Read + Send>)> {
     // The probe covers a full BGZF block header (18 bytes), which tells a BAM on
     // stdin or under an unknown extension apart from gzipped FASTQ.
     let mut probe = [0u8; 18];
     let n = io::fill(&mut source, &mut probe)?;
     let mut replay = probe[..n].to_vec();
+    // An empty stream has no format; the caller decides whether that is an
+    // error or a run over zero records.
+    if n == 0 {
+        return Ok((None, source));
+    }
     let fmt = if io::is_bgzf(&replay) {
         let block_size = usize::from(u16::from_le_bytes([replay[16], replay[17]])) + 1;
         if block_size < replay.len() {
@@ -284,7 +319,10 @@ fn detect_format(
     } else {
         io::detect_input(&replay)?
     };
-    Ok((fmt, Box::new(std::io::Cursor::new(replay).chain(source))))
+    Ok((
+        Some(fmt),
+        Box::new(std::io::Cursor::new(replay).chain(source)),
+    ))
 }
 
 /// Returns the thread budget of a run: the render pool takes the whole `-t`
@@ -390,6 +428,7 @@ impl Session {
                 self.finish(obs, &stats, cfg)
             },
             (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
+                note_update_moves_ignored(cfg, out_fmt);
                 let (_header, records) = self.bam_reader(source, false)?;
                 let Some(records) = settle(records, cfg, self.budget, adapter::resolve::bam_seq)?
                 else {
@@ -659,6 +698,17 @@ fn note_tags_ignored(cfg: &Config, in_fmt: Format, out_fmt: Format) {
             input = in_fmt.label(),
             output = out_fmt.label(),
             "--fastq-tags applies only to BAM-to-FASTQ output and is ignored"
+        );
+    }
+}
+
+/// Warns that `--update-moves` has no effect on BAM-to-FASTQ output, which
+/// drops the signal tags on every trim.
+fn note_update_moves_ignored(cfg: &Config, out_fmt: Format) {
+    if cfg.update_moves {
+        tracing::warn!(
+            output = out_fmt.label(),
+            "--update-moves applies only to BAM-to-BAM output and is ignored"
         );
     }
 }

@@ -35,6 +35,17 @@ impl Format {
         }
     }
 
+    /// Returns the spelling `--in-format`/`--out-format` accept for this
+    /// format, for messages that suggest the flag.
+    pub fn flag_value(&self) -> &'static str {
+        match self {
+            Format::Fastq => "fastq",
+            Format::FastqGz => "fastq-gz",
+            Format::FastqBgzf => "fastq-bgz",
+            Format::Bam => "bam",
+        }
+    }
+
     /// Returns the coarse format family that decides whether an (in, out) pair
     /// reads as a conversion in the startup banner's operation line: the
     /// FASTQ variants collapse to the `FASTQ` family (a `Fastq` to `FastqGz`
@@ -87,6 +98,34 @@ pub fn detect_input(sniff: &[u8]) -> anyhow::Result<Format> {
     } else {
         anyhow::bail!("cannot determine input format; pass --in-format")
     }
+}
+
+/// Returns true when a stream detected as `detected` may be read under a
+/// forced `--in-format` of `forced`: the same format, or BGZF FASTQ under
+/// `fastq-gz`, since a BGZF stream is valid gzip.
+pub fn forced_format_accepts(forced: Format, detected: Format) -> bool {
+    forced == detected || (forced == Format::FastqGz && detected == Format::FastqBgzf)
+}
+
+/// Returns advisory text when an output path carries an extension that names
+/// no supported format (`out.fasta`, `out.txt`), so the fallback to `resolved`
+/// is visible rather than silent. `None` for stdout, a path without an
+/// extension, or a recognized extension.
+pub fn unknown_extension_warning(path: Option<&Path>, resolved: Format) -> Option<String> {
+    let path = path?;
+    let name = path.file_name()?.to_str()?;
+    let ext = name
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())?
+        .1;
+    if ext.is_empty() || from_extension(path).is_some() {
+        return None;
+    }
+    Some(format!(
+        "-o/--output extension .{ext} names no supported format; writing {} (pass --out-format \
+         to choose)",
+        resolved.label()
+    ))
 }
 
 /// Returns advisory text when an explicit `--in-format`/`--out-format`

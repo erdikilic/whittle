@@ -49,9 +49,10 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
 
 /// Rejects the BAM-only flags on any input format other than BAM.
 ///
-/// `--trim-barcodes` reads the `bi` aux tag and `--remove-tag` and
-/// `--strip-kinetics` name BAM auxiliary tags, which only a BAM record carries,
-/// so on FASTQ they would be accepted and silently do nothing. `cli::parse`
+/// `--trim-barcodes` reads the `bi` aux tag, `--remove-tag` and
+/// `--strip-kinetics` name BAM auxiliary tags, and `--update-moves` rewrites
+/// the signal tags; only a BAM record carries them, so on FASTQ the flags would
+/// be accepted and silently do nothing. `cli::parse`
 /// applies this to the format an explicit `--in-format` or a known extension
 /// names, and `run` applies it again once detection has classified a stream.
 pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::Result<()> {
@@ -69,6 +70,13 @@ pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::
         anyhow::bail!(
             "{} removes BAM auxiliary tags and requires BAM input (got {})",
             cfg.remove_tags.flags(),
+            in_fmt.label()
+        );
+    }
+    if cfg.update_moves {
+        anyhow::bail!(
+            "--update-moves rewrites the ONT signal tags of BAM records and requires BAM input \
+             (got {})",
             in_fmt.label()
         );
     }

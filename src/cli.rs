@@ -42,12 +42,7 @@ struct Cli {
     out_format: Option<Format>,
     /// Worker threads, at least 1; values above the CPU count are clamped to
     /// it. Defaults to all detected CPUs.
-    #[arg(
-        short = 't',
-        long,
-        value_parser = clap::value_parser!(u64).range(1..),
-        help_heading = "Setup"
-    )]
+    #[arg(short = 't', long, value_parser = parse_threads, help_heading = "Setup")]
     threads: Option<u64>,
     /// Write records in input order when running with more than one thread.
     /// Without it, records are written as they finish, which is faster and uses
@@ -58,12 +53,10 @@ struct Cli {
     /// list such as MM,ML,RG. Defaults to all.
     #[arg(long, default_value = "all", help_heading = "Setup")]
     fastq_tags: String,
-    /// DEFLATE compression level (0-9) for compressed output: bgzf for BAM and
-    /// .bgz, gzip for FASTQ.gz. Lower levels are faster and produce larger
-    /// files. Ignored for plain FASTQ. Defaults to 4 for gzip FASTQ and 6 for
-    /// BGZF.
-    // bgzf (libdeflate) accepts up to 12 and gzip up to 9; the cap is the
-    // common 0-9 so a single flag is valid for both compressed output formats.
+    /// BGZF compression level (0-9) for BAM, .bgz and .gz output. Lower levels
+    /// are faster and produce larger files. Ignored for plain FASTQ. Defaults
+    /// to 4 for .gz and 6 for .bgz and BAM.
+    // libdeflate accepts up to 12; the cap is the conventional gzip 0-9.
     #[arg(
         short = 'c',
         long,
@@ -124,12 +117,12 @@ struct Cli {
     #[arg(short = 'm', long, value_enum, default_value_t = QualMode::Mean, help_heading = "Filtering")]
     qual_mode: QualMode,
 
-    /// Remove this many bases from the 5' end before other trimming. Defaults
-    /// to 0.
+    /// Remove this many bases from the 5' end, after barcode removal and
+    /// before adapter and quality trimming. Defaults to 0.
     #[arg(short = 'H', long, default_value_t = 0, help_heading = "Trimming")]
     head_crop: usize,
-    /// Remove this many bases from the 3' end before other trimming. Defaults
-    /// to 0.
+    /// Remove this many bases from the 3' end, after barcode removal and
+    /// before adapter and quality trimming. Defaults to 0.
     #[arg(short = 'T', long, default_value_t = 0, help_heading = "Trimming")]
     tail_crop: usize,
     /// Trim low-quality bases from both ends until each boundary reaches Q.
@@ -143,13 +136,8 @@ struct Cli {
     qual_split: Option<u8>,
     /// Tolerate low-quality runs shorter than this many bases when splitting.
     /// Requires --qual-split. Defaults to 1.
-    #[arg(
-        long,
-        default_value_t = 1,
-        requires = "qual_split",
-        help_heading = "Trimming"
-    )]
-    qual_split_window: usize,
+    #[arg(long, help_heading = "Trimming")]
+    qual_split_window: Option<usize>,
     /// Keep ONT signal tags consistent through trimming (slice mv, update ts,
     /// ns, sp and pi) for signal-aware tools such as Remora and Clair3 v2,
     /// instead of dropping them. BAM-to-BAM only.
@@ -169,10 +157,10 @@ struct Cli {
     #[arg(long, help_heading = "Tags")]
     strip_kinetics: bool,
 
-    /// Adapter FASTA; each sequence must be at least 11 bp and may use IUPAC
-    /// codes. An entry whose header description contains the word primer or
-    /// barcode is trimmed at read ends only; every other entry also splits
-    /// reads at interior hits. Enables adapter trimming.
+    /// Adapter FASTA; sequences may use IUPAC codes, and entries shorter than
+    /// 11 bp are skipped. An entry whose header description contains the word
+    /// primer or barcode is trimmed at read ends only; every other entry also
+    /// splits reads at interior hits. Enables adapter trimming.
     #[arg(short = 'a', long, help_heading = "Adapter trimming")]
     adapter_fasta: Option<PathBuf>,
     /// Built-in kit presets, comma-separated: lsk114, rad114 (ulk114), rbk114,
@@ -192,8 +180,9 @@ struct Cli {
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
     /// Reads sampled for preset presence detection or ab-initio inference; 0
-    /// disables detection, otherwise at least 100. Requires an adapter source.
-    /// Defaults to 2000 for preset detection and 40000 for inference.
+    /// disables detection, otherwise at least 100. Ignored with
+    /// --adapter-fasta alone. Defaults to 2000 for preset detection and 40000
+    /// for inference.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_sample: Option<usize>,
     /// Discover adapters de novo. Report prints the inferred FASTA and exits
@@ -209,14 +198,8 @@ struct Cli {
     /// Trust policy for inferred consensuses. Conservative trims and splits
     /// with a short end-facing anchor; aggressive uses the complete consensus.
     /// Defaults to conservative.
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = AdapterInferPolicy::Conservative,
-        requires = "adapter_infer",
-        help_heading = "Adapter trimming"
-    )]
-    adapter_infer_policy: AdapterInferPolicy,
+    #[arg(long, value_enum, help_heading = "Adapter trimming")]
+    adapter_infer_policy: Option<AdapterInferPolicy>,
 }
 
 /// The default `--adapter-error-rate`.
@@ -317,14 +300,33 @@ pub fn parse() -> anyhow::Result<Config> {
     // Only an explicit `--in-format` or a known extension decides the input
     // format here; a stream or an extensionless path is classified by `run`,
     // which applies the same guard once detection has run.
-    if let Some(fmt) = cfg
+    let in_fmt = cfg
         .io
         .in_format
-        .or_else(|| cfg.io.input.as_deref().and_then(crate::io::from_extension))
-    {
+        .or_else(|| cfg.io.input.as_deref().and_then(crate::io::from_extension));
+    if let Some(fmt) = in_fmt {
         crate::guards::guard_bam_only_flags(&cfg, fmt)?;
     }
+    let out_fmt = cfg
+        .io
+        .out_format
+        .or_else(|| cfg.io.output.as_deref().and_then(crate::io::from_extension));
+    if in_fmt.is_some_and(|f| f != Format::Bam) && out_fmt == Some(Format::Bam) {
+        anyhow::bail!(
+            "FASTQ-to-BAM conversion is not supported (a FASTQ read carries no header for a BAM \
+             record); write FASTQ output, or import with samtools import"
+        );
+    }
     Ok(cfg)
+}
+
+/// Parses `-t`: an integer of at least 1.
+fn parse_threads(value: &str) -> Result<u64, String> {
+    match value.parse::<u64>() {
+        Ok(0) => Err("must be at least 1".to_string()),
+        Ok(n) => Ok(n),
+        Err(_) => Err("must be an integer of at least 1".to_string()),
+    }
 }
 
 /// Rejects contradictory or out-of-domain trim and filter settings before the
@@ -340,6 +342,9 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
     .count();
     if n_quality > 1 {
         anyhow::bail!("--qual-trim, --qual-best-segment and --qual-split are mutually exclusive");
+    }
+    if c.qual_split.is_none() && c.qual_split_window.is_some() {
+        anyhow::bail!("--qual-split-window requires --qual-split");
     }
     let max_length = c.max_length.unwrap_or(usize::MAX);
     if c.min_length > max_length {
@@ -402,7 +407,7 @@ fn quality_op_for(c: &Cli) -> Option<QualityOp> {
     }
     c.qual_split.map(|cutoff| QualityOp::Split {
         cutoff,
-        window: c.qual_split_window,
+        window: c.qual_split_window.unwrap_or(1),
     })
 }
 
@@ -413,8 +418,13 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
         .adapter_infer
         .map_or(AdapterInfer::Off, |action| AdapterInfer::Enabled {
             action,
-            policy: c.adapter_infer_policy,
+            policy: c
+                .adapter_infer_policy
+                .unwrap_or(AdapterInferPolicy::Conservative),
         });
+    if c.adapter_infer.is_none() && c.adapter_infer_policy.is_some() {
+        anyhow::bail!("--adapter-infer-policy requires --adapter-infer");
+    }
 
     // Trim mode excludes an explicit FASTA; report mode allows one so the
     // discoveries can be named against it.
@@ -491,7 +501,8 @@ fn resolve_adapters(
         require_adapter_source(c)?;
         if c.adapter_ends_only {
             advisories.push(Advisory::warn(
-                "--adapter-ends-only has no effect without --adapter-fasta or --adapter-preset",
+                "--adapter-ends-only has no effect without --adapter-fasta, --adapter-preset or \
+                 --adapter-infer",
             ));
         }
         return Ok(None);

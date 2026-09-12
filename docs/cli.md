@@ -59,8 +59,8 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --qual-trim 10
 | `-o, --output <PATH>` | Output file (omit, or pass `-`, for stdout) |
 | `--in-format`, `--out-format {fastq,fastq-gz,fastq-bgz,bam}` | Force a format instead of detecting it |
 | `--fastq-tags {all,none,LIST}` | Aux tags carried into FASTQ headers on BAM-to-FASTQ (default `all`) |
-| `-c, --compression-level <0-9>` | DEFLATE level for compressed output (default 4 for gzip FASTQ, 6 for BGZF and BAM); ignored for plain FASTQ |
-| `--summary-json <PATH>` | Write a machine-readable run summary to PATH |
+| `-c, --compression-level <0-9>` | BGZF level for `.gz`, `.bgz` and BAM output (default 4 for `.gz`, 6 for `.bgz` and BAM); ignored for plain FASTQ |
+| `--summary-json <PATH>` | Write a machine-readable run summary to PATH; ignored under `--adapter-infer report` |
 | `-t, --threads <N>` | Worker threads, at least 1 (default: all detected CPUs, clamped to that maximum) |
 | `--ordered` | Write records in input order under `-t > 1` |
 | `-l, --min-length <N>` | Minimum length to keep, per output segment (default 1) |
@@ -79,14 +79,14 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --qual-trim 10
 | `--remove-tag <TAG>` | Remove a two-character aux tag from every output record; repeatable (BAM input) |
 | `--strip-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM input) |
 | `-a, --adapter-fasta <FILE>` | Adapter and primer FASTA (IUPAC codes accepted; `primer` or `barcode` in a header description restricts the entry to the read ends); enables adapter trimming |
-| `--adapter-preset <KITS>` | Built-in kit presets, comma-separated: `lsk114`, `rad114`, `rbk114`, `nbd114`, `pcb114`, `rpb114`, `mab114`, `rna004`, `pacbio`, `ont`, `all`; enables adapter trimming |
+| `--adapter-preset <KITS>` | Built-in kit presets, comma-separated: `lsk114`, `rad114` (`ulk114`), `rbk114`, `nbd114`, `pcb114` (`pcs114`), `rpb114`, `mab114`, `rna004`, `pacbio`, `ont`, `all`; enables adapter trimming |
 | `--adapter-error-rate <F>` | End-match tolerance as a fraction of adapter length (default 0.2); requires an adapter source |
 | `--adapter-end-size <N>` | End-zone width searched for terminal adapters (default 150); requires an adapter source |
 | `--adapter-ends-only` | Trim ends only; never split on an interior adapter |
-| `--adapter-sample <N>` | Reads sampled for preset presence detection or inference (defaults 2000 and 40000; `0` disables detection); requires an adapter source |
+| `--adapter-sample <N>` | Reads sampled for preset presence detection or inference (defaults 2000 and 40000; `0` disables detection); ignored with `--adapter-fasta` alone |
 | `--adapter-infer [trim\|report]` | Discover adapters de novo; the bare flag means `trim` |
 | `--adapter-infer-policy {conservative,aggressive}` | Trust policy for inferred adapters (default `conservative`); requires `--adapter-infer` |
-| `-v`, `-vv` | Stage detail, then per-read decisions |
+| `-v, --verbose` (repeatable) | Stage detail with `-v`, per-read decisions with `-vv` |
 | `--progress {auto,bar,plain,none}` | Progress reporting, independent of the log level (default `auto`) |
 | `--quiet` | Silence progress and the summary; warnings and errors still print. Conflicts with `-v` and `--progress` |
 
@@ -96,7 +96,9 @@ of them.
 
 An adapter source is `--adapter-fasta`, `--adapter-preset`, or
 `--adapter-infer`. `--adapter-error-rate`, `--adapter-end-size`, and
-`--adapter-sample` are rejected without one. Adapter trimming is described in
+`--adapter-sample` are rejected without one. A forced `--in-format` that
+disagrees with the stream, an output extension that names no format, and
+FASTQ-to-BAM output are reported before any output is written. Adapter trimming is described in
 [adapters.md](adapters.md).
 
 ## Stage order

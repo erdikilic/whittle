@@ -66,7 +66,7 @@ Write records in input order when running with more than one thread. Without it,
 BAM auxiliary tags copied into BAM\-to\-FASTQ headers: all, none, or a list such as MM,ML,RG. Defaults to all
 .TP
 \fB\-c\fR, \fB\-\-compression\-level\fR \fI<COMPRESSION_LEVEL>\fR
-DEFLATE compression level (0\-9) for compressed output: bgzf for BAM and .bgz, gzip for FASTQ.gz. Lower levels are faster and produce larger files. Ignored for plain FASTQ. Defaults to 4 for gzip FASTQ and 6 for BGZF
+BGZF compression level (0\-9) for BAM, .bgz and .gz output. Lower levels are faster and produce larger files. Ignored for plain FASTQ. Defaults to 4 for .gz and 6 for .bgz and BAM
 .TP
 \fB\-\-summary\-json\fR \fI<PATH>\fR
 Write a machine\-readable JSON run summary (counters plus the resolved settings) to this path. Written even under \-\-quiet
@@ -131,10 +131,10 @@ median: Take the median per\-base Phred score
 .SH TRIMMING
 .TP
 \fB\-H\fR, \fB\-\-head\-crop\fR \fI<HEAD_CROP>\fR [default: 0]
-Remove this many bases from the 5\*(Aq end before other trimming. Defaults to 0
+Remove this many bases from the 5\*(Aq end, after barcode removal and before adapter and quality trimming. Defaults to 0
 .TP
 \fB\-T\fR, \fB\-\-tail\-crop\fR \fI<TAIL_CROP>\fR [default: 0]
-Remove this many bases from the 3\*(Aq end before other trimming. Defaults to 0
+Remove this many bases from the 3\*(Aq end, after barcode removal and before adapter and quality trimming. Defaults to 0
 .TP
 \fB\-\-qual\-trim\fR \fI<QUAL_TRIM>\fR
 Trim low\-quality bases from both ends until each boundary reaches Q
@@ -145,7 +145,7 @@ Keep the longest contiguous segment whose bases are all at least Q
 \fB\-\-qual\-split\fR \fI<QUAL_SPLIT>\fR
 Split at low\-quality runs below Q and keep the surviving segments
 .TP
-\fB\-\-qual\-split\-window\fR \fI<QUAL_SPLIT_WINDOW>\fR [default: 1]
+\fB\-\-qual\-split\-window\fR \fI<QUAL_SPLIT_WINDOW>\fR
 Tolerate low\-quality runs shorter than this many bases when splitting. Requires \-\-qual\-split. Defaults to 1
 .TP
 \fB\-\-update\-moves\fR
@@ -163,7 +163,7 @@ Remove the per\-base kinetics and alignment\-count arrays (ip pw fi fp ri rp sa 
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<ADAPTER_FASTA>\fR
-Adapter FASTA; each sequence must be at least 11 bp and may use IUPAC codes. An entry whose header description contains the word primer or barcode is trimmed at read ends only; every other entry also splits reads at interior hits. Enables adapter trimming
+Adapter FASTA; sequences may use IUPAC codes, and entries shorter than 11 bp are skipped. An entry whose header description contains the word primer or barcode is trimmed at read ends only; every other entry also splits reads at interior hits. Enables adapter trimming
 .TP
 \fB\-\-adapter\-preset\fR \fI<KITS>\fR
 Built\-in kit presets, comma\-separated: lsk114, rad114 (ulk114), rbk114, nbd114, pcb114 (pcs114), rpb114, mab114, rna004, pacbio, ont (every ONT kit), all. Enables adapter trimming. Defaults to none
@@ -178,7 +178,7 @@ Bases at each read end searched for a terminal adapter. Requires an adapter sour
 Trim adapters at read ends only; never split on interior adapters
 .TP
 \fB\-\-adapter\-sample\fR \fI<ADAPTER_SAMPLE>\fR
-Reads sampled for preset presence detection or ab\-initio inference; 0 disables detection, otherwise at least 100. Requires an adapter source. Defaults to 2000 for preset detection and 40000 for inference
+Reads sampled for preset presence detection or ab\-initio inference; 0 disables detection, otherwise at least 100. Ignored with \-\-adapter\-fasta alone. Defaults to 2000 for preset detection and 40000 for inference
 .TP
 \fB\-\-adapter\-infer\fR [\fI<ADAPTER_INFER>\fR]
 Discover adapters de novo. Report prints the inferred FASTA and exits without writing read output. Defaults to trim when given no value
@@ -193,7 +193,7 @@ trim: Trim reads with the inferred sequences
 report: Print inferred FASTA to stdout and do not write read output
 .RE
 .TP
-\fB\-\-adapter\-infer\-policy\fR \fI<ADAPTER_INFER_POLICY>\fR [default: conservative]
+\fB\-\-adapter\-infer\-policy\fR \fI<ADAPTER_INFER_POLICY>\fR
 Trust policy for inferred consensuses. Conservative trims and splits with a short end\-facing anchor; aggressive uses the complete consensus. Defaults to conservative
 .br
 
@@ -206,6 +206,6 @@ conservative: Use a short end\-facing anchor
 aggressive: Use the complete recurrent consensus
 .RE
 .SH VERSION
-v0.2.0
+0.2.0
 .SH AUTHORS
 Erdi Kilic <erdican266@gmail.com>

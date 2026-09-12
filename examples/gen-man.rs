@@ -19,7 +19,12 @@ fn main() -> std::io::Result<()> {
     let path = dir.join("whittle.1");
     let mut buf = Vec::new();
     clap_mangen::Man::new(whittle::cli::command()).render(&mut buf)?;
-    std::fs::File::create(&path)?.write_all(&buf)?;
+    // clap_mangen prefixes the version with `v`; releases are bare numbers.
+    let page = String::from_utf8(buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        .replace("\nv0.", "\n0.")
+        .replace("\nv1.", "\n1.");
+    std::fs::File::create(&path)?.write_all(page.as_bytes())?;
     println!("{}", path.display());
     Ok(())
 }

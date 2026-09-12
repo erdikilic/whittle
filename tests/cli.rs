@@ -713,3 +713,82 @@ fn gz_output_roundtrips() {
     gz.read_to_string(&mut s).unwrap();
     assert_eq!(s, "@r1\nACGT\n+\nIIII\n");
 }
+
+#[test]
+fn forced_in_format_is_checked_against_the_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("reads.fastq");
+    std::fs::write(&input, READS).unwrap();
+    for (forced, detected) in [("fastq-bgz", "FASTQ"), ("bam", "FASTQ"), ("fastq-gz", "FASTQ")] {
+        whittle()
+            .args(["-i", input.to_str().unwrap(), "--in-format", forced, "--quiet"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(format!("but the input is {detected}")))
+            .stderr(predicates::str::contains("pass --in-format fastq"));
+    }
+    // A matching forced format and an empty input both run.
+    whittle()
+        .args(["-i", input.to_str().unwrap(), "--in-format", "fastq", "--quiet"])
+        .assert()
+        .success()
+        .stdout(READS);
+    let empty = dir.path().join("empty.fastq");
+    std::fs::write(&empty, "").unwrap();
+    whittle()
+        .args(["-i", empty.to_str().unwrap(), "--in-format", "fastq", "--quiet"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn unknown_output_extension_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.fasta");
+    whittle()
+        .args(["-o", out.to_str().unwrap(), "--in-format", "fastq", "-l", "5"])
+        .write_stdin(READS)
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "extension .fasta names no supported format; writing FASTQ",
+        ));
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), READS);
+}
+
+#[test]
+fn fastq_to_bam_is_rejected_before_the_run() {
+    whittle()
+        .args(["-i", "reads.fastq", "-o", "out.bam"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "FASTQ-to-BAM conversion is not supported",
+        ))
+        .stderr(predicates::str::contains("Input:").not());
+}
+
+#[test]
+fn update_moves_requires_bam_input() {
+    whittle()
+        .args(["-i", "reads.fastq", "--update-moves"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "--update-moves rewrites the ONT signal tags of BAM records and requires BAM input",
+        ));
+}
+
+#[test]
+fn zero_threads_names_the_floor() {
+    whittle()
+        .args(["-t", "0", "--in-format", "fastq"])
+        .write_stdin(READS)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("must be at least 1"))
+        .stderr(predicates::str::contains("18446744073709551615").not());
+}

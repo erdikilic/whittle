@@ -207,7 +207,7 @@ pub fn writer(
 /// accepted range.
 pub(crate) fn compression_level(level: u8) -> anyhow::Result<bgzf::io::writer::CompressionLevel> {
     bgzf::io::writer::CompressionLevel::new(level)
-        .ok_or_else(|| anyhow::anyhow!("invalid bgzf compression level {level} (expected 0-12)"))
+        .ok_or_else(|| anyhow::anyhow!("invalid BGZF compression level {level} (expected 0-9)"))
 }
 
 /// Encodes `records` under `header` into BGZF blocks at `level`: the bytes of

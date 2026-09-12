@@ -365,8 +365,10 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// The command line's defaults: stdin to stdout, no trimming or filtering,
-    /// one thread, every tag, compression level 6, progress `auto`.
+    /// The library defaults: stdin to stdout, no trimming or filtering, one
+    /// thread, every tag, compression level 6, progress `auto`. `cli::parse`
+    /// overrides the thread count with the CPU count and the level with 4 for
+    /// `.gz` output.
     fn default() -> Self {
         Config {
             io: IoConfig::default(),
