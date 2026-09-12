@@ -1907,8 +1907,9 @@ fn render_bam_fastq_read(
 /// trims, filters each produced segment, then writes each surviving segment as
 /// FASTQ with the selected aux tags in the header (MM/ML/MN reconstructed,
 /// per-base arrays sliced, other tags copied).
-fn run_bam_to_fastq_seq<W: Write>(
-    records: impl Iterator<Item = anyhow::Result<bam::Record>>,
+fn run_records_to_fastq_seq<R, W: Write>(
+    records: impl Iterator<Item = anyhow::Result<R>>,
+    decode: impl Fn(R) -> anyhow::Result<RecordBuf>,
     writer: &mut W,
     cfg: &Config,
     counters: &Arc<Counters>,
@@ -1917,7 +1918,7 @@ fn run_bam_to_fastq_seq<W: Write>(
     // the buffer keeps its capacity across records.
     let mut buf: Vec<u8> = Vec::new();
     for rec in records {
-        let rec = decode_raw_record(&rec?)?;
+        let rec = decode(rec?)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
@@ -1927,32 +1928,40 @@ fn run_bam_to_fastq_seq<W: Write>(
     Ok(counters.snapshot())
 }
 
-/// Runs the uBAM-to-FASTQ workflow: decodes, refuses aligned reads, trims,
-/// filters, then writes each surviving segment as FASTQ with the selected aux
-/// tags in the header (MM/ML/MN reconstructed, per-base arrays sliced, other
-/// tags copied). Sequential for `cfg.threads <= 1`; otherwise renders on a
-/// rayon pool and drains through `run_bam_parallel`'s bounded channel, in
-/// input order under `cfg.ordered` and in completion order otherwise.
-pub(crate) fn run_bam_to_fastq<W: BatchSink>(
-    records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
+/// Runs the record-to-FASTQ workflow over any source that decodes to
+/// `RecordBuf`: refuses aligned reads, trims, filters, then writes each
+/// surviving segment as FASTQ with the selected aux tags in the header (MM/ML/MN
+/// reconstructed, per-base arrays sliced, other tags copied). `weight` is a
+/// record's sequence length for batching and the input counters, and `decode`
+/// runs on the render worker. Sequential for `cfg.threads <= 1`; otherwise
+/// renders on a rayon pool and drains through the bounded channel, in input
+/// order under `cfg.ordered` and in completion order otherwise.
+fn run_records_to_fastq<R, W>(
+    records: impl Iterator<Item = anyhow::Result<R>> + Send,
+    weight: impl Fn(&R) -> usize + Sync,
+    decode: impl Fn(R) -> anyhow::Result<RecordBuf> + Sync,
     writer: &mut W,
     cfg: &Config,
     counters: &Arc<Counters>,
-) -> anyhow::Result<Stats> {
+) -> anyhow::Result<Stats>
+where
+    R: Send,
+    W: BatchSink,
+{
     if cfg.threads <= 1 {
-        return run_bam_to_fastq_seq(records, writer, cfg, counters);
+        return run_records_to_fastq_seq(records, decode, writer, cfg, counters);
     }
     run_bytes_parallel(
         records,
         BAM_BATCH,
-        |record: &bam::Record| record.sequence().len(),
+        weight,
         cfg,
         writer,
         // Render: the survivors of one record, as `Vec<Vec<u8>>` of rendered
         // FASTQ segments. Each segment's buffer is taken as an item, so the
         // next segment renders into a fresh one.
         |rec, cfg| {
-            let rec = decode_raw_record(&rec)?;
+            let rec = decode(rec)?;
             let mut items = Vec::new();
             let mut buf = Vec::new();
             render_bam_fastq_read(&rec, cfg, counters, &mut buf, |buf| {
@@ -1961,6 +1970,42 @@ pub(crate) fn run_bam_to_fastq<W: BatchSink>(
             })?;
             Ok(items)
         },
+        counters,
+    )
+}
+
+/// Runs the uBAM-to-FASTQ workflow (see `run_records_to_fastq`).
+pub(crate) fn run_bam_to_fastq<W: BatchSink>(
+    records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
+    writer: &mut W,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<Stats> {
+    run_records_to_fastq(
+        records,
+        |record: &bam::Record| record.sequence().len(),
+        |record| decode_raw_record(&record).map_err(anyhow::Error::from),
+        writer,
+        cfg,
+        counters,
+    )
+}
+
+/// Runs the tagged-FASTQ workflow: each read's header aux fields are decoded
+/// into a `RecordBuf` (`io::tagged`) and the read takes the same path as a
+/// uBAM record, so its tags are rewritten per output segment.
+pub(crate) fn run_tagged_fastq<W: BatchSink>(
+    records: impl Iterator<Item = anyhow::Result<crate::record::ReadRecord>> + Send,
+    writer: &mut W,
+    cfg: &Config,
+    counters: &Arc<Counters>,
+) -> anyhow::Result<Stats> {
+    run_records_to_fastq(
+        records,
+        |record: &crate::record::ReadRecord| record.seq.len(),
+        crate::io::tagged::record_from_tagged,
+        writer,
+        cfg,
         counters,
     )
 }

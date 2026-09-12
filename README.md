@@ -22,6 +22,7 @@ whittle filters, trims, and splits Oxford Nanopore and PacBio reads in FASTQ, co
 - **Kinetics and signal tags.** Per-base arrays (`ip`, `pw`, and related) are sliced with the sequence. ONT signal tags (`mv`, `ts`, `ns`, and related) are removed by default or rewritten with `--update-moves`.
 - **Adapter and primer trimming.** Terminal adapters, adapters truncated by the read end, and interior adapters (chimera splitting with junction cleanup). Sequences come from built-in kit presets (ONT kit 14 ligation, rapid, barcoding, cDNA, and amplicon kits; RNA004; PacBio SMRTbell), a user FASTA with IUPAC codes, or ab-initio discovery. Presence detection restricts a preset to the sequences a library carries.
 - **Quality trimming.** End trimming to a threshold, best-segment extraction, or splitting at low-quality runs. Every segment is filtered on its own.
+- **Tagged FASTQ.** FASTQ whose headers carry SAM aux tags (`samtools fastq -T MM,ML,MN`) is trimmed with the same tag rewriting as uBAM: `MM`/`ML`/`MN` are rebuilt and per-base arrays sliced for every output segment.
 - **Formats.** FASTQ, gzip and BGZF FASTQ, and unaligned BAM as input; the same, plus BAM-to-FASTQ, as output. Formats are detected from the path or the stream, including on stdin. A directory of files is merged in one run.
 - **Pipeline integration.** `--summary-json` writes the resolved settings and all counters as JSON. `--ordered` keeps the input order under multithreading. Malformed tags are counted and reported rather than fatal.
 - **Performance.** Multithreaded trimming, encoding, and decoding; `-t N` uses about N cores. Adapter search is SIMD bit-parallel ([sassy](https://github.com/RagnarGrootKoerkamp/sassy)). BAM and BGZF I/O use `noodles` with `libdeflate`. No `htslib` is required at build or run time.
@@ -62,6 +63,12 @@ Trim unaligned BAM, split at low-quality runs, and rewrite the modification tags
 
 ```bash
 whittle -i reads.bam -o trimmed.bam -H 10 -T 10 -l 1000 --qual-split 9 --qual-split-window 50
+```
+
+Trim FASTQ exported with its tags; the tags are rewritten the same way.
+
+```bash
+samtools fastq -T MM,ML,MN reads.bam | whittle -o trimmed.fastq.gz -H 10 -T 10 --qual-trim 10
 ```
 
 Trim adapters with a kit preset. Interior adapters split the read.

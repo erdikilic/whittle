@@ -152,14 +152,14 @@ Tolerate low\-quality runs shorter than this many bases when splitting. Requires
 Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp and pi) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM\-to\-BAM only
 .TP
 \fB\-\-trim\-barcodes\fR
-Remove the barcode spans dorado recorded in the bi aux tag, before every other trimming stage. BAM input only
+Remove the barcode spans dorado recorded in the bi aux tag, before every other trimming stage. BAM or tagged FASTQ input
 .SH TAGS
 .TP
 \fB\-\-remove\-tag\fR \fI<TAG>\fR
-Remove this two\-character aux tag from every output record. Repeatable. BAM input only
+Remove this two\-character aux tag from every output record. Repeatable. BAM or tagged FASTQ input
 .TP
 \fB\-\-strip\-kinetics\fR
-Remove the per\-base kinetics and alignment\-count arrays (ip pw fi fp ri rp sa sm sx). BAM input only
+Remove the per\-base kinetics and alignment\-count arrays (ip pw fi fp ri rp sa sm sx). BAM or tagged FASTQ input
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<ADAPTER_FASTA>\fR

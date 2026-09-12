@@ -4,6 +4,7 @@ pub mod bam;
 pub mod counting;
 pub mod dir;
 pub mod fastq;
+pub mod tagged;
 
 use std::io::Read;
 use std::path::Path;

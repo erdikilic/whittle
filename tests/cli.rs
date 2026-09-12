@@ -719,24 +719,48 @@ fn forced_in_format_is_checked_against_the_stream() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("reads.fastq");
     std::fs::write(&input, READS).unwrap();
-    for (forced, detected) in [("fastq-bgz", "FASTQ"), ("bam", "FASTQ"), ("fastq-gz", "FASTQ")] {
+    for (forced, detected) in [
+        ("fastq-bgz", "FASTQ"),
+        ("bam", "FASTQ"),
+        ("fastq-gz", "FASTQ"),
+    ] {
         whittle()
-            .args(["-i", input.to_str().unwrap(), "--in-format", forced, "--quiet"])
+            .args([
+                "-i",
+                input.to_str().unwrap(),
+                "--in-format",
+                forced,
+                "--quiet",
+            ])
             .assert()
             .failure()
-            .stderr(predicates::str::contains(format!("but the input is {detected}")))
+            .stderr(predicates::str::contains(format!(
+                "but the input is {detected}"
+            )))
             .stderr(predicates::str::contains("pass --in-format fastq"));
     }
     // A matching forced format and an empty input both run.
     whittle()
-        .args(["-i", input.to_str().unwrap(), "--in-format", "fastq", "--quiet"])
+        .args([
+            "-i",
+            input.to_str().unwrap(),
+            "--in-format",
+            "fastq",
+            "--quiet",
+        ])
         .assert()
         .success()
         .stdout(READS);
     let empty = dir.path().join("empty.fastq");
     std::fs::write(&empty, "").unwrap();
     whittle()
-        .args(["-i", empty.to_str().unwrap(), "--in-format", "fastq", "--quiet"])
+        .args([
+            "-i",
+            empty.to_str().unwrap(),
+            "--in-format",
+            "fastq",
+            "--quiet",
+        ])
         .assert()
         .success()
         .stdout("");
@@ -747,7 +771,14 @@ fn unknown_output_extension_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.fasta");
     whittle()
-        .args(["-o", out.to_str().unwrap(), "--in-format", "fastq", "-l", "5"])
+        .args([
+            "-o",
+            out.to_str().unwrap(),
+            "--in-format",
+            "fastq",
+            "-l",
+            "5",
+        ])
         .write_stdin(READS)
         .assert()
         .success()

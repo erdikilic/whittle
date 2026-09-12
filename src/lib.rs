@@ -325,6 +325,27 @@ fn detect_format(
     ))
 }
 
+/// Reads inspected for SAM aux fields before a FASTQ input is classified as
+/// tagged. A read without modification calls carries no tags under
+/// `samtools fastq -T MM,ML`, so the first header alone does not decide.
+const TAGGED_PROBE_READS: usize = 100;
+
+/// Buffers the first `n` records and reports whether any header carries SAM
+/// aux fields; the buffered records are chained back in front of the rest.
+fn detect_tagged(
+    mut records: Box<dyn Iterator<Item = anyhow::Result<record::ReadRecord>> + Send>,
+    n: usize,
+) -> (
+    bool,
+    Box<dyn Iterator<Item = anyhow::Result<record::ReadRecord>> + Send>,
+) {
+    let head: Vec<_> = records.by_ref().take(n).collect();
+    let tagged = head
+        .iter()
+        .any(|r| r.as_ref().is_ok_and(|r| io::tagged::has_aux_tags(&r.name)));
+    (tagged, Box::new(head.into_iter().chain(records)))
+}
+
 /// Returns the thread budget of a run: the render pool takes the whole `-t`
 /// budget, and BGZF input adds decode workers ahead of it.
 fn plan_budget(cfg: &Config, bgzf_input: bool) -> config::ThreadBudget {
@@ -443,8 +464,18 @@ impl Session {
                 anyhow::bail!("FASTQ-to-BAM conversion is not supported")
             },
             (Format::Fastq | Format::FastqGz | Format::FastqBgzf, _) => {
-                note_tags_ignored(cfg, in_fmt, out_fmt);
-                let records = self.fastq_reader(source, in_fmt)?;
+                // The leading headers decide between the plain path and the
+                // tagged path, which rewrites header aux tags per segment.
+                let (tagged, records) =
+                    detect_tagged(self.fastq_reader(source, in_fmt)?, TAGGED_PROBE_READS);
+                guards::guard_tag_flags(cfg, in_fmt, tagged)?;
+                if tagged {
+                    tracing::info!(
+                        "FASTQ headers carry SAM aux tags; tags are rewritten per segment"
+                    );
+                } else {
+                    note_tags_ignored(cfg, in_fmt, out_fmt);
+                }
                 let Some(records) = settle(records, cfg, self.budget, |r| {
                     Cow::Borrowed(r.seq.as_slice())
                 })?
@@ -452,7 +483,11 @@ impl Session {
                     return Ok(());
                 };
                 let mut writer = io::fastq::writer(cfg, out_fmt, cfg.threads > 1)?;
-                let stats = workflow::run_fastq(records, &mut writer, cfg, &self.counters)?;
+                let stats = if tagged {
+                    workflow::run_tagged_fastq(records, &mut writer, cfg, &self.counters)?
+                } else {
+                    workflow::run_fastq(records, &mut writer, cfg, &self.counters)?
+                };
                 writer.finish()?;
                 self.finish(obs, &stats, cfg)
             },

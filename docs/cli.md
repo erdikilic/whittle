@@ -26,6 +26,15 @@ in the `samtools fastq -T` convention. `--fastq-tags` selects them: `all`
 the trimmed segment, per-base arrays are sliced, and the remaining tags are
 copied verbatim.
 
+FASTQ input in the same convention (a tab after the read name, then
+`TAG:TYPE:VALUE` fields) is tagged FASTQ. Any such field among the first 100
+headers puts the whole input on the BAM-to-FASTQ path: every read's fields are
+decoded as SAM aux tags and rewritten per output segment exactly as a uBAM
+record's are ([tags.md](tags.md)), `--fastq-tags` selects the output tags, and
+`--trim-barcodes`, `--remove-tag` and `--strip-kinetics` apply. A field that
+does not parse as a SAM tag fails the run and names the read. A header whose
+tab-delimited text is not in this form is copied verbatim.
+
 ### Threads
 
 `-t`/`--threads` sets the worker count (default: every detected CPU). Trimming,
@@ -74,10 +83,10 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --qual-trim 10
 | `--qual-best-segment <Q>` | Keep only the longest contiguous run of quality at least Q |
 | `--qual-split <Q>` | Split at runs of quality below Q and keep each surviving segment |
 | `--qual-split-window <N>` | Tolerate low-quality runs shorter than N without splitting (default 1); requires `--qual-split` |
-| `--trim-barcodes` | Remove the barcode spans recorded in the `bi` aux tag, before every other stage (BAM input) |
+| `--trim-barcodes` | Remove the barcode spans recorded in the `bi` aux tag, before every other stage (BAM or tagged FASTQ input) |
 | `--update-moves` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM) |
-| `--remove-tag <TAG>` | Remove a two-character aux tag from every output record; repeatable (BAM input) |
-| `--strip-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM input) |
+| `--remove-tag <TAG>` | Remove a two-character aux tag from every output record; repeatable (BAM or tagged FASTQ input) |
+| `--strip-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM or tagged FASTQ input) |
 | `-a, --adapter-fasta <FILE>` | Adapter and primer FASTA (IUPAC codes accepted; `primer` or `barcode` in a header description restricts the entry to the read ends); enables adapter trimming |
 | `--adapter-preset <KITS>` | Built-in kit presets, comma-separated: `lsk114`, `rad114` (`ulk114`), `rbk114`, `nbd114`, `pcb114` (`pcs114`), `rpb114`, `mab114`, `rna004`, `pacbio`, `ont`, `all`; enables adapter trimming |
 | `--adapter-error-rate <F>` | End-match tolerance as a fraction of adapter length (default 0.2); requires an adapter source |

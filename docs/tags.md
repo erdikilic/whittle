@@ -3,7 +3,9 @@
 Long-read records carry auxiliary tags that are indexed by base position.
 Trimming the sequence without rewriting them leaves them referring to bases
 that no longer exist. whittle rewrites every such tag on BAM-to-BAM and
-BAM-to-FASTQ output.
+BAM-to-FASTQ output, and on FASTQ input whose headers carry the tags in the
+`samtools fastq -T` convention (tagged FASTQ, [cli.md](cli.md#input-and-output)),
+which takes the BAM-to-FASTQ path.
 
 ## Base-modification tags
 

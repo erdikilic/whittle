@@ -47,37 +47,46 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
     Ok(())
 }
 
-/// Rejects the BAM-only flags on any input format other than BAM.
-///
-/// `--trim-barcodes` reads the `bi` aux tag, `--remove-tag` and
-/// `--strip-kinetics` name BAM auxiliary tags, and `--update-moves` rewrites
-/// the signal tags; only a BAM record carries them, so on FASTQ the flags would
-/// be accepted and silently do nothing. `cli::parse`
-/// applies this to the format an explicit `--in-format` or a known extension
-/// names, and `run` applies it again once detection has classified a stream.
+/// Rejects `--update-moves` on any input format other than BAM: the ONT
+/// signal tags are rewritten only on BAM-to-BAM output, so elsewhere the flag
+/// would be accepted and silently do nothing. `cli::parse` applies this to the
+/// format an explicit `--in-format` or a known extension names, and `run`
+/// applies it again once detection has classified a stream.
 pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::Result<()> {
-    if in_fmt == io::Format::Bam {
-        return Ok(());
-    }
-    if cfg.trim_barcodes {
-        anyhow::bail!(
-            "--trim-barcodes reads barcode spans from the BAM `bi` aux tag and requires BAM \
-             input (got {})",
-            in_fmt.label()
-        );
-    }
-    if !cfg.remove_tags.is_empty() {
-        anyhow::bail!(
-            "{} removes BAM auxiliary tags and requires BAM input (got {})",
-            cfg.remove_tags.flags(),
-            in_fmt.label()
-        );
-    }
-    if cfg.update_moves {
+    if in_fmt != io::Format::Bam && cfg.update_moves {
         anyhow::bail!(
             "--update-moves rewrites the ONT signal tags of BAM records and requires BAM input \
              (got {})",
             in_fmt.label()
+        );
+    }
+    Ok(())
+}
+
+/// Rejects the flags that read or remove aux tags when the input carries none:
+/// `--trim-barcodes` reads the `bi` tag, `--remove-tag` and `--strip-kinetics`
+/// name tags. BAM records and tagged FASTQ headers carry tags; a plain FASTQ
+/// does not, so there the flags would be accepted and silently do nothing.
+/// `run` applies this once the first FASTQ header has been inspected.
+pub(crate) fn guard_tag_flags(
+    cfg: &Config,
+    in_fmt: io::Format,
+    tagged: bool,
+) -> anyhow::Result<()> {
+    if in_fmt == io::Format::Bam || tagged {
+        return Ok(());
+    }
+    let got = format!("{} without header tags", in_fmt.label());
+    if cfg.trim_barcodes {
+        anyhow::bail!(
+            "--trim-barcodes reads barcode spans from the `bi` aux tag and requires BAM or tagged \
+             FASTQ input (got {got})"
+        );
+    }
+    if !cfg.remove_tags.is_empty() {
+        anyhow::bail!(
+            "{} removes aux tags and requires BAM or tagged FASTQ input (got {got})",
+            cfg.remove_tags.flags()
         );
     }
     Ok(())

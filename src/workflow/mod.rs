@@ -12,6 +12,7 @@ use rayon::prelude::*;
 
 pub(crate) use bam::run_bam_to_fastq;
 pub use bam::run_raw_bam;
+pub(crate) use bam::run_tagged_fastq;
 pub(crate) use fastq::run_fastq;
 
 use crate::config::Config;

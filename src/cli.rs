@@ -144,16 +144,16 @@ struct Cli {
     #[arg(long, help_heading = "Trimming")]
     update_moves: bool,
     /// Remove the barcode spans dorado recorded in the bi aux tag, before every
-    /// other trimming stage. BAM input only.
+    /// other trimming stage. BAM or tagged FASTQ input.
     #[arg(long, help_heading = "Trimming")]
     trim_barcodes: bool,
 
     /// Remove this two-character aux tag from every output record. Repeatable.
-    /// BAM input only.
+    /// BAM or tagged FASTQ input.
     #[arg(long, value_name = "TAG", help_heading = "Tags")]
     remove_tag: Vec<String>,
     /// Remove the per-base kinetics and alignment-count arrays (ip pw fi fp ri
-    /// rp sa sm sx). BAM input only.
+    /// rp sa sm sx). BAM or tagged FASTQ input.
     #[arg(long, help_heading = "Tags")]
     strip_kinetics: bool,
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Tagged FASTQ input. A FASTQ whose headers carry SAM aux tags in the
+  `samtools fastq -T` convention is trimmed on the BAM-to-FASTQ path: `MM`,
+  `ML` and `MN` are rebuilt and per-base arrays sliced for every output
+  segment, `--fastq-tags` selects the output tags, and `--trim-barcodes`,
+  `--remove-tag` and `--strip-kinetics` apply. The first 100 headers decide;
+  a field that does not parse as a SAM tag fails the run and names the read.
+
+### Fixed
+- A forced `--in-format` that disagrees with the stream is an error before any
+  output is written; an output extension that names no format is reported;
+  FASTQ-to-BAM output and `--update-moves` on FASTQ input are rejected at parse
+  time; `--qual-split-window`, `--adapter-infer-policy` and `-t 0` errors name
+  the flag.
+
 ### Changed
 - Adapter trimming handles partial adapters, classifies hits by position, and
   cleans up chimeric junctions. A rear adapter cut short by the read end, or a
