@@ -580,7 +580,7 @@ fn commas(n: u64) -> String {
 }
 
 /// The end-of-run summary line: `Summary: 1 input reads, 3 output reads in
-/// 2.00s`. It carries no kept percentage, since `--qual-split` can turn one
+/// 2.00s`. It carries no kept percentage, since `--split-quality` can turn one
 /// input read into several segments and a read-count percentage would exceed
 /// 100%.
 fn summary_line(stats: &Stats, elapsed: Duration) -> String {
@@ -747,7 +747,7 @@ fn bar_message(input_reads: u64, output_reads: u64, bytes: u64, elapsed: Duratio
 
 /// Line-mode periodic progress log, emitted at INFO every `log_interval`: `Processed 1,200,000 input reads, 42%, 45k reads/s,
 /// 380 MB/s, ETA 00:00:40`. Fields, in order: full-precision input read count
-/// (reads consumed, not reads emitted, which differ under `--qual-split`),
+/// (reads consumed, not reads emitted, which differ under `--split-quality`),
 /// percent complete (if `total` bytes are known), reads/s, MB/s (if any bytes
 /// have been read), ETA (if `total` is known).
 fn periodic_line(input_reads: u64, bytes: u64, total: Option<u64>, elapsed: Duration) -> String {

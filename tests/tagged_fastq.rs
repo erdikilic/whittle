@@ -120,10 +120,17 @@ fn tagged_fastq_matches_the_bam_path_on_every_trim() {
     let (bam, tagged) = fixture(dir.path());
     for (i, args) in [
         vec!["-H", "3", "-T", "2"],
-        vec!["--qual-split", "36", "--qual-split-window", "1", "-l", "1"],
-        vec!["--qual-best-segment", "36"],
+        vec![
+            "--split-quality",
+            "36",
+            "--split-min-low-quality-bases",
+            "1",
+            "-l",
+            "1",
+        ],
+        vec!["--best-quality-segment", "36"],
         vec!["--trim-barcodes", "-H", "1"],
-        vec!["--strip-kinetics", "--remove-tag", "RG", "-T", "5"],
+        vec!["--remove-kinetics", "--remove-tag", "RG", "-T", "5"],
         vec!["--fastq-tags", "MM,ML,MN", "-H", "2"],
         vec!["--fastq-tags", "none", "-H", "2"],
     ]
@@ -162,7 +169,7 @@ fn tagged_fastq_over_stdin_and_gzip() {
     let expected = run(&["-H", "3"], &tagged, dir.path(), "file.fastq");
     let text = std::fs::read(&tagged).unwrap();
     whittle()
-        .args(["-H", "3", "--in-format", "fastq", "--quiet"])
+        .args(["-H", "3", "--input-format", "fastq", "--quiet"])
         .write_stdin(text.clone())
         .assert()
         .success()
@@ -189,8 +196,8 @@ fn tag_flags_need_tags_in_the_input() {
         ),
         (vec!["--remove-tag", "RG"], "--remove-tag removes aux tags"),
         (
-            vec!["--strip-kinetics"],
-            "--strip-kinetics removes aux tags",
+            vec!["--remove-kinetics"],
+            "--remove-kinetics removes aux tags",
         ),
     ] {
         whittle()

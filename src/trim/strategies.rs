@@ -24,9 +24,9 @@ pub fn trim_by_quality(phred: &[u8], cutoff: u8) -> Segments {
     }
 }
 
-/// Returns the single segment with the lowest cumulative error probability
-/// (modified Mott). `cutoff_q` is converted to a probability cutoff before
-/// scanning.
+/// Returns the segment maximizing the cumulative difference between the
+/// cutoff error probability and each base's error probability (modified Mott).
+/// Equal scores favor the longer segment. Bases below `cutoff_q` can be retained.
 pub fn best_segment(phred: &[u8], cutoff_q: u8) -> Segments {
     let cutoff = phred_to_prob(cutoff_q);
     let mut best_start = usize::MAX;

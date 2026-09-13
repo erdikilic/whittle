@@ -24,7 +24,10 @@ fn main() -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
         .replace("\nv0.", "\n0.")
         .replace("\nv1.", "\n1.");
-    std::fs::File::create(&path)?.write_all(page.as_bytes())?;
+    let mut file = std::fs::File::create(&path)?;
+    for line in page.lines() {
+        writeln!(file, "{}", line.trim_end())?;
+    }
     println!("{}", path.display());
     Ok(())
 }

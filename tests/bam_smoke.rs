@@ -58,11 +58,11 @@ fn bam_to_bam_end_to_end() {
         .unwrap()
         .env_remove("WHITTLE_LOG")
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "bam",
-            "--head-crop",
+            "--trim-front",
             "2",
             "-i",
         ])
@@ -96,7 +96,7 @@ fn bam_to_bam_end_to_end() {
     assert_eq!(
         out_records.len(),
         2,
-        "Both reads survive --head-crop 2 (lengths 10 and 8, above min-length)"
+        "Both reads survive --trim-front 2 (lengths 10 and 8, above min-length)"
     );
 
     // The BAM workflow emits records unordered at `threads > 1`, so records are
@@ -199,13 +199,13 @@ fn bam_to_bam_slices_pacbio_kinetics() {
         .unwrap()
         .env_remove("WHITTLE_LOG")
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "bam",
-            "--head-crop",
+            "--trim-front",
             "3",
-            "--tail-crop",
+            "--trim-tail",
             "2",
             "-i",
         ])
@@ -238,7 +238,7 @@ fn bam_to_bam_slices_pacbio_kinetics() {
     assert_eq!(pw, vec![103, 104, 105, 106, 107], "pw must be sliced too");
 }
 
-/// `--update-moves` slices the ONT `mv` move table and advances `ts` through
+/// `--update-signal-tags` slices the ONT `mv` move table and advances `ts` through
 /// the compiled binary, so a trimmed read stays signal-mappable for Remora and
 /// Clair3 v2 instead of dropping the move table.
 #[test]
@@ -269,12 +269,12 @@ fn bam_update_moves_slices_move_table() {
         .unwrap()
         .env_remove("WHITTLE_LOG")
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "bam",
-            "--update-moves",
-            "--head-crop",
+            "--update-signal-tags",
+            "--trim-front",
             "2",
             "-t",
             "1",
@@ -328,8 +328,8 @@ fn bam_on_stdin_without_in_format_is_detected() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        // No --in-format: detection must come from the piped bytes alone.
-        .args(["--out-format", "fastq", "-o"])
+        // No --input-format: detection must come from the piped bytes alone.
+        .args(["--output-format", "fastq", "-o"])
         .arg(&out_path)
         .write_stdin(bam_bytes)
         .assert()
@@ -413,7 +413,7 @@ fn read_one(path: &std::path::Path) -> RecordBuf {
 
 /// `--trim-barcodes` removes the spans `bi` records through the same machinery
 /// as a fixed crop, so the modification calls and the per-base kinetics land on
-/// exactly the bases an equivalent `--head-crop`/`--tail-crop` run leaves. `bi`
+/// exactly the bases an equivalent `--trim-front`/`--trim-tail` run leaves. `bi`
 /// itself goes, since its positions index the untrimmed read; the barcode call
 /// (`BC`, `bv`) is a per-read label and stays.
 #[test]
@@ -441,7 +441,7 @@ fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["--head-crop", "5", "--tail-crop", "5", "-t", "1", "-i"])
+        .args(["--trim-front", "5", "--trim-tail", "5", "-t", "1", "-i"])
         .arg(&plain)
         .arg("-o")
         .arg(&by_crop)
@@ -503,7 +503,7 @@ fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
     );
 }
 
-/// `--head-crop` counts from the first base after the front barcode, since the
+/// `--trim-front` counts from the first base after the front barcode, since the
 /// barcode stage is the outermost one, and the JSON summary records the
 /// resulting base counts.
 #[test]
@@ -517,7 +517,7 @@ fn trim_barcodes_runs_before_the_crop_and_updates_json_counts() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["--trim-barcodes", "--head-crop", "2", "-t", "1", "-i"])
+        .args(["--trim-barcodes", "--trim-front", "2", "-t", "1", "-i"])
         .arg(&in_path)
         .arg("-o")
         .arg(&out_path)
@@ -609,7 +609,7 @@ fn trim_barcodes_is_rejected_on_fastq_input() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["--trim-barcodes", "--out-format", "fastq", "-o"])
+        .args(["--trim-barcodes", "--output-format", "fastq", "-o"])
         .arg(dir.path().join("out2.fastq"))
         .write_stdin("@r1\nACGTACGTAC\n+\nIIIIIIIIII\n")
         .assert()
@@ -617,7 +617,7 @@ fn trim_barcodes_is_rejected_on_fastq_input() {
         .stderr(predicates::str::contains("--trim-barcodes"));
 }
 
-/// The nine per-base arrays `--strip-kinetics` removes.
+/// The nine per-base arrays `--remove-kinetics` removes.
 const KINETICS_TAGS: [[u8; 2]; 9] = [
     *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sm", *b"sx", *b"sa",
 ];
@@ -695,7 +695,7 @@ fn remove_tag_drops_rewritten_and_copied_tags_on_bam_output() {
         dir.path(),
         "trimmed.bam",
         &[
-            "--head-crop",
+            "--trim-front",
             "2",
             "--remove-tag",
             "MM",
@@ -783,12 +783,12 @@ fn remove_tag_drops_tags_from_the_fastq_header() {
     assert!(header.contains("ip:B:C,0,1,2,3,4,5,6,7"), "{header}");
 }
 
-/// `--strip-kinetics` removes all nine per-base arrays and leaves every other
+/// `--remove-kinetics` removes all nine per-base arrays and leaves every other
 /// tag alone.
 #[test]
 fn strip_kinetics_removes_the_nine_per_base_arrays() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run_with_tag_fixture(dir.path(), "stripped.bam", &["--strip-kinetics"]);
+    let out = run_with_tag_fixture(dir.path(), "stripped.bam", &["--remove-kinetics"]);
 
     for tag in KINETICS_TAGS {
         assert!(
@@ -812,7 +812,7 @@ fn remove_tag_flags_are_rejected_on_fastq_input() {
 
     for (args, flag) in [
         (vec!["--remove-tag", "RG"], "--remove-tag"),
-        (vec!["--strip-kinetics"], "--strip-kinetics"),
+        (vec!["--remove-kinetics"], "--remove-kinetics"),
     ] {
         Command::cargo_bin("whittle")
             .unwrap()
@@ -832,7 +832,7 @@ fn remove_tag_flags_are_rejected_on_fastq_input() {
             .unwrap()
             .env_remove("WHITTLE_LOG")
             .args(&args)
-            .args(["--out-format", "fastq", "-o"])
+            .args(["--output-format", "fastq", "-o"])
             .arg(dir.path().join("out2.fastq"))
             .write_stdin("@r1\nACGTACGTAC\n+\nIIIIIIIIII\n")
             .assert()

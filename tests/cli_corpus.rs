@@ -71,24 +71,24 @@ enum AdapterCase {
 enum QualityOp {
     /// No quality trimming.
     None,
-    /// `--qual-trim` at the cutoff.
+    /// `--trim-quality` at the cutoff.
     Trim(u8),
-    /// `--qual-split` at the cutoff with the window.
+    /// `--split-quality` at the cutoff with the window.
     Split { cutoff: u8, window: usize },
 }
 
 /// The run settings the expected-output model reproduces.
 #[derive(Debug, Clone, Copy)]
 struct ExpectCfg {
-    /// `--head-crop`.
+    /// `--trim-front`.
     head: usize,
-    /// `--tail-crop`.
+    /// `--trim-tail`.
     tail: usize,
     /// `--min-length`.
     min_len: usize,
     /// `--max-length`, or `usize::MAX`.
     max_len: usize,
-    /// `--min-qual`.
+    /// `--min-quality`.
     min_qual: f64,
     /// `--min-gc`.
     min_gc: Option<f64>,
@@ -361,7 +361,7 @@ fn write_bam(path: &Path, reads: &[SourceRead]) {
     writer.try_finish().unwrap();
 }
 
-/// The `--qual-trim` model: the window left after trimming both ends below
+/// The `--trim-quality` model: the window left after trimming both ends below
 /// `cutoff`, or nothing.
 fn trim_edge(qual: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     let mut start = 0usize;
@@ -379,7 +379,7 @@ fn trim_edge(qual: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     }
 }
 
-/// The `--qual-split` model: segments separated by low-quality runs of at least
+/// The `--split-quality` model: segments separated by low-quality runs of at least
 /// `window` bases.
 fn split_low_quality(qual: &[u8], cutoff: u8, window: usize) -> Vec<(usize, usize)> {
     let window = window.max(1);
@@ -614,7 +614,7 @@ fn expected_fastq_from_bam_with_tags(reads: &[SourceRead], cfg: ExpectCfg) -> Ve
 }
 
 /// The sorted BAM output expected for `reads` under `cfg`, with or without
-/// `--update-moves`.
+/// `--update-signal-tags`.
 fn expected_bam(reads: &[SourceRead], cfg: ExpectCfg, update_moves: bool) -> Vec<BamRecord> {
     let mut out = Vec::new();
     for read in reads {
@@ -799,7 +799,7 @@ fn fixed_crop_filter_cfg() -> ExpectCfg {
     }
 }
 
-/// `--qual-trim 20 -l 50`.
+/// `--trim-quality 20 -l 50`.
 fn qual_trim_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 0,
@@ -814,7 +814,7 @@ fn qual_trim_cfg() -> ExpectCfg {
     }
 }
 
-/// `--qual-split 20 --qual-split-window 3 -l 20`.
+/// `--split-quality 20 --split-min-low-quality-bases 3 -l 20`.
 fn qual_split_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 0,
@@ -919,7 +919,7 @@ fn fastq_gz_corpus_quality_trim_matches_expected() {
         .arg(&fastq_gz)
         .arg("-o")
         .arg(&out)
-        .args(["--qual-trim", "20", "-l", "50", "-t", "4", "--quiet"])
+        .args(["--trim-quality", "20", "-l", "50", "-t", "4", "--quiet"])
         .assert()
         .success();
 
@@ -942,9 +942,9 @@ fn fastq_gz_corpus_quality_split_matches_expected() {
         .arg("-o")
         .arg(&out)
         .args([
-            "--qual-split",
+            "--split-quality",
             "20",
-            "--qual-split-window",
+            "--split-min-low-quality-bases",
             "3",
             "-l",
             "20",
@@ -979,7 +979,7 @@ fn fastq_gz_corpus_adapter_trim_and_split_matches_expected() {
         .args([
             "--adapter-error-rate",
             "0",
-            "--adapter-end-size",
+            "--adapter-end-search",
             "20",
             "-l",
             "20",
@@ -1011,9 +1011,9 @@ fn bam_corpus_fixed_crop_filter_matches_expected() {
         .arg("-o")
         .arg(&out)
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "bam",
             "-H",
             "5",
@@ -1058,13 +1058,13 @@ fn bam_corpus_adapter_trim_and_split_matches_expected() {
         .arg("--adapter-fasta")
         .arg(&adapters)
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "bam",
             "--adapter-error-rate",
             "0",
-            "--adapter-end-size",
+            "--adapter-end-search",
             "20",
             "-l",
             "20",
@@ -1096,9 +1096,9 @@ fn bam_corpus_to_fastq_tags_match_expected() {
         .arg("-o")
         .arg(&out)
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "fastq",
             "-H",
             "5",
@@ -1132,11 +1132,11 @@ fn bam_corpus_update_moves_matches_expected() {
         .arg("-o")
         .arg(&out)
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "bam",
-            "--update-moves",
+            "--update-signal-tags",
             "-H",
             "5",
             "-T",

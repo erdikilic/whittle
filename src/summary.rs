@@ -60,11 +60,11 @@ struct Params {
     update_moves: bool,
     trim_barcodes: bool,
     ordered: bool,
-    /// Aux tags removed from every output record, sorted. `--strip-kinetics`
+    /// Aux tags removed from every output record, sorted. `--remove-kinetics`
     /// is folded into the same set, so the nine per-base arrays appear here
     /// when it was given.
     remove_tags: Vec<String>,
-    /// Whether `--strip-kinetics` was given, which `remove_tags` alone does not
+    /// Whether `--remove-kinetics` was given, which `remove_tags` alone does not
     /// distinguish from the same nine tags named one at a time.
     strip_kinetics: bool,
     /// `all`, `none`, or the comma-joined tag list.
@@ -111,7 +111,7 @@ struct AdapterParams {
 #[derive(Debug, Serialize)]
 struct Reads {
     input: u64,
-    /// Output segments written. A `--qual-split` read can contribute several,
+    /// Output segments written. A `--split-quality` read can contribute several,
     /// so this can exceed `input`.
     output: u64,
     /// Input reads that produced at least one surviving segment.
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(v["reads"]["with_output"], 92);
         assert_eq!(v["reads"]["trimmed_to_nothing"], 5);
         assert_eq!(v["reads"]["all_filtered"], 3);
-        // Output segments can exceed input reads under `--qual-split`.
+        // Output segments can exceed input reads under `--split-quality`.
         assert_eq!(v["reads"]["output"], 110);
     }
 

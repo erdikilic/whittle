@@ -83,7 +83,11 @@ fn bam_to_fastq_all_carries_rg_and_mods() {
     let out = dir.path().join("out.fastq");
     write_fixture(&inp);
 
-    run(&["--out-format", "fastq", "--head-crop", "2"], &inp, &out);
+    run(
+        &["--output-format", "fastq", "--trim-front", "2"],
+        &inp,
+        &out,
+    );
 
     let s = std::fs::read_to_string(&out).unwrap();
     // read1: plain, no tags.
@@ -104,9 +108,9 @@ fn bam_to_fastq_none_is_plain() {
 
     run(
         &[
-            "--out-format",
+            "--output-format",
             "fastq",
-            "--head-crop",
+            "--trim-front",
             "2",
             "--fastq-tags",
             "none",
@@ -129,9 +133,9 @@ fn bam_to_fastq_only_mm_ml_drops_rg() {
 
     run(
         &[
-            "--out-format",
+            "--output-format",
             "fastq",
-            "--head-crop",
+            "--trim-front",
             "2",
             "--fastq-tags",
             "MM,ML",
@@ -155,7 +159,14 @@ fn bam_to_fastq_gz_roundtrips() {
     write_fixture(&inp);
 
     run(
-        &["--out-format", "fastq-gz", "--head-crop", "2", "-t", "4"],
+        &[
+            "--output-format",
+            "fastq-gz",
+            "--trim-front",
+            "2",
+            "-t",
+            "4",
+        ],
         &inp,
         &out,
     );
@@ -181,8 +192,12 @@ fn cross_check_fastq_header_mods_equal_bam_path() {
     let ba = dir.path().join("out.bam");
     write_fixture(&inp);
 
-    run(&["--out-format", "fastq", "--head-crop", "2"], &inp, &fq);
-    run(&["--out-format", "bam", "--head-crop", "2"], &inp, &ba);
+    run(
+        &["--output-format", "fastq", "--trim-front", "2"],
+        &inp,
+        &fq,
+    );
+    run(&["--output-format", "bam", "--trim-front", "2"], &inp, &ba);
 
     // The MM/ML/MN block of the BAM output's read2.
     let mut reader = bam::io::Reader::new(std::fs::File::open(&ba).unwrap());
@@ -234,7 +249,11 @@ fn folder_dispatch_bam_to_fastq() {
     let out = dir.path().join("out.fastq");
     write_fixture(&inp);
 
-    run(&["--out-format", "fastq", "--head-crop", "2"], &sub, &out);
+    run(
+        &["--output-format", "fastq", "--trim-front", "2"],
+        &sub,
+        &out,
+    );
 
     let s = std::fs::read_to_string(&out).unwrap();
     assert_eq!(

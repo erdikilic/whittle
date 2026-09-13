@@ -37,7 +37,7 @@ fn version_is_long_only() {
 #[test]
 fn verbosity_above_trace_is_rejected() {
     whittle()
-        .args(["-vvv", "--in-format", "fastq"])
+        .args(["-vvv", "--input-format", "fastq"])
         .write_stdin("")
         .assert()
         .failure()
@@ -46,30 +46,79 @@ fn verbosity_above_trace_is_rejected() {
 
 #[test]
 fn head_tail_crop_over_stdin() {
-    whittle()
-        .args([
-            "--head-crop",
-            "1",
-            "--tail-crop",
-            "1",
-            "--in-format",
-            "fastq",
-        ])
-        .write_stdin("@r1\nACGT\n+\nIIII\n")
-        .assert()
-        .success()
-        .stdout("@r1\nCG\n+\nII\n");
+    for (front, tail) in [
+        ("--trim-front", "--trim-tail"),
+        ("--head-crop", "--tail-crop"),
+        ("--trim-front", "--tail-crop"),
+        ("--head-crop", "--trim-tail"),
+        ("-H", "-T"),
+    ] {
+        whittle()
+            .args([front, "1", tail, "1", "--input-format", "fastq"])
+            .write_stdin("@r1\nACGT\n+\nIIII\n")
+            .assert()
+            .success()
+            .stdout("@r1\nCG\n+\nII\n");
+    }
+}
+
+#[test]
+fn quality_mode_filters_segments_without_changing_split_locations() {
+    let input = "@r1\nACGTACGTACG\n+\nII#II##IIII\n";
+    let split = "@r1_segment_1\nACGTA\n+\nII#II\n@r1_segment_2\nTACG\n+\nIIII\n";
+    for mode in ["mean", "arithmetic", "median"] {
+        whittle()
+            .args([
+                "--split-quality",
+                "9",
+                "--split-min-low-quality-bases",
+                "2",
+                "--quality-mode",
+                mode,
+                "--threads",
+                "1",
+                "--quiet",
+            ])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .stdout(split);
+
+        let expected = if mode == "mean" {
+            "@r1_segment_2\nTACG\n+\nIIII\n"
+        } else {
+            split
+        };
+        whittle()
+            .args([
+                "--split-quality",
+                "9",
+                "--split-min-low-quality-bases",
+                "2",
+                "--quality-mode",
+                mode,
+                "--min-quality",
+                "12",
+                "--threads",
+                "1",
+                "--quiet",
+            ])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .stdout(expected);
+    }
 }
 
 #[test]
 fn mutually_exclusive_quality_ops_error() {
     whittle()
         .args([
-            "--qual-trim",
+            "--trim-quality",
             "10",
-            "--qual-best-segment",
+            "--best-quality-segment",
             "10",
-            "--in-format",
+            "--input-format",
             "fastq",
         ])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
@@ -81,7 +130,7 @@ fn mutually_exclusive_quality_ops_error() {
 #[test]
 fn min_length_filters() {
     whittle()
-        .args(["--min-length", "10", "--in-format", "fastq"])
+        .args(["--min-length", "10", "--input-format", "fastq"])
         .write_stdin("@short\nACGT\n+\nIIII\n")
         .assert()
         .success()
@@ -123,7 +172,7 @@ fn same_input_output_file_is_rejected_and_preserves_input() {
 #[test]
 fn contradictory_length_bounds_error() {
     whittle()
-        .args(["-l", "10", "-L", "5", "--in-format", "fastq"])
+        .args(["-l", "10", "-L", "5", "--input-format", "fastq"])
         .write_stdin("@r1\nACGTACGTAC\n+\nIIIIIIIIII\n")
         .assert()
         .failure()
@@ -133,7 +182,7 @@ fn contradictory_length_bounds_error() {
 #[test]
 fn contradictory_qual_bounds_error() {
     whittle()
-        .args(["-q", "30", "-Q", "20", "--in-format", "fastq"])
+        .args(["-q", "30", "-Q", "20", "--input-format", "fastq"])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
         .assert()
         .failure()
@@ -143,7 +192,7 @@ fn contradictory_qual_bounds_error() {
 #[test]
 fn out_of_range_gc_bound_errors() {
     whittle()
-        .args(["--min-gc", "2", "--in-format", "fastq"])
+        .args(["--min-gc", "2", "--input-format", "fastq"])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
         .assert()
         .failure()
@@ -155,7 +204,7 @@ fn out_of_range_gc_bound_errors() {
 #[test]
 fn nan_quality_bound_errors() {
     whittle()
-        .args(["--min-qual", "nan", "--in-format", "fastq"])
+        .args(["--min-quality", "nan", "--input-format", "fastq"])
         .write_stdin("@r1\nACGT\n+\nIIII\n")
         .assert()
         .failure()
@@ -179,7 +228,7 @@ fn every_validation_names_its_flag() {
     let dir = tempfile::tempdir().unwrap();
     let fastq = dir.path().join("reads.fastq");
     std::fs::write(&fastq, READS).unwrap();
-    // gzip bytes behind a plain `.fastq` name, so `--in-format fastq-gz` is right
+    // gzip bytes behind a plain `.fastq` name, so `--input-format fastq-gz` is right
     // and the extension is the one that looks wrong.
     let misnamed_gz = dir.path().join("misnamed.fastq");
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -213,19 +262,19 @@ fn every_validation_names_its_flag() {
             "--min-gc (0.8) must not exceed --max-gc",
         ),
         (
-            vec!["--max-qual".into(), "nan".into()],
+            vec!["--max-quality".into(), "nan".into()],
             Expect::Fails,
             "NaN",
         ),
         (
-            vec!["--min-qual=-5".into()],
+            vec!["--min-quality=-5".into()],
             Expect::Fails,
-            "--min-qual (-5) must be a finite quality",
+            "--min-quality (-5) must be a finite quality",
         ),
         (
-            vec!["--max-qual".into(), "inf".into()],
+            vec!["--max-quality".into(), "inf".into()],
             Expect::Fails,
-            "--max-qual (inf) must be a finite quality",
+            "--max-quality (inf) must be a finite quality",
         ),
         (vec!["-t".into(), "0".into()], Expect::Fails, "--threads"),
         (
@@ -234,9 +283,9 @@ fn every_validation_names_its_flag() {
             "--fastq-tags: invalid tag",
         ),
         (
-            vec!["--qual-split-window".into(), "5".into()],
+            vec!["--split-min-low-quality-bases".into(), "5".into()],
             Expect::Fails,
-            "--qual-split",
+            "--split-quality",
         ),
         (
             vec!["--progress".into(), "bar".into(), "--quiet".into()],
@@ -252,20 +301,20 @@ fn every_validation_names_its_flag() {
             vec![
                 "--adapter-preset".into(),
                 "ont".into(),
-                "--adapter-end-size".into(),
+                "--adapter-end-search".into(),
                 "0".into(),
             ],
             Expect::Fails,
-            "--adapter-end-size must be >= 1",
+            "--adapter-end-search must be >= 1",
         ),
         (
             vec![
-                "--adapter-infer".into(),
-                "--adapter-sample".into(),
+                "--discover-adapters".into(),
+                "--adapter-sample-reads".into(),
                 "0".into(),
             ],
             Expect::Fails,
-            "--adapter-sample 0 disables sampling",
+            "--adapter-sample-reads 0 disables sampling",
         ),
         (
             vec!["--adapter-error-rate".into(), "0.5".into()],
@@ -273,26 +322,26 @@ fn every_validation_names_its_flag() {
             "--adapter-error-rate requires an adapter source",
         ),
         (
-            vec!["--adapter-end-size".into(), "50".into()],
+            vec!["--adapter-end-search".into(), "50".into()],
             Expect::Fails,
-            "--adapter-end-size requires an adapter source",
+            "--adapter-end-search requires an adapter source",
         ),
         (
-            vec!["--adapter-sample".into(), "50".into()],
+            vec!["--adapter-sample-reads".into(), "50".into()],
             Expect::Fails,
-            "--adapter-sample requires an adapter source",
+            "--adapter-sample-reads requires an adapter source",
         ),
         (
             vec![
                 "-i".into(),
                 p(&misnamed_gz),
-                "--in-format".into(),
+                "--input-format".into(),
                 "fastq-gz".into(),
                 "-o".into(),
                 p(&dir.path().join("out_in_mismatch.fastq")),
             ],
             Expect::Warns,
-            "--in-format",
+            "--input-format",
         ),
         (
             vec![
@@ -300,23 +349,23 @@ fn every_validation_names_its_flag() {
                 p(&fastq),
                 "-o".into(),
                 p(&dir.path().join("out_out_mismatch.fastq.gz")),
-                "--out-format".into(),
+                "--output-format".into(),
                 "fastq".into(),
             ],
             Expect::Warns,
-            "--out-format",
+            "--output-format",
         ),
         (
             vec![
                 "-i".into(),
                 p(&folder),
-                "--in-format".into(),
+                "--input-format".into(),
                 "fastq".into(),
                 "-o".into(),
                 p(&dir.path().join("out_folder.fastq")),
             ],
             Expect::Warns,
-            "--in-format is ignored for a directory input",
+            "--input-format is ignored for a directory input",
         ),
         (
             vec![
@@ -356,7 +405,7 @@ fn every_validation_names_its_flag() {
         let mut cmd = whittle();
         cmd.args(&args);
         if !args.iter().any(|a| a == "-i") {
-            cmd.args(["--in-format", "fastq"]).write_stdin(READS);
+            cmd.args(["--input-format", "fastq"]).write_stdin(READS);
         }
         let output = cmd.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -418,7 +467,7 @@ fn dash_means_stdin_and_stdout() {
     let dir = tempfile::tempdir().unwrap();
     whittle()
         .current_dir(dir.path())
-        .args(["-i", "-", "-o", "-", "--in-format", "fastq", "-l", "5"])
+        .args(["-i", "-", "-o", "-", "--input-format", "fastq", "-l", "5"])
         .write_stdin(READS)
         .assert()
         .success()
@@ -631,7 +680,7 @@ fn non_tty_stderr_has_no_ansi_escapes() {
 fn all_dropped_run_warns() {
     let input = "@r1\nACGT\n+\nIIII\n";
     whittle()
-        .args(["-q", "50", "--in-format", "fastq"])
+        .args(["-q", "50", "--input-format", "fastq"])
         .write_stdin(input)
         .assert()
         .success()
@@ -646,7 +695,7 @@ fn all_dropped_run_warns() {
 #[test]
 fn empty_input_warns() {
     whittle()
-        .args(["--in-format", "fastq"])
+        .args(["--input-format", "fastq"])
         .write_stdin("")
         .assert()
         .success()
@@ -703,7 +752,7 @@ fn gz_output_roundtrips() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.fastq.gz");
     whittle()
-        .args(["--in-format", "fastq", "-o"])
+        .args(["--input-format", "fastq", "-o"])
         .arg(&out)
         .write_stdin("@r1\nACGT\n+\nIIII\n")
         .assert()
@@ -728,7 +777,7 @@ fn forced_in_format_is_checked_against_the_stream() {
             .args([
                 "-i",
                 input.to_str().unwrap(),
-                "--in-format",
+                "--input-format",
                 forced,
                 "--quiet",
             ])
@@ -737,14 +786,14 @@ fn forced_in_format_is_checked_against_the_stream() {
             .stderr(predicates::str::contains(format!(
                 "but the input is {detected}"
             )))
-            .stderr(predicates::str::contains("pass --in-format fastq"));
+            .stderr(predicates::str::contains("pass --input-format fastq"));
     }
     // A matching forced format and an empty input both run.
     whittle()
         .args([
             "-i",
             input.to_str().unwrap(),
-            "--in-format",
+            "--input-format",
             "fastq",
             "--quiet",
         ])
@@ -757,7 +806,7 @@ fn forced_in_format_is_checked_against_the_stream() {
         .args([
             "-i",
             empty.to_str().unwrap(),
-            "--in-format",
+            "--input-format",
             "fastq",
             "--quiet",
         ])
@@ -774,7 +823,7 @@ fn unknown_output_extension_is_reported() {
         .args([
             "-o",
             out.to_str().unwrap(),
-            "--in-format",
+            "--input-format",
             "fastq",
             "-l",
             "5",
@@ -804,19 +853,19 @@ fn fastq_to_bam_is_rejected_before_the_run() {
 #[test]
 fn update_moves_requires_bam_input() {
     whittle()
-        .args(["-i", "reads.fastq", "--update-moves"])
+        .args(["-i", "reads.fastq", "--update-signal-tags"])
         .assert()
         .failure()
         .code(2)
         .stderr(predicates::str::contains(
-            "--update-moves rewrites the ONT signal tags of BAM records and requires BAM input",
+            "--update-signal-tags rewrites the ONT signal tags of BAM records and requires BAM input",
         ));
 }
 
 #[test]
 fn zero_threads_names_the_floor() {
     whittle()
-        .args(["-t", "0", "--in-format", "fastq"])
+        .args(["-t", "0", "--input-format", "fastq"])
         .write_stdin(READS)
         .assert()
         .failure()

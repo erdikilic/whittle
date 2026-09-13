@@ -47,15 +47,15 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
     Ok(())
 }
 
-/// Rejects `--update-moves` on any input format other than BAM: the ONT
+/// Rejects `--update-signal-tags` on any input format other than BAM: the ONT
 /// signal tags are rewritten only on BAM-to-BAM output, so elsewhere the flag
 /// would be accepted and silently do nothing. `cli::parse` applies this to the
-/// format an explicit `--in-format` or a known extension names, and `run`
+/// format an explicit `--input-format` or a known extension names, and `run`
 /// applies it again once detection has classified a stream.
 pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::Result<()> {
     if in_fmt != io::Format::Bam && cfg.update_moves {
         anyhow::bail!(
-            "--update-moves rewrites the ONT signal tags of BAM records and requires BAM input \
+            "--update-signal-tags rewrites the ONT signal tags of BAM records and requires BAM input \
              (got {})",
             in_fmt.label()
         );
@@ -64,7 +64,7 @@ pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::
 }
 
 /// Rejects the flags that read or remove aux tags when the input carries none:
-/// `--trim-barcodes` reads the `bi` tag, `--remove-tag` and `--strip-kinetics`
+/// `--trim-barcodes` reads the `bi` tag, `--remove-tag` and `--remove-kinetics`
 /// name tags. BAM records and tagged FASTQ headers carry tags; a plain FASTQ
 /// does not, so there the flags would be accepted and silently do nothing.
 /// `run` applies this once the first FASTQ header has been inspected.
@@ -164,7 +164,7 @@ pub(crate) fn guard_output_collisions(
     // A mistyped artifact path is caught during setup rather than after the
     // reads are written. Probing the parent directory instead of creating the
     // file leaves nothing behind on a run that writes no artifact
-    // (`--adapter-infer report`). A permission failure still surfaces at write
+    // (`--discover-adapters report`). A permission failure still surfaces at write
     // time; a nonexistent directory does not.
     for &(flag, path) in &targets {
         if path.is_dir() {

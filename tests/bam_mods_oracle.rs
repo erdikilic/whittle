@@ -551,15 +551,15 @@ fn infer_on_ubam_preserves_mm_ml() {
         .unwrap()
         .env_remove("WHITTLE_LOG")
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "bam",
             "-i",
             input.to_str().unwrap(),
             "-o",
             output.to_str().unwrap(),
-            "--adapter-infer",
+            "--discover-adapters",
             "-t",
             "1",
         ])
@@ -706,9 +706,9 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
         .unwrap()
         .env_remove("WHITTLE_LOG")
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "bam",
             "-i",
             split_in.to_str().unwrap(),
@@ -718,7 +718,7 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
             fa.path().to_str().unwrap(),
             "--adapter-error-rate",
             "0.1",
-            "--adapter-end-size",
+            "--adapter-end-search",
             "1",
             "-l",
             "13",
@@ -732,9 +732,9 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
         .unwrap()
         .env_remove("WHITTLE_LOG")
         .args([
-            "--in-format",
+            "--input-format",
             "bam",
-            "--out-format",
+            "--output-format",
             "bam",
             "-i",
             solo_in.to_str().unwrap(),

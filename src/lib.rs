@@ -90,13 +90,13 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     let mut source: Box<dyn Read + Send> = Box::new(BufReader::new(raw));
 
     let in_fmt = match cfg.io.in_format {
-        // A forced format is checked against the stream: a wrong `--in-format`
+        // A forced format is checked against the stream: a wrong `--input-format`
         // would otherwise read zero records and exit 0, or fail inside a
         // decoder with a message that names no flag.
         Some(forced) => {
             let (detected, replayed) = detect_format(in_path, source).with_context(|| {
                 format!(
-                    "--in-format {} but the input does not look like {}",
+                    "--input-format {} but the input does not look like {}",
                     forced.label(),
                     forced.label()
                 )
@@ -106,7 +106,7 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
                 None => forced,
                 Some(d) if io::forced_format_accepts(forced, d) => d,
                 Some(d) => anyhow::bail!(
-                    "--in-format {} but the input is {}; drop the flag or pass --in-format {}",
+                    "--input-format {} but the input is {}; drop the flag or pass --input-format {}",
                     forced.label(),
                     d.label(),
                     d.flag_value()
@@ -122,20 +122,23 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
                 let (fmt, replayed) = detect_format(in_path, source)?;
                 source = replayed;
                 fmt.ok_or_else(|| {
-                    anyhow::anyhow!("cannot determine input format; pass --in-format")
+                    anyhow::anyhow!("cannot determine input format; pass --input-format")
                 })?
             },
         },
     };
 
-    // Advisory only: an explicit `--in-format` or `--out-format` decides the
-    // format, and a disagreement with the path's extension (`--out-format fastq`
+    // Advisory only: an explicit `--input-format` or `--output-format` decides the
+    // format, and a disagreement with the path's extension (`--output-format fastq`
     // on an `out.fastq.gz` path) is reported as a warning. Skipped for stdin,
     // stdout, and paths without an extension. Only the check runs here; both
     // warnings are logged after the banner with the other advisories.
-    let mismatch_warn = io::format_mismatch_warning("--in-format", cfg.io.in_format, in_path);
-    let out_mismatch_warn =
-        io::format_mismatch_warning("--out-format", cfg.io.out_format, cfg.io.output.as_deref());
+    let mismatch_warn = io::format_mismatch_warning("--input-format", cfg.io.in_format, in_path);
+    let out_mismatch_warn = io::format_mismatch_warning(
+        "--output-format",
+        cfg.io.out_format,
+        cfg.io.output.as_deref(),
+    );
 
     let out_fmt = cfg
         .io
@@ -198,7 +201,7 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
 /// format family, then merges its read files into a single trimmed output
 /// through the same dispatch as the single-file path.
 fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
-    // `--in-format` is inert for a directory, whose family is decided per file
+    // `--input-format` is inert for a directory, whose family is decided per file
     // by extension, so a warning is queued below.
     let folder_in_format_ignored = cfg.io.in_format.is_some();
 
@@ -246,13 +249,13 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
     let mut warnings: Vec<String> = Vec::new();
     if folder_in_format_ignored {
         warnings.push(
-            "--in-format is ignored for a directory input; folder files are classified by \
+            "--input-format is ignored for a directory input; folder files are classified by \
              extension per file"
                 .to_string(),
         );
     }
     warnings.extend(io::format_mismatch_warning(
-        "--out-format",
+        "--output-format",
         cfg.io.out_format,
         cfg.io.output.as_deref(),
     ));
@@ -286,7 +289,7 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
 }
 
 /// Sniffs the input format from the stream's first bytes when neither
-/// `--in-format` nor the path extension decides it. Returns the format and the
+/// `--input-format` nor the path extension decides it. Returns the format and the
 /// stream with the consumed bytes chained back in front, so the reader built
 /// next sees the input from its start.
 fn detect_format(
@@ -580,7 +583,7 @@ impl Session {
 /// place so every dispatch arm sees the same narrowed set and pool size.
 ///
 /// `Ok(None)` means the run is over without writing records: that is
-/// `--adapter-infer report`, which prints the inferred FASTA and stops.
+/// `--discover-adapters report`, which prints the inferred FASTA and stops.
 fn settle<R, I, F>(
     records: I,
     cfg: &mut Config,
@@ -608,7 +611,9 @@ where
 /// the run exits 0 without creating any of them.
 fn note_report_only_ignores(cfg: &Config) {
     for (flag, _) in cfg.write_targets() {
-        tracing::warn!("{flag} is ignored under --adapter-infer report, which writes no records");
+        tracing::warn!(
+            "{flag} is ignored under --discover-adapters report, which writes no records"
+        );
     }
 }
 
@@ -737,13 +742,13 @@ fn note_tags_ignored(cfg: &Config, in_fmt: Format, out_fmt: Format) {
     }
 }
 
-/// Warns that `--update-moves` has no effect on BAM-to-FASTQ output, which
+/// Warns that `--update-signal-tags` has no effect on BAM-to-FASTQ output, which
 /// drops the signal tags on every trim.
 fn note_update_moves_ignored(cfg: &Config, out_fmt: Format) {
     if cfg.update_moves {
         tracing::warn!(
             output = out_fmt.label(),
-            "--update-moves applies only to BAM-to-BAM output and is ignored"
+            "--update-signal-tags applies only to BAM-to-BAM output and is ignored"
         );
     }
 }

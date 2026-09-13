@@ -37,10 +37,20 @@ struct Cli {
     #[arg(short = 'o', long, value_name = "PATH", help_heading = "Setup")]
     output: Option<PathBuf>,
     /// Force the input format instead of detecting it from the path or stream.
-    #[arg(long, value_enum, value_name = "FORMAT", help_heading = "Setup")]
+    #[arg(
+        long = "input-format",
+        value_enum,
+        value_name = "FORMAT",
+        help_heading = "Setup"
+    )]
     in_format: Option<Format>,
     /// Force the output format instead of selecting it from the output path.
-    #[arg(long, value_enum, value_name = "FORMAT", help_heading = "Setup")]
+    #[arg(
+        long = "output-format",
+        value_enum,
+        value_name = "FORMAT",
+        help_heading = "Setup"
+    )]
     out_format: Option<Format>,
     /// Worker threads, at least 1; values above the CPU count are clamped to
     /// it. Defaults to all detected CPUs.
@@ -55,7 +65,7 @@ struct Cli {
     /// Write records in input order when running with more than one thread.
     /// Without it, records are written as they finish, which is faster and uses
     /// less memory but is not reproducible between runs.
-    #[arg(long, help_heading = "Setup")]
+    #[arg(long = "preserve-order", help_heading = "Setup")]
     ordered: bool,
     /// Aux tags written into FASTQ headers on BAM or tagged FASTQ input: all,
     /// none, or a list such as MM,ML,RG.
@@ -109,42 +119,43 @@ struct Cli {
     #[arg(
         short = 'l',
         long,
-        value_name = "N",
+        value_name = "BASES",
         default_value_t = 1,
         help_heading = "Filtering"
     )]
     min_length: usize,
     /// Maximum post-trim segment length.
-    #[arg(short = 'L', long, value_name = "N", help_heading = "Filtering")]
+    #[arg(short = 'L', long, value_name = "BASES", help_heading = "Filtering")]
     max_length: Option<usize>,
-    /// Minimum post-trim read quality under --qual-mode.
+    /// Minimum post-trim segment quality under --quality-mode.
     #[arg(
         short = 'q',
-        long,
-        value_name = "Q",
+        long = "min-quality",
+        value_name = "PHRED",
         default_value_t = 0.0,
         help_heading = "Filtering"
     )]
     min_qual: f64,
-    /// Maximum post-trim read quality under --qual-mode.
+    /// Maximum post-trim segment quality under --quality-mode.
     #[arg(
         short = 'Q',
-        long,
-        value_name = "Q",
+        long = "max-quality",
+        value_name = "PHRED",
         default_value_t = 1000.0,
         help_heading = "Filtering"
     )]
     max_qual: f64,
-    /// Minimum post-trim GC fraction (0 to 1).
+    /// Minimum post-trim GC fraction (0 to 1; 0.4 means 40%).
     #[arg(short = 'g', long, value_name = "FRACTION", help_heading = "Filtering")]
     min_gc: Option<f64>,
-    /// Maximum post-trim GC fraction (0 to 1).
+    /// Maximum post-trim GC fraction (0 to 1; 0.4 means 40%).
     #[arg(short = 'G', long, value_name = "FRACTION", help_heading = "Filtering")]
     max_gc: Option<f64>,
-    /// How a read's per-base Phred scores are summarized for -q and -Q.
+    /// Quality calculation used by --min-quality and --max-quality on each
+    /// output segment. Does not affect trimming, best-segment selection or splitting.
     #[arg(
         short = 'm',
-        long,
+        long = "quality-mode",
         value_enum,
         value_name = "MODE",
         default_value_t = QualMode::Mean,
@@ -156,8 +167,9 @@ struct Cli {
     /// before adapter and quality trimming.
     #[arg(
         short = 'H',
-        long,
-        value_name = "N",
+        long = "trim-front",
+        visible_alias = "head-crop",
+        value_name = "BASES",
         default_value_t = 0,
         help_heading = "Trimming"
     )]
@@ -166,33 +178,50 @@ struct Cli {
     /// before adapter and quality trimming.
     #[arg(
         short = 'T',
-        long,
-        value_name = "N",
+        long = "trim-tail",
+        visible_alias = "tail-crop",
+        value_name = "BASES",
         default_value_t = 0,
         help_heading = "Trimming"
     )]
     tail_crop: usize,
-    /// Trim low-quality bases from both ends until each boundary reaches Q.
-    /// One of --qual-trim, --qual-best-segment and --qual-split per run.
-    #[arg(long, value_name = "Q", help_heading = "Trimming")]
+    /// Trim both ends until reaching a base at or above PHRED.
+    /// Mutually exclusive with --best-quality-segment and --split-quality.
+    #[arg(long = "trim-quality", value_name = "PHRED", help_heading = "Trimming")]
     qual_trim: Option<u8>,
-    /// Keep the longest contiguous segment whose bases are all at least Q.
-    #[arg(long, value_name = "Q", help_heading = "Trimming")]
+    /// Keep the highest-scoring segment using cumulative base-error
+    /// probabilities and the PHRED cutoff (modified Mott). May retain bases
+    /// below the cutoff. Applied separately to each adapter-derived segment.
+    #[arg(
+        long = "best-quality-segment",
+        value_name = "PHRED",
+        help_heading = "Trimming"
+    )]
     qual_best_segment: Option<u8>,
-    /// Split at low-quality runs below Q and keep the surviving segments.
-    #[arg(long, value_name = "Q", help_heading = "Trimming")]
+    /// Split at consecutive bases below PHRED and keep the surviving segments.
+    /// --split-min-low-quality-bases sets the minimum number required to split.
+    #[arg(
+        long = "split-quality",
+        value_name = "PHRED",
+        help_heading = "Trimming"
+    )]
     qual_split: Option<u8>,
-    /// Tolerate low-quality runs shorter than this many bases when splitting.
-    /// Requires --qual-split. Defaults to 1.
-    #[arg(long, value_name = "N", help_heading = "Trimming")]
+    /// Minimum consecutive bases below --split-quality required to split.
+    /// Shorter internal stretches are retained; low-quality ends are trimmed.
+    /// Requires --split-quality. Defaults to 1.
+    #[arg(
+        long = "split-min-low-quality-bases",
+        value_name = "BASES",
+        help_heading = "Trimming"
+    )]
     qual_split_window: Option<usize>,
     /// Keep ONT signal tags consistent through trimming (slice mv, update ts,
     /// ns, sp and pi) for signal-aware tools such as Remora and Clair3 v2,
     /// instead of dropping them. BAM-to-BAM only.
-    #[arg(long, help_heading = "Trimming")]
+    #[arg(long = "update-signal-tags", help_heading = "Tags")]
     update_moves: bool,
-    /// Remove the barcode spans dorado recorded in the bi aux tag, before every
-    /// other trimming stage. BAM or tagged FASTQ input.
+    /// Remove barcode spans recorded in the bi aux tag before every other
+    /// trimming stage. Requires BAM or tagged FASTQ; does not detect barcodes.
     #[arg(long, help_heading = "Trimming")]
     trim_barcodes: bool,
 
@@ -202,7 +231,7 @@ struct Cli {
     remove_tag: Vec<String>,
     /// Remove the per-base kinetics and alignment-count arrays (ip pw fi fp ri
     /// rp sa sm sx). BAM or tagged FASTQ input.
-    #[arg(long, help_heading = "Tags")]
+    #[arg(long = "remove-kinetics", help_heading = "Tags")]
     strip_kinetics: bool,
 
     /// Adapter FASTA; sequences may use IUPAC codes, and entries shorter than
@@ -227,21 +256,31 @@ struct Cli {
     adapter_error_rate: Option<f64>,
     /// Bases at each read end searched for a terminal adapter. Requires an
     /// adapter source. Defaults to 150.
-    #[arg(long, value_name = "BP", help_heading = "Adapter trimming")]
+    #[arg(
+        long = "adapter-end-search",
+        value_name = "BASES",
+        help_heading = "Adapter trimming"
+    )]
     adapter_end_size: Option<usize>,
     /// Trim adapters at read ends only; never split on interior adapters.
+    /// Does not disable quality splitting.
     #[arg(long, help_heading = "Adapter trimming")]
     adapter_ends_only: bool,
-    /// Reads inspected before trimming, to keep only the preset entries the
-    /// library carries or to infer adapters; at least 100, or 0 to search the
-    /// whole preset. Ignored with --adapter-fasta alone. Defaults to 2000 with
-    /// a preset and 40000 under --adapter-infer.
-    #[arg(long, value_name = "N", help_heading = "Adapter trimming")]
-    adapter_sample: Option<usize>,
-    /// Discover adapters de novo. Report prints the inferred FASTA and exits
-    /// without writing read output. Defaults to trim when given no value.
+    /// Reads inspected for preset presence or adapter discovery; at least 100.
+    /// 0 disables presence detection and uses the full preset; discovery
+    /// requires sampling. Ignored with --adapter-fasta unless discovering
+    /// adapters. Defaults to 2000 with a preset and 40000 under --discover-adapters.
     #[arg(
-        long,
+        long = "adapter-sample-reads",
+        value_name = "COUNT",
+        help_heading = "Adapter trimming"
+    )]
+    adapter_sample: Option<usize>,
+    /// Discover adapters de novo. Report prints discovered FASTA to stdout
+    /// and exits without read output or a JSON summary. Defaults to trim
+    /// when given no value.
+    #[arg(
+        long = "discover-adapters",
         value_enum,
         num_args = 0..=1,
         default_missing_value = "trim",
@@ -253,7 +292,7 @@ struct Cli {
     /// with a short end-facing anchor; aggressive uses the complete consensus.
     /// Defaults to conservative.
     #[arg(
-        long,
+        long = "adapter-discovery-policy",
         value_enum,
         value_name = "POLICY",
         help_heading = "Adapter trimming"
@@ -264,8 +303,8 @@ struct Cli {
 /// The examples block at the end of `--help`.
 const EXAMPLES: &str = "\
 Examples:
-  whittle -i reads.fastq.gz -o trimmed.fastq.gz -H 20 -T 20 --qual-trim 8 -l 500 -q 10 -t 8
-  whittle -i reads.bam -o trimmed.bam --qual-split 9 --qual-split-window 50 -l 1000
+  whittle -i reads.fastq.gz -o trimmed.fastq.gz -H 20 -T 20 --trim-quality 8 -l 500 -q 10 -t 8
+  whittle -i reads.bam -o trimmed.bam --split-quality 9 --split-min-low-quality-bases 50 -l 1000
   whittle -i reads.bam -o trimmed.bam --adapter-preset lsk114 -l 500
   whittle -i 16s.fastq.gz -o trimmed.fastq.gz --adapter-preset mab114
   samtools fastq -T MM,ML,MN reads.bam | whittle -o trimmed.fastq.gz -H 10 -T 10
@@ -273,11 +312,11 @@ Examples:
 
 /// The default `--adapter-error-rate`.
 const DEFAULT_ADAPTER_ERROR_RATE: f64 = 0.2;
-/// The default `--adapter-end-size`.
+/// The default `--adapter-end-search`.
 const DEFAULT_ADAPTER_END_SIZE: usize = 150;
-/// The default `--adapter-sample` under `--adapter-infer`.
+/// The default `--adapter-sample-reads` under `--discover-adapters`.
 const DEFAULT_INFER_SAMPLE: usize = 40_000;
-/// The default `--adapter-sample` for preset presence detection.
+/// The default `--adapter-sample-reads` for preset presence detection.
 const DEFAULT_PRESET_SAMPLE: usize = 2_000;
 
 /// Returns the clap `Command` for the CLI. `examples/gen-man.rs` renders the
@@ -366,7 +405,7 @@ pub fn parse() -> anyhow::Result<Config> {
         remove_tags,
     };
 
-    // Only an explicit `--in-format` or a known extension decides the input
+    // Only an explicit `--input-format` or a known extension decides the input
     // format here; a stream or an extensionless path is classified by `run`,
     // which applies the same guard once detection has run.
     let in_fmt = cfg
@@ -410,10 +449,12 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
     .filter(|&&b| b)
     .count();
     if n_quality > 1 {
-        anyhow::bail!("--qual-trim, --qual-best-segment and --qual-split are mutually exclusive");
+        anyhow::bail!(
+            "--trim-quality, --best-quality-segment and --split-quality are mutually exclusive"
+        );
     }
     if c.qual_split.is_none() && c.qual_split_window.is_some() {
-        anyhow::bail!("--qual-split-window requires --qual-split");
+        anyhow::bail!("--split-min-low-quality-bases requires --split-quality");
     }
     let max_length = c.max_length.unwrap_or(usize::MAX);
     if c.min_length > max_length {
@@ -425,14 +466,14 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
     // NaN compares false against everything, so it would slip past the ordering
     // check below and disable the filter; `is_finite` rejects it together with
     // the infinite bounds, which are outside the Phred domain.
-    for (flag, value) in [("--min-qual", c.min_qual), ("--max-qual", c.max_qual)] {
+    for (flag, value) in [("--min-quality", c.min_qual), ("--max-quality", c.max_qual)] {
         if !value.is_finite() || value < 0.0 {
             anyhow::bail!("{flag} ({value}) must be a finite quality of at least 0");
         }
     }
     if c.min_qual > c.max_qual {
         anyhow::bail!(
-            "--min-qual ({}) must not exceed --max-qual ({})",
+            "--min-quality ({}) must not exceed --max-quality ({})",
             c.min_qual,
             c.max_qual
         );
@@ -492,7 +533,7 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
                 .unwrap_or(AdapterInferPolicy::Conservative),
         });
     if c.adapter_infer.is_none() && c.adapter_infer_policy.is_some() {
-        anyhow::bail!("--adapter-infer-policy requires --adapter-infer");
+        anyhow::bail!("--adapter-discovery-policy requires --discover-adapters");
     }
 
     // Trim mode excludes an explicit FASTA; report mode allows one so the
@@ -506,8 +547,8 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
     ) && c.adapter_fasta.is_some()
     {
         anyhow::bail!(
-            "--adapter-infer and --adapter-fasta are mutually exclusive (one discovers \
-             the set, the other supplies it); --adapter-infer report --adapter-fasta <file> \
+            "--discover-adapters and --adapter-fasta are mutually exclusive (one discovers \
+             the set, the other supplies it); --discover-adapters report --adapter-fasta <file> \
              names discovered adapters against a supplied FASTA"
         );
     }
@@ -515,7 +556,7 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
     // builds its own set; it is retained only to name discovered adapters.
     if adapter_infer != AdapterInfer::Off && preset_kits(c)?.is_some() {
         advisories.push(Advisory::warn(
-            "--adapter-preset is ignored for trimming under --adapter-infer \
+            "--adapter-preset is ignored for trimming under --discover-adapters \
              (used only for naming discovered adapters)",
         ));
     }
@@ -524,7 +565,7 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
     // names appear alongside catalog names.
     if adapter_infer.is_report() && c.adapter_fasta.is_some() {
         advisories.push(Advisory::info(
-            "--adapter-infer report with --adapter-fasta: discovered adapters are named \
+            "--discover-adapters report with --adapter-fasta: discovered adapters are named \
              against the built-in ONT catalog and the supplied FASTA",
         ));
     }
@@ -571,7 +612,7 @@ fn resolve_adapters(
         if c.adapter_ends_only {
             advisories.push(Advisory::warn(
                 "--adapter-ends-only has no effect without --adapter-fasta, --adapter-preset or \
-                 --adapter-infer",
+                 --discover-adapters",
             ));
         }
         return Ok(None);
@@ -583,7 +624,7 @@ fn resolve_adapters(
     }
     let end_size = c.adapter_end_size.unwrap_or(DEFAULT_ADAPTER_END_SIZE);
     if end_size == 0 {
-        anyhow::bail!("--adapter-end-size must be >= 1");
+        anyhow::bail!("--adapter-end-search must be >= 1");
     }
     Ok(Some(crate::adapter::AdapterConfig {
         adapters: adapter_seqs,
@@ -610,13 +651,13 @@ fn preset_kits(c: &Cli) -> anyhow::Result<Option<Vec<crate::adapter::preset::Kit
 fn require_adapter_source(c: &Cli) -> anyhow::Result<()> {
     let explicit = [
         ("--adapter-error-rate", c.adapter_error_rate.is_some()),
-        ("--adapter-end-size", c.adapter_end_size.is_some()),
-        ("--adapter-sample", c.adapter_sample.is_some()),
+        ("--adapter-end-search", c.adapter_end_size.is_some()),
+        ("--adapter-sample-reads", c.adapter_sample.is_some()),
     ];
     if let Some((flag, _)) = explicit.iter().find(|(_, given)| *given) {
         anyhow::bail!(
             "{flag} requires an adapter source (--adapter-fasta, --adapter-preset, or \
-             --adapter-infer)"
+             --discover-adapters)"
         );
     }
     Ok(())
@@ -643,13 +684,13 @@ fn resolve_sample(
         Some(n) => {
             if n != 0 && n < min {
                 anyhow::bail!(
-                    "--adapter-sample ({n}) must be 0 (disable detection) or at least {min} \
+                    "--adapter-sample-reads ({n}) must be 0 (disable detection) or at least {min} \
                      (smaller samples are too few for reliable detection)"
                 );
             }
             if n == 0 && adapter_infer != AdapterInfer::Off {
                 anyhow::bail!(
-                    "--adapter-sample 0 disables sampling, which --adapter-infer requires; \
+                    "--adapter-sample-reads 0 disables sampling, which --discover-adapters requires; \
                      omit it or pass >= {min}"
                 );
             }
@@ -661,7 +702,7 @@ fn resolve_sample(
     }
     if c.adapter_sample.is_some_and(|n| n > 0) {
         advisories.push(Advisory::warn(
-            "--adapter-sample is ignored with --adapter-fasta (presence detection is \
+            "--adapter-sample-reads is ignored with --adapter-fasta (presence detection is \
              preset-only)",
         ));
     }
@@ -810,6 +851,35 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn unsupported_parameter_names_are_rejected() {
+        for flag in [
+            "--in-format",
+            "--out-format",
+            "--ordered",
+            "--min-qual",
+            "--max-qual",
+            "--qual-mode",
+            "--qual-trim",
+            "--qual-best-segment",
+            "--qual-split",
+            "--qual-split-window",
+            "--update-moves",
+            "--strip-kinetics",
+            "--adapter-end-size",
+            "--adapter-sample",
+            "--adapter-infer",
+            "--adapter-infer-policy",
+        ] {
+            let error = Cli::try_parse_from(["whittle", flag]).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{flag}"
+            );
+        }
+    }
+
     /// Help text quotes the matcher's minimum pattern length and the detection
     /// sample floor; the numbers stay in step with the constants.
     #[test]
@@ -832,7 +902,7 @@ mod tests {
                 "at least {}",
                 crate::adapter::detect::MIN_SAMPLE_FOR_DETECTION
             )),
-            "--adapter-sample help quotes MIN_SAMPLE_FOR_DETECTION"
+            "--adapter-sample-reads help quotes MIN_SAMPLE_FOR_DETECTION"
         );
     }
 

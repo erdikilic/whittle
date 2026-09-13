@@ -204,7 +204,7 @@ fn folder_bam_to_fastq_rerun_with_output_inside_dir_hard_errors() {
         .arg(dir.path())
         .arg("-o")
         .arg(&out)
-        .args(["--out-format", "fastq", "-t", "1"])
+        .args(["--output-format", "fastq", "-t", "1"])
         .assert()
         .success();
     let first = std::fs::read_to_string(&out).unwrap();
@@ -214,7 +214,7 @@ fn folder_bam_to_fastq_rerun_with_output_inside_dir_hard_errors() {
         .arg(dir.path())
         .arg("-o")
         .arg(&out)
-        .args(["--out-format", "fastq", "-t", "1"])
+        .args(["--output-format", "fastq", "-t", "1"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("refusing to overwrite"));

@@ -58,7 +58,7 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
                 adapter = %d.adapter.name,
                 support = %support,
                 floor = MARGINAL_SUPPORT,
-                "Inferred adapter support is marginal; verify with --adapter-infer report"
+                "Inferred adapter support is marginal; verify with --discover-adapters report"
             );
         }
         if d.uncertain_bases() > 0 {
@@ -68,7 +68,7 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
                 uncertain_bp = d.uncertain_bases(),
                 consensus_bp = d.assembled_seq.len(),
                 "Inferred adapter trims with a conservative terminal anchor; the insert-facing \
-                 remainder is not trimmed (--adapter-infer-policy aggressive uses the full \
+                 remainder is not trimmed (--adapter-discovery-policy aggressive uses the full \
                  consensus)"
             );
         }
@@ -154,7 +154,7 @@ pub(crate) struct Resolved<R> {
 /// needed, and returns it with the stream intact.
 ///
 /// `Ok(None)` means the run is over without writing records: that is
-/// `--adapter-infer report`, which prints the inferred FASTA and stops.
+/// `--discover-adapters report`, which prints the inferred FASTA and stops.
 ///
 /// Takes `&Config` and returns the outcome rather than writing back into the
 /// config: the set is final only after reads have been seen, which is after the
@@ -261,7 +261,7 @@ where
                 reads = s,
                 configured = full,
                 "Adapter presence: no adapters detected in the sampled prefix; using all \
-                 configured adapters (the prefix may be unrepresentative; --adapter-sample 0 \
+                 configured adapters (the prefix may be unrepresentative; --adapter-sample-reads 0 \
                  skips sampling)"
             );
             ac.adapters.clone()

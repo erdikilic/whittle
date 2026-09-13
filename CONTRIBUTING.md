@@ -85,7 +85,7 @@ git merge --no-ff feature-branch -m "perf: integrate throughput improvements"
 - The message starts with a capital letter, at every level. The message is prose;
   the structured fields after it are data. A message opening on a literal that is
   spelled lowercase keeps that spelling, since it is a token and not a word:
-  `--adapter-sample is ignored with --adapter-fasta`, `inferred_1 support=0.82`.
+  `--adapter-sample-reads is ignored with --adapter-fasta`, `inferred_1 support=0.82`.
 - The level is never restated in the text. The formatter already prints `[WARN]`,
   so a message beginning "warning:" says it twice.
 - Values go in fields rather than in the sentence, so they can be filtered and

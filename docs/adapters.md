@@ -2,7 +2,7 @@
 
 Adapter trimming is off by default. It is enabled by an adapter source:
 `-a`/`--adapter-fasta <FILE>` (user-supplied sequences), `--adapter-preset
-<KITS>` (the built-in catalog, scoped to the named kits), or `--adapter-infer`
+<KITS>` (the built-in catalog, scoped to the named kits), or `--discover-adapters`
 (ab-initio discovery). A FASTA and a preset combine into one search set.
 
 ## Sequences
@@ -33,7 +33,7 @@ Every sequence is searched on both strands, so orientation is irrelevant and a
 rear adapter is the reverse complement of its front adapter. Each read receives
 these treatments:
 
-- **Terminal trimming.** A hit within `--adapter-end-size` bases of an end
+- **Terminal trimming.** A hit within `--adapter-end-search` bases of an end
   (default 150) trims that end together with everything outboard of it.
 - **Partial adapters.** An adapter cut short by the read end (a truncated rear
   adapter, a front adapter missing its first bases) is trimmed when at least
@@ -56,21 +56,23 @@ every other trim, so `MM`/`ML`/`MN` and the per-base tags stay in register
 
 A preset holds sequences a given library may not carry, such as the primers of
 a kit's cDNA variant or most of the `ont` union. Presence detection runs the
-trimming passes over the first `--adapter-sample` reads (default 2000, minimum
+trimming passes over the first `--adapter-sample-reads` reads (default 2000, minimum
 100), keeps the entries that trimmed or split at least 0.2% of them (at least 3
 reads), and searches the remaining input against that set only. This is faster
 and avoids spurious trims from absent entries.
 
-Detection applies to presets only; a FASTA is always searched in full.
-`--adapter-sample 0` disables it. If detection finds nothing, whittle warns and
-falls back to the full set.
+Detection applies to presets only. Supplying a FASTA disables presence
+detection for the combined FASTA and preset set. `--adapter-sample-reads 0`
+also disables detection and searches the full set. If detection finds nothing,
+whittle warns and falls back to the full set.
 
-## Ab-initio inference
+## Adapter discovery
 
-`--adapter-infer` (equivalent to `--adapter-infer trim`) discovers recurrent
-read-end sequences de novo from the first `--adapter-sample` reads (default
+`--discover-adapters` (equivalent to `--discover-adapters trim`) discovers recurrent
+read-end sequences de novo from the first `--adapter-sample-reads` reads (default
 40000) by k-mer assembly in the manner of Porechop_ABI, then trims and splits
-with the result. The default `conservative` policy anchors at most 32 bp facing
+with the result. Sampling requires at least 100 reads; a sample count of 0 is
+rejected. The default `conservative` policy anchors at most 32 bp facing
 the physical read end; the insert-facing remainder of the assembled consensus is
 reported as uncertain rather than assumed technical.
 
@@ -80,12 +82,12 @@ boundary that lies inward of another candidate, in the reads carrying both, is
 dropped as that candidate's insert-facing remainder, so a conserved gene start
 is not trimmed from reads that carry no adapter.
 
-`--adapter-infer report` prints the recommended anchor, its support, the
+`--discover-adapters report` prints the recommended anchor, its support, the
 assembled length, the uncertain-base count, and any catalog or FASTA cross-name,
-as FASTA, then exits without writing records. `-v` logs the full assembled
-consensus.
+as FASTA to stdout, then exits without writing records or a JSON summary.
+`-v` logs the full assembled consensus.
 
-`--adapter-infer-policy aggressive` trims the full consensus. It is appropriate
+`--adapter-discovery-policy aggressive` trims the full consensus. It is appropriate
 only when overtrimming of conserved biological sequence has been ruled out, and
 unsuitable for amplicons, where the consensus extends into the conserved gene
 start.

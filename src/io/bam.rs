@@ -296,7 +296,7 @@ impl BamSink {
 /// Returns the output header: the input header with an `@PG` provenance record
 /// (`ID:whittle`, program name and version) appended, and with `@HD SO:` set to
 /// `unsorted` (and `GO`/`SS` removed) when `order_kept` is false, since a
-/// multithreaded run without `--ordered` writes records in completion order.
+/// multithreaded run without `--preserve-order` writes records in completion order.
 ///
 /// The `@PG` record is best-effort: `Programs::add` fails on a duplicate ID and
 /// cannot walk a dangling `PP` chain (`samtools reset` leaves

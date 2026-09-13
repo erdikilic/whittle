@@ -1,10 +1,10 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH whittle 1  "whittle 0.2.0" 
+.TH whittle 1  "whittle 0.2.0"
 .SH NAME
 whittle \- Tag\-aware long\-read trimmer
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-in\-format\fR] [\fB\-\-out\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-ordered\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-qual\fR] [\fB\-Q\fR|\fB\-\-max\-qual\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-qual\-mode\fR] [\fB\-H\fR|\fB\-\-head\-crop\fR] [\fB\-T\fR|\fB\-\-tail\-crop\fR] [\fB\-\-qual\-trim\fR] [\fB\-\-qual\-best\-segment\fR] [\fB\-\-qual\-split\fR] [\fB\-\-qual\-split\-window\fR] [\fB\-\-update\-moves\fR] [\fB\-\-trim\-barcodes\fR] [\fB\-\-remove\-tag\fR] [\fB\-\-strip\-kinetics\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-size\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\fR] [\fB\-\-adapter\-infer\fR] [\fB\-\-adapter\-infer\-policy\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-trim\-quality\fR] [\fB\-\-best\-quality\-segment\fR] [\fB\-\-split\-quality\fR] [\fB\-\-split\-min\-low\-quality\-bases\fR] [\fB\-\-update\-signal\-tags\fR] [\fB\-\-trim\-barcodes\fR] [\fB\-\-remove\-tag\fR] [\fB\-\-remove\-kinetics\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-discover\-adapters\fR] [\fB\-\-adapter\-discovery\-policy\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Tag\-aware long\-read trimmer
 .SH OPTIONS
@@ -22,7 +22,7 @@ Input FASTQ\-family file, unaligned BAM, or directory; \- means stdin. Defaults 
 \fB\-o\fR, \fB\-\-output\fR \fI<PATH>\fR
 Output file, whose extension selects the format; \- means stdout. Defaults to stdout
 .TP
-\fB\-\-in\-format\fR \fI<FORMAT>\fR
+\fB\-\-input\-format\fR \fI<FORMAT>\fR
 Force the input format instead of detecting it from the path or stream
 .br
 
@@ -39,7 +39,7 @@ fastq\-bgz: BGZF\-compressed FASTQ
 bam: Unaligned BAM
 .RE
 .TP
-\fB\-\-out\-format\fR \fI<FORMAT>\fR
+\fB\-\-output\-format\fR \fI<FORMAT>\fR
 Force the output format instead of selecting it from the output path
 .br
 
@@ -59,7 +59,7 @@ bam: Unaligned BAM
 \fB\-t\fR, \fB\-\-threads\fR \fI<N>\fR
 Worker threads, at least 1; values above the CPU count are clamped to it. Defaults to all detected CPUs
 .TP
-\fB\-\-ordered\fR
+\fB\-\-preserve\-order\fR
 Write records in input order when running with more than one thread. Without it, records are written as they finish, which is faster and uses less memory but is not reproducible between runs
 .TP
 \fB\-c\fR, \fB\-\-compression\-level\fR \fI<0\-9>\fR
@@ -72,10 +72,13 @@ Write a machine\-readable JSON run summary (counters plus the resolved settings)
 \fB\-\-fastq\-tags\fR \fI<all|none|TAGS>\fR [default: all]
 Aux tags written into FASTQ headers on BAM or tagged FASTQ input: all, none, or a list such as MM,ML,RG
 .TP
+\fB\-\-update\-signal\-tags\fR
+Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp and pi) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM\-to\-BAM only
+.TP
 \fB\-\-remove\-tag\fR \fI<TAG>\fR
 Remove this two\-character aux tag from every output record. Repeatable. BAM or tagged FASTQ input
 .TP
-\fB\-\-strip\-kinetics\fR
+\fB\-\-remove\-kinetics\fR
 Remove the per\-base kinetics and alignment\-count arrays (ip pw fi fp ri rp sa sm sx). BAM or tagged FASTQ input
 .SH LOGGING
 .TP
@@ -103,26 +106,26 @@ none: No progress reporting; the banner and summary still print
 .RE
 .SH FILTERING
 .TP
-\fB\-l\fR, \fB\-\-min\-length\fR \fI<N>\fR [default: 1]
+\fB\-l\fR, \fB\-\-min\-length\fR \fI<BASES>\fR [default: 1]
 Minimum post\-trim segment length
 .TP
-\fB\-L\fR, \fB\-\-max\-length\fR \fI<N>\fR
+\fB\-L\fR, \fB\-\-max\-length\fR \fI<BASES>\fR
 Maximum post\-trim segment length
 .TP
-\fB\-q\fR, \fB\-\-min\-qual\fR \fI<Q>\fR [default: 0]
-Minimum post\-trim read quality under \-\-qual\-mode
+\fB\-q\fR, \fB\-\-min\-quality\fR \fI<PHRED>\fR [default: 0]
+Minimum post\-trim segment quality under \-\-quality\-mode
 .TP
-\fB\-Q\fR, \fB\-\-max\-qual\fR \fI<Q>\fR [default: 1000]
-Maximum post\-trim read quality under \-\-qual\-mode
+\fB\-Q\fR, \fB\-\-max\-quality\fR \fI<PHRED>\fR [default: 1000]
+Maximum post\-trim segment quality under \-\-quality\-mode
 .TP
 \fB\-g\fR, \fB\-\-min\-gc\fR \fI<FRACTION>\fR
-Minimum post\-trim GC fraction (0 to 1)
+Minimum post\-trim GC fraction (0 to 1; 0.4 means 40%)
 .TP
 \fB\-G\fR, \fB\-\-max\-gc\fR \fI<FRACTION>\fR
-Maximum post\-trim GC fraction (0 to 1)
+Maximum post\-trim GC fraction (0 to 1; 0.4 means 40%)
 .TP
-\fB\-m\fR, \fB\-\-qual\-mode\fR \fI<MODE>\fR [default: mean]
-How a read\*(Aqs per\-base Phred scores are summarized for \-q and \-Q
+\fB\-m\fR, \fB\-\-quality\-mode\fR \fI<MODE>\fR [default: mean]
+Quality calculation used by \-\-min\-quality and \-\-max\-quality on each output segment. Does not affect trimming, best\-segment selection or splitting
 .br
 
 .br
@@ -137,29 +140,26 @@ median: Median Phred score
 .RE
 .SH TRIMMING
 .TP
-\fB\-H\fR, \fB\-\-head\-crop\fR \fI<N>\fR [default: 0]
+\fB\-H\fR, \fB\-\-trim\-front\fR \fI<BASES>\fR [default: 0]
 Remove this many bases from the 5\*(Aq end, after barcode removal and before adapter and quality trimming
 .TP
-\fB\-T\fR, \fB\-\-tail\-crop\fR \fI<N>\fR [default: 0]
+\fB\-T\fR, \fB\-\-trim\-tail\fR \fI<BASES>\fR [default: 0]
 Remove this many bases from the 3\*(Aq end, after barcode removal and before adapter and quality trimming
 .TP
-\fB\-\-qual\-trim\fR \fI<Q>\fR
-Trim low\-quality bases from both ends until each boundary reaches Q. One of \-\-qual\-trim, \-\-qual\-best\-segment and \-\-qual\-split per run
+\fB\-\-trim\-quality\fR \fI<PHRED>\fR
+Trim both ends until reaching a base at or above PHRED. Mutually exclusive with \-\-best\-quality\-segment and \-\-split\-quality
 .TP
-\fB\-\-qual\-best\-segment\fR \fI<Q>\fR
-Keep the longest contiguous segment whose bases are all at least Q
+\fB\-\-best\-quality\-segment\fR \fI<PHRED>\fR
+Keep the highest\-scoring segment using cumulative base\-error probabilities and the PHRED cutoff (modified Mott). May retain bases below the cutoff. Applied separately to each adapter\-derived segment
 .TP
-\fB\-\-qual\-split\fR \fI<Q>\fR
-Split at low\-quality runs below Q and keep the surviving segments
+\fB\-\-split\-quality\fR \fI<PHRED>\fR
+Split at consecutive bases below PHRED and keep the surviving segments. \-\-split\-min\-low\-quality\-bases sets the minimum number required to split
 .TP
-\fB\-\-qual\-split\-window\fR \fI<N>\fR
-Tolerate low\-quality runs shorter than this many bases when splitting. Requires \-\-qual\-split. Defaults to 1
-.TP
-\fB\-\-update\-moves\fR
-Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp and pi) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM\-to\-BAM only
+\fB\-\-split\-min\-low\-quality\-bases\fR \fI<BASES>\fR
+Minimum consecutive bases below \-\-split\-quality required to split. Shorter internal stretches are retained; low\-quality ends are trimmed. Requires \-\-split\-quality. Defaults to 1
 .TP
 \fB\-\-trim\-barcodes\fR
-Remove the barcode spans dorado recorded in the bi aux tag, before every other trimming stage. BAM or tagged FASTQ input
+Remove barcode spans recorded in the bi aux tag before every other trimming stage. Requires BAM or tagged FASTQ; does not detect barcodes
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<FILE>\fR
@@ -171,17 +171,17 @@ Built\-in kit presets, comma\-separated: lsk114, rad114 (ulk114), rbk114, nbd114
 \fB\-\-adapter\-error\-rate\fR \fI<FRACTION>\fR
 End\-match tolerance as a fraction of adapter length; interior splits use half. Requires an adapter source. Defaults to 0.2
 .TP
-\fB\-\-adapter\-end\-size\fR \fI<BP>\fR
+\fB\-\-adapter\-end\-search\fR \fI<BASES>\fR
 Bases at each read end searched for a terminal adapter. Requires an adapter source. Defaults to 150
 .TP
 \fB\-\-adapter\-ends\-only\fR
-Trim adapters at read ends only; never split on interior adapters
+Trim adapters at read ends only; never split on interior adapters. Does not disable quality splitting
 .TP
-\fB\-\-adapter\-sample\fR \fI<N>\fR
-Reads inspected before trimming, to keep only the preset entries the library carries or to infer adapters; at least 100, or 0 to search the whole preset. Ignored with \-\-adapter\-fasta alone. Defaults to 2000 with a preset and 40000 under \-\-adapter\-infer
+\fB\-\-adapter\-sample\-reads\fR \fI<COUNT>\fR
+Reads inspected for preset presence or adapter discovery; at least 100. 0 disables presence detection and uses the full preset; discovery requires sampling. Ignored with \-\-adapter\-fasta unless discovering adapters. Defaults to 2000 with a preset and 40000 under \-\-discover\-adapters
 .TP
-\fB\-\-adapter\-infer\fR [\fI<ACTION>\fR]
-Discover adapters de novo. Report prints the inferred FASTA and exits without writing read output. Defaults to trim when given no value
+\fB\-\-discover\-adapters\fR [\fI<ACTION>\fR]
+Discover adapters de novo. Report prints discovered FASTA to stdout and exits without read output or a JSON summary. Defaults to trim when given no value
 .br
 
 .br
@@ -193,7 +193,7 @@ trim: Trim reads with the inferred sequences
 report: Print inferred FASTA to stdout and do not write read output
 .RE
 .TP
-\fB\-\-adapter\-infer\-policy\fR \fI<POLICY>\fR
+\fB\-\-adapter\-discovery\-policy\fR \fI<POLICY>\fR
 Trust policy for inferred consensuses. Conservative trims and splits with a short end\-facing anchor; aggressive uses the complete consensus. Defaults to conservative
 .br
 
@@ -207,8 +207,8 @@ aggressive: Use the complete recurrent consensus
 .RE
 .SH EXTRA
 Examples:
-  whittle \-i reads.fastq.gz \-o trimmed.fastq.gz \-H 20 \-T 20 \-\-qual\-trim 8 \-l 500 \-q 10 \-t 8
-  whittle \-i reads.bam \-o trimmed.bam \-\-qual\-split 9 \-\-qual\-split\-window 50 \-l 1000
+  whittle \-i reads.fastq.gz \-o trimmed.fastq.gz \-H 20 \-T 20 \-\-trim\-quality 8 \-l 500 \-q 10 \-t 8
+  whittle \-i reads.bam \-o trimmed.bam \-\-split\-quality 9 \-\-split\-min\-low\-quality\-bases 50 \-l 1000
   whittle \-i reads.bam \-o trimmed.bam \-\-adapter\-preset lsk114 \-l 500
   whittle \-i 16s.fastq.gz \-o trimmed.fastq.gz \-\-adapter\-preset mab114
   samtools fastq \-T MM,ML,MN reads.bam | whittle \-o trimmed.fastq.gz \-H 10 \-T 10

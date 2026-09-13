@@ -65,7 +65,7 @@ impl FastqTags {
     }
 }
 
-/// The per-base arrays `--strip-kinetics` removes: the PacBio kinetics
+/// The per-base arrays `--remove-kinetics` removes: the PacBio kinetics
 /// `ip`/`pw`/`fi`/`fp`, the reverse-strand `ri`/`rp`, the per-base aligned match
 /// and mismatch counts `sm`/`sx`, and the run-length subread coverage `sa`.
 /// Derived from the per-base tag constants, so the flag covers exactly the
@@ -77,7 +77,7 @@ pub fn kinetics_tags() -> impl Iterator<Item = [u8; 2]> {
 }
 
 /// Aux tags removed from every output record. `--remove-tag` names them one at a
-/// time and `--strip-kinetics` folds in `kinetics_tags`, so both flags fill one
+/// time and `--remove-kinetics` folds in `kinetics_tags`, so both flags fill one
 /// set and the writers have a single removal path. Removal runs after the
 /// rewrite of a tag whittle maintains, so a removed `MM` or `mv` leaves the rest
 /// of the record intact.
@@ -87,12 +87,12 @@ pub struct TagRemoval {
     tags: BTreeSet<[u8; 2]>,
     /// Whether `--remove-tag` named at least one tag.
     named: bool,
-    /// Whether `--strip-kinetics` was given.
+    /// Whether `--remove-kinetics` was given.
     kinetics: bool,
 }
 
 impl TagRemoval {
-    /// Parses the `--remove-tag` values and folds in `--strip-kinetics`. Each
+    /// Parses the `--remove-tag` values and folds in `--remove-kinetics`. Each
     /// value is exactly two ASCII alphanumeric characters, the shape of a SAM
     /// tag.
     pub fn parse(values: &[String], strip_kinetics: bool) -> anyhow::Result<Self> {
@@ -133,7 +133,7 @@ impl TagRemoval {
         self.tags.iter()
     }
 
-    /// Whether `--strip-kinetics` was given, which the run summary records
+    /// Whether `--remove-kinetics` was given, which the run summary records
     /// alongside the resolved set the flag expands to.
     pub fn strips_kinetics(&self) -> bool {
         self.kinetics
@@ -143,8 +143,8 @@ impl TagRemoval {
     /// to name what the user wrote.
     pub fn flags(&self) -> &'static str {
         match (self.named, self.kinetics) {
-            (true, true) => "--remove-tag and --strip-kinetics",
-            (false, true) => "--strip-kinetics",
+            (true, true) => "--remove-tag and --remove-kinetics",
+            (false, true) => "--remove-kinetics",
             _ => "--remove-tag",
         }
     }
@@ -284,9 +284,9 @@ pub struct IoConfig {
     pub input: Option<PathBuf>,
     /// Output path; `None` writes stdout.
     pub output: Option<PathBuf>,
-    /// Input format forced by `--in-format`.
+    /// Input format forced by `--input-format`.
     pub in_format: Option<Format>,
-    /// Output format forced by `--out-format`.
+    /// Output format forced by `--output-format`.
     pub out_format: Option<Format>,
 }
 
@@ -328,12 +328,12 @@ pub struct Config {
     /// `mv`/`ts`/`ns`/`sp`/`pi`.
     pub update_moves: bool,
     /// Whether the barcode spans dorado recorded in the `bi` aux tag are
-    /// removed, as the outermost trimming stage. BAM input only; `cli::parse`
-    /// and `guards::guard_bam_only_flags` reject any other input format.
+    /// removed, as the outermost trimming stage. Requires BAM or tagged FASTQ;
+    /// `guards::guard_tag_flags` rejects input without auxiliary tags.
     pub trim_barcodes: bool,
     /// Aux tags removed from every output record (`--remove-tag`,
-    /// `--strip-kinetics`). BAM input only; `cli::parse` and
-    /// `guards::guard_bam_only_flags` reject any other input format.
+    /// `--remove-kinetics`). Requires BAM or tagged FASTQ;
+    /// `guards::guard_tag_flags` rejects input without auxiliary tags.
     pub remove_tags: TagRemoval,
     /// Whether multithreaded runs write records in input order. When false,
     /// records are written in completion order.
@@ -510,7 +510,7 @@ mod tests {
         );
     }
 
-    /// `--strip-kinetics` folds in exactly the nine per-base arrays the BAM
+    /// `--remove-kinetics` folds in exactly the nine per-base arrays the BAM
     /// writer slices, so the flag and the writer cannot drift apart.
     #[test]
     fn strip_kinetics_folds_in_the_nine_per_base_arrays() {
@@ -537,10 +537,10 @@ mod tests {
         let r = TagRemoval::parse(&["MM".to_string(), "RG".to_string()], true).unwrap();
         assert!(r.contains(b"MM") && r.contains(b"RG") && r.contains(b"ip"));
         assert_eq!(r.tags().count(), 11);
-        assert_eq!(r.flags(), "--remove-tag and --strip-kinetics");
+        assert_eq!(r.flags(), "--remove-tag and --remove-kinetics");
         assert_eq!(
             TagRemoval::parse(&[], true).unwrap().flags(),
-            "--strip-kinetics"
+            "--remove-kinetics"
         );
         assert_eq!(
             TagRemoval::parse(&["MM".to_string()], false)

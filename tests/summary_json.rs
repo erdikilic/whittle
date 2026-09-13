@@ -47,7 +47,7 @@ fn summary_counts_match_the_run() {
         .args(["-o", out.to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
         .args(["-l", "15"])
-        .args(["--qual-trim", "20"])
+        .args(["--trim-quality", "20"])
         .write_stdin(reads())
         .assert()
         .success();
@@ -102,7 +102,7 @@ fn summary_records_the_resolved_parameters() {
         .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
         .args(["-t", "2", "-H", "3", "-T", "4", "-l", "5", "-q", "7"])
-        .args(["--qual-split", "9", "--qual-split-window", "6"])
+        .args(["--split-quality", "9", "--split-min-low-quality-bases", "6"])
         .write_stdin(reads())
         .assert()
         .success();
@@ -121,7 +121,7 @@ fn summary_records_the_resolved_parameters() {
         v["command"]
             .as_str()
             .unwrap()
-            .contains("--qual-split-window")
+            .contains("--split-min-low-quality-bases")
     );
     assert!(v["elapsed_seconds"].as_f64().unwrap() >= 0.0);
 }
@@ -241,7 +241,7 @@ fn report_mode_warns_that_summary_json_is_ignored() {
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
-        .args(["--adapter-infer", "report"])
+        .args(["--discover-adapters", "report"])
         .assert()
         .success()
         .stderr(predicate::str::contains("--summary-json is ignored"))
@@ -274,7 +274,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         "ont",
         "--adapter-fasta",
         fasta.to_str().unwrap(),
-        "--adapter-infer",
+        "--discover-adapters",
         "report",
     ];
 
@@ -283,7 +283,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "--adapter-infer report with --adapter-fasta",
+            "--discover-adapters report with --adapter-fasta",
         ));
 
     whittle()
@@ -294,7 +294,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         // The INFO advisory is filtered out; the WARN one still belongs on stderr,
         // since --quiet keeps warnings.
         .stderr(
-            predicate::str::contains("--adapter-infer report with --adapter-fasta")
+            predicate::str::contains("--discover-adapters report with --adapter-fasta")
                 .not()
                 .and(predicate::str::contains("--adapter-preset is ignored")),
         );
@@ -361,7 +361,7 @@ fn summary_reports_configured_and_resolved_adapter_counts() {
         .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
         .args(["--adapter-preset", "ont"])
-        .args(["--adapter-sample", "200"])
+        .args(["--adapter-sample-reads", "200"])
         .assert()
         .success();
 
@@ -402,7 +402,7 @@ fn inference_reports_zero_configured_adapters() {
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
-        .args(["--adapter-infer", "trim"])
+        .args(["--discover-adapters", "trim"])
         .assert()
         .success();
 

@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::Path;
 
 /// A read-file format as detected from an extension or stream header, and
-/// the value of `--in-format`/`--out-format`.
+/// the value of `--input-format`/`--output-format`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
     /// Plain FASTQ.
@@ -36,7 +36,7 @@ impl Format {
         }
     }
 
-    /// Returns the spelling `--in-format`/`--out-format` accept for this
+    /// Returns the spelling `--input-format`/`--output-format` accept for this
     /// format, for messages that suggest the flag.
     pub fn flag_value(&self) -> &'static str {
         match self {
@@ -97,12 +97,12 @@ pub fn detect_input(sniff: &[u8]) -> anyhow::Result<Format> {
     } else if sniff.first() == Some(&b'@') {
         Ok(Format::Fastq)
     } else {
-        anyhow::bail!("cannot determine input format; pass --in-format")
+        anyhow::bail!("cannot determine input format; pass --input-format")
     }
 }
 
 /// Returns true when a stream detected as `detected` may be read under a
-/// forced `--in-format` of `forced`: the same format, or BGZF FASTQ under
+/// forced `--input-format` of `forced`: the same format, or BGZF FASTQ under
 /// `fastq-gz`, since a BGZF stream is valid gzip.
 pub fn forced_format_accepts(forced: Format, detected: Format) -> bool {
     forced == detected || (forced == Format::FastqGz && detected == Format::FastqBgzf)
@@ -123,15 +123,15 @@ pub fn unknown_extension_warning(path: Option<&Path>, resolved: Format) -> Optio
         return None;
     }
     Some(format!(
-        "-o/--output extension .{ext} names no supported format; writing {} (pass --out-format \
+        "-o/--output extension .{ext} names no supported format; writing {} (pass --output-format \
          to choose)",
         resolved.label()
     ))
 }
 
-/// Returns advisory text when an explicit `--in-format`/`--out-format`
+/// Returns advisory text when an explicit `--input-format`/`--output-format`
 /// (`forced`) disagrees with what `path`'s extension suggests, e.g.
-/// `--out-format fastq` on an `out.fastq.gz` path. `None` when there is no
+/// `--output-format fastq` on an `out.fastq.gz` path. `None` when there is no
 /// forced format, the path has no recognized extension, the path is
 /// stdin/stdout (`None`), or the two agree. `flag` names the CLI flag for the
 /// message.
@@ -227,7 +227,7 @@ pub(crate) fn detect_bgzf_block(block: &[u8]) -> anyhow::Result<Format> {
 /// Resolves the output format from the path extension, else mirrors the input
 /// format, except that output is never auto-compressed: a `.gz` (`FastqGz`)
 /// input with no output extension defaults to plain `Fastq`, so gzip output
-/// happens only when the caller asks (`-o *.gz` or `--out-format fastq-gz`).
+/// happens only when the caller asks (`-o *.gz` or `--output-format fastq-gz`).
 pub fn resolve_output(path: Option<&Path>, input: Format) -> Format {
     // An explicit output extension always wins.
     if let Some(f) = path.and_then(from_extension) {
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(detect_input(&[0x1f, 0x8b, 0x08]).unwrap(), Format::FastqGz);
         assert_eq!(detect_input(b"@read").unwrap(), Format::Fastq);
         let err = detect_input(b"").unwrap_err().to_string();
-        assert!(err.contains("--in-format"), "Got: {err}");
+        assert!(err.contains("--input-format"), "Got: {err}");
     }
 
     /// A bare `BAM\x01` stream (no BGZF framing) cannot be read by the
@@ -307,13 +307,13 @@ mod tests {
     #[test]
     fn format_mismatch_warning_fires_on_disagreement() {
         let w = format_mismatch_warning(
-            "--out-format",
+            "--output-format",
             Some(Format::Fastq),
             Some(Path::new("out.fastq.gz")),
         );
         assert_eq!(
             w.as_deref(),
-            Some("--out-format FASTQ but the file extension looks like FASTQ.gz")
+            Some("--output-format FASTQ but the file extension looks like FASTQ.gz")
         );
     }
 
@@ -322,19 +322,27 @@ mod tests {
         // No forced format, a matching extension, an unknown extension, and
         // stdin all stay silent.
         assert_eq!(
-            format_mismatch_warning("--in-format", None, Some(Path::new("x.bam"))),
+            format_mismatch_warning("--input-format", None, Some(Path::new("x.bam"))),
             None
         );
         assert_eq!(
-            format_mismatch_warning("--in-format", Some(Format::Bam), Some(Path::new("x.bam"))),
+            format_mismatch_warning(
+                "--input-format",
+                Some(Format::Bam),
+                Some(Path::new("x.bam"))
+            ),
             None
         );
         assert_eq!(
-            format_mismatch_warning("--in-format", Some(Format::Bam), Some(Path::new("x.txt"))),
+            format_mismatch_warning(
+                "--input-format",
+                Some(Format::Bam),
+                Some(Path::new("x.txt"))
+            ),
             None
         );
         assert_eq!(
-            format_mismatch_warning("--in-format", Some(Format::Bam), None),
+            format_mismatch_warning("--input-format", Some(Format::Bam), None),
             None
         );
     }

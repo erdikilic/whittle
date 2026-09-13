@@ -16,23 +16,23 @@ fn help_lists_the_quality_and_adapter_flags() {
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     for flag in [
-        "--qual-split",
-        "--qual-trim",
-        "--qual-best-segment",
+        "--split-quality",
+        "--trim-quality",
+        "--best-quality-segment",
         "--adapter-fasta",
         "--adapter-preset",
         "--adapter-error-rate",
-        "--adapter-end-size",
+        "--adapter-end-search",
         "--adapter-ends-only",
-        "--adapter-sample",
-        "--adapter-infer",
-        "--adapter-infer-policy",
+        "--adapter-sample-reads",
+        "--discover-adapters",
+        "--adapter-discovery-policy",
     ] {
         assert!(stdout.contains(flag), "Help must list {flag}: {stdout}");
     }
 }
 
-/// The range check runs once an adapter source is active; `--in-format fastq`
+/// The range check runs once an adapter source is active; `--input-format fastq`
 /// keeps format detection out of the failure so the flag is the only cause.
 #[test]
 fn rejects_out_of_range_error_rate() {
@@ -44,7 +44,7 @@ fn rejects_out_of_range_error_rate() {
             "ont",
             "--adapter-error-rate",
             "2.0",
-            "--in-format",
+            "--input-format",
             "fastq",
         ])
         .write_stdin("")
@@ -61,9 +61,9 @@ fn adapter_sample_below_min_is_rejected() {
         .args([
             "--adapter-preset",
             "ont",
-            "--adapter-sample",
+            "--adapter-sample-reads",
             "50",
-            "--in-format",
+            "--input-format",
             "fastq",
         ])
         .write_stdin("")
@@ -181,7 +181,7 @@ fn adapter_sample_zero_disables_detection() {
             fq.path().to_str().unwrap(),
             "--adapter-fasta",
             fa.path().to_str().unwrap(),
-            "--adapter-sample",
+            "--adapter-sample-reads",
             "0",
             "-v",
         ])
@@ -216,7 +216,7 @@ fn tiny_input_skips_detection() {
             fq.path().to_str().unwrap(),
             "--adapter-preset",
             "ont",
-            "--adapter-sample",
+            "--adapter-sample-reads",
             "10000",
             "-v",
         ])
@@ -230,7 +230,7 @@ fn tiny_input_skips_detection() {
 }
 
 /// Presence detection is on by default for a preset: a run without
-/// `--adapter-sample` narrows the catalog to the entries the sampled prefix
+/// `--adapter-sample-reads` narrows the catalog to the entries the sampled prefix
 /// carries and still trims the adapter present in every read.
 #[test]
 fn default_runs_detection() {
@@ -320,9 +320,9 @@ fn detection_output_equals_full_set_for_present_adapter() {
 
     // Detection on, with a sample larger than the input so every read is
     // sampled: narrows the catalog.
-    let (detect_on, detect_on_err) = run(&["--adapter-sample", "10000"]);
+    let (detect_on, detect_on_err) = run(&["--adapter-sample-reads", "10000"]);
     // Detection off: trims against the full catalog.
-    let (detect_off, _) = run(&["--adapter-sample", "0"]);
+    let (detect_off, _) = run(&["--adapter-sample-reads", "0"]);
 
     assert!(!detect_on.is_empty(), "Detection-on output is non-empty");
     let stderr_on = String::from_utf8_lossy(&detect_on_err);
@@ -379,7 +379,7 @@ fn custom_fasta_trims_adapters_after_a_clean_prefix() {
             fq.path().to_str().unwrap(),
             "--adapter-fasta",
             fa.path().to_str().unwrap(),
-            "--adapter-sample",
+            "--adapter-sample-reads",
             "10000",
             "-t",
             "1",
@@ -433,7 +433,7 @@ fn preset_detection_falls_back_when_prefix_has_no_adapters() {
             fq.path().to_str().unwrap(),
             "--adapter-preset",
             "ont",
-            "--adapter-sample",
+            "--adapter-sample-reads",
             "100",
             "-v",
             "-t",
@@ -481,7 +481,7 @@ fn infer_and_fasta_are_mutually_exclusive() {
     cmd.args([
         "-i",
         "x.fastq",
-        "--adapter-infer",
+        "--discover-adapters",
         "--adapter-fasta",
         "a.fa",
     ]);
@@ -494,7 +494,13 @@ fn infer_and_fasta_are_mutually_exclusive() {
 fn adapter_sample_below_min_still_rejected_under_infer() {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
-    cmd.args(["-i", "x.fastq", "--adapter-infer", "--adapter-sample", "50"]);
+    cmd.args([
+        "-i",
+        "x.fastq",
+        "--discover-adapters",
+        "--adapter-sample-reads",
+        "50",
+    ]);
     cmd.assert()
         .failure()
         .stderr(predicates::str::contains("must be 0"));
@@ -505,11 +511,11 @@ fn infer_policy_requires_an_inference_operation() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["-i", "x.fastq", "--adapter-infer-policy", "aggressive"])
+        .args(["-i", "x.fastq", "--adapter-discovery-policy", "aggressive"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "--adapter-infer-policy requires --adapter-infer",
+            "--adapter-discovery-policy requires --discover-adapters",
         ));
 }
 
@@ -521,8 +527,8 @@ fn infer_policy_rejects_unknown_value() {
         .args([
             "-i",
             "x.fastq",
-            "--adapter-infer",
-            "--adapter-infer-policy",
+            "--discover-adapters",
+            "--adapter-discovery-policy",
             "balanced",
         ])
         .assert()
@@ -546,7 +552,7 @@ fn infer_report_with_fasta_notes_naming_includes_fasta() {
         .args([
             "-i",
             fq.path().to_str().unwrap(),
-            "--adapter-infer",
+            "--discover-adapters",
             "report",
             "--adapter-fasta",
             fa.path().to_str().unwrap(),
@@ -625,7 +631,7 @@ fn infer_action_and_policy_map_to_banner() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["-i", fq.to_str().unwrap(), "--adapter-infer", "-t", "1"])
+        .args(["-i", fq.to_str().unwrap(), "--discover-adapters", "-t", "1"])
         .assert()
         .success()
         .stderr(predicates::str::contains("infer trim · conservative"));
@@ -636,9 +642,9 @@ fn infer_action_and_policy_map_to_banner() {
         .args([
             "-i",
             fq.to_str().unwrap(),
-            "--adapter-infer",
+            "--discover-adapters",
             "report",
-            "--adapter-infer-policy",
+            "--adapter-discovery-policy",
             "aggressive",
             "-t",
             "1",
@@ -657,7 +663,7 @@ fn infer_report_prints_and_does_not_trim() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--adapter-infer",
+        "--discover-adapters",
         "report",
         "-t",
         "1",
@@ -687,7 +693,7 @@ fn infer_report_prints_sequence_to_stdout() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--adapter-infer",
+        "--discover-adapters",
         "report",
         "-t",
         "1",
@@ -732,7 +738,7 @@ fn infer_report_cross_names_against_user_fasta() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--adapter-infer",
+        "--discover-adapters",
         "report",
         "--adapter-fasta",
         fa_path.to_str().unwrap(),
@@ -761,7 +767,7 @@ fn infer_trims_planted_adapter() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--adapter-infer",
+        "--discover-adapters",
         "-t",
         "1",
     ]);
@@ -822,7 +828,7 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--adapter-infer",
+        "--discover-adapters",
         "-t",
         "1",
     ]);
@@ -860,7 +866,7 @@ fn infer_report_tiny_input_writes_no_output() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--adapter-infer",
+        "--discover-adapters",
         "report",
         "-t",
         "1",
@@ -906,7 +912,7 @@ fn infer_report_does_not_clobber_output_file() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--adapter-infer",
+        "--discover-adapters",
         "report",
         "-t",
         "1",
@@ -920,7 +926,7 @@ fn infer_report_does_not_clobber_output_file() {
     );
 }
 
-/// The same input run twice through `--adapter-infer` at `-t 1` produces
+/// The same input run twice through `--discover-adapters` at `-t 1` produces
 /// byte-identical output. Discovery (`infer::discover`) is pure over its sampled
 /// slice with no RNG or hash-map iteration-order dependence, and `-t 1` pins the
 /// FASTQ dispatch to its sequential (order-preserving) path, so this is a
@@ -938,7 +944,7 @@ fn infer_is_deterministic() {
             fq.to_str().unwrap(),
             "-o",
             out.to_str().unwrap(),
-            "--adapter-infer",
+            "--discover-adapters",
             "-t",
             "1",
         ]);
@@ -1006,7 +1012,7 @@ fn infer_warns_on_marginal_support() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--adapter-infer",
+        "--discover-adapters",
         "report",
         "-t",
         "1",
@@ -1057,7 +1063,7 @@ fn infer_report_on_bam_input_with_piped_stdout_succeeds() {
         .args([
             "-i",
             in_path.to_str().unwrap(),
-            "--adapter-infer",
+            "--discover-adapters",
             "report",
             "-t",
             "1",
@@ -1187,7 +1193,7 @@ fn produced_index_naming_end_to_end() {
             fa.path().to_str().unwrap(),
             "--adapter-error-rate",
             "0.1",
-            "--adapter-end-size",
+            "--adapter-end-search",
             "1",
             "-l",
             "13",
@@ -1269,7 +1275,7 @@ fn accounting_summary_end_to_end() {
             fa.path().to_str().unwrap(),
             "--adapter-error-rate",
             "0.1",
-            "--adapter-end-size",
+            "--adapter-end-search",
             "1",
             "-l",
             "13",
@@ -1317,9 +1323,9 @@ fn qual_split_emits_short_pieces_for_post_trim_filter_to_own() {
         .args([
             "-i",
             fq.path().to_str().unwrap(),
-            "--qual-split",
+            "--split-quality",
             "10",
-            "--qual-split-window",
+            "--split-min-low-quality-bases",
             "1",
             "-l",
             "5",
@@ -1364,9 +1370,9 @@ fn qual_split_both_pieces_survive_at_lower_length_floor() {
         .args([
             "-i",
             fq.path().to_str().unwrap(),
-            "--qual-split",
+            "--split-quality",
             "10",
-            "--qual-split-window",
+            "--split-min-low-quality-bases",
             "1",
             "-l",
             "4",

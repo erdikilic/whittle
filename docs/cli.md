@@ -7,10 +7,10 @@ every option, format selection, directory input, the summary file, and logging.
 
 `-i`/`--input` names the input and `-o`/`--output` the output. Either flag may
 be omitted or given as `-` for the standard stream. The format comes from the
-file extension, from the first bytes of a stream, or from `--in-format` and
-`--out-format` (`fastq`, `fastq-gz`, `fastq-bgz`, `bam`).
+file extension, from the first bytes of a stream, or from `--input-format` and
+`--output-format` (`fastq`, `fastq-gz`, `fastq-bgz`, `bam`).
 
-Without an output extension or `--out-format`, the output format is the input
+Without an output extension or `--output-format`, the output format is the input
 format, except that compressed FASTQ input yields plain FASTQ. Compressed output
 is produced only when requested by a `.gz`/`.bgz` extension or the format flag.
 FASTQ-to-BAM is not supported: a FASTQ read carries no header from which to
@@ -31,7 +31,7 @@ FASTQ input in the same convention (a tab after the read name, then
 headers puts the whole input on the BAM-to-FASTQ path: every read's fields are
 decoded as SAM aux tags and rewritten per output segment exactly as a uBAM
 record's are ([tags.md](tags.md)), `--fastq-tags` selects the output tags, and
-`--trim-barcodes`, `--remove-tag` and `--strip-kinetics` apply. A field that
+`--trim-barcodes`, `--remove-tag` and `--remove-kinetics` apply. A field that
 does not parse as a SAM tag fails the run and names the read. A header whose
 tab-delimited text is not in this form is copied verbatim.
 
@@ -43,7 +43,7 @@ input (BAM and FASTQ.bgz) is decompressed by an additional set of one quarter of
 the workers, at least one; plain gzip input is decompressed serially. The
 startup banner reports both figures.
 
-Records are written in completion order under `-t > 1`. `--ordered` restores
+Records are written in completion order under `-t > 1`. `--preserve-order` restores
 the input order at a small throughput cost.
 
 ## Directory input
@@ -56,65 +56,106 @@ path inside the input directory is rejected, since it cannot be distinguished
 from an input on a later run.
 
 ```bash
-whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --qual-trim 10
+whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 ```
 
 ## Options
 
 | Flag | Meaning |
 |---|---|
+| `-h, --help` | Print the option list and examples |
 | `--version` | Print the version and exit |
 | `-i, --input <PATH>` | Input file or directory (omit, or pass `-`, for stdin) |
 | `-o, --output <PATH>` | Output file (omit, or pass `-`, for stdout) |
-| `--in-format`, `--out-format <FORMAT>` | Force a format instead of detecting it: `fastq`, `fastq-gz`, `fastq-bgz`, `bam` |
+| `--input-format`, `--output-format <FORMAT>` | Force a format instead of detecting it: `fastq`, `fastq-gz`, `fastq-bgz`, `bam` |
 | `--fastq-tags <all\|none\|TAGS>` | Aux tags written into FASTQ headers on BAM or tagged FASTQ input (default `all`) |
 | `-c, --compression-level <0-9>` | BGZF level for `.gz`, `.bgz` and BAM output (default 4 for `.gz`, 6 for `.bgz` and BAM); ignored for plain FASTQ |
-| `--summary-json <PATH>` | Write a machine-readable run summary to PATH; ignored under `--adapter-infer report` |
+| `--summary-json <PATH>` | Write a machine-readable run summary to PATH; ignored under `--discover-adapters report` |
 | `-t, --threads <N>` | Worker threads, at least 1 (default: all detected CPUs, clamped to that maximum) |
-| `--ordered` | Write records in input order under `-t > 1` |
-| `-l, --min-length <N>` | Minimum length to keep, per output segment (default 1) |
-| `-L, --max-length <N>` | Maximum length to keep |
-| `-q, --min-qual <Q>` | Minimum read quality, a finite value of at least 0 (default 0) |
-| `-Q, --max-qual <Q>` | Maximum read quality, a finite value of at least 0 (default 1000) |
-| `-g, --min-gc <FRACTION>`, `-G, --max-gc <FRACTION>` | GC-fraction bounds (0 to 1) |
-| `-m, --qual-mode <MODE>` | How per-base Phred scores are summarized for `-q`/`-Q`: `mean` (mean error probability as a Phred score, the default), `arithmetic` (mean of the Phred scores), `median` |
-| `-H, --head-crop <N>`, `-T, --tail-crop <N>` | Fixed crop from each end, applied before adapter and quality trimming |
-| `--qual-trim <Q>` | Trim low-quality bases from both ends up to the first base of quality at least Q |
-| `--qual-best-segment <Q>` | Keep only the longest contiguous run of quality at least Q |
-| `--qual-split <Q>` | Split at runs of quality below Q and keep each surviving segment |
-| `--qual-split-window <N>` | Tolerate low-quality runs shorter than N without splitting (default 1); requires `--qual-split` |
+| `--preserve-order` | Write records in input order under `-t > 1` |
+| `-l, --min-length <BASES>` | Minimum length to keep, per output segment (default 1) |
+| `-L, --max-length <BASES>` | Maximum length to keep |
+| `-q, --min-quality <PHRED>` | Minimum post-trim segment quality, a finite value of at least 0 (default 0) |
+| `-Q, --max-quality <PHRED>` | Maximum post-trim segment quality, a finite value of at least 0 (default 1000) |
+| `-g, --min-gc <FRACTION>`, `-G, --max-gc <FRACTION>` | GC-fraction bounds (0 to 1; `0.4` means 40%) |
+| `-m, --quality-mode <MODE>` | Quality calculation for `--min-quality`/`--max-quality` only: `mean` (mean error probability as a Phred score, the default), `arithmetic` (mean of the Phred scores), `median` |
+| `-H, --trim-front <BASES>`, `-T, --trim-tail <BASES>` | Fixed crop from each end, applied before adapter and quality trimming |
+| `--trim-quality <PHRED>` | Trim both ends up to the first base of quality at least PHRED |
+| `--best-quality-segment <PHRED>` | Keep the highest-scoring segment using cumulative base-error probabilities and the Phred cutoff (modified Mott); may retain bases below the cutoff |
+| `--split-quality <PHRED>` | Split at consecutive bases below PHRED and keep each surviving segment |
+| `--split-min-low-quality-bases <BASES>` | Minimum consecutive bases below the splitting threshold required to split; shorter internal stretches are retained and low-quality ends are trimmed (default 1); requires `--split-quality` |
 | `--trim-barcodes` | Remove the barcode spans recorded in the `bi` aux tag, before every other stage (BAM or tagged FASTQ input) |
-| `--update-moves` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM) |
+| `--update-signal-tags` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM) |
 | `--remove-tag <TAG>` | Remove a two-character aux tag from every output record; repeatable (BAM or tagged FASTQ input) |
-| `--strip-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM or tagged FASTQ input) |
+| `--remove-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM or tagged FASTQ input) |
 | `-a, --adapter-fasta <FILE>` | Adapter and primer FASTA (IUPAC codes accepted; `primer` or `barcode` in a header description restricts the entry to the read ends); enables adapter trimming |
 | `--adapter-preset <KITS>` | Built-in kit presets, comma-separated: `lsk114`, `rad114` (`ulk114`), `rbk114`, `nbd114`, `pcb114` (`pcs114`), `rpb114`, `mab114`, `rna004`, `pacbio`, `ont`, `all`; enables adapter trimming |
 | `--adapter-error-rate <FRACTION>` | End-match tolerance as a fraction of adapter length (default 0.2); requires an adapter source |
-| `--adapter-end-size <BP>` | End-zone width searched for terminal adapters (default 150); requires an adapter source |
-| `--adapter-ends-only` | Trim ends only; never split on an interior adapter |
-| `--adapter-sample <N>` | Reads inspected before trimming, to keep only the preset entries the library carries or to infer adapters (defaults 2000 and 40000; `0` searches the whole preset); ignored with `--adapter-fasta` alone |
-| `--adapter-infer [<ACTION>]` | Discover adapters de novo: `trim` (the bare flag) or `report` |
-| `--adapter-infer-policy <POLICY>` | Trust policy for inferred adapters: `conservative` (default) or `aggressive`; requires `--adapter-infer` |
+| `--adapter-end-search <BASES>` | End-zone width searched for terminal adapters (default 150); requires an adapter source |
+| `--adapter-ends-only` | Trim adapters at ends only; disable interior adapter splitting independently of quality splitting |
+| `--adapter-sample-reads <COUNT>` | Reads inspected for preset presence or adapter discovery (defaults 2000 and 40000; at least 100); `0` disables preset detection and is rejected for discovery; ignored with `--adapter-fasta` unless discovering adapters |
+| `--discover-adapters [<ACTION>]` | Discover adapters de novo: `trim` (the bare flag) or `report` (FASTA to stdout, then exit without read output or a JSON summary) |
+| `--adapter-discovery-policy <POLICY>` | Trust policy for inferred adapters: `conservative` (default) or `aggressive`; requires `--discover-adapters` |
 | `-v, --verbose` (repeatable) | Stage detail with `-v`, per-read decisions with `-vv` |
 | `--progress <MODE>` | Progress reporting, independent of the log level: `auto` (default), `bar`, `plain`, `none` |
 | `--quiet` | Silence progress and the summary; warnings and errors still print. Conflicts with `-v` and `--progress` |
 
-`--qual-trim`, `--qual-best-segment`, and `--qual-split` are alternative
+`--trim-quality`, `--best-quality-segment`, and `--split-quality` are alternative
 strategies for one stage, so at most one is accepted. `-H`/`-T` combine with any
 of them.
 
 An adapter source is `--adapter-fasta`, `--adapter-preset`, or
-`--adapter-infer`. `--adapter-error-rate`, `--adapter-end-size`, and
-`--adapter-sample` are rejected without one. A forced `--in-format` that
+`--discover-adapters`. `--adapter-error-rate`, `--adapter-end-search`, and
+`--adapter-sample-reads` are rejected without one. A forced `--input-format` that
 disagrees with the stream, an output extension that names no format, and
 FASTQ-to-BAM output are reported before any output is written. Adapter trimming is described in
 [adapters.md](adapters.md).
+
+## Quality filtering and trimming
+
+`--quality-mode` determines the segment-level score used by `--min-quality`
+and `--max-quality`. It does not affect trimming, best-segment selection, or
+split locations.
+
+| Mode | Calculation |
+|---|---|
+| `mean` (default) | Average per-base error probabilities, then convert the average to a Phred score |
+| `arithmetic` | Average the numerical Phred scores directly |
+| `median` | Take the median Phred score |
+
+`--trim-quality PHRED` compares individual base scores with PHRED, removing
+bases from each end until a base meets the threshold. `--split-quality PHRED`
+removes stretches of consecutive bases below PHRED when they reach
+`--split-min-low-quality-bases BASES`. Shorter internal stretches remain in
+their segment; low-quality bases at segment ends are trimmed.
+
+`--best-quality-segment PHRED` maximizes the cumulative score
+`10^(-PHRED/10) - 10^(-base_quality/10)` over a contiguous segment. This
+modified Mott calculation can retain bases below PHRED. Each segment from
+adapter processing is evaluated separately, so an original read can still
+produce multiple outputs.
+
+```bash
+whittle -i reads.fastq.gz -o trimmed.fastq.gz \
+  --split-quality 9 --split-min-low-quality-bases 50 \
+  --min-quality 12 --quality-mode median
+```
+
+The command splits at at least 50 consecutive bases below Q9, then keeps
+segments with median quality of at least Q12. Length and GC filters also apply
+to each output segment.
+
+## Parameter aliases
+
+`--head-crop` is an alias for `--trim-front`, and `--tail-crop` is an alias for
+`--trim-tail`. Both appear in `--help`, accept a base count, and retain the
+short options `-H` and `-T`. Other parameters use the names listed above.
 
 ## Stage order
 
 The stages run in a fixed order: barcode removal, fixed crop, adapter trimming
 and chimera splitting, then the quality strategy. Each stage operates on what
-the previous one left, so `--head-crop` counts from the first base after the
+the previous one left, so `--trim-front` counts from the first base after the
 front barcode. The filters (`-l`/`-L`, `-q`/`-Q`, `-g`/`-G`) apply to every
 surviving segment on its own, and the run summary reports the stages separately.
 
@@ -127,7 +168,7 @@ machinery as every other stage: `MM`/`ML`/`MN`, per-base kinetics, and the ONT
 move table are rewritten for the trimmed sequence.
 
 ```bash
-whittle -i barcoded.bam -o trimmed.bam --trim-barcodes --update-moves
+whittle -i barcoded.bam -o trimmed.bam --trim-barcodes --update-signal-tags
 ```
 
 The tag holds seven floats, four of which are positions: the front barcode's
@@ -142,7 +183,7 @@ that is not a seven-element float array, or whose positions describe an empty,
 inverted, or out-of-range window, leaves the read untrimmed and is counted under
 `warnings.barcode_tag_malformed_reads`.
 
-The flag requires BAM input, since the positions come from a BAM aux tag.
+The flag requires BAM or tagged FASTQ input carrying auxiliary tags.
 
 ## Tag removal
 
@@ -150,13 +191,13 @@ The flag requires BAM input, since the positions come from a BAM aux tag.
 It is repeatable, and each value must be exactly two alphanumeric characters,
 validated before the run starts.
 
-`--strip-kinetics` removes the per-base kinetics and alignment-count arrays in
+`--remove-kinetics` removes the per-base kinetics and alignment-count arrays in
 one flag: `ip`, `pw`, `fi`, `fp`, `ri`, `rp`, `sa`, `sm`, and `sx`. It is
 equivalent to naming each with `--remove-tag`, and the two flags fill one
 removal set.
 
 ```bash
-whittle -i reads.bam -o smaller.bam --strip-kinetics --remove-tag ML
+whittle -i reads.bam -o smaller.bam --remove-kinetics --remove-tag ML
 ```
 
 Removal runs after the tags kept in register have been rewritten, so removing
@@ -169,8 +210,8 @@ records back without decoding them; with tag removal each record is rebuilt
 instead, which costs the decode and changes nothing else. On BAM-to-FASTQ the
 removal applies to the header tags selected by `--fastq-tags`.
 
-Both flags require BAM input. Tag removal is a complete run on its own:
-`whittle -i in.bam -o out.bam --strip-kinetics` with no trimming options is
+Both flags require BAM or tagged FASTQ input. Tag removal is a complete run on its own:
+`whittle -i in.bam -o out.bam --remove-kinetics` with no trimming options is
 valid. The resolved set is recorded under `params.remove_tags` in the summary
 JSON, and `params.strip_kinetics` records which flag requested it.
 
@@ -215,14 +256,14 @@ output, and `barcode_tag_malformed_reads` counts reads whose `bi` positions did
 not describe a window inside the read under `--trim-barcodes`. All three are
 also reported on stderr at the end of the run.
 
-`reads.output` counts output segments, not input reads, so under `--qual-split`
+`reads.output` counts output segments, not input reads, so under `--split-quality`
 or chimera splitting it can exceed `reads.input`. The read-level buckets
 `with_output`, `trimmed_to_nothing`, and `all_filtered` partition `reads.input`.
 
 Under `params.adapters`, `configured` is the set requested (preset and/or FASTA)
 and `count` is the set searched, after presence detection narrowed it or
 inference replaced it. The two are equal when neither ran. The startup banner
-prints `configured`. Under `--adapter-infer` nothing is configured up front, so
+prints `configured`. Under `--discover-adapters` nothing is configured up front, so
 `configured` is `0`.
 
 `schema_version` is incremented only when an existing field changes meaning or

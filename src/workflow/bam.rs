@@ -57,7 +57,7 @@ pub(crate) const FIXED_ARRAY_TAGS: [[u8; 2]; 3] = [*b"sn", *b"ac", *b"bc"];
 
 /// ONT signal-mapping tags: the `mv` move table plus the `ts`/`ns` sample counts
 /// and the `sp`/`pi` split linkage. On a trimmed read these are either rewritten
-/// (`--update-moves`) or dropped (default), never left stale. Handled by
+/// (`--update-signal-tags`) or dropped (default), never left stale. Handled by
 /// `signal_tag_updates`, not the per-base pass.
 pub(crate) const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 
@@ -66,7 +66,7 @@ pub(crate) const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b
 /// POD5 sample indexes, the frame `ts` uses: dorado adds `num_trimmed_samples`
 /// to the anchor and to both boundary ranges before writing the tag
 /// (`PolyACalculatorNode.cpp`, `poly_tail_calculator.cpp`). Under
-/// `--update-moves` they are kept or shifted when the poly-A tail survives the
+/// `--update-signal-tags` they are kept or shifted when the poly-A tail survives the
 /// trim and dropped when it is cut; without it (or with a malformed move table)
 /// they are dropped, since signal cannot be related to sequence.
 pub(crate) const POLYA_TAGS: [[u8; 2]; 2] = [*b"pa", *b"pt"];
@@ -82,7 +82,7 @@ pub(crate) const DROP_ON_TRIM_TAGS: [[u8; 2]; 3] = [*b"bi", *b"ds", *b"ls"];
 /// Tags that describe the whole parent read, not a split subread: `st` (read
 /// start time) and `du` (duration). A head/tail crop keeps the same read
 /// identity, so they stay valid there. On a split they are recomputed from the
-/// sample rate when `--update-moves` resolves the subread's signal window
+/// sample rate when `--update-signal-tags` resolves the subread's signal window
 /// (`split_time_updates`) and dropped otherwise. A non-float `du` (pbmarkdup's
 /// `du:Z`) is not a duration and is copied.
 pub(crate) const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
@@ -1073,7 +1073,7 @@ fn count_undo_tags_dropped(
 /// appended. A `Malformed` block is removed. An untrimmed, unsplit record with
 /// an `Absent` or `Consistent` block is cloned as is.
 ///
-/// `remove` names the tags `--remove-tag` and `--strip-kinetics` drop. Removal
+/// `remove` names the tags `--remove-tag` and `--remove-kinetics` drop. Removal
 /// is applied last, to the rewritten tag set, so a removed tag whittle
 /// maintains (`MM`, the move table, a per-base array) is absent from the
 /// output rather than left stale.
@@ -2752,7 +2752,7 @@ mod tests {
     }
 
     /// A synthetic move table: stride 2, 6 ones (one per base) at block indexes
-    /// 0, 1, 3, 4, 6, 7, 8 blocks in total. Shared by the `--update-moves` tests.
+    /// 0, 1, 3, 4, 6, 7, 8 blocks in total. Shared by the `--update-signal-tags` tests.
     fn ubam_with_moves() -> RecordBuf {
         let mut src = RecordBuf::default();
         *src.flags_mut() = Flags::UNMAPPED;
@@ -3096,7 +3096,7 @@ mod tests {
         }
     }
 
-    /// `--update-moves` without a move table cannot relate signal to sequence,
+    /// `--update-signal-tags` without a move table cannot relate signal to sequence,
     /// so the signal and poly-A tags are dropped (`parse_move_table` returns
     /// `None`, which selects `drop_all`).
     #[test]
@@ -4232,7 +4232,7 @@ mod tests {
 
     /// An ONT split carries the parent id, zero MinKNOW events and an unknown
     /// end reason on every subread but the last, with or without
-    /// `--update-moves`; `sp` still needs the move table and `st`/`du` are
+    /// `--update-signal-tags`; `sp` still needs the move table and `st`/`du` are
     /// dropped without it.
     #[test]
     fn ont_split_marks_subreads_without_update_moves() {
@@ -4278,7 +4278,7 @@ mod tests {
         assert!(!s.contains("\tst:Z:") && !s.contains("\tdu:f:"), "{s:?}");
     }
 
-    /// Under `--update-moves` a split recomputes `du` from the subread's
+    /// Under `--update-signal-tags` a split recomputes `du` from the subread's
     /// samples and `st` from its start sample, at the rate `ns`/`du` gives
     /// (26 samples over 5 s), in the source's offset form.
     #[test]
@@ -4434,7 +4434,7 @@ mod tests {
         assert_eq!(out[0].sequence().as_ref(), rec.sequence().as_ref());
     }
 
-    /// `--strip-kinetics` removes all nine per-base arrays and nothing else.
+    /// `--remove-kinetics` removes all nine per-base arrays and nothing else.
     #[test]
     fn strip_kinetics_removes_every_per_base_array() {
         let mut rec = ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]);

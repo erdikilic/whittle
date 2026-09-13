@@ -19,12 +19,12 @@ whittle filters, trims, and splits Oxford Nanopore and PacBio reads in FASTQ, co
 ## Features
 
 - **Base-modification tags.** `MM`, `ML`, and `MN` are reconstructed for every trimmed or split uBAM read. The test suite checks the result against an independent `htslib` decoder.
-- **Kinetics and signal tags.** Per-base arrays (`ip`, `pw`, and related) are sliced with the sequence. ONT signal tags (`mv`, `ts`, `ns`, and related) are removed by default or rewritten with `--update-moves`.
+- **Kinetics and signal tags.** Per-base arrays (`ip`, `pw`, and related) are sliced with the sequence. ONT signal tags (`mv`, `ts`, `ns`, and related) are removed by default or rewritten with `--update-signal-tags`.
 - **Adapter and primer trimming.** Terminal adapters, adapters truncated by the read end, and interior adapters (chimera splitting with junction cleanup). Sequences come from built-in kit presets (ONT kit 14 ligation, rapid, barcoding, cDNA, and amplicon kits; RNA004; PacBio SMRTbell), a user FASTA with IUPAC codes, or ab-initio discovery. Presence detection restricts a preset to the sequences a library carries.
-- **Quality trimming.** End trimming to a threshold, best-segment extraction, or splitting at low-quality runs. Every segment is filtered on its own.
+- **Quality trimming.** End trimming to a threshold, best-segment extraction, or splitting at consecutive low-quality bases. Every segment is filtered on its own.
 - **Tagged FASTQ.** FASTQ whose headers carry SAM aux tags (`samtools fastq -T MM,ML,MN`) is trimmed with the same tag rewriting as uBAM: `MM`/`ML`/`MN` are rebuilt and per-base arrays sliced for every output segment.
 - **Formats.** FASTQ, gzip and BGZF FASTQ, and unaligned BAM as input; the same, plus BAM-to-FASTQ, as output. Formats are detected from the path or the stream, including on stdin. A directory of files is merged in one run.
-- **Pipeline integration.** `--summary-json` writes the resolved settings and all counters as JSON. `--ordered` keeps the input order under multithreading. Malformed tags are counted and reported rather than fatal.
+- **Pipeline integration.** `--summary-json` writes the resolved settings and all counters as JSON. `--preserve-order` keeps the input order under multithreading. Malformed tags are counted and reported rather than fatal.
 - **Performance.** Multithreaded trimming, encoding, and decoding; `-t N` uses about N cores. Adapter search is SIMD bit-parallel ([sassy](https://github.com/RagnarGrootKoerkamp/sassy)). BAM and BGZF I/O use `noodles` with `libdeflate`. No `htslib` is required at build or run time.
 
 ## Installation
@@ -56,19 +56,21 @@ cargo build --release   # target/release/whittle
 Filter and trim FASTQ: crop 20 bp from each end, quality-trim below Q8, keep reads of at least 500 bp and Q10.
 
 ```bash
-whittle -i reads.fastq.gz -o trimmed.fastq.gz -H 20 -T 20 --qual-trim 8 -l 500 -q 10 -t 8
+whittle -i reads.fastq.gz -o trimmed.fastq.gz --trim-front 20 --trim-tail 20 \
+  --trim-quality 8 --min-length 500 --min-quality 10 -t 8
 ```
 
-Trim unaligned BAM, split at low-quality runs, and rewrite the modification tags of every output read.
+Trim unaligned BAM, split at consecutive low-quality bases, and rewrite the modification tags of every output read.
 
 ```bash
-whittle -i reads.bam -o trimmed.bam -H 10 -T 10 -l 1000 --qual-split 9 --qual-split-window 50
+whittle -i reads.bam -o trimmed.bam --trim-front 10 --trim-tail 10 \
+  --split-quality 9 --split-min-low-quality-bases 50 --min-length 1000
 ```
 
 Trim FASTQ exported with its tags; the tags are rewritten the same way.
 
 ```bash
-samtools fastq -T MM,ML,MN reads.bam | whittle -o trimmed.fastq.gz -H 10 -T 10 --qual-trim 10
+samtools fastq -T MM,ML,MN reads.bam | whittle -o trimmed.fastq.gz -H 10 -T 10 --trim-quality 10
 ```
 
 Trim adapters with a kit preset. Interior adapters split the read.
@@ -101,27 +103,50 @@ whittle -i hifi.bam -o trimmed.bam --adapter-preset pacbio
 Discover adapters de novo: report the candidates, or trim with them directly.
 
 ```bash
-whittle -i reads.fastq.gz --adapter-infer report
-whittle -i reads.fastq.gz -o trimmed.fastq.gz --adapter-infer
+whittle -i reads.fastq.gz --discover-adapters report
+whittle -i reads.fastq.gz -o trimmed.fastq.gz --discover-adapters
 ```
 
 Merge a directory, convert BAM to FASTQ, and write a machine-readable summary.
 
 ```bash
-whittle -i fastq_pass/barcode03/ -o barcode03.fastq.gz --qual-trim 10
+whittle -i fastq_pass/barcode03/ -o barcode03.fastq.gz --trim-quality 10
 whittle -i reads.bam -o reads.fastq.gz -l 500 --quiet --summary-json qc.json
 ```
 
 `whittle --help` lists every option; [docs/cli.md](docs/cli.md) describes them.
+
+## Quality filtering and trimming
+
+`--min-quality` and `--max-quality` filter each output segment using the
+calculation selected by `--quality-mode`: `mean` (average error probability
+converted to Phred, the default), `arithmetic` (average Phred score), or
+`median`. This setting does not affect trimming or splitting.
+
+| Operation | Parameters | Behavior |
+|---|---|---|
+| Fixed crop | `--trim-front BASES`, `--trim-tail BASES` | Remove a fixed number of bases from the 5' and 3' ends |
+| Quality end trimming | `--trim-quality PHRED` | Trim each end until reaching a base at or above the threshold |
+| Best segment | `--best-quality-segment PHRED` | Select the highest-scoring contiguous segment using cumulative error probabilities; bases below the threshold can be retained |
+| Quality splitting | `--split-quality PHRED`, `--split-min-low-quality-bases BASES` | Split at the specified number of consecutive bases below the threshold; retain shorter internal stretches |
+
+The three quality operations are mutually exclusive and apply separately to
+each segment produced by adapter processing. Filters apply after these
+operations. `--min-length` sets the minimum retained segment length;
+`--split-min-low-quality-bases` sets the number of low-quality bases required
+to split.
+
+`--head-crop` and `--tail-crop` are aliases for `--trim-front` and `--trim-tail`.
+Both accept a base count and retain the short options `-H` and `-T`.
 
 ## Trimming pipeline
 
 The stages run in a fixed order, and each stage operates on what the previous one left:
 
 1. **Barcodes.** `--trim-barcodes` removes the spans recorded in the `bi` tag.
-2. **Fixed crop.** `-H`/`--head-crop` and `-T`/`--tail-crop`.
+2. **Fixed crop.** `-H`/`--trim-front` and `-T`/`--trim-tail`.
 3. **Adapters.** Terminal adapters and primers are trimmed. An interior adapter splits the read, the junction is excised, and each side is re-trimmed at its new end.
-4. **Quality.** One of `--qual-trim`, `--qual-best-segment`, or `--qual-split`.
+4. **Quality.** One of `--trim-quality`, `--best-quality-segment`, or `--split-quality`.
 5. **Filter.** Each surviving segment must pass `-l`/`-L` (length), `-q`/`-Q` (quality), and `-g`/`-G` (GC).
 
 A split read yields segments named `<read>_segment_N`, each filtered independently, so `-l` is a per-segment minimum after trimming. Every stage is expressed as an interval on the original read, and the tags are rewritten once against the final interval ([docs/tags.md](docs/tags.md)).
@@ -133,7 +158,7 @@ A split read yields segments named `<read>_segment_N`, each filtered independent
 | FASTQ, FASTQ.gz, FASTQ.bgz | yes | yes | yes | no |
 | unaligned BAM | yes | yes | yes | yes |
 
-Formats are taken from the path extension, a stream sniff, or `--in-format`/`--out-format`. FASTQ-to-BAM is not supported, since a FASTQ read carries no header from which to build a BAM record.
+Formats are taken from the path extension, a stream sniff, or `--input-format`/`--output-format`. FASTQ-to-BAM is not supported, since a FASTQ read carries no header from which to build a BAM record.
 
 ## Documentation
 
@@ -150,7 +175,7 @@ Formats are taken from the path extension, a stream sniff, or `--in-format`/`--o
 - **Unaligned BAM only.** Aligned records are refused; there is no CIGAR or POS adjustment for mapped reads.
 - **No FASTQ-to-BAM.** BAM-to-FASTQ is supported.
 - **`--min-length` applies after trimming**, per output segment, not to the raw read.
-- **One quality-trim strategy per run.** `--qual-trim`, `--qual-best-segment`, and `--qual-split` are mutually exclusive; `-H`/`-T` combine with any of them.
+- **One quality-trim strategy per run.** `--trim-quality`, `--best-quality-segment`, and `--split-quality` are mutually exclusive; `-H`/`-T` combine with any of them.
 
 ## Citation
 
