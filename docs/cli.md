@@ -79,12 +79,12 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `-Q, --max-quality <PHRED>` | Maximum post-trim segment quality, a finite value of at least 0 (default 1000) |
 | `-g, --min-gc <FRACTION>`, `-G, --max-gc <FRACTION>` | GC-fraction bounds (0 to 1; `0.4` means 40%) |
 | `-m, --quality-mode <MODE>` | Quality calculation for `--min-quality`/`--max-quality` only: `mean` (mean error probability as a Phred score, the default), `arithmetic` (mean of the Phred scores), `median` |
-| `-H, --trim-front <BASES>`, `-T, --trim-tail <BASES>` | Fixed crop from each end, applied before adapter and quality trimming |
+| `-H, --trim-front <BASES>`, `-T, --trim-tail <BASES>` | Fixed crop from each adapter-derived segment after barcode restriction and before quality processing; applied once |
 | `--trim-quality <PHRED>` | Trim both ends up to the first base of quality at least PHRED |
 | `--best-quality-segment <PHRED>` | Keep the highest-scoring segment using cumulative base-error probabilities and the Phred cutoff (modified Mott); may retain bases below the cutoff |
 | `--split-quality <PHRED>` | Split at consecutive bases below PHRED and keep each surviving segment |
 | `--split-min-low-quality-bases <BASES>` | Minimum consecutive bases below the splitting threshold required to split; shorter internal stretches are retained and low-quality ends are trimmed (default 1); requires `--split-quality` |
-| `--trim-barcodes` | Remove the barcode spans recorded in the `bi` aux tag, before every other stage (BAM or tagged FASTQ input) |
+| `--trim-barcodes` | Intersect adapter-derived segments with the retained interval from the original `bi` tag before cropping (BAM or tagged FASTQ input) |
 | `--update-signal-tags` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM) |
 | `--remove-tag <TAG>` | Remove a two-character aux tag from every output record; repeatable (BAM or tagged FASTQ input) |
 | `--remove-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM or tagged FASTQ input) |
@@ -153,19 +153,42 @@ short options `-H` and `-T`. Other parameters use the names listed above.
 
 ## Stage order
 
-The stages run in a fixed order: barcode removal, fixed crop, adapter trimming
-and chimera splitting, then the quality strategy. Each stage operates on what
-the previous one left, so `--trim-front` counts from the first base after the
-front barcode. The filters (`-l`/`-L`, `-q`/`-Q`, `-g`/`-G`) apply to every
-surviving segment on its own, and the run summary reports the stages separately.
+Adapter preparation loads a FASTA or preset, or discovers adapters from a
+sample of original reads. Sampled reads remain in the processing stream.
+Each read then passes through these stages:
+
+1. Adapter trimming and interior splitting on the original sequence, including
+   terminal cleanup of the resulting segments.
+2. Intersection of each segment with the retained barcode interval from the
+   original `bi` tag, when `--trim-barcodes` is enabled.
+3. Fixed cropping at both ends of each retained segment.
+4. Quality end trimming, best-segment selection, or quality splitting.
+5. Length, quality, and GC filtering of each final segment.
+6. Tag reconstruction and output of surviving segments.
+
+An unmatched read enters the barcode and crop stages as one full-length
+segment. Cropping applies once per adapter-derived segment. Quality splitting
+can divide that cropped segment again; its pieces are not cropped again.
+Adapter matching uses the original sequence before barcode restriction and
+fixed cropping.
+
+Final intervals are collected in original-read order before filtering. FASTQ
+and ONT names use one suffix per final interval, such as `read_segment_1`
+through `read_segment_4` for two adapter segments each split into two quality
+segments. Numbering does not restart at adapter boundaries or append nested
+suffixes. Filtering preserves these indices: if only interval 3 passes, its
+name remains `read_segment_3`. A read producing only one final interval keeps
+its original name. PacBio names use final query coordinates according to the
+[platform rules](tags.md#platform-rules).
 
 ## Barcode trimming
 
 `--trim-barcodes` removes the barcode spans that dorado recorded in the `bi` aux
-tag. The positions are read from the tag, not found by sequence search, so the
-cut equals the one `dorado demux` makes, and the trim runs through the same
-machinery as every other stage: `MM`/`ML`/`MN`, per-base kinetics, and the ONT
-move table are rewritten for the trimmed sequence.
+tag. The positions are read from the original tag and define the retained
+interval. Each adapter-derived segment is intersected with that interval
+before cropping. The trim uses the same tag-rewrite machinery as every other
+stage: `MM`/`ML`/`MN`, per-base kinetics, and the ONT move table are rewritten
+for the trimmed sequence.
 
 ```bash
 whittle -i barcoded.bam -o trimmed.bam --trim-barcodes --update-signal-tags

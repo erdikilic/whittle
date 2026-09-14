@@ -503,9 +503,8 @@ fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
     );
 }
 
-/// `--trim-front` counts from the first base after the front barcode, since the
-/// barcode stage is the outermost one, and the JSON summary records the
-/// resulting base counts.
+/// Without adapters, `--trim-front` counts from the retained barcode interval.
+/// The JSON summary records the resulting base counts.
 #[test]
 fn trim_barcodes_runs_before_the_crop_and_updates_json_counts() {
     let dir = tempfile::tempdir().unwrap();

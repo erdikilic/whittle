@@ -328,7 +328,8 @@ pub struct Config {
     /// `mv`/`ts`/`ns`/`sp`/`pi`.
     pub update_moves: bool,
     /// Whether the barcode spans dorado recorded in the `bi` aux tag are
-    /// removed, as the outermost trimming stage. Requires BAM or tagged FASTQ;
+    /// removed by intersecting adapter-derived segments with the retained
+    /// original-coordinate interval before cropping. Requires BAM or tagged FASTQ;
     /// `guards::guard_tag_flags` rejects input without auxiliary tags.
     pub trim_barcodes: bool,
     /// Aux tags removed from every output record (`--remove-tag`,

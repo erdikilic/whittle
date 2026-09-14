@@ -5,6 +5,13 @@ Adapter trimming is off by default. It is enabled by an adapter source:
 <KITS>` (the built-in catalog, scoped to the named kits), or `--discover-adapters`
 (ab-initio discovery). A FASTA and a preset combine into one search set.
 
+Adapter search operates on the original read before barcode restriction and
+fixed cropping. Each retained adapter segment then receives barcode
+restriction, fixed cropping, and quality processing. Quality splitting can
+produce several final segments from one adapter segment. Final segments are
+numbered in original-read order, then filtered. Reads without an
+adapter match continue through the same downstream stages.
+
 ## Sequences
 
 A FASTA record holds one sequence of at least 11 bp. The full IUPAC alphabet is

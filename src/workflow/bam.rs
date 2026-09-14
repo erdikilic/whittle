@@ -1231,7 +1231,7 @@ struct PreparedRead<'a> {
     qual: &'a [u8],
     /// The state of the record's modification block.
     mod_block: ModBlock,
-    /// The window the barcode stage leaves for the rest of the trim, `None`
+    /// The original-coordinate interval retained by barcode restriction, `None`
     /// when `--trim-barcodes` is off or the record carries no usable `bi`.
     barcode: Option<(usize, usize)>,
 }
@@ -4098,6 +4098,65 @@ mod tests {
             s.contains("@m64011_190830_220126/123/ccs/103_110\tqs:i:103\tqe:i:110\t"),
             "{s:?}"
         );
+    }
+
+    #[test]
+    fn adapter_and_quality_splits_retain_original_barcode_and_pacbio_coordinates() {
+        use crate::adapter::{Adapter, AdapterConfig, Role};
+        let adapter = b"GGGGTTTTGGGGTTTT";
+        let seq = [vec![b'C'; 64], adapter.to_vec(), vec![b'C'; 64]].concat();
+        let mut qual = vec![40; seq.len()];
+        qual[20..24].fill(2);
+        qual[104..108].fill(2);
+        let mut src = RecordBuf::default();
+        *src.flags_mut() = Flags::UNMAPPED;
+        *src.name_mut() = Some(HIFI.into());
+        *src.sequence_mut() = seq.into();
+        *src.quality_scores_mut() = qual.into();
+        src.data_mut()
+            .insert(Tag::new(b'q', b's'), Value::Int32(100));
+        src.data_mut()
+            .insert(Tag::new(b'q', b'e'), Value::Int32(244));
+        src.data_mut().insert(
+            Tag::new(b'b', b'i'),
+            Value::Array(Array::Float(vec![
+                100.0, 0.0, 9.0, 100.0, 143.0, 8.0, 100.0,
+            ])),
+        );
+        let mut cfg = split_cfg();
+        cfg.trim.head = 3;
+        cfg.trim.tail = 5;
+        cfg.trim.quality = Some(QualityOp::Split {
+            cutoff: 9,
+            window: 4,
+        });
+        cfg.trim_barcodes = true;
+        cfg.filter.min_length = 20;
+        cfg.adapters = Some(AdapterConfig {
+            adapters: vec![Adapter {
+                name: "junction".into(),
+                seq: adapter.to_vec(),
+                role: Role::Adapter,
+            }],
+            error_rate: 0.0,
+            end_size: 8,
+            split: true,
+            min_piece: 20,
+            candidate_index: std::sync::OnceLock::new(),
+        });
+        let (stats, recs) = bam2bam(vec![src.clone()], &cfg);
+        assert_eq!(stats.output_reads, 3);
+        assert_eq!(stats.segments_dropped_short, 1);
+        let (_, fastq) = bam2fq(vec![src], &cfg);
+        for (rec, (start, end)) in recs.iter().zip([(124, 159), (183, 204), (208, 230)]) {
+            let name = format!("m64011_190830_220126/123/ccs/{start}_{end}");
+            assert_eq!(name_of(rec), name.as_bytes());
+            assert_eq!(tag(rec, *b"qs"), Some(Value::Int32(start)));
+            assert_eq!(tag(rec, *b"qe"), Some(Value::Int32(end)));
+            assert_eq!(rec.sequence().len(), (end - start) as usize);
+            assert!(tag(rec, *b"bi").is_none());
+            assert!(fastq.contains(&format!("@{name}\t")), "{fastq}");
+        }
     }
 
     /// `rn` is a pass count on PacBio and passes through a split, as does

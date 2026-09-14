@@ -1,4 +1,5 @@
-//! Per-read trimming: barcode window, fixed crop, adapter stage and quality stage, producing kept intervals.
+//! Adapter trimming and splitting, barcode restriction, per-segment cropping
+//! and quality processing, expressed as intervals in the original read.
 
 pub mod strategies;
 
@@ -23,24 +24,23 @@ pub enum QualityOp {
 /// The per-read trim configuration.
 #[derive(Debug, Clone, Default)]
 pub struct TrimPlan {
-    /// Bases removed from the 5' end.
+    /// Bases removed from each adapter-derived segment's 5' end after barcode restriction.
     pub head: usize,
-    /// Bases removed from the 3' end.
+    /// Bases removed from each adapter-derived segment's 3' end after barcode restriction.
     pub tail: usize,
-    /// Quality operation applied after the crop and adapter stages, if any.
+    /// Quality operation applied to each cropped segment.
     pub quality: Option<QualityOp>,
 }
 
-/// Applies `plan` to one read and returns the kept intervals in read
-/// coordinates: `barcode` first, then the fixed crop, then the adapter stage on
-/// the cropped window (when configured), then the quality operation within each
-/// adapter segment. Every segment is returned, including short ones; the caller
-/// filters each by length, quality and GC.
+/// Searches the original read for adapters, intersects each retained segment
+/// with `barcode`, crops each intersection once, and applies the quality
+/// operation. Quality splitting can produce multiple intervals per adapter
+/// segment. The result is flattened in original-coordinate order for final
+/// numbering and filtering by length, quality and GC.
 ///
-/// `barcode` is the per-read window an outer stage leaves for the rest of the
-/// trim, in read coordinates and within `[0, seq.len()]`. `--trim-barcodes`
-/// resolves it from the record's `bi` aux tag; every other path passes `None`,
-/// which is the whole read.
+/// `barcode` is the retained interval resolved from the original record's `bi`
+/// tag under `--trim-barcodes`. `None` retains the whole read. An unmatched
+/// read enters barcode restriction and cropping as one full-length segment.
 pub fn apply(
     seq: &[u8],
     phred: &[u8],
@@ -54,22 +54,25 @@ pub fn apply(
         "Sequence and quality lengths must be equal"
     );
     let seq_len = seq.len();
-    // The barcode window is the outermost stage, so the crop counts from its
-    // first base rather than from the read's.
     let (outer_start, outer_end) = match barcode {
         Some((s, e)) => (s.min(seq_len), e.clamp(s.min(seq_len), seq_len)),
         None => (0, seq_len),
     };
-    let start = outer_start.saturating_add(plan.head).min(outer_end);
-    let end = outer_end.saturating_sub(plan.tail).max(start);
-    if start >= end {
+    if outer_start >= outer_end {
         return vec![];
     }
 
-    // The quality op within one `[s, e)` segment, with results offset back to
-    // read coordinates and appended to `out`. No length filter is applied; the
-    // caller filters each returned segment.
-    let quality_in = |s: usize, e: usize, out: &mut Vec<(usize, usize)>| {
+    let process_segment = |s: usize, e: usize, out: &mut Vec<(usize, usize)>| {
+        let s = s.max(outer_start);
+        let e = e.min(outer_end);
+        if s >= e {
+            return;
+        }
+        let s = s.saturating_add(plan.head).min(e);
+        let e = e.saturating_sub(plan.tail).max(s);
+        if s >= e {
+            return;
+        }
         let wp = &phred[s..e];
         let offset = |v: Vec<(usize, usize)>, out: &mut Vec<(usize, usize)>| {
             out.extend(v.into_iter().map(|(is, ie)| (is + s, ie + s)));
@@ -84,17 +87,14 @@ pub fn apply(
         }
     };
 
-    // The adapter stage on the cropped window, mapped back to read coordinates,
-    // then the quality op within each segment. The no-adapter path goes directly
-    // to the quality op with no intermediate segment vector.
     let mut out = Vec::new();
     match adapters {
         None => {
-            quality_in(start, end, &mut out);
+            process_segment(0, seq_len, &mut out);
         },
         Some(cfg) => {
-            for (s, e) in crate::adapter::adapter_segments(&seq[start..end], cfg) {
-                quality_in(s + start, e + start, &mut out);
+            for (s, e) in crate::adapter::adapter_segments(seq, cfg) {
+                process_segment(s, e, &mut out);
             }
         },
     }
@@ -104,6 +104,113 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn adapter_config() -> crate::adapter::AdapterConfig {
+        crate::adapter::AdapterConfig {
+            adapters: vec![crate::adapter::Adapter {
+                name: "junction".into(),
+                seq: b"GGGGTTTTGGGGTTTT".to_vec(),
+                role: crate::adapter::Role::Adapter,
+            }],
+            error_rate: 0.0,
+            end_size: 8,
+            split: true,
+            min_piece: 1,
+            candidate_index: std::sync::OnceLock::new(),
+        }
+    }
+
+    #[test]
+    fn adapter_segments_are_cropped_once_before_quality_processing() {
+        let ac = adapter_config();
+        let seq = [vec![b'C'; 64], ac.adapters[0].seq.clone(), vec![b'A'; 64]].concat();
+        let mut phred = vec![40; seq.len()];
+        phred[20..24].fill(2);
+        phred[104..108].fill(2);
+        let plan = TrimPlan {
+            head: 3,
+            tail: 5,
+            quality: Some(QualityOp::Split {
+                cutoff: 9,
+                window: 4,
+            }),
+        };
+        assert_eq!(
+            apply(&seq, &phred, &plan, Some(&ac), None),
+            vec![(3, 20), (24, 59), (83, 104), (108, 139)]
+        );
+        assert_eq!(
+            apply(&seq, &phred, &plan, Some(&ac), Some((10, 135))),
+            vec![(13, 20), (24, 59), (83, 104), (108, 130)]
+        );
+        let end_trim = TrimPlan {
+            quality: Some(QualityOp::TrimQual(20)),
+            ..plan.clone()
+        };
+        assert_eq!(
+            apply(&seq, &phred, &end_trim, Some(&ac), None),
+            vec![(3, 59), (83, 139)]
+        );
+        let best = TrimPlan {
+            quality: Some(QualityOp::BestSegment(20)),
+            ..plan
+        };
+        assert_eq!(
+            apply(&seq, &phred, &best, Some(&ac), None),
+            vec![(24, 59), (108, 139)]
+        );
+    }
+
+    #[test]
+    fn terminal_adapter_is_recognized_before_barcode_restriction_and_crop() {
+        let ac = adapter_config();
+        let seq = [ac.adapters[0].seq.clone(), vec![b'C'; 64]].concat();
+        let phred = vec![40; seq.len()];
+        let plan = TrimPlan {
+            head: 3,
+            tail: 5,
+            quality: None,
+        };
+        assert_eq!(apply(&seq, &phred, &plan, Some(&ac), None), vec![(19, 75)]);
+        assert_eq!(
+            apply(&seq, &phred, &plan, Some(&ac), Some((12, 70))),
+            vec![(19, 65)]
+        );
+    }
+
+    #[test]
+    fn unmatched_read_is_cropped_and_quality_split() {
+        let ac = adapter_config();
+        let seq = vec![b'C'; 64];
+        let mut phred = vec![40; seq.len()];
+        phred[20..24].fill(2);
+        let plan = TrimPlan {
+            head: 3,
+            tail: 5,
+            quality: Some(QualityOp::Split {
+                cutoff: 9,
+                window: 4,
+            }),
+        };
+        assert_eq!(
+            apply(&seq, &phred, &plan, Some(&ac), None),
+            vec![(3, 20), (24, 59)]
+        );
+    }
+
+    #[test]
+    fn crop_can_consume_one_adapter_segment_without_consuming_its_sibling() {
+        let ac = adapter_config();
+        let seq = [vec![b'C'; 24], ac.adapters[0].seq.clone(), vec![b'A'; 64]].concat();
+        let phred = vec![40; seq.len()];
+        let plan = TrimPlan {
+            head: 20,
+            tail: 5,
+            quality: None,
+        };
+        assert_eq!(apply(&seq, &phred, &plan, Some(&ac), None), vec![(60, 99)]);
+        assert!(apply(&seq, &phred, &plan, Some(&ac), Some((0, 24))).is_empty());
+    }
 
     #[test]
     fn no_quality_op_is_fixed_crop() {
@@ -169,11 +276,12 @@ mod tests {
         let adapter = b"ACGTACGTACGT";
         let mut seq = adapter.to_vec();
         seq.extend_from_slice(b"GGGGGGGGGGGG");
-        let phred = vec![40u8; seq.len()];
+        let mut phred = vec![40u8; seq.len()];
+        phred[12..15].fill(2);
         let plan = TrimPlan {
-            head: 0,
-            tail: 0,
-            quality: None,
+            head: 2,
+            tail: 1,
+            quality: Some(QualityOp::TrimQual(20)),
         };
         let ac = AdapterConfig {
             adapters: vec![Adapter {
@@ -187,11 +295,11 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        assert_eq!(apply(&seq, &phred, &plan, Some(&ac), None), vec![(12, 24)]);
+        assert_eq!(apply(&seq, &phred, &plan, Some(&ac), None), vec![(15, 23)]);
     }
 
     #[test]
-    fn no_adapter_config_matches_old_behavior() {
+    fn crop_without_adapters_uses_the_full_read() {
         let phred = vec![30u8; 20];
         let seq = vec![b'A'; 20];
         let plan = TrimPlan {
@@ -207,8 +315,7 @@ mod tests {
 mod barcode_tests {
     use super::*;
 
-    /// The barcode window is the outermost stage, so the head crop counts from
-    /// the first base after the front barcode.
+    /// Fixed cropping operates within the original-coordinate barcode interval.
     #[test]
     fn barcode_window_precedes_the_crop() {
         let seq = vec![b'A'; 20];

@@ -141,10 +141,10 @@ median: Median Phred score
 .SH TRIMMING
 .TP
 \fB\-H\fR, \fB\-\-trim\-front\fR \fI<BASES>\fR [default: 0]
-Remove this many bases from the 5\*(Aq end, after barcode removal and before adapter and quality trimming
+Remove this many bases from each adapter\-derived segment\*(Aqs 5\*(Aq end, after barcode restriction and before quality processing. Applied once; quality\-split pieces are not cropped again
 .TP
 \fB\-T\fR, \fB\-\-trim\-tail\fR \fI<BASES>\fR [default: 0]
-Remove this many bases from the 3\*(Aq end, after barcode removal and before adapter and quality trimming
+Remove this many bases from each adapter\-derived segment\*(Aqs 3\*(Aq end, after barcode restriction and before quality processing. Applied once; quality\-split pieces are not cropped again
 .TP
 \fB\-\-trim\-quality\fR \fI<PHRED>\fR
 Trim both ends until reaching a base at or above PHRED. Mutually exclusive with \-\-best\-quality\-segment and \-\-split\-quality
@@ -153,13 +153,13 @@ Trim both ends until reaching a base at or above PHRED. Mutually exclusive with 
 Keep the highest\-scoring segment using cumulative base\-error probabilities and the PHRED cutoff (modified Mott). May retain bases below the cutoff. Applied separately to each adapter\-derived segment
 .TP
 \fB\-\-split\-quality\fR \fI<PHRED>\fR
-Split at consecutive bases below PHRED and keep the surviving segments. \-\-split\-min\-low\-quality\-bases sets the minimum number required to split
+Split each cropped adapter\-derived segment at consecutive bases below PHRED. Number the final segments in original\-read order. \-\-split\-min\-low\-quality\-bases sets the minimum number required to split
 .TP
 \fB\-\-split\-min\-low\-quality\-bases\fR \fI<BASES>\fR
 Minimum consecutive bases below \-\-split\-quality required to split. Shorter internal stretches are retained; low\-quality ends are trimmed. Requires \-\-split\-quality. Defaults to 1
 .TP
 \fB\-\-trim\-barcodes\fR
-Remove barcode spans recorded in the bi aux tag before every other trimming stage. Requires BAM or tagged FASTQ; does not detect barcodes
+Restrict adapter\-derived segments to the retained interval recorded in the original bi aux tag, before fixed cropping. Requires BAM or tagged FASTQ; does not detect barcodes
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<FILE>\fR

@@ -125,7 +125,7 @@ converted to Phred, the default), `arithmetic` (average Phred score), or
 
 | Operation | Parameters | Behavior |
 |---|---|---|
-| Fixed crop | `--trim-front BASES`, `--trim-tail BASES` | Remove a fixed number of bases from the 5' and 3' ends |
+| Fixed crop | `--trim-front BASES`, `--trim-tail BASES` | Remove a fixed number of bases from each adapter-derived segment's 5' and 3' ends after barcode restriction |
 | Quality end trimming | `--trim-quality PHRED` | Trim each end until reaching a base at or above the threshold |
 | Best segment | `--best-quality-segment PHRED` | Select the highest-scoring contiguous segment using cumulative error probabilities; bases below the threshold can be retained |
 | Quality splitting | `--split-quality PHRED`, `--split-min-low-quality-bases BASES` | Split at the specified number of consecutive bases below the threshold; retain shorter internal stretches |
@@ -141,15 +141,23 @@ Both accept a base count and retain the short options `-H` and `-T`.
 
 ## Trimming pipeline
 
-The stages run in a fixed order, and each stage operates on what the previous one left:
+Adapter preparation loads a FASTA or preset, or discovers adapters from sampled
+original reads. Sampled reads remain in the processing stream. Processing then
+follows this order:
 
-1. **Barcodes.** `--trim-barcodes` removes the spans recorded in the `bi` tag.
-2. **Fixed crop.** `-H`/`--trim-front` and `-T`/`--trim-tail`.
-3. **Adapters.** Terminal adapters and primers are trimmed. An interior adapter splits the read, the junction is excised, and each side is re-trimmed at its new end.
-4. **Quality.** One of `--trim-quality`, `--best-quality-segment`, or `--split-quality`.
-5. **Filter.** Each surviving segment must pass `-l`/`-L` (length), `-q`/`-Q` (quality), and `-g`/`-G` (GC).
+1. **Adapters.** Search the original read, trim terminal adapters and primers, and split at interior adapters. Clean each new end. Reads without a match continue as one segment.
+2. **Barcodes.** `--trim-barcodes` intersects each segment with the retained interval from the original `bi` tag.
+3. **Fixed crop.** `--trim-front` and `--trim-tail` crop each retained adapter-derived segment once.
+4. **Quality.** Apply `--trim-quality`, `--best-quality-segment`, or `--split-quality` to each cropped segment. Quality splitting can produce further segments; these are not cropped again.
+5. **Filter.** Each final segment must pass the length, quality, and GC bounds.
+6. **Output.** Rewrite tags against each surviving interval and write the records.
 
-A split read yields segments named `<read>_segment_N`, each filtered independently, so `-l` is a per-segment minimum after trimming. Every stage is expressed as an interval on the original read, and the tags are rewritten once against the final interval ([docs/tags.md](docs/tags.md)).
+Final segments are numbered once, in their order along the original read.
+Two adapter segments that each split into two quality segments produce
+`<read>_segment_1` through `<read>_segment_4`. Filtering preserves the indices
+of surviving segments. PacBio records use final query-coordinate names.
+Every stage retains original-read coordinates, and tags are rewritten once
+against each final interval ([docs/tags.md](docs/tags.md)).
 
 ## Formats
 

@@ -490,7 +490,9 @@ pub(crate) fn read_span(name: &[u8]) -> tracing::Span {
 
 /// Filters produced segments and updates segment- and read-level counters for
 /// all workflows. `seq` and `qual` contain the complete input read and
-/// `produced` contains the ranges to evaluate. For each surviving segment,
+/// `produced` contains the final ranges from adapter and quality processing
+/// in original-coordinate order. Segment numbers index this flattened list
+/// before filtering; they do not restart at adapter boundaries. For each survivor,
 /// `render` receives `(idx, total, start, end)`. A render error stops
 /// processing before the read-level outcome counter is updated.
 pub(crate) fn process_read_segments<Rn>(

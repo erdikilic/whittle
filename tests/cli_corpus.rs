@@ -136,6 +136,10 @@ struct BamRecord {
     ts: Option<i64>,
     /// `ns` tag.
     ns: Option<i64>,
+    /// Split offset in the original ONT signal.
+    sp: Option<i64>,
+    /// Original ONT parent read name.
+    pi: Option<String>,
 }
 
 /// The binary with `WHITTLE_LOG` cleared.
@@ -442,20 +446,19 @@ fn adapter_windows(read: &SourceRead, start: usize, end: usize) -> Vec<(usize, u
 
 /// Every segment a run under `cfg` produces for `read`, before filtering.
 fn produced_windows(read: &SourceRead, cfg: ExpectCfg) -> Vec<(usize, usize)> {
-    let start = cfg.head.min(read.seq.len());
-    let end = read.seq.len().saturating_sub(cfg.tail).max(start);
-    if start >= end {
-        return Vec::new();
-    }
-
     let adapter_segs = if cfg.adapters {
-        adapter_windows(read, start, end)
+        adapter_windows(read, 0, read.seq.len())
     } else {
-        vec![(start, end)]
+        vec![(0, read.seq.len())]
     };
 
     let mut out = Vec::new();
     for (seg_start, seg_end) in adapter_segs {
+        if seg_end - seg_start <= cfg.head + cfg.tail {
+            continue;
+        }
+        let seg_start = seg_start + cfg.head;
+        let seg_end = seg_end - cfg.tail;
         let inner = match cfg.quality {
             QualityOp::None => vec![(0, seg_end - seg_start)],
             QualityOp::Trim(cutoff) => trim_edge(&read.qual[seg_start..seg_end], cutoff),
@@ -650,8 +653,16 @@ fn expected_bam(reads: &[SourceRead], cfg: ExpectCfg, update_moves: bool) -> Vec
                         mv.extend(std::iter::repeat_n(1, kept_len));
                         mv
                     }),
-                    Some(i64::from(read.ts) + (s as i64 * 2)),
-                    Some(i64::from(read.ts) + (e as i64 * 2)),
+                    Some(if total > 1 {
+                        0
+                    } else {
+                        i64::from(read.ts) + (s as i64 * 2)
+                    }),
+                    Some(if total > 1 {
+                        kept_len as i64 * 2
+                    } else {
+                        i64::from(read.ts) + (e as i64 * 2)
+                    }),
                 )
             } else {
                 (None, None, None)
@@ -668,6 +679,9 @@ fn expected_bam(reads: &[SourceRead], cfg: ExpectCfg, update_moves: bool) -> Vec
                 mv,
                 ts,
                 ns,
+                sp: (total > 1 && update_moves && read.moves)
+                    .then_some(i64::from(read.ts) + s as i64 * 2),
+                pi: (total > 1).then(|| read.id.clone()),
             });
         }
     }
@@ -756,6 +770,8 @@ fn read_bam(path: &Path) -> Vec<BamRecord> {
             mv,
             ts: aux_i64(&buf, Tag::new(b't', b's')),
             ns: aux_i64(&buf, Tag::new(b'n', b's')),
+            sp: aux_i64(&buf, Tag::new(b's', b'p')),
+            pi: aux_string(&buf, Tag::new(b'p', b'i')),
         });
     }
     out.sort();
@@ -881,6 +897,149 @@ fn write_adapter_fasta(dir: &Path) -> std::path::PathBuf {
     )
     .unwrap();
     path
+}
+
+#[test]
+fn adapter_crop_and_quality_splits_preserve_final_names_and_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let seq = [vec![b'C'; 64], ADAPTER.to_vec(), vec![b'C'; 64]].concat();
+    let mut qual = vec![40; seq.len()];
+    qual[20..24].fill(2);
+    qual[104..108].fill(2);
+    let read = SourceRead {
+        id: "nested".into(),
+        ip: Some((0..seq.len()).map(|i| i as u8).collect()),
+        seq,
+        qual,
+        rg: Some("group1".into()),
+        mods: Some(ModFixture {
+            abs: vec![4, 25, 85, 110],
+            probs: vec![80, 100, 120, 140],
+        }),
+        moves: true,
+        ts: 1000,
+        adapter: Some(AdapterCase::Interior { start: 64 }),
+    };
+    let reads = vec![read];
+    let fastq = dir.path().join("reads.fastq.gz");
+    let bam = dir.path().join("reads.bam");
+    let tagged = dir.path().join("tagged.fastq");
+    write_fastq_gz(&fastq, &reads);
+    write_bam(&bam, &reads);
+    let adapters = write_adapter_fasta(dir.path());
+    whittle()
+        .arg("-i")
+        .arg(&bam)
+        .arg("-o")
+        .arg(&tagged)
+        .args(["--threads", "1", "--quiet"])
+        .assert()
+        .success();
+
+    for min_len in [1, 20, 32] {
+        let cfg = ExpectCfg {
+            head: 3,
+            tail: 5,
+            min_len,
+            quality: QualityOp::Split {
+                cutoff: 9,
+                window: 4,
+            },
+            ..adapter_cfg()
+        };
+        assert_eq!(
+            produced_windows(&reads[0], cfg),
+            vec![(3, 20), (24, 59), (83, 104), (108, 139)]
+        );
+        for threads in ["1", "4"] {
+            for (input, output_bam, carries_tags) in [
+                (&fastq, false, false),
+                (&bam, false, true),
+                (&tagged, false, true),
+                (&bam, true, true),
+            ] {
+                let out = dir
+                    .path()
+                    .join(if output_bam { "out.bam" } else { "out.fastq" });
+                let json = dir.path().join("summary.json");
+                let mut cmd = whittle();
+                cmd.arg("-i")
+                    .arg(input)
+                    .arg("-o")
+                    .arg(&out)
+                    .arg("--adapter-fasta")
+                    .arg(&adapters)
+                    .args([
+                        "--adapter-error-rate",
+                        "0",
+                        "--adapter-end-search",
+                        "8",
+                        "--trim-front",
+                        "3",
+                        "--trim-tail",
+                        "5",
+                        "--split-quality",
+                        "9",
+                        "--split-min-low-quality-bases",
+                        "4",
+                        "--threads",
+                        threads,
+                        "--preserve-order",
+                        "--quiet",
+                    ])
+                    .arg("--min-length")
+                    .arg(min_len.to_string())
+                    .arg("--summary-json")
+                    .arg(&json);
+                if output_bam {
+                    cmd.arg("--update-signal-tags");
+                } else if carries_tags {
+                    cmd.args(["--fastq-tags", "MM,ML,RG"]);
+                }
+                cmd.assert().success();
+                if output_bam {
+                    assert_same(
+                        "BAM final segments",
+                        &read_bam(&out),
+                        &expected_bam(&reads, cfg, true),
+                    );
+                } else {
+                    let expected = if carries_tags {
+                        expected_fastq_from_bam_with_tags(&reads, cfg)
+                    } else {
+                        expected_fastq(&reads, cfg)
+                    };
+                    let actual = read_fastq(&out);
+                    assert_same("FASTQ final segments", &actual, &expected);
+                    let names: Vec<_> = actual
+                        .iter()
+                        .map(|r| r.head.split_whitespace().next().unwrap())
+                        .collect();
+                    let expected_names = match min_len {
+                        1 => vec![
+                            "nested_segment_1",
+                            "nested_segment_2",
+                            "nested_segment_3",
+                            "nested_segment_4",
+                        ],
+                        20 => vec!["nested_segment_2", "nested_segment_3", "nested_segment_4"],
+                        _ => vec!["nested_segment_2"],
+                    };
+                    assert_eq!(names, expected_names);
+                }
+                let summary: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&json).unwrap()).unwrap();
+                let kept = match min_len {
+                    1 => 4,
+                    20 => 3,
+                    _ => 1,
+                };
+                assert_eq!(summary["reads"]["input"], 1);
+                assert_eq!(summary["reads"]["output"], kept);
+                assert_eq!(summary["segments_dropped"]["too_short"], 4 - kept);
+            }
+        }
+    }
 }
 
 #[test]

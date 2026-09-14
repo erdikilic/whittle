@@ -73,9 +73,8 @@ input. See [cli.md](cli.md#tag-removal).
 ## Barcode positions under `--trim-barcodes`
 
 `--trim-barcodes` removes the barcode spans recorded in `bi` rather than
-searching for the sequences, so the cut equals the one `dorado demux` makes,
-and every position-indexed tag is rewritten by the same machinery as any other
-trim. The tag is a `B:f` array of seven floats, `[barcode_score,
+searching for the sequences, using an interval in the original read. Every position-indexed tag is
+rewritten against each final interval. The tag is a `B:f` array of seven floats, `[barcode_score,
 front_start_index, front_len, front_score, rear_end_index, rear_len,
 rear_score]` (dorado `read_pipeline/base/messages.cpp`). `front_start_index +
 front_len` is the last base of the front barcode and `rear_end_index -
@@ -85,9 +84,16 @@ dorado's trimmer keeps (`demux/Trimmer.cpp`). A barcode that dorado did not
 find is stored as a negative position, and each end is guarded on its own
 value, so a read barcoded at one end is trimmed at that end only.
 
-Barcode removal is the outermost stage: it runs before `--trim-front` and
-`--trim-tail`, which therefore count from the first base after the front
-barcode. It requires BAM input, since no other format carries the tag.
+Each adapter-derived segment is intersected with the original barcode
+interval before `--trim-front` and `--trim-tail` crop its ends. The barcode
+coordinates are never interpreted relative to a split segment. BAM and tagged
+FASTQ input support this operation.
+
+Adapter and quality splitting share the original coordinate frame. Final
+segments are numbered in original-read order before filtering, with a single
+`_segment_N` suffix for ONT records. PacBio records use the final query
+coordinates. Modification calls, kinetics, and signal tags are reconstructed
+from the original record for each surviving interval.
 
 ## Platform rules
 

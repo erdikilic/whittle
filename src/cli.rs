@@ -163,8 +163,9 @@ struct Cli {
     )]
     qual_mode: QualMode,
 
-    /// Remove this many bases from the 5' end, after barcode removal and
-    /// before adapter and quality trimming.
+    /// Remove this many bases from each adapter-derived segment's 5' end,
+    /// after barcode restriction and before quality processing. Applied once;
+    /// quality-split pieces are not cropped again.
     #[arg(
         short = 'H',
         long = "trim-front",
@@ -174,8 +175,9 @@ struct Cli {
         help_heading = "Trimming"
     )]
     head_crop: usize,
-    /// Remove this many bases from the 3' end, after barcode removal and
-    /// before adapter and quality trimming.
+    /// Remove this many bases from each adapter-derived segment's 3' end,
+    /// after barcode restriction and before quality processing. Applied once;
+    /// quality-split pieces are not cropped again.
     #[arg(
         short = 'T',
         long = "trim-tail",
@@ -198,7 +200,8 @@ struct Cli {
         help_heading = "Trimming"
     )]
     qual_best_segment: Option<u8>,
-    /// Split at consecutive bases below PHRED and keep the surviving segments.
+    /// Split each cropped adapter-derived segment at consecutive bases below
+    /// PHRED. Number the final segments in original-read order.
     /// --split-min-low-quality-bases sets the minimum number required to split.
     #[arg(
         long = "split-quality",
@@ -220,8 +223,9 @@ struct Cli {
     /// instead of dropping them. BAM-to-BAM only.
     #[arg(long = "update-signal-tags", help_heading = "Tags")]
     update_moves: bool,
-    /// Remove barcode spans recorded in the bi aux tag before every other
-    /// trimming stage. Requires BAM or tagged FASTQ; does not detect barcodes.
+    /// Restrict adapter-derived segments to the retained interval recorded in
+    /// the original bi aux tag, before fixed cropping. Requires BAM or tagged
+    /// FASTQ; does not detect barcodes.
     #[arg(long, help_heading = "Trimming")]
     trim_barcodes: bool,
 
