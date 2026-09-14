@@ -136,6 +136,34 @@ pub fn expected_ml_len(mm: &[u8]) -> Option<usize> {
     Some(total)
 }
 
+/// Validates every cumulative modification occurrence against the sequence.
+pub(crate) fn positions_valid(mm: &[u8], seq: impl Iterator<Item = u8>) -> bool {
+    let mut totals = [0usize; 256];
+    let mut len = 0;
+    for base in seq {
+        totals[usize::from(base.to_ascii_uppercase())] += 1;
+        len += 1;
+    }
+    totals[usize::from(b'N')] = len;
+    group_tokens(mm).all(|token| {
+        let Some(head) = group_head(token) else {
+            return false;
+        };
+        let total = totals[usize::from(super::counting_base(head.base))];
+        let mut next = 0usize;
+        deltas(head.tail).all(|delta| {
+            let Some(position) = delta.and_then(|d| next.checked_add(d)) else {
+                return false;
+            };
+            if position >= total {
+                return false;
+            }
+            next = position + 1;
+            true
+        })
+    })
+}
+
 /// Parses a raw `MM:Z` string plus its `ML:B,C` array into groups. A group
 /// without a usable header contributes nothing, and a group is read up to its
 /// first unexpected byte; the groups after it are still read. The workflows
@@ -175,6 +203,23 @@ pub fn parse(mm: &[u8], ml: &[u8]) -> Mods {
 mod tests {
     use super::*;
     use crate::mods::ModCode;
+
+    #[test]
+    fn cumulative_positions_must_fit_the_counting_base() {
+        let seq = b"ACCT";
+        for mm in [b"C+m,0,0;".as_slice(), b"N+n,3;", b"U+m,0;", b"G-m;"] {
+            assert!(positions_valid(mm, seq.iter().copied()));
+        }
+        for mm in [
+            b"C+m,2;".as_slice(),
+            b"C+m,1,0;",
+            b"N+n,4;",
+            b"G-m,0;",
+            b"C+m,99999999999999999999999999;",
+        ] {
+            assert!(!positions_valid(mm, seq.iter().copied()));
+        }
+    }
 
     #[test]
     fn single_group_single_code() {

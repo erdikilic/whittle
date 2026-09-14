@@ -312,7 +312,7 @@ fn folder_merge_custom_fasta_never_reduces_still_trims() {
 /// Folder merge keeps only the first header, so records from a file declaring a
 /// different `@RG` would reference a read group missing from the merged output.
 #[test]
-fn folder_merge_bam_warns_on_differing_read_groups() {
+fn folder_merge_bam_rejects_differing_read_groups() {
     let dir = tempfile::tempdir().unwrap();
     write_ubam_with_rg(&dir.path().join("a.bam"), b"r1", "rg_a");
     write_ubam_with_rg(&dir.path().join("b.bam"), b"r2", "rg_b");
@@ -325,6 +325,44 @@ fn folder_merge_bam_warns_on_differing_read_groups() {
         .arg(&out)
         .args(["-t", "1"])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("different @RG"));
+        .failure()
+        .stderr(predicate::str::contains("incompatible @RG definitions"));
+}
+
+#[test]
+fn folder_merge_rejects_conflicting_definitions_of_the_same_read_group() {
+    use noodles_sam::alignment::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("inputs");
+    std::fs::create_dir(&input).unwrap();
+    for (file, sample) in [("a.bam", "sample_a"), ("b.bam", "sample_b")] {
+        let header: noodles_sam::Header = format!("@HD\tVN:1.6\n@RG\tID:shared\tSM:{sample}\n")
+            .parse()
+            .unwrap();
+        let mut writer =
+            noodles_bam::io::Writer::new(std::fs::File::create(input.join(file)).unwrap());
+        writer.write_header(&header).unwrap();
+        let mut rec = noodles_sam::alignment::RecordBuf::default();
+        *rec.flags_mut() = noodles_sam::alignment::record::Flags::UNMAPPED;
+        *rec.name_mut() = Some(sample.as_bytes().into());
+        *rec.sequence_mut() = b"ACGT".to_vec().into();
+        *rec.quality_scores_mut() = vec![40; 4].into();
+        rec.data_mut().insert(
+            noodles_sam::alignment::record::data::field::Tag::READ_GROUP,
+            noodles_sam::alignment::record_buf::data::field::Value::String(b"shared".into()),
+        );
+        writer.write_alignment_record(&header, &rec).unwrap();
+        writer.try_finish().unwrap();
+    }
+    for threads in ["1", "4"] {
+        whittle()
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg(dir.path().join("out.bam"))
+            .args(["-t", threads, "--quiet"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("incompatible @RG definitions"));
+    }
 }

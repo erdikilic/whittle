@@ -124,15 +124,53 @@ where
     f(&seqs)
 }
 
-/// Buffers at most `n` records, stopping when the input is exhausted.
+/// Maximum retained sample payload, including decoded BAM sampling sequences.
+const SAMPLE_BYTES: usize = 256 * 1024 * 1024;
+/// Maximum bases retained for adapter sampling.
+const SAMPLE_BASES: usize = 64 * 1024 * 1024;
+
+/// Estimates a raw BAM record's retained payload and decoded sampling sequence.
+pub(crate) fn bam_sample_weight(rec: &noodles_bam::Record) -> (usize, usize) {
+    let bases = rec.sequence().len();
+    let bytes = std::mem::size_of::<noodles_bam::Record>()
+        + rec.name().map_or(0, |n| n.len() + 1)
+        + rec.cigar().len() * 4
+        + bases.div_ceil(2)
+        + rec.quality_scores().len()
+        + rec.data().as_bytes().len()
+        + bases;
+    (bytes, bases)
+}
+
+/// Buffers a prefix bounded by record count, payload bytes and bases. The last
+/// record is retained whole, so one record can exceed a payload limit.
 fn buffer_prefix<R>(
     records: &mut impl Iterator<Item = anyhow::Result<R>>,
     n: usize,
+    weight: &impl Fn(&R) -> (usize, usize),
+    max_bytes: usize,
+    max_bases: usize,
 ) -> anyhow::Result<Vec<R>> {
     let mut sample = Vec::new();
+    let (mut bytes, mut bases) = (0usize, 0usize);
     for _ in 0..n {
         match records.next() {
-            Some(Ok(r)) => sample.push(r),
+            Some(Ok(r)) => {
+                let (record_bytes, record_bases) = weight(&r);
+                bytes = bytes.saturating_add(record_bytes);
+                bases = bases.saturating_add(record_bases);
+                sample.push(r);
+                if bytes >= max_bytes || bases >= max_bases {
+                    tracing::info!(
+                        reads = sample.len(),
+                        requested = n,
+                        bytes,
+                        bases,
+                        "Adapter sample reached its payload limit"
+                    );
+                    break;
+                }
+            },
             Some(Err(e)) => return Err(e),
             None => break,
         }
@@ -165,6 +203,7 @@ pub(crate) fn resolve<R, I, F>(
     cfg: &Config,
     // The returned sequence view borrows the record passed to `seq_of`.
     seq_of: F,
+    weight: impl Fn(&R) -> (usize, usize),
 ) -> anyhow::Result<Option<Resolved<R>>>
 where
     // Workflow iterators are boxed and may cross worker-thread boundaries.
@@ -180,7 +219,13 @@ where
             anyhow::bail!("adapter inference requires an adapter configuration");
         };
 
-        let sample: Vec<R> = buffer_prefix(&mut records, cfg.adapter_sample)?;
+        let sample: Vec<R> = buffer_prefix(
+            &mut records,
+            cfg.adapter_sample,
+            &weight,
+            SAMPLE_BYTES,
+            SAMPLE_BASES,
+        )?;
         let s = sample.len();
         let chain =
             |sample: Vec<R>, records: I| -> Box<dyn Iterator<Item = anyhow::Result<R>> + Send> {
@@ -241,7 +286,13 @@ where
 
     // Presence detection narrows the configured set to what the sampled prefix
     // contains.
-    let sample: Vec<R> = buffer_prefix(&mut records, cfg.adapter_sample)?;
+    let sample: Vec<R> = buffer_prefix(
+        &mut records,
+        cfg.adapter_sample,
+        &weight,
+        SAMPLE_BYTES,
+        SAMPLE_BASES,
+    )?;
     let s = sample.len();
     let full = ac.adapters.len();
     let kept = if s < detect::MIN_SAMPLE_FOR_DETECTION {
@@ -286,4 +337,46 @@ where
         records: Box::new(sample.into_iter().map(anyhow::Ok).chain(records)),
         adapters: Some(reduced),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_limits_preserve_the_complete_record_stream() {
+        for (max_bytes, max_bases, expected) in [(60, 100, 3), (100, 12, 3), (1, 1, 1)] {
+            let mut records = (0..10usize).map(Ok);
+            let sample =
+                buffer_prefix(&mut records, 10, &|_| (20, 4), max_bytes, max_bases).unwrap();
+            assert_eq!(sample.len(), expected);
+            let replayed: Vec<_> = sample
+                .into_iter()
+                .map(Ok)
+                .chain(records)
+                .collect::<anyhow::Result<_>>()
+                .unwrap();
+            assert_eq!(replayed, (0..10).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn sample_limit_accounts_for_large_auxiliary_payloads() {
+        let rec = crate::record::ReadRecord {
+            name: vec![b'A'; 1000],
+            seq: vec![b'C'; 4],
+            qual: vec![40; 4],
+        };
+        let mut records = std::iter::repeat_with(|| Ok(rec.clone())).take(20);
+        let sample = buffer_prefix(
+            &mut records,
+            20,
+            &|r| (r.name.len() + r.seq.len() + r.qual.len(), r.seq.len()),
+            2000,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(sample.len(), 2);
+        assert_eq!(records.count(), 18);
+    }
 }

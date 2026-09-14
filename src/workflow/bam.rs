@@ -17,6 +17,7 @@ use super::{
 };
 use crate::config::{Config, FastqTags, TagRemoval};
 use crate::io::fastq::{push_aux_field, push_mods_aux, push_record_body};
+use crate::mods::reconstruct::IndexedMods;
 use crate::{mods, trim};
 
 /// Per-base `B` arrays, one value per SEQ base, sliced in lockstep with the
@@ -393,18 +394,19 @@ pub(crate) enum ModBlock {
     /// No `MM:Z` tag. An `ML` or `MN` present on its own is copied verbatim.
     Absent,
     /// `MM` parses to its end, `ML` (when present) is a `B:C` array of the
-    /// length `MM` declares, and `MN` equals the sequence length.
+    /// length `MM` declares, all calls fit the sequence, and `MN` equals its length.
     Consistent,
     /// As `Consistent`, with `MN` absent; the output gains one.
     MissingMn,
     /// `MM` does not parse to its end, `ML` is not a `B:C` array or has the
-    /// wrong length, or `MN` disagrees with the sequence length. The calls
-    /// cannot be placed on the sequence, so the block is removed from the
+    /// wrong length, `MN` disagrees with the sequence length, or a call exceeds
+    /// the available counting-base occurrences. The block is removed from the
     /// output and the read is counted in `Counters::malformed_mod_reads`.
     Malformed,
 }
 
-/// Classifies a modification block from its parts. `ml` is `None` when the tag
+/// Checks modification syntax and tag lengths; sequence positions are checked
+/// separately. `ml` is `None` when the tag
 /// is absent and `Some(None)` when it is present with a subtype other than
 /// `B:C`; `mn` is `None` when absent and `Some(None)` when not an integer.
 fn classify_mod_block(
@@ -459,7 +461,14 @@ pub(crate) fn inspect_mod_block(src: &RecordBuf, seq_len: usize) -> ModBlock {
         .data()
         .get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH)
         .map(aux_integer);
-    classify_mod_block(mm, ml, mn, seq_len)
+    let block = classify_mod_block(mm, ml, mn, seq_len);
+    if block != ModBlock::Malformed
+        && !mods::parse::positions_valid(mm, src.sequence().as_ref().iter().copied())
+    {
+        ModBlock::Malformed
+    } else {
+        block
+    }
 }
 
 /// Parses an `mv` move table value into `(stride, moves)`. `None` unless it is a
@@ -477,6 +486,74 @@ pub(crate) fn parse_move_table(value: &Value) -> Option<(i8, &[i8])> {
             }
         },
         _ => None,
+    }
+}
+
+/// Signal direction resolved from the record's basecalling model.
+fn signal_reversed(header: &sam::Header, rec: &RecordBuf) -> Option<bool> {
+    use sam::header::record::value::map::read_group::tag::DESCRIPTION;
+    let direction =
+        |group: &sam::header::record::value::Map<sam::header::record::value::map::ReadGroup>| {
+            let description = group.other_fields().get(&DESCRIPTION)?;
+            description
+                .split(|b| b.is_ascii_whitespace() || *b == b';')
+                .find_map(|field| {
+                    let model = field.strip_prefix(b"basecall_model=")?;
+                    if model.starts_with(b"rna") {
+                        Some(true)
+                    } else if model.starts_with(b"dna") {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                })
+        };
+    match rec.data().get(&Tag::READ_GROUP) {
+        Some(Value::String(id)) => direction(header.read_groups().get(AsRef::<[u8]>::as_ref(id))?),
+        None => {
+            let mut groups = header.read_groups().values();
+            let first = direction(groups.next()?)?;
+            groups
+                .all(|group| direction(group) == Some(first))
+                .then_some(first)
+        },
+        _ => None,
+    }
+}
+
+/// Emitted-base boundaries in signal block order, indexed once per read.
+struct MoveIndex<'a> {
+    stride: i8,
+    moves: &'a [i8],
+    boundaries: Vec<usize>,
+    reversed: bool,
+}
+
+impl<'a> MoveIndex<'a> {
+    /// Accepts binary move tables with one emission per sequence base.
+    fn new(src: &'a RecordBuf, reversed: bool) -> Option<Self> {
+        let (stride, moves) = src
+            .data()
+            .get(&Tag::new(b'm', b'v'))
+            .and_then(parse_move_table)?;
+        let mut boundaries = Vec::new();
+        for (i, &m) in moves.iter().enumerate() {
+            match m {
+                0 => {},
+                1 => boundaries.push(i),
+                _ => return None,
+            }
+        }
+        if boundaries.len() != src.sequence().len() {
+            return None;
+        }
+        boundaries.push(moves.len());
+        Some(Self {
+            stride,
+            moves,
+            boundaries,
+            reversed,
+        })
     }
 }
 
@@ -605,8 +682,8 @@ fn window_coords(qs0: i64, start: usize, end: usize) -> (i64, i64) {
     (qs0 + start as i64, qs0 + end as i64)
 }
 
-/// Returns the output name of `window` for a read named `name`. A crop keeps
-/// the name. A split names an ONT segment `{name}_segment_{n}` (1-based) and a
+/// Returns the output name of `window`, updating existing PacBio query intervals.
+/// A split names an ONT segment `{name}_segment_{n}` (1-based) and a
 /// PacBio segment `{stem}/{qStart}_{qEnd}` from `coords`, the segment's
 /// rewritten `qs`/`qe`; without them the interval is offset from the name's
 /// own `qStart` (0 when the name has none). A PacBio record whose name follows
@@ -617,11 +694,9 @@ pub(crate) fn segment_name(
     window: Window,
     coords: Option<(i64, i64)>,
 ) -> Vec<u8> {
-    if window.total <= 1 {
-        return name.to_vec();
-    }
     if platform == Platform::PacBio
         && let Some(parts) = parse_pacbio_name(name)
+        && (window.total > 1 || parts.query_start.is_some())
     {
         let (qs, qe) = coords.unwrap_or_else(|| {
             window_coords(parts.query_start.unwrap_or(0), window.start, window.end)
@@ -629,6 +704,9 @@ pub(crate) fn segment_name(
         let mut out = parts.stem.to_vec();
         out.extend_from_slice(format!("/{qs}_{qe}").as_bytes());
         return out;
+    }
+    if window.total <= 1 {
+        return name.to_vec();
     }
     let mut out = name.to_vec();
     out.extend_from_slice(format!("_segment_{}", window.idx + 1).as_bytes());
@@ -735,12 +813,13 @@ fn signal_tag_updates(
     start: usize,
     end: usize,
     total: usize,
-    update_moves: bool,
+    moves: Option<&MoveIndex<'_>>,
 ) -> (TagUpdates, Option<SignalWindow>) {
     if start == 0 && end == seq_len {
         return (Vec::new(), None);
     }
-    if update_moves && let Some((updates, window)) = signal_rewrite(src, seq_len, start, end, total)
+    if let Some(moves) = moves
+        && let Some((updates, window)) = signal_rewrite(src, seq_len, start, end, total, moves)
     {
         return (updates, Some(window));
     }
@@ -762,41 +841,21 @@ fn signal_rewrite(
     start: usize,
     end: usize,
     total: usize,
+    index: &MoveIndex<'_>,
 ) -> Option<(TagUpdates, SignalWindow)> {
-    let (stride, moves) = src
-        .data()
-        .get(&Tag::new(b'm', b'v'))
-        .and_then(parse_move_table)?;
-    // The move index of the `start`-th and `end`-th base (each `1` in `moves`
-    // is one emitted base), and the total base count, found in a single pass,
-    // without materializing the whole positions list.
-    let mut ones_seen = 0usize;
-    let mut block_first = None;
-    let mut block_second = None;
-    for (i, &m) in moves.iter().enumerate() {
-        if m != 0 {
-            if ones_seen == start {
-                block_first = Some(i);
-            }
-            if ones_seen == end {
-                block_second = Some(i);
-            }
-            ones_seen += 1;
-        }
-    }
-    if ones_seen != seq_len {
+    if start >= end || end > seq_len {
         return None;
     }
-
-    let stride_n = stride as usize;
-    // The end-th base exists only when `end < seq_len`; otherwise the window
-    // runs to the table end. An empty or out-of-range window has no start base.
-    let block_first = block_first?;
-    let block_second = if end == seq_len {
-        moves.len()
+    let (start, end) = if index.reversed {
+        (seq_len - end, seq_len - start)
     } else {
-        block_second?
+        (start, end)
     };
+    let stride = index.stride;
+    let moves = index.moves;
+    let stride_n = stride as usize;
+    let block_first = *index.boundaries.get(start)?;
+    let block_second = *index.boundaries.get(end)?;
 
     let mut new_mv = Vec::with_capacity(1 + block_second - block_first);
     new_mv.push(stride);
@@ -974,7 +1033,7 @@ fn window_tag_updates(
     qual: &[u8],
     window: Window,
     platform: Platform,
-    update_moves: bool,
+    moves: Option<&MoveIndex<'_>>,
 ) -> TagUpdates {
     let Window {
         start,
@@ -989,7 +1048,7 @@ fn window_tag_updates(
         return Vec::new();
     }
 
-    let (mut updates, signal) = signal_tag_updates(src, orig_len, start, end, total, update_moves);
+    let (mut updates, signal) = signal_tag_updates(src, orig_len, start, end, total, moves);
     if trimmed {
         updates.extend(DROP_ON_TRIM_TAGS.map(|t| (Tag::new(t[0], t[1]), None)));
         let qs = Tag::new(b'q', b's');
@@ -1026,7 +1085,8 @@ fn window_tag_updates(
     if split && platform == Platform::Ont {
         // Dorado's subread convention (`splitter_utils.cpp`): read number -1,
         // the parent read id, zero MinKNOW events, and an unknown end reason on
-        // every subread but the last, which ends where the read did.
+        // subreads that do not retain the end of the parent signal. Without
+        // a move index, the last sequence segment retains the source end reason.
         let me = Tag::new(b'm', b'e');
         let er = Tag::new(b'e', b'r');
         updates.push((Tag::new(b'r', b'n'), Some(Value::Int32(-1))));
@@ -1038,7 +1098,14 @@ fn window_tag_updates(
         if src.data().get(&me).is_some() {
             updates.push((me, Some(Value::Int32(0))));
         }
-        if idx + 1 < total && src.data().get(&er).is_some() {
+        let retains_end = moves.map_or(idx + 1 == total, |index| {
+            if index.reversed {
+                start == 0
+            } else {
+                end == orig_len
+            }
+        });
+        if !retains_end && src.data().get(&er).is_some() {
             updates.push((er, Some(Value::String(b"unknown".as_slice().into()))));
         }
     }
@@ -1067,7 +1134,7 @@ fn count_undo_tags_dropped(
 
 /// Builds one output uBAM record for `window`: SEQ/QUAL sliced, `MM`/`ML`/`MN`
 /// rebuilt, per-base kinetics sliced, stale signal-space tags rewritten or
-/// dropped, the name set per platform on a split (`segment_name`). The record
+/// dropped, and the name updated for splits and PacBio interval crops. The record
 /// is assembled field by field: aux tags are copied in source order with the
 /// rewritten ones replaced in place, removed ones skipped and added ones
 /// appended. A `Malformed` block is removed. An untrimmed, unsplit record with
@@ -1077,21 +1144,20 @@ fn count_undo_tags_dropped(
 /// is applied last, to the rewritten tag set, so a removed tag whittle
 /// maintains (`MM`, the move table, a per-base array) is absent from the
 /// output rather than left stale.
-fn reconstruct_record_with_bases(
+fn reconstruct_window_record(
     src: &RecordBuf,
-    seq: &[u8],
-    qual: &[u8],
     window: Window,
     mod_block: ModBlock,
-    update_moves: bool,
+    indexed: Option<&IndexedMods>,
+    moves: Option<&MoveIndex<'_>>,
     remove: &TagRemoval,
 ) -> RecordBuf {
     let Window {
         start, end, total, ..
     } = window;
+    let seq = src.sequence().as_ref();
+    let qual = src.quality_scores().as_ref();
     let orig_len = seq.len();
-    debug_assert_eq!(src.sequence().as_ref(), seq);
-    debug_assert_eq!(src.quality_scores().as_ref(), qual);
     let trimmed = start != 0 || end != orig_len;
     let split = total > 1;
     if !trimmed
@@ -1104,7 +1170,7 @@ fn reconstruct_record_with_bases(
 
     let platform = platform(src);
     let mut out = RecordBuf::default();
-    *out.name_mut() = if split {
+    *out.name_mut() = if trimmed || split {
         let name = src.name().map(|n| n.to_vec()).unwrap_or_default();
         let coords = query_span(src).map(|(qs0, _)| window_coords(qs0, start, end));
         Some(segment_name(platform, &name, window, coords).into())
@@ -1130,7 +1196,7 @@ fn reconstruct_record_with_bases(
         ModBlock::Malformed => updates.extend(MOD_TAGS.map(|t| (t, None))),
         ModBlock::Consistent | ModBlock::MissingMn => {
             if let Some((mm, ml)) = mod_tags(src) {
-                let (mm, ml) = rebuild_mods(mm, ml, seq, start, end);
+                let (mm, ml) = rebuild_mods(mm, ml, seq, start, end, indexed);
                 updates.push((Tag::BASE_MODIFICATIONS, Some(Value::String(mm.into()))));
                 updates.push((
                     Tag::BASE_MODIFICATION_PROBABILITIES,
@@ -1143,13 +1209,7 @@ fn reconstruct_record_with_bases(
             }
         },
     }
-    updates.extend(window_tag_updates(
-        src,
-        qual,
-        window,
-        platform,
-        update_moves,
-    ));
+    updates.extend(window_tag_updates(src, qual, window, platform, moves));
     // A removed tag is dropped from the rewrite list as well, so neither the
     // copy loop below nor the append loop after it can put it back.
     if !remove.is_empty() {
@@ -1193,34 +1253,20 @@ fn rebuild_mods(
     seq: &[u8],
     start: usize,
     end: usize,
+    indexed: Option<&IndexedMods>,
 ) -> (Vec<u8>, Option<Vec<u8>>) {
     // Over the full window the rebuild is the identity, so the source bytes are
     // returned and the parse, slice and re-serialize are skipped; that work is
     // the dominant cost of an untrimmed BAM-to-FASTQ run.
     if start == 0 && end == seq.len() {
-        let fast = (mm.to_vec(), ml.map(<[u8]>::to_vec));
-        debug_assert_eq!(
-            fast,
-            rebuild_mods_windowed(mm, ml, seq, start, end),
-            "The full-window shortcut must agree with the general path"
-        );
-        return fast;
+        return (mm.to_vec(), ml.map(<[u8]>::to_vec));
     }
-    rebuild_mods_windowed(mm, ml, seq, start, end)
-}
-
-/// Rebuilds the MM/ML block for any window the full-window shortcut does not cover.
-fn rebuild_mods_windowed(
-    mm: &[u8],
-    ml: Option<&[u8]>,
-    seq: &[u8],
-    start: usize,
-    end: usize,
-) -> (Vec<u8>, Option<Vec<u8>>) {
-    let parsed = mods::parse(mm, ml.unwrap_or(&[]));
-    let sliced = mods::reconstruct(&parsed, seq, start, end);
-    let (mm_new, ml_new) = mods::serialize(&sliced);
-    (mm_new, ml.map(|_| ml_new))
+    let sliced = match indexed {
+        Some(indexed) => indexed.window(start, end),
+        None => mods::reconstruct(&mods::parse(mm, ml.unwrap_or(&[])), seq, start, end),
+    };
+    let (mm, probabilities) = mods::serialize(&sliced);
+    (mm, ml.map(|_| probabilities))
 }
 
 /// The per-read state the decoded BAM workflows share.
@@ -1295,7 +1341,7 @@ fn render_windows(
     rec: &RecordBuf,
     cfg: &Config,
     counters: &Counters,
-    mut render: impl FnMut(Window, ModBlock) -> anyhow::Result<()>,
+    mut render: impl FnMut(Window, ModBlock, Option<&IndexedMods>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let PreparedRead {
         seq,
@@ -1306,6 +1352,12 @@ fn render_windows(
     let _read = crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
     let _read = _read.enter();
     let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
+    let indexed =
+        if matches!(mod_block, ModBlock::Consistent | ModBlock::MissingMn) && produced.len() > 1 {
+            mod_tags(rec).map(|(mm, ml)| IndexedMods::new(mods::parse(mm, ml.unwrap_or(&[])), seq))
+        } else {
+            None
+        };
     let mut survivors: Vec<(usize, usize)> = Vec::new();
     process_read_segments(
         &produced,
@@ -1323,6 +1375,7 @@ fn render_windows(
                     total,
                 },
                 mod_block,
+                indexed.as_ref(),
             )
         },
     )?;
@@ -1334,21 +1387,37 @@ fn render_windows(
 /// rebuilt into an output record and handed to `emit`. Shared by the
 /// sequential and parallel drivers.
 fn render_bam_read(
+    header: &sam::Header,
     rec: &RecordBuf,
     cfg: &Config,
     counters: &Counters,
     mut emit: impl FnMut(RecordBuf) -> io::Result<()>,
 ) -> anyhow::Result<()> {
+    let direction = signal_reversed(header, rec);
+    let moves = if cfg.update_moves {
+        direction.and_then(|reverse| MoveIndex::new(rec, reverse))
+    } else {
+        None
+    };
     let seq = rec.sequence().as_ref();
-    let qual = rec.quality_scores().as_ref();
-    render_windows(rec, cfg, counters, |window, mod_block| {
-        let out = reconstruct_record_with_bases(
+    render_windows(rec, cfg, counters, |window, mod_block, indexed| {
+        if cfg.update_moves
+            && direction.is_none()
+            && rec.data().get(&Tag::new(b'm', b'v')).is_some()
+            && (window.start != 0 || window.end != seq.len())
+        {
+            anyhow::bail!(
+                "read {}: --update-signal-tags requires a DNA or RNA basecall_model in the @RG description",
+                crate::io::bam::display_name(rec.name().map(AsRef::as_ref))
+            );
+        }
+
+        let out = reconstruct_window_record(
             rec,
-            seq,
-            qual,
             window,
             mod_block,
-            cfg.update_moves,
+            indexed,
+            moves.as_ref(),
             &cfg.remove_tags,
         );
         Ok(emit(out)?)
@@ -1370,14 +1439,16 @@ fn run_bam_seq(
         counters
             .input_bases
             .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
-        render_bam_read(&rec, cfg, counters, |out| sink.write_record(header, &out))?;
+        render_bam_read(header, &rec, cfg, counters, |out| {
+            sink.write_record(header, &out)
+        })?;
     }
     Ok(counters.snapshot())
 }
 
 /// Runs `workflow::run_parallel` for BAM input: decodes each raw record on the
-/// pool and hands the decoded record to `render`, which returns the record's
-/// output items. The per-segment filter and counters are updated inside
+/// pool and hands the decoded record to `render`, which appends output items
+/// to the batch buffer. The per-segment filter and counters are updated inside
 /// `render` by `process_read_segments`.
 fn run_bam_parallel<T, P, S, Render, Pack, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
@@ -1392,7 +1463,7 @@ where
     T: Send,
     P: Send,
     S: Send,
-    Render: Fn(&RecordBuf, &Config) -> anyhow::Result<Vec<T>> + Sync,
+    Render: Fn(&RecordBuf, &Config, &mut Vec<T>) -> anyhow::Result<()> + Sync,
     Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
     WriteOne: Fn(&mut S, &P) -> std::io::Result<()> + Send,
 {
@@ -1402,7 +1473,7 @@ where
         |record: &bam::Record| record.sequence().len(),
         cfg,
         sink,
-        |rec, cfg| render(&decode_raw_record(&rec)?, cfg),
+        |rec, cfg, out| render(&decode_raw_record(&rec)?, cfg, out),
         pack,
         write_one,
         counters,
@@ -1541,7 +1612,16 @@ fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(ModBlock, 
 
     let block = match mm {
         None => ModBlock::Absent,
-        Some(mm) => classify_mod_block(mm, ml, mn, seq_len),
+        Some(mm) => {
+            let block = classify_mod_block(mm, ml, mn, seq_len);
+            if block != ModBlock::Malformed
+                && !mods::parse::positions_valid(mm, record.sequence().iter())
+            {
+                ModBlock::Malformed
+            } else {
+                block
+            }
+        },
     };
     Ok((block, malformed_perbase))
 }
@@ -1609,9 +1689,8 @@ fn process_raw_full_window(
             .fetch_add(1, Ordering::Relaxed);
         true
     } else {
-        let gc = (cfg.filter.min_gc.is_some() || cfg.filter.max_gc.is_some())
-            .then(|| raw_gc_fraction(&record));
-        match crate::filter::check_metrics(seq_len, qual, gc, &cfg.filter) {
+        match crate::filter::check_with_gc(seq_len, qual, || raw_gc_fraction(&record), &cfg.filter)
+        {
             Some(reason) => {
                 counters.record_segment_drop(reason);
                 counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
@@ -1635,20 +1714,18 @@ fn process_raw_full_window(
         ModBlock::Absent | ModBlock::Consistent => BamOutputRecord::Raw(record),
         ModBlock::MissingMn | ModBlock::Malformed => {
             let decoded = decode_raw_record(&record)?;
-            let seq = decoded.sequence().as_ref();
             let window = Window {
                 start: 0,
                 end: seq_len,
                 idx: 0,
                 total: 1,
             };
-            BamOutputRecord::Decoded(reconstruct_record_with_bases(
+            BamOutputRecord::Decoded(reconstruct_window_record(
                 &decoded,
-                seq,
-                qual,
                 window,
                 mod_block,
-                cfg.update_moves,
+                None,
+                None,
                 &cfg.remove_tags,
             ))
         },
@@ -1696,11 +1773,10 @@ fn run_raw_bam_full_window_parallel(
         |record: &bam::Record| record.sequence().len(),
         cfg,
         sink,
-        |record, cfg| {
+        |record, cfg, out: &mut Vec<BamOutputRecord>| {
             ensure_raw_trimmable(&record)?;
-            Ok(process_raw_full_window(record, cfg, counters)?
-                .into_iter()
-                .collect())
+            out.extend(process_raw_full_window(record, cfg, counters)?);
+            Ok(())
         },
         |records| pack_bam_blocks(header, level, records),
         |sink, blocks: &Vec<u8>| sink.write_blocks(blocks),
@@ -1759,13 +1835,11 @@ pub(crate) fn run_bam(
         cfg,
         sink,
         // Render: the survivors of one record.
-        |rec, cfg| {
-            let mut items = Vec::new();
-            render_bam_read(rec, cfg, counters, |out| {
+        |rec, cfg, items| {
+            render_bam_read(header, rec, cfg, counters, |out| {
                 items.push(BamOutputRecord::Decoded(out));
                 Ok(())
-            })?;
-            Ok(items)
+            })
         },
         // Pack: encode and compress the batch on the pool.
         |records| pack_bam_blocks(header, level, records),
@@ -1789,6 +1863,7 @@ fn push_fastq_tags(
     seq: &[u8],
     window: Window,
     mod_block: ModBlock,
+    indexed: Option<&IndexedMods>,
     sel: &FastqTags,
     platform: Platform,
     remove: &TagRemoval,
@@ -1800,7 +1875,7 @@ fn push_fastq_tags(
     // in a FASTQ header, and signal-aware consumers read BAM), so a trim drops
     // the signal and poly-A tags.
     let mut updates =
-        window_tag_updates(src, src.quality_scores().as_ref(), window, platform, false);
+        window_tag_updates(src, src.quality_scores().as_ref(), window, platform, None);
     if !remove.is_empty() {
         updates.retain(|(t, _)| !remove.contains(&<[u8; 2]>::from(*t)));
     }
@@ -1834,7 +1909,7 @@ fn push_fastq_tags(
         && matches!(mod_block, ModBlock::Consistent | ModBlock::MissingMn)
         && let Some((mm, ml)) = mod_tags(src)
     {
-        let (mm, ml) = rebuild_mods(mm, ml, seq, start, end);
+        let (mm, ml) = rebuild_mods(mm, ml, seq, start, end, indexed);
         push_mods_aux(tags, &mm, ml.as_deref(), end - start, remove);
     }
     for (tag, value) in updates {
@@ -1856,8 +1931,10 @@ fn push_fastq_tags(
 fn render_fastq_window(
     out: &mut Vec<u8>,
     rec: &RecordBuf,
+    description: &[u8],
     window: Window,
     mod_block: ModBlock,
+    indexed: Option<&IndexedMods>,
     platform: Platform,
     sel: &FastqTags,
     remove: &TagRemoval,
@@ -1868,146 +1945,95 @@ fn render_fastq_window(
     let coords = query_span(rec).map(|(qs0, _)| window_coords(qs0, start, end));
     let name = rec.name().map(|n| n.as_ref()).unwrap_or_default();
     out.push(b'@');
-    if window.total > 1 {
+    if window.total > 1 || start != 0 || end != seq.len() {
         out.extend_from_slice(&segment_name(platform, name, window, coords));
     } else {
         out.extend_from_slice(name);
     }
-    push_fastq_tags(out, rec, seq, window, mod_block, sel, platform, remove);
+    out.extend_from_slice(description);
+    push_fastq_tags(
+        out, rec, seq, window, mod_block, indexed, sel, platform, remove,
+    );
     push_record_body(out, &seq[start..end], &qual[start..end]);
 }
 
 /// Renders one decoded record for FASTQ output: every surviving window is
-/// formatted into `buf`, cleared first, and `buf` is handed to `emit`. Shared
-/// by the sequential and parallel drivers.
+/// appended to `buf`. The buffer is shared across records within a batch.
 fn render_bam_fastq_read(
     rec: &RecordBuf,
     cfg: &Config,
     counters: &Counters,
     buf: &mut Vec<u8>,
-    mut emit: impl FnMut(&mut Vec<u8>) -> io::Result<()>,
+    description: &[u8],
 ) -> anyhow::Result<()> {
     let platform = platform(rec);
-    render_windows(rec, cfg, counters, |window, mod_block| {
-        buf.clear();
+    render_windows(rec, cfg, counters, |window, mod_block, indexed| {
         render_fastq_window(
             buf,
             rec,
+            description,
             window,
             mod_block,
+            indexed,
             platform,
             &cfg.fastq_tags,
             &cfg.remove_tags,
         );
-        Ok(emit(buf)?)
+        Ok(())
     })
 }
 
-/// Runs the single-threaded uBAM-to-FASTQ workflow: refuses aligned reads,
-/// trims, filters each produced segment, then writes each surviving segment as
-/// FASTQ with the selected aux tags in the header (MM/ML/MN reconstructed,
-/// per-base arrays sliced, other tags copied).
-fn run_records_to_fastq_seq<R, W: Write>(
-    records: impl Iterator<Item = anyhow::Result<R>>,
-    decode: impl Fn(R) -> anyhow::Result<RecordBuf>,
-    writer: &mut W,
-    cfg: &Config,
-    counters: &Arc<Counters>,
-) -> anyhow::Result<Stats> {
-    // One segment is rendered into this buffer and handed to the writer whole;
-    // the buffer keeps its capacity across records.
-    let mut buf: Vec<u8> = Vec::new();
-    for rec in records {
-        let rec = decode(rec?)?;
-        counters.input_reads.fetch_add(1, Ordering::Relaxed);
-        counters
-            .input_bases
-            .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
-        render_bam_fastq_read(&rec, cfg, counters, &mut buf, |buf| writer.write_all(buf))?;
-    }
-    Ok(counters.snapshot())
-}
-
-/// Runs the record-to-FASTQ workflow over any source that decodes to
-/// `RecordBuf`: refuses aligned reads, trims, filters, then writes each
-/// surviving segment as FASTQ with the selected aux tags in the header (MM/ML/MN
-/// reconstructed, per-base arrays sliced, other tags copied). `weight` is a
-/// record's sequence length for batching and the input counters, and `decode`
-/// runs on the render worker. Sequential for `cfg.threads <= 1`; otherwise
-/// renders on a rayon pool and drains through the bounded channel, in input
-/// order under `cfg.ordered` and in completion order otherwise.
-fn run_records_to_fastq<R, W>(
-    records: impl Iterator<Item = anyhow::Result<R>> + Send,
-    weight: impl Fn(&R) -> usize + Sync,
-    decode: impl Fn(R) -> anyhow::Result<RecordBuf> + Sync,
-    writer: &mut W,
-    cfg: &Config,
-    counters: &Arc<Counters>,
-) -> anyhow::Result<Stats>
-where
-    R: Send,
-    W: BatchSink,
-{
-    if cfg.threads <= 1 {
-        return run_records_to_fastq_seq(records, decode, writer, cfg, counters);
-    }
-    run_bytes_parallel(
-        records,
-        BAM_BATCH,
-        weight,
-        cfg,
-        writer,
-        // Render: the survivors of one record, as `Vec<Vec<u8>>` of rendered
-        // FASTQ segments. Each segment's buffer is taken as an item, so the
-        // next segment renders into a fresh one.
-        |rec, cfg| {
-            let rec = decode(rec)?;
-            let mut items = Vec::new();
-            let mut buf = Vec::new();
-            render_bam_fastq_read(&rec, cfg, counters, &mut buf, |buf| {
-                items.push(std::mem::take(buf));
-                Ok(())
-            })?;
-            Ok(items)
-        },
-        counters,
-    )
-}
-
-/// Runs the uBAM-to-FASTQ workflow (see `run_records_to_fastq`).
+/// Decodes and renders BAM records as FASTQ, reusing a buffer per batch.
 pub(crate) fn run_bam_to_fastq<W: BatchSink>(
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
     writer: &mut W,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
-    run_records_to_fastq(
+    if cfg.threads <= 1 {
+        let mut buf = Vec::new();
+        for rec in records {
+            let rec = decode_raw_record(&rec?)?;
+            counters.input_reads.fetch_add(1, Ordering::Relaxed);
+            counters
+                .input_bases
+                .fetch_add(rec.sequence().len() as u64, Ordering::Relaxed);
+            buf.clear();
+            render_bam_fastq_read(&rec, cfg, counters, &mut buf, &[])?;
+            writer.write_all(&buf)?;
+        }
+        return Ok(counters.snapshot());
+    }
+    run_bytes_parallel(
         records,
-        |record: &bam::Record| record.sequence().len(),
-        |record| decode_raw_record(&record).map_err(anyhow::Error::from),
-        writer,
+        BAM_BATCH,
+        |rec| rec.sequence().len(),
         cfg,
+        writer,
+        |rec, cfg, buf| render_bam_fastq_read(&decode_raw_record(&rec)?, cfg, counters, buf, &[]),
         counters,
     )
 }
 
-/// Runs the tagged-FASTQ workflow: each read's header aux fields are decoded
-/// into a `RecordBuf` (`io::tagged`) and the read takes the same path as a
-/// uBAM record, so its tags are rewritten per output segment.
-pub(crate) fn run_tagged_fastq<W: BatchSink>(
-    records: impl Iterator<Item = anyhow::Result<crate::record::ReadRecord>> + Send,
-    writer: &mut W,
+/// Appends a tagged FASTQ read's output while preserving its header description.
+pub(crate) fn render_tagged_fastq_read(
+    rec: crate::record::ReadRecord,
     cfg: &Config,
-    counters: &Arc<Counters>,
-) -> anyhow::Result<Stats> {
-    run_records_to_fastq(
-        records,
-        |record: &crate::record::ReadRecord| record.seq.len(),
-        crate::io::tagged::record_from_tagged,
-        writer,
-        cfg,
-        counters,
-    )
+    counters: &Counters,
+    buf: &mut Vec<u8>,
+) -> anyhow::Result<()> {
+    let head_end = rec
+        .name
+        .iter()
+        .position(|&b| b == b'\t')
+        .unwrap_or(rec.name.len());
+    let id_end = rec.name[..head_end]
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(head_end);
+    let description = rec.name[id_end..head_end].to_vec();
+    let rec = crate::io::tagged::record_from_tagged(rec)?;
+    render_bam_fastq_read(&rec, cfg, counters, buf, &description)
 }
 
 #[cfg(test)]
@@ -2019,6 +2045,32 @@ mod tests {
     use noodles_sam::alignment::record_buf::data::field::value::Array;
 
     use super::*;
+
+    #[test]
+    fn signal_direction_uses_the_record_group_or_a_shared_header_direction() {
+        let header: sam::Header =
+            "@RG\tID:dna\tDS:basecall_model=dna_r10.4.1\n@RG\tID:rna\tDS:basecall_model=rna004\n"
+                .parse()
+                .unwrap();
+        let mut rec = RecordBuf::default();
+        assert_eq!(signal_reversed(&header, &rec), None);
+        for (id, expected) in [
+            (b"dna".as_slice(), Some(false)),
+            (b"rna".as_slice(), Some(true)),
+            (b"absent".as_slice(), None),
+        ] {
+            rec.data_mut()
+                .insert(Tag::READ_GROUP, Value::String(id.into()));
+            assert_eq!(signal_reversed(&header, &rec), expected);
+        }
+        rec.data_mut().remove(&Tag::READ_GROUP);
+        let header: sam::Header =
+            "@RG\tID:a\tDS:basecall_model=rna004\n@RG\tID:b\tDS:runid=run;basecall_model=rna002\n"
+                .parse()
+                .unwrap();
+        assert_eq!(signal_reversed(&header, &rec), Some(true));
+        assert_eq!(signal_reversed(&sam::Header::default(), &rec), None);
+    }
 
     /// Builds one output record for interval `[start, end)`, segment `idx` of
     /// `total`, with the modification block classified from `src` and no tag
@@ -2032,7 +2084,6 @@ mod tests {
         update_moves: bool,
     ) -> RecordBuf {
         let seq = src.sequence().as_ref();
-        let qual = src.quality_scores().as_ref();
         let mod_block = inspect_mod_block(src, seq.len());
         let window = Window {
             start,
@@ -2040,13 +2091,15 @@ mod tests {
             idx,
             total,
         };
-        reconstruct_record_with_bases(
+        reconstruct_window_record(
             src,
-            seq,
-            qual,
             window,
             mod_block,
-            update_moves,
+            None,
+            update_moves
+                .then(|| MoveIndex::new(src, false))
+                .flatten()
+                .as_ref(),
             &TagRemoval::default(),
         )
     }
@@ -3255,7 +3308,10 @@ mod tests {
             recs.into_iter(),
             &cfg,
             &mut sink,
-            |_rec, _cfg| anyhow::Ok(vec![()]),
+            |_rec, _cfg, out: &mut Vec<()>| {
+                out.push(());
+                Ok(())
+            },
             Ok,
             |sink, batch: &Vec<()>| -> io::Result<()> {
                 if sink.written >= sink.limit {
@@ -3297,7 +3353,10 @@ mod tests {
             recs,
             &cfg,
             &mut sink,
-            |_rec, _cfg| anyhow::Ok(vec![()]),
+            |_rec, _cfg, out: &mut Vec<()>| {
+                out.push(());
+                Ok(())
+            },
             Ok,
             |_sink: &mut NullSink, _batch: &Vec<()>| -> io::Result<()> { Ok(()) },
             &Arc::new(Counters::default()),

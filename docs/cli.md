@@ -27,8 +27,8 @@ the trimmed segment, per-base arrays are sliced, and the remaining tags are
 copied verbatim.
 
 FASTQ input in the same convention (a tab after the read name, then
-`TAG:TYPE:VALUE` fields) is tagged FASTQ. Any such field among the first 100
-headers puts the whole input on the BAM-to-FASTQ path: every read's fields are
+`TAG:TYPE:VALUE` fields) is tagged FASTQ. Each header is inspected independently,
+so tagged and plain reads can share a file or directory. Tagged records are
 decoded as SAM aux tags and rewritten per output segment exactly as a uBAM
 record's are ([tags.md](tags.md)), `--fastq-tags` selects the output tags, and
 `--trim-barcodes`, `--remove-tag` and `--remove-kinetics` apply. A field that
@@ -44,7 +44,8 @@ the workers, at least one; plain gzip input is decompressed serially. The
 startup banner reports both figures.
 
 Records are written in completion order under `-t > 1`. `--preserve-order` restores
-the input order at a small throughput cost.
+the input order using bounded groups of batches. A slow batch limits read-ahead
+until its group completes.
 
 ## Directory input
 
@@ -54,6 +55,10 @@ must share one format family (all FASTQ or all BAM); hidden files and
 subdirectories are ignored; a mixed or empty directory is an error. An output
 path inside the input directory is rejected, since it cannot be distinguished
 from an input on a later run.
+
+BAM output requires identical read-group definitions across input headers.
+Conflicting definitions or different read-group sets fail the run. Only the
+first header is written; FASTQ output does not require matching read groups.
 
 ```bash
 whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
@@ -85,7 +90,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--split-quality <PHRED>` | Split at consecutive bases below PHRED and keep each surviving segment |
 | `--split-min-low-quality-bases <BASES>` | Minimum consecutive bases below the splitting threshold required to split; shorter internal stretches are retained and low-quality ends are trimmed (default 1); requires `--split-quality` |
 | `--trim-barcodes` | Intersect adapter-derived segments with the retained interval from the original `bi` tag before cropping (BAM or tagged FASTQ input) |
-| `--update-signal-tags` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM) |
+| `--update-signal-tags` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM; requires DNA or RNA model metadata in the read-group description) |
 | `--remove-tag <TAG>` | Remove a two-character aux tag from every output record; repeatable (BAM or tagged FASTQ input) |
 | `--remove-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM or tagged FASTQ input) |
 | `-a, --adapter-fasta <FILE>` | Adapter and primer FASTA (IUPAC codes accepted; `primer` or `barcode` in a header description restricts the entry to the read ends); enables adapter trimming |
@@ -110,6 +115,11 @@ An adapter source is `--adapter-fasta`, `--adapter-preset`, or
 disagrees with the stream, an output extension that names no format, and
 FASTQ-to-BAM output are reported before any output is written. Adapter trimming is described in
 [adapters.md](adapters.md).
+
+Adapter sampling stops at the requested read count, 256 MiB of retained payload,
+or 64 Mi bases, whichever is reached first. The last record is kept whole and
+can exceed a limit. The log reports the sampled count and any payload limit;
+sampled records remain in the processing stream.
 
 ## Quality filtering and trimming
 

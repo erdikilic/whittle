@@ -86,19 +86,14 @@ impl DropReason {
 /// Called once for each segment produced by trimming, so `seq` and `phred`
 /// describe that segment rather than necessarily the complete input read.
 pub fn check(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> Option<DropReason> {
-    let gc = (cfg.min_gc.is_some() || cfg.max_gc.is_some()).then(|| gc_fraction(seq));
-    check_metrics(seq.len(), phred, gc, cfg)
+    check_with_gc(seq.len(), phred, || gc_fraction(seq), cfg)
 }
 
-/// Filters from precomputed sequence metrics, with the result of `check`. The
-/// raw BAM fast path obtains length and GC from packed sequence views without
-/// materializing a decoded sequence. `gc` is required whenever a GC bound is
-/// active; a missing value panics rather than filtering on a fabricated
-/// fraction.
-pub(crate) fn check_metrics(
+/// Evaluates sequence composition only after the length and quality bounds pass.
+pub(crate) fn check_with_gc(
     len: usize,
     phred: &[u8],
-    gc: Option<f64>,
+    gc: impl FnOnce() -> f64,
     cfg: &FilterConfig,
 ) -> Option<DropReason> {
     if len == 0 || len < cfg.min_length {
@@ -109,15 +104,21 @@ pub(crate) fn check_metrics(
     }
     if cfg.min_qual > 0.0 || cfg.max_qual < 1000.0 {
         let q = read_quality(phred, cfg.qual_mode);
-        if q < cfg.min_qual {
+        // Probability summation and logarithms introduce rounding at inclusive bounds.
+        let tolerance = if cfg.qual_mode == QualMode::Mean {
+            1e-10
+        } else {
+            0.0
+        };
+        if q < cfg.min_qual - tolerance {
             return Some(DropReason::LowQuality);
         }
-        if q > cfg.max_qual {
+        if q > cfg.max_qual + tolerance {
             return Some(DropReason::HighQuality);
         }
     }
     if cfg.min_gc.is_some() || cfg.max_gc.is_some() {
-        let gc = gc.expect("The GC fraction is computed whenever a GC bound is active");
+        let gc = gc();
         if gc < cfg.min_gc.unwrap_or(0.0) || gc > cfg.max_gc.unwrap_or(1.0) {
             return Some(DropReason::Gc);
         }
@@ -144,6 +145,50 @@ mod tests {
 
     fn passes(seq: &[u8], phred: &[u8], cfg: &FilterConfig) -> bool {
         check(seq, phred, cfg).is_none()
+    }
+
+    #[test]
+    fn probability_quality_bounds_include_equal_scores() {
+        for q in [0, 7, 10, 12, 20, 30, 40, 93] {
+            for len in [1, 3, 30, 100, 511, 512, 513, 1000] {
+                let seq = vec![b'C'; len];
+                let phred = vec![q; len];
+                let cfg = FilterConfig {
+                    min_qual: f64::from(q),
+                    max_qual: f64::from(q),
+                    ..base()
+                };
+                assert_eq!(check(&seq, &phred, &cfg), None, "Q{q}, {len} bases");
+                let above = FilterConfig {
+                    min_qual: f64::from(q) + 1e-6,
+                    max_qual: 1000.0,
+                    ..base()
+                };
+                assert_eq!(check(&seq, &phred, &above), Some(DropReason::LowQuality));
+            }
+        }
+    }
+
+    #[test]
+    fn gc_is_evaluated_only_after_earlier_filters_pass() {
+        let cfg = FilterConfig {
+            min_length: 10,
+            min_qual: 20.0,
+            min_gc: Some(0.5),
+            ..base()
+        };
+        assert_eq!(
+            check_with_gc(4, &[30; 4], || panic!("GC evaluated"), &cfg),
+            Some(DropReason::TooShort)
+        );
+        assert_eq!(
+            check_with_gc(12, &[10; 12], || panic!("GC evaluated"), &cfg),
+            Some(DropReason::LowQuality)
+        );
+        assert_eq!(
+            check_with_gc(12, &[30; 12], || 0.4, &cfg),
+            Some(DropReason::Gc)
+        );
     }
 
     #[test]
@@ -188,24 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn check_metrics_uses_the_supplied_gc_when_a_bound_is_active() {
-        let mut c = base();
-        c.min_gc = Some(0.4);
-        assert_eq!(check_metrics(4, &[30; 4], Some(0.5), &c), None);
+    fn gc_is_not_evaluated_without_a_bound() {
         assert_eq!(
-            check_metrics(4, &[30; 4], Some(0.1), &c),
-            Some(DropReason::Gc)
+            check_with_gc(4, &[30; 4], || panic!("GC evaluated"), &base()),
+            None
         );
-        // No bound active: a missing GC value is not consulted.
-        assert_eq!(check_metrics(4, &[30; 4], None, &base()), None);
-    }
-
-    #[test]
-    #[should_panic(expected = "GC")]
-    fn check_metrics_panics_without_gc_when_a_bound_is_active() {
-        let mut c = base();
-        c.max_gc = Some(0.6);
-        let _ = check_metrics(4, &[30; 4], None, &c);
     }
 
     /// The bounds are evaluated cheapest-first, so a segment failing both

@@ -220,7 +220,8 @@ struct Cli {
     qual_split_window: Option<usize>,
     /// Keep ONT signal tags consistent through trimming (slice mv, update ts,
     /// ns, sp and pi) for signal-aware tools such as Remora and Clair3 v2,
-    /// instead of dropping them. BAM-to-BAM only.
+    /// instead of dropping them. BAM-to-BAM only; requires a DNA or RNA
+    /// basecall_model in the read-group description.
     #[arg(long = "update-signal-tags", help_heading = "Tags")]
     update_moves: bool,
     /// Restrict adapter-derived segments to the retained interval recorded in
@@ -274,6 +275,7 @@ struct Cli {
     /// 0 disables presence detection and uses the full preset; discovery
     /// requires sampling. Ignored with --adapter-fasta unless discovering
     /// adapters. Defaults to 2000 with a preset and 40000 under --discover-adapters.
+    /// Sampling is also bounded by 256 MiB of payload and 64 Mi bases.
     #[arg(
         long = "adapter-sample-reads",
         value_name = "COUNT",

@@ -2,6 +2,77 @@
 
 use super::{MmGroup, Mods, counting_base, counts};
 
+/// Per-read occurrence indexes shared by all output windows.
+pub(crate) struct IndexedMods {
+    /// Groups whose deltas hold absolute counting-base occurrence indexes.
+    groups: Mods,
+    /// Sequence positions for each counting base represented by a group.
+    bases: Vec<(u8, Vec<usize>)>,
+}
+
+impl IndexedMods {
+    /// Indexes a validated modification block and its counting bases.
+    pub(crate) fn new(mut groups: Mods, seq: &[u8]) -> Self {
+        let mut bases = Vec::new();
+        for group in &mut groups.groups {
+            let base = counting_base(group.base);
+            if !bases.iter().any(|(b, _)| *b == base) {
+                let positions: Vec<usize> = seq
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &b)| counts(b, base).then_some(i))
+                    .collect();
+                bases.push((base, positions));
+            }
+            let mut next = 0;
+            for delta in &mut group.deltas {
+                *delta += next;
+                next = *delta + 1;
+            }
+        }
+        Self { groups, bases }
+    }
+
+    /// Restricts calls and probabilities to a half-open sequence interval.
+    pub(crate) fn window(&self, start: usize, end: usize) -> Mods {
+        let groups = self
+            .groups
+            .groups
+            .iter()
+            .map(|group| {
+                let base = counting_base(group.base);
+                let positions = &self.bases.iter().find(|(b, _)| *b == base).unwrap().1;
+                let before = positions.partition_point(|&p| p < start);
+                let after = positions.partition_point(|&p| p < end);
+                let first = group.deltas.partition_point(|&p| p < before);
+                let last = group.deltas.partition_point(|&p| p < after);
+                let mut next = before;
+                let deltas = group.deltas[first..last]
+                    .iter()
+                    .map(|&p| {
+                        let delta = p - next;
+                        next = p + 1;
+                        delta
+                    })
+                    .collect();
+                let codes = group.codes.len();
+                let ml = group.ml
+                    [(first * codes).min(group.ml.len())..(last * codes).min(group.ml.len())]
+                    .to_vec();
+                MmGroup {
+                    base: group.base,
+                    strand: group.strand,
+                    codes: group.codes.clone(),
+                    status: group.status,
+                    deltas,
+                    ml,
+                }
+            })
+            .collect();
+        Mods { groups }
+    }
+}
+
 /// Restricts every group to the window `[start, end)`: skip-counts are
 /// renumbered against the window's own counting-base occurrences and each
 /// surviving position keeps its `ML` bytes. Every source group is emitted,
@@ -83,6 +154,26 @@ mod tests {
     /// Parses raw MM/ML and reconstructs the window.
     fn recon(mm: &[u8], ml: &[u8], seq: &[u8], start: usize, end: usize) -> Mods {
         reconstruct(&parse(mm, ml), seq, start, end)
+    }
+
+    #[test]
+    fn indexed_windows_match_reconstruction_for_every_interval() {
+        let seq = b"CACGTCCANTCTACCGT";
+        let mm = b"C+mh,0,1,1;G-m?,0,0;U+17802,0,1;N+n,1,4,3;C+h;";
+        let ml: Vec<u8> = (1..=13).collect();
+        for probabilities in [ml.as_slice(), &[]] {
+            let parsed = parse(mm, probabilities);
+            let indexed = IndexedMods::new(parsed.clone(), seq);
+            for start in 0..=seq.len() {
+                for end in start..=seq.len() {
+                    assert_eq!(
+                        indexed.window(start, end),
+                        reconstruct(&parsed, seq, start, end),
+                        "{start}..{end}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

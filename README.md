@@ -153,6 +153,10 @@ follows this order:
 6. **Output.** Rewrite tags against each surviving interval and write the records.
 
 Final segments are numbered once, in their order along the original read.
+Existing PacBio query intervals in read names are updated on crops as well as
+splits. Tagged FASTQ headers are detected per record, including after plain
+records in a merged directory.
+
 Two adapter segments that each split into two quality segments produce
 `<read>_segment_1` through `<read>_segment_4`. Filtering preserves the indices
 of surviving segments. PacBio records use final query-coordinate names.
@@ -183,6 +187,8 @@ Formats are taken from the path extension, a stream sniff, or `--input-format`/`
 - **Unaligned BAM only.** Aligned records are refused; there is no CIGAR or POS adjustment for mapped reads.
 - **No FASTQ-to-BAM.** BAM-to-FASTQ is supported.
 - **`--min-length` applies after trimming**, per output segment, not to the raw read.
+- **BAM folder output requires matching read groups.** Conflicting definitions are rejected.
+- **Signal rewriting requires model direction.** `--update-signal-tags` uses a DNA or RNA `basecall_model` in the BAM read-group description.
 - **One quality-trim strategy per run.** `--trim-quality`, `--best-quality-segment`, and `--split-quality` are mutually exclusive; `-H`/`-T` combine with any of them.
 
 ## Citation

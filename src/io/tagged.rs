@@ -32,7 +32,7 @@ pub fn has_aux_tags(head: &[u8]) -> bool {
 }
 
 /// Decodes a tagged FASTQ read into an unmapped `RecordBuf`: the name is the
-/// header up to the first tab, and every tab-delimited field after it is an
+/// first whitespace-delimited token, and every tab-delimited field is an
 /// aux tag. A field that does not parse names the read and the field.
 pub fn record_from_tagged(rec: ReadRecord) -> anyhow::Result<RecordBuf> {
     let (name, fields) = match rec.name.iter().position(|&b| b == b'\t') {
@@ -43,7 +43,11 @@ pub fn record_from_tagged(rec: ReadRecord) -> anyhow::Result<RecordBuf> {
         .map_err(|e| anyhow::anyhow!("read {}: header {e}", String::from_utf8_lossy(name)))?;
     let mut out = RecordBuf::default();
     *out.flags_mut() = Flags::UNMAPPED;
-    *out.name_mut() = Some(name.to_vec().into());
+    let id_end = name
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(name.len());
+    *out.name_mut() = Some(name[..id_end].to_vec().into());
     *out.sequence_mut() = rec.seq.into();
     *out.quality_scores_mut() = rec.qual.into();
     *out.data_mut() = data;

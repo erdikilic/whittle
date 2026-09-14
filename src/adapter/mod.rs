@@ -642,7 +642,7 @@ enum Terminal {
 /// fills one lane of eight with a single pattern, which costs more on these
 /// short windows than the allocations do.
 ///
-/// `text` is plain ACGT on every call; see `normalize_into`.
+/// The DNA profile requires a plain pattern and a plain read.
 fn search(
     engine: &mut Engine<'_>,
     index: &CandidateIndex,
@@ -652,27 +652,15 @@ fn search(
     k: usize,
     accept: impl FnMut(Hit),
 ) {
-    if index.plain[adapter_idx] {
+    if engine.plain_read && index.plain[adapter_idx] {
         for_each_hit(engine.plain, pattern, &text, k, accept);
     } else {
         for_each_hit(engine.ambiguous, pattern, &text, k, accept);
     }
 }
 
-/// The base an ambiguity code in a read is rewritten to before searching.
-///
-/// An uncalled base is evidence of nothing, so it consumes error budget rather
-/// than matching for free: a short `N` inside a real adapter still matches
-/// within `--adapter-error-rate`, while a run of them never looks like an
-/// adapter. Leaving the codes in place and searching on the IUPAC profile would
-/// do the opposite and excise the whole run as adapter.
-///
-/// Any ACGT byte serves; the requirement is one fixed base, so that no real
-/// adapter matches a homopolymer run of it within its budget. The rewrite also
-/// keeps the fast profile usable, which panics during traceback on any other
-/// byte, and keeps the batched path consistent, since sassy implements batching
-/// only for IUPAC.
-const AMBIGUOUS_READ_BASE: u8 = b'A';
+/// The IUPAC profile's nonmatching symbol for uncalled read bases.
+const AMBIGUOUS_READ_BASE: u8 = b'X';
 
 /// Returns the read as every searcher sees it: uppercase, with each byte
 /// outside ACGT rewritten to `AMBIGUOUS_READ_BASE`. An uppercase plain read,
@@ -999,6 +987,8 @@ struct Context<'a> {
 /// The per-thread searchers and buffers one read is processed with, borrowed
 /// from the thread's `ThreadState` for the duration of `adapter_segments`.
 struct Engine<'a> {
+    /// Whether the complete read contains only ACGT bases.
+    plain_read: bool,
     /// The DNA-profile searcher, for a plain pattern.
     plain: &'a mut PlainSearcher,
     /// The IUPAC-profile searcher, for a degenerate pattern and for the
@@ -1103,7 +1093,7 @@ fn search_singletons(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep
                 keep.accept(Site::Tail { head_end }, adapter_idx, shifted(h, tail_start));
             }
         };
-        if ctx.index.plain[adapter_idx] {
+        if engine.plain_read && ctx.index.plain[adapter_idx] {
             for_each_hit_in_texts(engine.plain, &adapter.seq, &windows, k_end, accept);
         } else {
             for_each_hit_in_texts(engine.ambiguous, &adapter.seq, &windows, k_end, accept);
@@ -1375,6 +1365,7 @@ fn segments_tallied(
             read: Read { window, reversed },
         };
         let mut engine = Engine {
+            plain_read: !window.contains(&AMBIGUOUS_READ_BASE),
             plain,
             ambiguous,
             overhang,
@@ -1646,6 +1637,25 @@ mod segment_tests {
                 "Candidate/reference mismatch in randomized case {case} (degenerate: {degenerate})"
             );
         }
+    }
+
+    #[test]
+    fn unknown_read_bases_consume_adapter_error_budget() {
+        let adapter = b"ACGTAAGTCAGTACGATCAG";
+        let mut text = adapter.to_vec();
+        text[5] = b'N';
+        text.extend_from_slice(&[b'C'; 80]);
+        let exact = cfg_with(vec![ad("a", adapter)], 0.0, 8, true);
+        assert_eq!(adapter_segments(&text, &exact), vec![(0, text.len())]);
+        let tolerant = cfg_with(vec![ad("a", adapter)], 0.1, 8, true);
+        assert_ne!(adapter_segments(&text, &tolerant), vec![(0, text.len())]);
+        let mut unknown = vec![b'N'; 40];
+        unknown.extend_from_slice(&[b'C'; 80]);
+        let homopolymer = cfg_with(vec![ad("poly_a", &[b'A'; 20])], 0.0, 8, true);
+        assert_eq!(
+            adapter_segments(&unknown, &homopolymer),
+            vec![(0, unknown.len())]
+        );
     }
 
     /// The candidate search matches the full-window reference on random plain

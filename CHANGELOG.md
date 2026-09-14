@@ -12,10 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `samtools fastq -T` convention is trimmed on the BAM-to-FASTQ path: `MM`,
   `ML` and `MN` are rebuilt and per-base arrays sliced for every output
   segment, `--fastq-tags` selects the output tags, and `--trim-barcodes`,
-  `--remove-tag` and `--strip-kinetics` apply. The first 100 headers decide;
+  `--remove-tag` and `--remove-kinetics` apply. Each header is inspected;
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Fixed
+- Tagged FASTQ headers are detected per record, including after plain records
+  in files or merged directories. Split suffixes precede header descriptions.
+- Modification coordinates are validated against the sequence; impossible
+  blocks are removed and counted on raw BAM and decoded output paths.
+- Inclusive quality bounds tolerate numerical rounding in mean-error scores.
+- RNA signal windows follow move-table direction. Signal rewriting requires
+  resolvable DNA or RNA model metadata in the read groups.
+- BAM folder output rejects incompatible read-group definitions, including
+  conflicting metadata under the same ID.
+- Cropping updates existing PacBio query intervals in read names.
+- Unknown read bases cannot match adapter bases without consuming edit budget.
+- Ordered output bounds in-flight batches and completed output buffering.
 - A forced `--in-format` that disagrees with the stream is an error before any
   output is written; an output extension that names no format is reported;
   FASTQ-to-BAM output and `--update-moves` on FASTQ input are rejected at parse
@@ -23,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the flag.
 
 ### Changed
+- Modification occurrences and signal boundaries are indexed once per read
+  and reused across output segments. Parallel FASTQ rendering appends directly
+  to batch buffers. GC scans run only after length and quality filters pass.
+- Adapter sampling is bounded by 256 MiB of retained payload and 64 Mi bases,
+  including complete terminal records, in addition to the requested read count.
 - Adapter trimming handles partial adapters, classifies hits by position, and
   cleans up chimeric junctions. A rear adapter cut short by the read end, or a
   front adapter missing its first bases, is trimmed when at least 10 of its

@@ -25,7 +25,8 @@ from the input stay absent. The rest of the record is copied unchanged.
 A block that cannot be placed on the sequence is removed from the output record
 rather than repaired: an `MN` that disagrees with the sequence length, an `ML`
 that is not a `B:C` array of the length `MM` declares, or an `MM` that does not
-parse to its end. Such reads are counted and reported in the run summary.
+parse to its end, or modification coordinates beyond the available counting-base
+occurrences. Such reads are counted and reported in the run summary.
 
 ### Decode-equivalence tests
 
@@ -55,10 +56,10 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 | `ds`/`ls` (PacBio undo blobs for `skera undo` and `lima-undo`) | Removed from every output record of a trimmed read, since they describe the untrimmed read; counted once per read and reported |
 | `qs:f` (dorado mean qscore) | Recomputed from the trimmed quality |
 | `qs:i`/`qe:i` (PacBio query coordinates) | Rewritten as `qs + start` and `qs + end` of the window, since the PacBio BAM specification keeps them relative to the original read; one without the other leaves both unchanged |
-| Read name | Kept on a crop. A split names ONT segments `{name}_segment_N`; PacBio segments (an integer `qs`, or a `{movie}/{zmw}/ccs[/fwd|/rev]` or `{movie}/{zmw}/{qStart}_{qEnd}` name) take the specification's `{stem}/{qStart}_{qEnd}` from the rewritten coordinates, replacing any existing interval |
+| Read name | A crop updates an existing PacBio query interval in the name; other names are kept. A split names ONT segments `{name}_segment_N`; PacBio segments (an integer `qs`, or a `{movie}/{zmw}/ccs[/fwd|/rev]` or `{movie}/{zmw}/{qStart}_{qEnd}` name) take the specification's `{stem}/{qStart}_{qEnd}` from the rewritten coordinates, replacing any existing interval |
 | `rn` (read number) | Kept on a crop; `-1` on an ONT split (dorado's convention); PacBio's `rn` is a pass count and is copied |
 | `st`/`du` (start time, duration) | Kept on a crop. On a split, recomputed with `--update-signal-tags`, otherwise removed; pbmarkdup's `du:Z` is not a duration and is copied |
-| `me`/`er` (MinKNOW event count, end reason) | On an ONT split, `me` is 0 on every segment and `er` is `unknown` on every segment but the last, which ends where the read did; only when the source carries them |
+| `me`/`er` (MinKNOW event count, end reason) | On an ONT split, `me` is 0 on every segment and `er` is `unknown` except on the segment retaining the parent signal end when moves are rewritten, or the last sequence segment otherwise; only when the source carries them |
 | `RG`, `ch`, `mx`, `sd`/`sv`, and other scalar tags | Copied verbatim |
 
 ## Tag removal
@@ -106,10 +107,17 @@ above; the remaining rules are keyed on the tag type.
 
 ## ONT signal tags under `--update-signal-tags`
 
+Signal direction comes from `basecall_model=dna...` or `basecall_model=rna...`
+in the record's `@RG` description. A record without `RG` can use a direction
+shared by every read group in the header. Rewriting a trimmed read's move table
+requires a resolvable direction; otherwise the run fails with the read name.
+RNA sequence intervals are reversed into signal order before locating move
+boundaries, since RNA basecalls and move tables have opposite directions.
+
 With `--update-signal-tags`, a crop slices `mv`, advances `ts` by the removed head
-signal, and sets `ns` to the end of the kept signal (unchanged under a head-only
-crop). A split emits subreads in dorado's convention: `pi` parent id, `sp`
-offset from the parent's POD5 signal start, `ns` subread span, `ts` 0, so each
+signal, and sets `ns` to the end of the kept signal. A DNA head-only crop and
+an RNA tail-only crop preserve the original signal end. A split emits subreads
+in dorado's convention: `pi` parent id, `sp` offset from the parent's POD5 signal start, `ns` subread span, `ts` 0, so each
 renamed segment stays locatable in POD5. A split also recomputes `du` and `st`
 as dorado does: the sample rate is the parent's `ns` over its `du`, the
 subread's `du` is its sample count at that rate, and its `st` is the parent's

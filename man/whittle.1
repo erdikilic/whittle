@@ -73,7 +73,7 @@ Write a machine\-readable JSON run summary (counters plus the resolved settings)
 Aux tags written into FASTQ headers on BAM or tagged FASTQ input: all, none, or a list such as MM,ML,RG
 .TP
 \fB\-\-update\-signal\-tags\fR
-Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp and pi) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM\-to\-BAM only
+Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp and pi) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM\-to\-BAM only; requires a DNA or RNA basecall_model in the read\-group description
 .TP
 \fB\-\-remove\-tag\fR \fI<TAG>\fR
 Remove this two\-character aux tag from every output record. Repeatable. BAM or tagged FASTQ input
@@ -178,7 +178,7 @@ Bases at each read end searched for a terminal adapter. Requires an adapter sour
 Trim adapters at read ends only; never split on interior adapters. Does not disable quality splitting
 .TP
 \fB\-\-adapter\-sample\-reads\fR \fI<COUNT>\fR
-Reads inspected for preset presence or adapter discovery; at least 100. 0 disables presence detection and uses the full preset; discovery requires sampling. Ignored with \-\-adapter\-fasta unless discovering adapters. Defaults to 2000 with a preset and 40000 under \-\-discover\-adapters
+Reads inspected for preset presence or adapter discovery; at least 100. 0 disables presence detection and uses the full preset; discovery requires sampling. Ignored with \-\-adapter\-fasta unless discovering adapters. Defaults to 2000 with a preset and 40000 under \-\-discover\-adapters. Sampling is also bounded by 256 MiB of payload and 64 Mi bases
 .TP
 \fB\-\-discover\-adapters\fR [\fI<ACTION>\fR]
 Discover adapters de novo. Report prints discovered FASTA to stdout and exits without read output or a JSON summary. Defaults to trim when given no value

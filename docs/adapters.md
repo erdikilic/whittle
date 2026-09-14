@@ -59,6 +59,8 @@ match splits a read. Adapter trims pass through the same tag-rewrite path as
 every other trim, so `MM`/`ML`/`MN` and the per-base tags stay in register
 ([tags.md](tags.md)).
 
+Unknown read bases consume edit budget and cannot form exact adapter matches.
+
 ## Presence detection
 
 A preset holds sequences a given library may not carry, such as the primers of
@@ -72,6 +74,10 @@ Detection applies to presets only. Supplying a FASTA disables presence
 detection for the combined FASTA and preset set. `--adapter-sample-reads 0`
 also disables detection and searches the full set. If detection finds nothing,
 whittle warns and falls back to the full set.
+
+Adapter samples are bounded by 256 MiB of retained payload and 64 Mi bases as
+well as `--adapter-sample-reads`. The last sampled record is retained whole;
+the actual sample size is reported, and all sampled reads are processed.
 
 ## Adapter discovery
 

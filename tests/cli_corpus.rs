@@ -313,7 +313,19 @@ fn write_fastq_gz(path: &Path, reads: &[SourceRead]) {
 
 /// Writes the corpus as an unaligned BAM with every tagged field populated.
 fn write_bam(path: &Path, reads: &[SourceRead]) {
-    let header = sam::Header::default();
+    let mut header = sam::Header::default();
+    for read in reads {
+        if let Some(id) = &read.rg {
+            use sam::header::record::value::map::read_group::tag::DESCRIPTION;
+            use sam::header::record::value::{Map, map::ReadGroup};
+            let mut group = Map::<ReadGroup>::default();
+            group.other_fields_mut().insert(
+                DESCRIPTION,
+                "basecall_model=dna_r10.4.1_400bps_sup@v5.0.0".into(),
+            );
+            header.read_groups_mut().insert(id.as_bytes().into(), group);
+        }
+    }
     let mut writer = bam::io::Writer::new(std::fs::File::create(path).unwrap());
     writer.write_header(&header).unwrap();
     for read in reads {

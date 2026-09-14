@@ -235,3 +235,110 @@ fn malformed_tag_names_the_read() {
             "read r2: header field \"ML:B:C,x\": array value \"x\" does not fit the subtype",
         ));
 }
+
+#[test]
+fn late_tags_are_rewritten_in_files_and_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("inputs");
+    std::fs::create_dir(&folder).unwrap();
+    let plain: String = (0..160)
+        .map(|i| format!("@plain{i}\nCCCC\n+\nIIII\n"))
+        .collect();
+    let tagged = "@tagged\tMM:Z:C+m,1;\tML:B:C,200\tMN:i:4\tRG:Z:group\nCCCC\n+\nIIII\n";
+    std::fs::write(folder.join("1.fastq"), &plain).unwrap();
+    std::fs::write(folder.join("2.fastq"), tagged).unwrap();
+    let file = dir.path().join("all.fastq");
+    std::fs::write(&file, plain + tagged).unwrap();
+    for input in [&file, &folder] {
+        for threads in ["1", "4"] {
+            let output = run(
+                &["-H", "1", "-t", threads, "--remove-tag", "RG"],
+                input,
+                dir.path(),
+                "out.fastq",
+            );
+            let head = output
+                .lines()
+                .find(|line| line.starts_with("@tagged"))
+                .unwrap();
+            assert!(head.contains("\tMM:Z:C+m,0;\tML:B:C,200\tMN:i:3"), "{head}");
+            assert!(!head.contains("\tRG:"), "{head}");
+            assert_eq!(output.lines().count(), 161 * 4);
+        }
+    }
+}
+
+#[test]
+fn split_identifiers_precede_header_descriptions() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("descriptions.fastq");
+    std::fs::write(&input, "@r1 description\tMM:Z:C+m,0;\tML:B:C,200\nCCCCC\n+\nII!II\n@plain another description\nCCCCC\n+\nII!II\n").unwrap();
+    for threads in ["1", "4"] {
+        let output = run(
+            &["--split-quality", "10", "-t", threads, "--preserve-order"],
+            &input,
+            dir.path(),
+            "out.fastq",
+        );
+        let heads: Vec<_> = output.lines().step_by(4).collect();
+        assert!(heads[0].starts_with("@r1_segment_1 description\t"));
+        assert!(heads[1].starts_with("@r1_segment_2 description\t"));
+        assert!(heads[0].contains("\tpi:Z:r1\t"));
+        assert_eq!(heads[2], "@plain_segment_1 another description");
+        assert_eq!(heads[3], "@plain_segment_2 another description");
+    }
+}
+
+#[test]
+fn impossible_modification_positions_are_removed_and_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("invalid.fastq");
+    std::fs::write(&input, "@r1\tMM:Z:C+m,8;\tML:B:C,200\tMN:i:4\nCCCC\n+\nIIII\n@r2\tMM:Z:N+n,184467440737095516160;\tML:B:C,3\nACGT\n+\nIIII\n").unwrap();
+    let summary = dir.path().join("summary.json");
+    for threads in ["1", "4"] {
+        for crop in ["0", "1"] {
+            let output = run(
+                &[
+                    "-H",
+                    crop,
+                    "-t",
+                    threads,
+                    "--summary-json",
+                    summary.to_str().unwrap(),
+                ],
+                &input,
+                dir.path(),
+                "out.fastq",
+            );
+            assert!(!output.contains("MM:"));
+            assert!(!output.contains("ML:"));
+            assert!(!output.contains("MN:"));
+            let stats: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&summary).unwrap()).unwrap();
+            assert_eq!(stats["warnings"]["malformed_mod_reads"], 2);
+        }
+    }
+}
+
+#[test]
+fn pacbio_interval_names_follow_repeated_crops() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("pacbio.fastq");
+    std::fs::write(&input, "@movie/1/100_106\tqs:i:100\tqe:i:106\nCCCCCC\n+\nIIIIII\n@movie/2/ccs/100_106\tRG:Z:group\nCCCCCC\n+\nIIIIII\n").unwrap();
+    let first = run(
+        &["-H", "1", "--preserve-order"],
+        &input,
+        dir.path(),
+        "first.fastq",
+    );
+    assert!(first.starts_with("@movie/1/101_106\tqs:i:101\tqe:i:106\n"));
+    assert!(first.contains("@movie/2/ccs/101_106\t"));
+    let second = run(
+        &["-T", "1", "--preserve-order"],
+        &dir.path().join("first.fastq"),
+        dir.path(),
+        "second.fastq",
+    );
+    assert!(second.starts_with("@movie/1/101_105\tqs:i:101\tqe:i:105\n"));
+    assert!(second.contains("@movie/2/ccs/101_105\t"));
+}

@@ -18,26 +18,34 @@ fn run_fastq_seq<W: Write>(
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
+    let mut buf = Vec::new();
     for rec in records {
         let rec = rec?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
             .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
-        render_record(&rec, cfg, counters, writer)?;
+        buf.clear();
+        render_record(rec, cfg, counters, &mut buf)?;
+        writer.write_all(&buf)?;
     }
     Ok(counters.snapshot())
 }
 
 /// Trims one record, filters each produced segment through
-/// `process_read_segments`, and writes the survivors to `w`: the output stream
-/// on the sequential path, a per-record buffer on the parallel one.
-fn render_record<W: Write>(
-    rec: &ReadRecord,
+/// `process_read_segments`, and appends survivors to the reusable output buffer.
+fn render_record(
+    rec: ReadRecord,
     cfg: &Config,
     counters: &Counters,
-    w: &mut W,
+    w: &mut Vec<u8>,
 ) -> anyhow::Result<()> {
+    if crate::io::tagged::has_aux_tags(&rec.name) {
+        if !counters.tagged_fastq.swap(true, Ordering::Relaxed) {
+            tracing::info!("FASTQ headers carry SAM aux tags; tags are rewritten per segment");
+        }
+        return super::bam::render_tagged_fastq_read(rec, cfg, counters, w);
+    }
     let _read = super::read_span(&rec.name);
     let _read = _read.enter();
     let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref(), None);
@@ -72,22 +80,13 @@ where
     if cfg.threads <= 1 {
         return run_fastq_seq(records, writer, cfg, counters);
     }
-    let render = |rec: ReadRecord, cfg: &Config| {
-        let mut buf = Vec::with_capacity(rec.seq.len().saturating_mul(2) + rec.name.len() + 6);
-        render_record(&rec, cfg, counters, &mut buf)?;
-        Ok(if buf.is_empty() {
-            Vec::new()
-        } else {
-            vec![buf]
-        })
-    };
     run_bytes_parallel(
         records,
         FASTQ_BATCH,
         |rec| rec.seq.len(),
         cfg,
         writer,
-        render,
+        |rec, cfg, buf| render_record(rec, cfg, counters, buf),
         counters,
     )
 }

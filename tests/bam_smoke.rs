@@ -247,7 +247,10 @@ fn bam_update_moves_slices_move_table() {
     let in_path = dir.path().join("mv.bam");
     let out_path = dir.path().join("mv_out.bam");
 
-    let header = sam::Header::default();
+    let header: sam::Header =
+        "@HD\tVN:1.6\n@RG\tID:model\tPL:ONT\tDS:basecall_model=dna_r10.4.1_400bps_sup@v5.0.0\n"
+            .parse()
+            .unwrap();
     let mut w = bam::io::Writer::new(std::fs::File::create(&in_path).unwrap());
     w.write_header(&header).unwrap();
     let mut r = RecordBuf::default();
@@ -859,5 +862,201 @@ fn a_malformed_remove_tag_fails_at_parse_time() {
             .assert()
             .failure()
             .stderr(predicates::str::contains("--remove-tag"));
+    }
+}
+
+/// Writes one ONT read with nonuniform emitted-base spacing and model metadata.
+fn write_signal_fixture(path: &std::path::Path, model: Option<&str>) {
+    let header = model.map_or_else(sam::Header::default, |model| {
+        format!("@HD\tVN:1.6\n@RG\tID:model\tPL:ONT\tDS:basecall_model={model}\n")
+            .parse()
+            .unwrap()
+    });
+    let mut writer = bam::io::Writer::new(std::fs::File::create(path).unwrap());
+    writer.write_header(&header).unwrap();
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = Flags::UNMAPPED;
+    *rec.name_mut() = Some(b"read".into());
+    *rec.sequence_mut() = b"ACGT".to_vec().into();
+    *rec.quality_scores_mut() = vec![40, 40, 0, 40].into();
+    if model.is_some() {
+        rec.data_mut()
+            .insert(Tag::READ_GROUP, Value::String(b"model".into()));
+    }
+    rec.data_mut().insert(
+        Tag::from(*b"mv"),
+        Value::Array(Array::Int8(vec![5, 1, 0, 1, 0, 0, 1, 1, 0])),
+    );
+    rec.data_mut().insert(Tag::from(*b"ts"), Value::Int32(0));
+    rec.data_mut().insert(Tag::from(*b"ns"), Value::Int32(40));
+    rec.data_mut()
+        .insert(Tag::from(*b"er"), Value::String(b"signal_positive".into()));
+    writer.write_alignment_record(&header, &rec).unwrap();
+    writer.try_finish().unwrap();
+}
+
+fn read_signal_records(path: &std::path::Path) -> Vec<RecordBuf> {
+    let mut reader = bam::io::Reader::new(std::fs::File::open(path).unwrap());
+    let header = reader.read_header().unwrap();
+    reader
+        .record_bufs(&header)
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn rna_signal_windows_follow_signal_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rna.bam");
+    write_signal_fixture(&input, Some("rna004_130bps_sup@v5.0.0"));
+    for threads in ["1", "4"] {
+        for (flag, expected_seq, expected_ts, expected_ns, expected_moves) in [
+            ("-H", b"CGT".as_slice(), 0, 30, vec![5, 1, 0, 1, 0, 0, 1]),
+            ("-T", b"ACG".as_slice(), 10, 40, vec![5, 1, 0, 0, 1, 1, 0]),
+        ] {
+            let output = dir.path().join("out.bam");
+            Command::cargo_bin("whittle")
+                .unwrap()
+                .env_remove("WHITTLE_LOG")
+                .arg("-i")
+                .arg(&input)
+                .arg("-o")
+                .arg(&output)
+                .args([flag, "1", "--update-signal-tags", "-t", threads, "--quiet"])
+                .assert()
+                .success();
+            let records = read_signal_records(&output);
+            let rec = &records[0];
+            assert_eq!(rec.sequence().as_ref(), expected_seq);
+            assert_eq!(
+                rec.data().get(&Tag::from(*b"ts")).unwrap().as_int(),
+                Some(expected_ts)
+            );
+            assert_eq!(
+                rec.data().get(&Tag::from(*b"ns")).unwrap().as_int(),
+                Some(expected_ns)
+            );
+            assert_eq!(
+                rec.data().get(&Tag::from(*b"mv")),
+                Some(&Value::Array(Array::Int8(expected_moves)))
+            );
+        }
+        let output = dir.path().join("split.bam");
+        Command::cargo_bin("whittle")
+            .unwrap()
+            .env_remove("WHITTLE_LOG")
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg(&output)
+            .args([
+                "--split-quality",
+                "10",
+                "--update-signal-tags",
+                "--preserve-order",
+                "-t",
+                threads,
+                "--quiet",
+            ])
+            .assert()
+            .success();
+        let records = read_signal_records(&output);
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0].data().get(&Tag::from(*b"er")),
+            Some(&Value::String(b"signal_positive".into()))
+        );
+        assert_eq!(
+            records[1].data().get(&Tag::from(*b"er")),
+            Some(&Value::String(b"unknown".into()))
+        );
+        for (rec, offset, samples) in [(&records[0], 25, 15), (&records[1], 0, 10)] {
+            assert_eq!(
+                rec.data().get(&Tag::from(*b"sp")).unwrap().as_int(),
+                Some(offset)
+            );
+            assert_eq!(
+                rec.data().get(&Tag::from(*b"ns")).unwrap().as_int(),
+                Some(samples)
+            );
+            assert_eq!(
+                rec.data().get(&Tag::from(*b"ts")).unwrap().as_int(),
+                Some(0)
+            );
+        }
+    }
+}
+
+#[test]
+fn signal_rewriting_requires_resolvable_model_direction() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("unknown.bam");
+    write_signal_fixture(&input, None);
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .arg("-i")
+        .arg(&input)
+        .arg("-o")
+        .arg(dir.path().join("out.bam"))
+        .args(["-H", "1", "--update-signal-tags", "--quiet"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "requires a DNA or RNA basecall_model",
+        ));
+}
+
+#[test]
+fn bam_modification_validation_and_query_names_cover_both_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.bam");
+    let header = sam::Header::default();
+    let mut writer = bam::io::Writer::new(std::fs::File::create(&input).unwrap());
+    writer.write_header(&header).unwrap();
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = Flags::UNMAPPED;
+    *rec.name_mut() = Some(b"movie/1/100_104".into());
+    *rec.sequence_mut() = b"CCCC".to_vec().into();
+    *rec.quality_scores_mut() = vec![40; 4].into();
+    for (tag, value) in [(*b"qs", 100), (*b"qe", 104), (*b"MN", 4)] {
+        rec.data_mut().insert(Tag::from(tag), Value::Int32(value));
+    }
+    rec.data_mut()
+        .insert(Tag::BASE_MODIFICATIONS, Value::String(b"C+m,8;".into()));
+    rec.data_mut().insert(
+        Tag::BASE_MODIFICATION_PROBABILITIES,
+        Value::Array(Array::UInt8(vec![200])),
+    );
+    writer.write_alignment_record(&header, &rec).unwrap();
+    writer.try_finish().unwrap();
+    for threads in ["1", "4"] {
+        for (crop, expected) in [("0", "movie/1/100_104"), ("1", "movie/1/101_104")] {
+            let output = dir.path().join("out.bam");
+            let summary = dir.path().join("stats.json");
+            Command::cargo_bin("whittle")
+                .unwrap()
+                .env_remove("WHITTLE_LOG")
+                .arg("-i")
+                .arg(&input)
+                .arg("-o")
+                .arg(&output)
+                .arg("--summary-json")
+                .arg(&summary)
+                .args(["-H", crop, "-t", threads, "--quiet"])
+                .assert()
+                .success();
+            let records = read_signal_records(&output);
+            assert_eq!(
+                AsRef::<[u8]>::as_ref(records[0].name().unwrap()),
+                expected.as_bytes()
+            );
+            for tag in [*b"MM", *b"ML", *b"MN"] {
+                assert!(records[0].data().get(&Tag::from(tag)).is_none());
+            }
+            let stats: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(summary).unwrap()).unwrap();
+            assert_eq!(stats["warnings"]["malformed_mod_reads"], 1);
+        }
     }
 }

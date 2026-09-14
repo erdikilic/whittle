@@ -328,27 +328,6 @@ fn detect_format(
     ))
 }
 
-/// Reads inspected for SAM aux fields before a FASTQ input is classified as
-/// tagged. A read without modification calls carries no tags under
-/// `samtools fastq -T MM,ML`, so the first header alone does not decide.
-const TAGGED_PROBE_READS: usize = 100;
-
-/// Buffers the first `n` records and reports whether any header carries SAM
-/// aux fields; the buffered records are chained back in front of the rest.
-fn detect_tagged(
-    mut records: Box<dyn Iterator<Item = anyhow::Result<record::ReadRecord>> + Send>,
-    n: usize,
-) -> (
-    bool,
-    Box<dyn Iterator<Item = anyhow::Result<record::ReadRecord>> + Send>,
-) {
-    let head: Vec<_> = records.by_ref().take(n).collect();
-    let tagged = head
-        .iter()
-        .any(|r| r.as_ref().is_ok_and(|r| io::tagged::has_aux_tags(&r.name)));
-    (tagged, Box::new(head.into_iter().chain(records)))
-}
-
 /// Returns the thread budget of a run: the render pool takes the whole `-t`
 /// budget, and BGZF input adds decode workers ahead of it.
 fn plan_budget(cfg: &Config, bgzf_input: bool) -> config::ThreadBudget {
@@ -427,7 +406,13 @@ impl Session {
             (Format::Bam, Format::Bam) => {
                 note_tags_ignored(cfg, in_fmt, out_fmt);
                 let (header, records) = self.bam_reader(source, true)?;
-                let Some(records) = settle(records, cfg, self.budget, adapter::resolve::bam_seq)?
+                let Some(records) = settle(
+                    records,
+                    cfg,
+                    self.budget,
+                    adapter::resolve::bam_seq,
+                    adapter::resolve::bam_sample_weight,
+                )?
                 else {
                     return Ok(());
                 };
@@ -454,7 +439,13 @@ impl Session {
             (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
                 note_update_moves_ignored(cfg, out_fmt);
                 let (_header, records) = self.bam_reader(source, false)?;
-                let Some(records) = settle(records, cfg, self.budget, adapter::resolve::bam_seq)?
+                let Some(records) = settle(
+                    records,
+                    cfg,
+                    self.budget,
+                    adapter::resolve::bam_seq,
+                    adapter::resolve::bam_sample_weight,
+                )?
                 else {
                     return Ok(());
                 };
@@ -467,30 +458,35 @@ impl Session {
                 anyhow::bail!("FASTQ-to-BAM conversion is not supported")
             },
             (Format::Fastq | Format::FastqGz | Format::FastqBgzf, _) => {
-                // The leading headers decide between the plain path and the
-                // tagged path, which rewrites header aux tags per segment.
-                let (tagged, records) =
-                    detect_tagged(self.fastq_reader(source, in_fmt)?, TAGGED_PROBE_READS);
-                guards::guard_tag_flags(cfg, in_fmt, tagged)?;
-                if tagged {
-                    tracing::info!(
-                        "FASTQ headers carry SAM aux tags; tags are rewritten per segment"
-                    );
-                } else {
-                    note_tags_ignored(cfg, in_fmt, out_fmt);
-                }
-                let Some(records) = settle(records, cfg, self.budget, |r| {
-                    Cow::Borrowed(r.seq.as_slice())
-                })?
+                let records = self.fastq_reader(source, in_fmt)?;
+                let Some(records) = settle(
+                    records,
+                    cfg,
+                    self.budget,
+                    |r| Cow::Borrowed(r.seq.as_slice()),
+                    |r| {
+                        (
+                            std::mem::size_of::<record::ReadRecord>()
+                                + r.name.capacity()
+                                + r.seq.capacity()
+                                + r.qual.capacity(),
+                            r.seq.len(),
+                        )
+                    },
+                )?
                 else {
                     return Ok(());
                 };
                 let mut writer = io::fastq::writer(cfg, out_fmt, cfg.threads > 1)?;
-                let stats = if tagged {
-                    workflow::run_tagged_fastq(records, &mut writer, cfg, &self.counters)?
-                } else {
-                    workflow::run_fastq(records, &mut writer, cfg, &self.counters)?
-                };
+                let stats = workflow::run_fastq(records, &mut writer, cfg, &self.counters)?;
+                let tagged = self
+                    .counters
+                    .tagged_fastq
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                guards::guard_tag_flags(cfg, in_fmt, tagged)?;
+                if !tagged {
+                    note_tags_ignored(cfg, in_fmt, out_fmt);
+                }
                 writer.finish()?;
                 self.finish(obs, &stats, cfg)
             },
@@ -500,8 +496,8 @@ impl Session {
     /// Opens the BAM record stream. A stdin BAM's sniffed bytes are chained back
     /// into the stream, so it is read as is rather than reopened. Only the
     /// first file of a folder contributes its header, so `check_read_groups`
-    /// asks the folder reader to warn when a later file declares a different
-    /// `@RG` set; BAM output only, since FASTQ output writes no header.
+    /// asks the folder reader to reject incompatible read-group definitions;
+    /// BAM output only, since FASTQ output writes no header.
     fn bam_reader(
         &self,
         source: Source,
@@ -589,13 +585,14 @@ fn settle<R, I, F>(
     cfg: &mut Config,
     budget: config::ThreadBudget,
     seq_of: F,
+    weight: impl Fn(&R) -> (usize, usize),
 ) -> anyhow::Result<Option<Box<dyn Iterator<Item = anyhow::Result<R>> + Send>>>
 where
     I: Iterator<Item = anyhow::Result<R>> + Send + 'static,
     R: Send + 'static,
     F: for<'a> Fn(&'a R) -> std::borrow::Cow<'a, [u8]>,
 {
-    let Some(resolved) = adapter::resolve::resolve(records, cfg, seq_of)? else {
+    let Some(resolved) = adapter::resolve::resolve(records, cfg, seq_of, weight)? else {
         note_report_only_ignores(cfg);
         return Ok(None);
     };
@@ -779,9 +776,13 @@ mod tests {
         };
 
         let records = vec![Ok(a_read())].into_iter();
-        let got = settle(records, &mut cfg, budget, |r| {
-            Cow::Borrowed(r.seq.as_slice())
-        })
+        let got = settle(
+            records,
+            &mut cfg,
+            budget,
+            |r| Cow::Borrowed(r.seq.as_slice()),
+            |r| (r.name.len() + r.seq.len() + r.qual.len(), r.seq.len()),
+        )
         .expect("Settle succeeds")
         .expect("Records are returned when not in report mode");
 
@@ -803,9 +804,13 @@ mod tests {
             render: 1,
         };
         let records = (0..7).map(|_| Ok(a_read()));
-        let got = settle(records, &mut cfg, budget, |r| {
-            Cow::Borrowed(r.seq.as_slice())
-        })
+        let got = settle(
+            records,
+            &mut cfg,
+            budget,
+            |r| Cow::Borrowed(r.seq.as_slice()),
+            |r| (r.name.len() + r.seq.len() + r.qual.len(), r.seq.len()),
+        )
         .unwrap()
         .unwrap();
         assert_eq!(got.count(), 7);

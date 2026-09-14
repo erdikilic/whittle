@@ -12,7 +12,6 @@ use rayon::prelude::*;
 
 pub(crate) use bam::run_bam_to_fastq;
 pub use bam::run_raw_bam;
-pub(crate) use bam::run_tagged_fastq;
 pub(crate) use fastq::run_fastq;
 
 use crate::config::Config;
@@ -30,7 +29,7 @@ pub(crate) struct BatchPolicy {
     queue_per_worker: usize,
 }
 
-/// FASTQ batches: owned records that render to a small buffer each.
+/// FASTQ batches: owned records rendered into a shared batch buffer.
 pub(crate) const FASTQ_BATCH: BatchPolicy = BatchPolicy {
     target_weight: 2 * 1024 * 1024,
     max_items: 128,
@@ -102,8 +101,7 @@ impl BatchSink for crate::io::fastq::FastqOut {
     }
 }
 
-/// Runs `run_parallel` for a workflow whose items are rendered text: each
-/// batch is concatenated and, for a block sink, compressed on the pool.
+/// Renders directly into a batch buffer and compresses block output on the pool.
 pub(crate) fn run_bytes_parallel<R, W, Weight, Render>(
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
     policy: BatchPolicy,
@@ -117,7 +115,7 @@ where
     R: Send,
     W: BatchSink,
     Weight: Fn(&R) -> usize + Sync,
-    Render: Fn(R, &Config) -> anyhow::Result<Vec<Vec<u8>>> + Sync,
+    Render: Fn(R, &Config, &mut Vec<u8>) -> anyhow::Result<()> + Sync,
 {
     let level = writer.block_level();
     run_parallel(
@@ -127,12 +125,9 @@ where
         cfg,
         writer,
         render,
-        |items: Vec<Vec<u8>>| {
-            let bytes = items.concat();
-            match level {
-                Some(level) => crate::io::fastq::encode_blocks(level, &bytes),
-                None => Ok(bytes),
-            }
+        |bytes: Vec<u8>| match level {
+            Some(level) => crate::io::fastq::encode_blocks(level, &bytes),
+            None => Ok(bytes),
         },
         |writer, bytes: &Vec<u8>| writer.write_all(bytes),
         counters,
@@ -205,10 +200,10 @@ where
 /// `Err` and stops being read once any render or write error is recorded, so a
 /// failing run neither re-polls a reader after an I/O error nor processes the
 /// rest of the input. With `cfg.ordered` the writer emits batches in input
-/// order; otherwise in completion order.
+/// order with bounded groups of in-flight batches; otherwise in completion order.
 ///
-/// `render` returns the output items of one record, in the order they are
-/// written; `pack` turns a batch's items into the unit the writer takes, on
+/// `render` appends each record's output to the batch accumulator; `pack`
+/// turns the accumulator into the unit the writer takes, on
 /// the pool, so a compressing sink has its blocks compressed by the render
 /// workers. The read-level counters are updated inside `render` by
 /// `process_read_segments`; this driver counts input reads and bases only.
@@ -226,12 +221,12 @@ pub(crate) fn run_parallel<R, T, P, S, Weight, Render, Pack, WriteOne>(
 ) -> anyhow::Result<Stats>
 where
     R: Send,
-    T: Send,
+    T: Default + Send,
     P: Send,
     S: Send,
     Weight: Fn(&R) -> usize + Sync,
-    Render: Fn(R, &Config) -> anyhow::Result<Vec<T>> + Sync,
-    Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
+    Render: Fn(R, &Config, &mut T) -> anyhow::Result<()> + Sync,
+    Pack: Fn(T) -> std::io::Result<P> + Sync,
     WriteOne: Fn(&mut S, &P) -> std::io::Result<()> + Send,
 {
     let render_workers = render_pool_size(cfg);
@@ -290,54 +285,63 @@ where
 
         pool.install(|| {
             let weight_of = |rec: &anyhow::Result<R>| rec.as_ref().map_or(0, &weight);
-            Batches::new(records, weight_of, policy)
+            let mut batches = Batches::new(records, weight_of, policy)
                 .enumerate()
-                .par_bridge()
-                .for_each(|(idx, batch)| {
-                    let mut out = Vec::with_capacity(batch.len());
-                    let mut input_reads = 0u64;
-                    let mut input_bases = 0u64;
-                    for rec in batch {
-                        if aborted.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let rec = match rec {
-                            Ok(r) => r,
-                            Err(e) => {
-                                render_err.record(e, &aborted);
-                                break;
-                            },
-                        };
-                        input_reads += 1;
-                        input_bases += weight(&rec) as u64;
-                        match render(rec, cfg) {
-                            Ok(items) => out.extend(items),
-                            Err(e) => {
-                                render_err.record(e, &aborted);
-                                break;
-                            },
-                        }
+                .peekable();
+            let render_batch = |(idx, batch): (usize, Vec<anyhow::Result<R>>)| {
+                let mut out = T::default();
+                let mut input_reads = 0u64;
+                let mut input_bases = 0u64;
+                for rec in batch {
+                    if aborted.load(Ordering::Relaxed) {
+                        break;
                     }
-                    counters
-                        .input_reads
-                        .fetch_add(input_reads, Ordering::Relaxed);
-                    counters
-                        .input_bases
-                        .fetch_add(input_bases, Ordering::Relaxed);
-                    let packed = match pack(out) {
-                        Ok(packed) => packed,
+                    let rec = match rec {
+                        Ok(r) => r,
                         Err(e) => {
-                            render_err.record(e.into(), &aborted);
-                            return;
+                            render_err.record(e, &aborted);
+                            break;
                         },
                     };
-                    // Every batch is sent, empty ones included, so the ordered
-                    // writer can advance past it. A closed channel means the
-                    // writer is gone; nothing more can be written.
-                    if tx.send((idx, packed)).is_err() {
-                        aborted.store(true, Ordering::Relaxed);
+                    input_reads += 1;
+                    input_bases += weight(&rec) as u64;
+                    if let Err(e) = render(rec, cfg, &mut out) {
+                        render_err.record(e, &aborted);
+                        break;
                     }
-                });
+                }
+                counters
+                    .input_reads
+                    .fetch_add(input_reads, Ordering::Relaxed);
+                counters
+                    .input_bases
+                    .fetch_add(input_bases, Ordering::Relaxed);
+                let packed = match pack(out) {
+                    Ok(packed) => packed,
+                    Err(e) => {
+                        render_err.record(e.into(), &aborted);
+                        return;
+                    },
+                };
+                // Every batch is sent, empty ones included, so the ordered
+                // writer can advance past it. A closed channel means the
+                // writer is gone; nothing more can be written.
+                if tx.send((idx, packed)).is_err() {
+                    aborted.store(true, Ordering::Relaxed);
+                }
+            };
+            if ordered {
+                // Each group completes before another is read, bounding reordered output.
+                while batches.peek().is_some() {
+                    batches
+                        .by_ref()
+                        .take(queue + render_workers)
+                        .par_bridge()
+                        .for_each(render_batch);
+                }
+            } else {
+                batches.par_bridge().for_each(render_batch);
+            }
         });
         drop(tx);
     });
@@ -354,6 +358,8 @@ where
 /// Live, thread-shared counters read by the progress ticker and finalized into `Stats`.
 #[derive(Default)]
 pub struct Counters {
+    /// Whether any FASTQ header carries SAM auxiliary fields.
+    pub(crate) tagged_fastq: AtomicBool,
     /// Input reads consumed.
     pub input_reads: AtomicU64,
     /// Output segments written (one per surviving segment).
@@ -372,7 +378,8 @@ pub struct Counters {
     pub malformed_tag_reads: AtomicU64,
     /// Input reads whose `MM`/`ML`/`MN` block was malformed (an `MN` that
     /// disagrees with the sequence length, an `ML` whose length disagrees with
-    /// `MM`, an `MM` that does not parse to its end, or a non-`B:C` `ML`) and was
+    /// `MM`, an `MM` that does not parse to its end or exceeds the available
+    /// counting-base occurrences, or a non-`B:C` `ML`) and was
     /// therefore removed from the output record.
     pub malformed_mod_reads: AtomicU64,
     /// Trimmed input reads whose PacBio undo blobs (`ds`, `ls`) were removed,
@@ -788,12 +795,13 @@ mod tests {
             |_: &usize| 1,
             &cfg,
             &mut sink,
-            |n, _cfg| {
+            |n, _cfg, out: &mut Vec<usize>| {
                 if n % 2 == 1 {
                     std::thread::sleep(std::time::Duration::from_micros(200));
                 }
                 counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-                Ok(vec![n])
+                out.push(n);
+                Ok(())
             },
             Ok,
             |sink, batch: &Vec<usize>| {
@@ -804,6 +812,93 @@ mod tests {
         )
         .unwrap();
         sink
+    }
+
+    #[test]
+    fn ordered_driver_bounds_read_ahead_behind_a_slow_batch() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+        let cfg = driver_cfg(4, true);
+        let consumed = AtomicUsize::new(0);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let mut output = Vec::new();
+        let counters = Counters::default();
+        std::thread::scope(|scope| {
+            let consumed_ref = &consumed;
+            let observed = scope.spawn(move || {
+                for _ in 0..7 {
+                    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                let read_ahead = consumed_ref.load(Ordering::Relaxed);
+                release_tx.send(()).unwrap();
+                read_ahead
+            });
+            run_parallel(
+                (0..1000usize).map(|n| {
+                    consumed.fetch_add(1, Ordering::Relaxed);
+                    Ok(n)
+                }),
+                BatchPolicy {
+                    target_weight: 1,
+                    max_items: 1,
+                    queue_per_worker: 1,
+                },
+                |_| 1,
+                &cfg,
+                &mut output,
+                |n, _, out: &mut Vec<usize>| {
+                    if n == 0 {
+                        release_rx
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(5))
+                            .unwrap();
+                    } else if n < 8 {
+                        ready_tx.send(()).unwrap();
+                    }
+                    counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+                    out.push(n);
+                    Ok(())
+                },
+                Ok,
+                |out, batch: &Vec<usize>| {
+                    out.extend_from_slice(batch);
+                    Ok(())
+                },
+                &counters,
+            )
+            .unwrap();
+            assert_eq!(observed.join().unwrap(), 8);
+        });
+        assert_eq!(output, (0..1000).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn ordered_driver_propagates_write_errors() {
+        let cfg = driver_cfg(4, true);
+        let error = run_parallel(
+            (0..1000usize).map(Ok),
+            BatchPolicy {
+                target_weight: 1,
+                max_items: 1,
+                queue_per_worker: 1,
+            },
+            |_| 1,
+            &cfg,
+            &mut (),
+            |n, _, out: &mut Vec<usize>| {
+                out.push(n);
+                Ok(())
+            },
+            Ok,
+            |_, _: &Vec<usize>| Err(std::io::Error::other("sink failed")),
+            &Counters::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "sink failed");
     }
 
     #[test]
@@ -852,7 +947,10 @@ mod tests {
             |_: &usize| 1,
             &cfg,
             &mut sink,
-            |n, _cfg| Ok(vec![n]),
+            |n, _cfg, out: &mut Vec<usize>| {
+                out.push(n);
+                Ok(())
+            },
             Ok,
             |sink, batch: &Vec<usize>| {
                 sink.extend_from_slice(batch);
@@ -883,12 +981,13 @@ mod tests {
             |_: &usize| 1,
             &cfg,
             &mut sink,
-            |n, _cfg| {
+            |n, _cfg, out: &mut Vec<usize>| {
                 rendered.fetch_add(1, Ordering::Relaxed);
                 if n == 10 {
                     anyhow::bail!("record 10 is malformed");
                 }
-                Ok(vec![n])
+                out.push(n);
+                Ok(())
             },
             Ok,
             |sink, batch: &Vec<usize>| {

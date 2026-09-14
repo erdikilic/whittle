@@ -1,5 +1,4 @@
-//! Refusals that protect the user's data, all checked before any output file is
-//! created so a rejected run leaves nothing behind.
+//! Output collision guards and format- and tag-specific option validation.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -67,7 +66,7 @@ pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::
 /// `--trim-barcodes` reads the `bi` tag, `--remove-tag` and `--remove-kinetics`
 /// name tags. BAM records and tagged FASTQ headers carry tags; a plain FASTQ
 /// does not, so there the flags would be accepted and silently do nothing.
-/// `run` applies this once the first FASTQ header has been inspected.
+/// `run` applies this after the complete FASTQ stream has been inspected.
 pub(crate) fn guard_tag_flags(
     cfg: &Config,
     in_fmt: io::Format,
