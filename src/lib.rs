@@ -1,4 +1,4 @@
-//! whittle: a tag-aware trimmer for long-read FASTQ and unaligned BAM.
+//! whittle: coordinate-consistent trimming of long-read uBAM and tagged FASTQ.
 //!
 //! `run` is the library entry point; `cli::parse` builds its `Config`.
 

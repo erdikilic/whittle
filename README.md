@@ -2,7 +2,7 @@
 
 # whittle
 
-**Tag-aware trimming of long-read FASTQ and unaligned BAM.**
+**Coordinate-consistent trimming of long-read uBAM and tagged FASTQ.**
 
 [![CI](https://github.com/erdikilic/whittle/actions/workflows/ci.yml/badge.svg)](https://github.com/erdikilic/whittle/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/whittle.svg)](https://crates.io/crates/whittle)
@@ -193,7 +193,7 @@ Formats are taken from the path extension, a stream sniff, or `--input-format`/`
 
 ## Citation
 
-Kılıç E. whittle: tag-aware trimming of long-read FASTQ and unaligned BAM. Zenodo. https://doi.org/10.5281/zenodo.21355499
+Kılıç E. whittle: coordinate-consistent trimming of long-read uBAM and tagged FASTQ. Zenodo. https://doi.org/10.5281/zenodo.21355499
 
 ## License
 

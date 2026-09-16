@@ -19,7 +19,7 @@ use crate::trim::{QualityOp, TrimPlan};
     author,
     version,
     disable_version_flag = true,
-    about = "Tag-aware long-read trimmer",
+    about = "Coordinate-consistent trimming of long-read uBAM and tagged FASTQ",
     long_about = None,
     max_term_width = 100,
     after_help = EXAMPLES
