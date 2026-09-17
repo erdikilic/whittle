@@ -149,8 +149,8 @@ pub(crate) fn adapter_banner_line(
     };
     let infer_suffix = match adapter_infer {
         AdapterInfer::Off => String::new(),
-        AdapterInfer::Enabled { action, policy } => {
-            format!(" \u{b7} infer {} \u{b7} {}", action.label(), policy.label())
+        AdapterInfer::Enabled { action } => {
+            format!(" \u{b7} infer {}", action.label())
         },
     };
     let (n_adapters, roles) = if adapter_infer == AdapterInfer::Off {
@@ -227,7 +227,7 @@ pub(crate) fn output_desc(output: Option<&std::path::Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AdapterInferAction, AdapterInferPolicy};
+    use crate::config::AdapterInferAction;
 
     fn base_filter() -> filter::FilterConfig {
         filter::FilterConfig {
@@ -494,28 +494,20 @@ mod tests {
             40000,
             AdapterInfer::Enabled {
                 action: AdapterInferAction::Trim,
-                policy: AdapterInferPolicy::Conservative,
             },
         )
         .unwrap();
-        assert!(
-            trim_line.ends_with("infer trim · conservative"),
-            "{trim_line}"
-        );
+        assert!(trim_line.ends_with("infer trim"), "{trim_line}");
 
         let report_line = adapter_banner_line(
             Some(&cfg),
             40000,
             AdapterInfer::Enabled {
                 action: AdapterInferAction::Report,
-                policy: AdapterInferPolicy::Conservative,
             },
         )
         .unwrap();
-        assert!(
-            report_line.ends_with("infer report · conservative"),
-            "{report_line}"
-        );
+        assert!(report_line.ends_with("infer report"), "{report_line}");
     }
 
     #[test]

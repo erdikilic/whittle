@@ -169,37 +169,15 @@ impl AdapterInferAction {
     }
 }
 
-/// How much of an inferred recurrent consensus is trusted as technical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum AdapterInferPolicy {
-    /// Use a short end-facing anchor.
-    Conservative,
-    /// Use the complete recurrent consensus.
-    Aggressive,
-}
-
-impl AdapterInferPolicy {
-    /// Lowercase label, as the banner and the summary print it.
-    pub fn label(self) -> &'static str {
-        match self {
-            AdapterInferPolicy::Conservative => "conservative",
-            AdapterInferPolicy::Aggressive => "aggressive",
-        }
-    }
-}
-
-/// Whether ab-initio adapter inference runs, and its independent action and
-/// policy.
+/// Whether ab-initio adapter inference runs and how its discoveries are used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterInfer {
     /// Inference does not run.
     Off,
-    /// Inference runs with the given action and policy.
+    /// Inference runs with the given action.
     Enabled {
         /// What is done with the discoveries.
         action: AdapterInferAction,
-        /// How much of each consensus is trusted.
-        policy: AdapterInferPolicy,
     },
 }
 
@@ -210,17 +188,6 @@ impl AdapterInfer {
             self,
             Self::Enabled {
                 action: AdapterInferAction::Report,
-                ..
-            }
-        )
-    }
-
-    /// Whether inference is enabled with the aggressive policy.
-    pub fn is_aggressive(self) -> bool {
-        matches!(
-            self,
-            Self::Enabled {
-                policy: AdapterInferPolicy::Aggressive,
                 ..
             }
         )

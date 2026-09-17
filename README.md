@@ -107,6 +107,15 @@ whittle -i reads.fastq.gz --discover-adapters report
 whittle -i reads.fastq.gz -o trimmed.fastq.gz --discover-adapters
 ```
 
+Discovery uses one automatic boundary rule for reporting, trimming, and splitting.
+It can recover multiple recurrent adapters and degenerate primers from the same
+sample. Exact k-mer assembly and batched Sassy alignments determine the sequences;
+catalog matches provide names only. Conserved amplicon sequence is excluded when
+reads without a primer establish the insert boundary. Candidates with unresolved
+boundaries are skipped. For known primers, an explicit FASTA or kit preset remains
+the most direct choice; see [adapter discovery](docs/adapters.md#adapter-discovery)
+for sampling requirements and limitations.
+
 Merge a directory, convert BAM to FASTQ, and write a machine-readable summary.
 
 ```bash

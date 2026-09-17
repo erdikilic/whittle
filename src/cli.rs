@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::config::{
-    AdapterInfer, AdapterInferAction, AdapterInferPolicy, Advisory, Config, FastqTags, IoConfig,
-    ProgressMode, TagRemoval,
+    AdapterInfer, AdapterInferAction, Advisory, Config, FastqTags, IoConfig, ProgressMode,
+    TagRemoval,
 };
 use crate::filter::FilterConfig;
 use crate::io::Format;
@@ -282,9 +282,10 @@ struct Cli {
         help_heading = "Adapter trimming"
     )]
     adapter_sample: Option<usize>,
-    /// Discover adapters de novo. Report prints discovered FASTA to stdout
-    /// and exits without read output or a JSON summary. Defaults to trim
-    /// when given no value.
+    /// Discover adapters and primers de novo with automatic boundaries.
+    /// Report prints discovered FASTA to stdout and exits without read output
+    /// or a JSON summary. Both actions use the same sequences. Defaults to
+    /// trim when given no value.
     #[arg(
         long = "discover-adapters",
         value_enum,
@@ -294,16 +295,6 @@ struct Cli {
         help_heading = "Adapter trimming"
     )]
     adapter_infer: Option<AdapterInferAction>,
-    /// Trust policy for inferred consensuses. Conservative trims and splits
-    /// with a short end-facing anchor; aggressive uses the complete consensus.
-    /// Defaults to conservative.
-    #[arg(
-        long = "adapter-discovery-policy",
-        value_enum,
-        value_name = "POLICY",
-        help_heading = "Adapter trimming"
-    )]
-    adapter_infer_policy: Option<AdapterInferPolicy>,
 }
 
 /// The examples block at the end of `--help`.
@@ -532,15 +523,7 @@ fn quality_op_for(c: &Cli) -> Option<QualityOp> {
 fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<AdapterInfer> {
     let adapter_infer = c
         .adapter_infer
-        .map_or(AdapterInfer::Off, |action| AdapterInfer::Enabled {
-            action,
-            policy: c
-                .adapter_infer_policy
-                .unwrap_or(AdapterInferPolicy::Conservative),
-        });
-    if c.adapter_infer.is_none() && c.adapter_infer_policy.is_some() {
-        anyhow::bail!("--adapter-discovery-policy requires --discover-adapters");
-    }
+        .map_or(AdapterInfer::Off, |action| AdapterInfer::Enabled { action });
 
     // Trim mode excludes an explicit FASTA; report mode allows one so the
     // discoveries can be named against it.
@@ -567,12 +550,12 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
         ));
     }
     // Report mode names discovered adapters against the union of the built-in
-    // ONT catalog and the supplied FASTA (see `infer::discover`), so FASTA entry
+    // adapter catalog and the supplied FASTA (see `infer::discover`), so FASTA entry
     // names appear alongside catalog names.
     if adapter_infer.is_report() && c.adapter_fasta.is_some() {
         advisories.push(Advisory::info(
             "--discover-adapters report with --adapter-fasta: discovered adapters are named \
-             against the built-in ONT catalog and the supplied FASTA",
+             against the built-in adapter catalog and the supplied FASTA",
         ));
     }
     Ok(adapter_infer)

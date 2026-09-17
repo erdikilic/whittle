@@ -97,14 +97,12 @@ struct AdapterParams {
     count: usize,
     error_rate: f64,
     end_size: usize,
-    /// False under `--adapter-ends-only`, or under conservative inference.
+    /// False under `--adapter-ends-only`.
     split: bool,
     /// Reads sampled for presence detection or inference; `0` disables detection.
     sample: usize,
     /// `off`, `trim`, or `report`.
     infer: &'static str,
-    /// `None` when inference is off.
-    infer_policy: Option<&'static str>,
 }
 
 /// Read-level counts: input, output, and the three-way split of the input.
@@ -285,10 +283,6 @@ impl Params {
                     AdapterInfer::Off => "off",
                     AdapterInfer::Enabled { action, .. } => action.label(),
                 },
-                infer_policy: match cfg.adapter_infer {
-                    AdapterInfer::Off => None,
-                    AdapterInfer::Enabled { policy, .. } => Some(policy.label()),
-                },
             }),
         }
     }
@@ -433,7 +427,7 @@ mod tests {
         assert_eq!(v["params"]["adapters"]["split"], true);
         assert_eq!(v["params"]["adapters"]["sample"], 5_000);
         assert_eq!(v["params"]["adapters"]["infer"], "off");
-        assert!(v["params"]["adapters"]["infer_policy"].is_null());
+        assert!(v["params"]["adapters"].get("infer_policy").is_none());
     }
 
     #[test]

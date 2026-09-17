@@ -82,28 +82,48 @@ the actual sample size is reported, and all sampled reads are processed.
 ## Adapter discovery
 
 `--discover-adapters` (equivalent to `--discover-adapters trim`) discovers recurrent
-read-end sequences de novo from the first `--adapter-sample-reads` reads (default
-40000) by k-mer assembly in the manner of Porechop_ABI, then trims and splits
-with the result. Sampling requires at least 100 reads; a sample count of 0 is
-rejected. The default `conservative` policy anchors at most 32 bp facing
-the physical read end; the insert-facing remainder of the assembled consensus is
-reported as uncertain rather than assumed technical.
+sequences from the first `--adapter-sample-reads` reads (default 40000), then trims
+and splits with the supported sequences. Sampling requires at least 100 reads;
+a count of 0 is rejected. Reporting and trimming use the same automatic boundary
+rule. There is no conservative/aggressive policy switch.
 
-Without a known primer or reference, a primer and a conserved marker-gene
-prefix can be statistically indistinguishable. A candidate without a sharp
-boundary that lies inward of another candidate, in the reads carrying both, is
-dropped as that candidate's insert-facing remainder, so a conserved gene start
-is not trimmed from reads that carry no adapter.
+Discovery counts exact 16-mers in the first and last 100 bases of sampled reads.
+A bounded graph assembly retains multiple paths, locates abrupt support changes
+at insert boundaries, and corrects weak paths with aligned read evidence.
+Sassy batches the approximate searches used to align supporting reads and
+validate complete candidates. At most 4000 windows per end, distributed across
+the sample, participate in alignment validation.
 
-`--discover-adapters report` prints the recommended anchor, its support, the
-assembled length, the uncertain-base count, and any catalog or FASTA cross-name,
-as FASTA to stdout, then exits without writing records or a JSON summary.
-`-v` logs the full assembled consensus.
+A candidate must occur in at least 15% of the usable windows at one end.
+Discovery can therefore recover several adapter families from a mixed library,
+but rare adapters or large barcode panels may fall below its support floor.
+Related candidates and reverse complements are merged using exact sequence
+support before approximate equivalence, so sequencing-error variants do not
+replace a better-supported reconstruction.
 
-`--adapter-discovery-policy aggressive` trims the full consensus. It is appropriate
-only when overtrimming of conserved biological sequence has been ruled out, and
-unsuitable for amplicons, where the consensus extends into the conserved gene
-start.
+For amplicons, recurrent read starts can identify an insert boundary in reads
+that lack a primer. Discovery aligns the upstream sequence in primer-bearing
+reads, reconstructs supported IUPAC variants, and excludes the conserved insert.
+Distinct primer families sharing an insert boundary are considered separately.
+Candidates whose insert-facing boundaries remain unresolved are skipped.
+
+Without reads exposing an insert boundary, an unknown primer and a conserved
+gene prefix can be indistinguishable. Short primers, highly degenerate mixtures,
+high sequencing error, adapter lengths approaching the sampling-window length,
+or insufficient representation can prevent complete recovery. Use a known
+primer FASTA or kit preset when available. Inferred sequences use the adapter
+role: they trim ends and can excise interior junctions. Use
+`--adapter-ends-only` to suppress adapter splitting, or an explicit FASTA with
+`primer` in its headers to restrict primer matches to the ends.
+
+`--discover-adapters report` prints the same sequences used for trimming,
+together with their support, length, and catalog or supplied-FASTA annotations,
+then exits without writing records or a JSON summary. Catalog entries provide
+names only; their sequences do not choose or extend an inferred consensus.
+`-v` logs inferred sequences and unresolved-boundary candidates.
+
+The former `--adapter-discovery-policy` option and JSON `infer_policy` parameter
+have been removed. Existing commands should omit that option.
 
 ## Catalog and presets
 

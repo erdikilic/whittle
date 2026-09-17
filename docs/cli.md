@@ -99,8 +99,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--adapter-end-search <BASES>` | End-zone width searched for terminal adapters (default 150); requires an adapter source |
 | `--adapter-ends-only` | Trim adapters at ends only; disable interior adapter splitting independently of quality splitting |
 | `--adapter-sample-reads <COUNT>` | Reads inspected for preset presence or adapter discovery (defaults 2000 and 40000; at least 100); `0` disables preset detection and is rejected for discovery; ignored with `--adapter-fasta` unless discovering adapters |
-| `--discover-adapters [<ACTION>]` | Discover adapters de novo: `trim` (the bare flag) or `report` (FASTA to stdout, then exit without read output or a JSON summary) |
-| `--adapter-discovery-policy <POLICY>` | Trust policy for inferred adapters: `conservative` (default) or `aggressive`; requires `--discover-adapters` |
+| `--discover-adapters [<ACTION>]` | Discover adapters and primers with automatic boundaries: `trim` (the bare flag) or `report` (FASTA to stdout, then exit without read output or a JSON summary); both use the same sequences |
 | `-v, --verbose` (repeatable) | Stage detail with `-v`, per-read decisions with `-vv` |
 | `--progress <MODE>` | Progress reporting, independent of the log level: `auto` (default), `bar`, `plain`, `none` |
 | `--quiet` | Silence progress and the summary; warnings and errors still print. Conflicts with `-v` and `--progress` |

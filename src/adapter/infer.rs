@@ -1,47 +1,44 @@
-//! Ab-initio adapter inference.
+//! Ab-initio adapter inference from recurrent read-end sequences.
 //!
-//! Discovers adapters de novo from a read sample using Porechop_ABI's published
-//! method: read-end k-mer counting, a weighted de Bruijn graph, length-bounded
-//! heaviest-path assembly, iterative peeling, boundary drop-trim, and
-//! presence-fraction confidence. Implemented from the paper, not translated
-//! from GPL source. Pure and format-neutral.
+//! Exact k-mer graphs establish consensus boundaries. Batched approximate
+//! matching validates support and aligns primer extensions to conserved insert
+//! starts. Catalog sequences annotate discoveries without choosing their bases.
 
 use crate::adapter::search::{AmbiguousSearcher, hits, is_plain_acgt, new_ambiguous_searcher};
 use crate::adapter::{Adapter, AdapterConfig, MIN_PATTERN_LEN, Role, edit_budget};
 
-/// The read end a discovered consensus faces, which selects the side of its
-/// conservative anchor.
+/// The physical read end from which a consensus was assembled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum End {
     /// Discovered in the 5' windows.
     Five,
     /// Discovered in the 3' windows.
     Three,
-    /// Discovered at both ends.
-    Both,
 }
 
 /// k-mer length used for end-window counting and assembly graph nodes.
 const KMER_K: usize = 16;
 
-/// Number of top exact k-mers (by count) kept per end before reweighting.
+/// Number of top exact k-mers retained per end for graph assembly.
 const TOP_KMERS: usize = 500;
 
 /// Length of the 5'/3' end window scanned per read for adapter discovery.
 const WINDOW_LEN: usize = 100;
 
-/// Edit-distance budget for the forward-only per-window presence recount.
-const RECOUNT_EDITS: usize = 2;
-
 /// Minimum presence-fraction support required to keep a discovered adapter.
 /// Support is the fraction of sampled end windows containing the consensus
 /// within its length-scaled edit budget. The threshold retains common library
 /// adapters while excluding sparse barcode-specific sequences and background.
-const KEEP_SUPPORT: f64 = 0.30;
+const KEEP_SUPPORT: f64 = 0.15;
 
-/// Cap on the number of windows scanned per k-mer during the 2-error recount
-/// (the confidence pass), bounding its cost on large samples.
+/// Maximum windows used for alignment and support validation.
 const RECOUNT_WINDOWS: usize = 4000;
+
+/// Minimum k-mer support relative to the path peak at an assembly boundary.
+const BOUNDARY_SUPPORT: f64 = 0.45;
+
+/// Exact prefix length used to locate recurrent unprimed read starts.
+const START_K: usize = 11;
 
 /// Max total emitted length of a single `bounded_heaviest_path` consensus,
 /// used by `peel_paths` so no single peel can run away in length.
@@ -54,26 +51,11 @@ const MAX_ADAPTERS_PER_END: usize = 3;
 /// to be kept; a lighter path is background rather than a distinct adapter.
 const MIN_PATH_WEIGHT_FRAC: f64 = 0.25;
 
-/// Neighborhood size (in profile positions) `drop_trim` scans inward from
-/// each end when looking for a sharp support drop.
-const DROP_WINDOW: usize = 7;
-
-/// Fraction of the profile's max weight added to the median-of-diffs baseline
-/// to form `drop_trim`'s cut threshold.
-const CUT_RATIO: f64 = 0.075;
-
 /// Minimum percent identity for a catalog entry to be reported as the match
 /// of an inferred adapter. A 16 to 32 bp anchor searched against every catalog
 /// entry on both strands names something spurious well above the 60 percent
 /// that its trimming budget alone would allow.
 const NAME_IDENTITY_MIN: f32 = 85.0;
-
-/// Maximum length of the end-facing anchor used by conservative inference.
-/// Two independent 16-mers are long enough to be specific in ordinary long
-/// reads while avoiding the unidentifiable insert-facing tail of a recurrent
-/// amplicon consensus. Terminal trimming still removes everything between the
-/// physical read end and this anchor.
-const CONSERVATIVE_ANCHOR_LEN: usize = 2 * KMER_K;
 
 /// One discovered adapter with inference metadata. The bare `Adapter` (without
 /// `support` and `name_hits`) is extracted only when building the trim config.
@@ -82,7 +64,7 @@ pub struct InferredAdapter {
     /// Sequence used for trimming (or printed as the recommendation), named
     /// `inferred_N` by presentation order.
     pub adapter: Adapter,
-    /// Complete recurrent consensus assembled before conservative anchoring.
+    /// Complete sequence retained after boundary validation.
     pub assembled_seq: Vec<u8>,
     /// Fraction of sampled end windows containing the consensus within its
     /// edit budget.
@@ -93,8 +75,7 @@ pub struct InferredAdapter {
 }
 
 impl InferredAdapter {
-    /// Returns the number of insert-facing consensus bases excluded from the
-    /// trimming anchor because their technical or biological origin is unknown.
+    /// Returns the number of assembled bases excluded from the trimming sequence.
     pub fn uncertain_bases(&self) -> usize {
         self.assembled_seq
             .len()
@@ -183,24 +164,40 @@ fn is_low_complexity(kmer: &[u8]) -> bool {
 fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
     use std::collections::HashMap;
     let mut counts: HashMap<u64, u32> = HashMap::new();
+    assert!((1..=32).contains(&k));
+    let mask = u64::MAX >> (64 - 2 * k);
     for &wnd in windows {
-        if wnd.len() < k {
-            continue;
-        }
-        for i in 0..=wnd.len() - k {
-            let sub = &wnd[i..i + k];
-            if is_low_complexity(sub) {
-                continue;
-            }
-            if let Some(code) = encode_kmer(sub) {
-                *counts.entry(code).or_insert(0) += 1;
+        let (mut code, mut valid) = (0, 0);
+        for &base in wnd {
+            if let Some(bits) = encode_kmer(&[base]) {
+                code = ((code << 2) | bits) & mask;
+                valid += 1;
+                if valid >= k {
+                    *counts.entry(code).or_insert(0) += 1;
+                }
+            } else {
+                code = 0;
+                valid = 0;
             }
         }
     }
-    let mut ranked: Vec<(u64, u32)> = counts.into_iter().collect();
+    let mut ranked: Vec<(u64, u32)> = counts
+        .into_iter()
+        .filter(|&(code, _)| {
+            if k >= 4 {
+                code & (mask >> 4) != code >> 4
+            } else {
+                !is_low_complexity(&decode_kmer(code, k))
+            }
+        })
+        .collect();
     // Count descending, then code ascending for a deterministic tie-break.
-    ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    ranked.truncate(top);
+    let order = |a: &(u64, u32), b: &(u64, u32)| b.1.cmp(&a.1).then(a.0.cmp(&b.0));
+    if ranked.len() > top {
+        ranked.select_nth_unstable_by(top, order);
+        ranked.truncate(top);
+    }
+    ranked.sort_unstable_by(order);
     ranked
 }
 
@@ -215,13 +212,15 @@ fn windows_containing(
     windows: &[&[u8]],
     max_edits: usize,
 ) -> u32 {
-    let mut present = 0u32;
-    for &wnd in windows {
-        if !hits(searcher, pattern, wnd, max_edits).is_empty() {
-            present += 1;
-        }
-    }
-    present
+    let mut seen = vec![false; windows.len()];
+    crate::adapter::search::for_each_hit_in_texts(
+        searcher,
+        pattern,
+        windows,
+        max_edits,
+        |index, _| seen[index] = true,
+    );
+    seen.into_iter().filter(|&present| present).count() as u32
 }
 
 /// Reconstructs a consensus adapter from weighted k-mer nodes by a cycle-safe
@@ -328,63 +327,6 @@ fn bounded_heaviest_path(
     Some((cons, profile, weight))
 }
 
-/// Returns the median of `xs`, or 0.0 when empty.
-fn median_f64(xs: &[f64]) -> f64 {
-    if xs.is_empty() {
-        return 0.0;
-    }
-    let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let m = v.len() / 2;
-    if v.len() % 2 == 1 {
-        v[m]
-    } else {
-        (v[m - 1] + v[m]) / 2.0
-    }
-}
-
-/// Trims low-support flanks: walks from each end inward and cuts at the first
-/// position where the support jumps by more than the drop threshold relative
-/// to the interior plateau. The threshold is the median of the absolute
-/// successive differences plus `CUT_RATIO` times the profile maximum, evaluated
-/// over a `DROP_WINDOW`-sized neighborhood.
-fn drop_trim(consensus: &[u8], profile: &[u32]) -> (Vec<u8>, Vec<u32>) {
-    let n = profile.len();
-    if n == 0 {
-        return (consensus.to_vec(), profile.to_vec());
-    }
-    let maxp = *profile.iter().max().unwrap() as f64;
-    let diffs: Vec<f64> = profile
-        .windows(2)
-        .map(|w| (w[0] as f64 - w[1] as f64).abs())
-        .collect();
-    let thresh = median_f64(&diffs) + CUT_RATIO * maxp;
-
-    // Left boundary: advance over low-support positions within the first
-    // `DROP_WINDOW` positions.
-    let mut lo = 0usize;
-    while lo + 1 < n && lo < DROP_WINDOW {
-        if (profile[lo] as f64) < maxp - thresh {
-            lo += 1;
-        } else {
-            break;
-        }
-    }
-    // Right boundary: symmetric from the tail.
-    let mut hi = n;
-    while hi > lo + 1 && n - hi < DROP_WINDOW {
-        if (profile[hi - 1] as f64) < maxp - thresh {
-            hi -= 1;
-        } else {
-            break;
-        }
-    }
-    if lo >= hi {
-        return (consensus.to_vec(), profile.to_vec()); // never trim to nothing
-    }
-    (consensus[lo..hi].to_vec(), profile[lo..hi].to_vec())
-}
-
 /// Peels up to `MAX_ADAPTERS_PER_END` distinct adapter consensuses out of one
 /// end's weighted k-mer graph: each round runs `bounded_heaviest_path`, then
 /// removes that path's k-mers from `nodes` so the next round is forced onto a
@@ -428,62 +370,6 @@ fn same_adapter(a: &[u8], b: &[u8], error_rate: f64) -> bool {
     !hits(&mut s, short, long, k).is_empty()
 }
 
-/// Folds a sequence discovered at both the 5' and 3' ends (per `same_adapter`)
-/// into a single `End::Both` entry, so the matcher's nearest-end arbitration
-/// (see `classify_terminal`) handles it rather than two independent single-end
-/// entries. The rest keep their originating end tag.
-fn merge_both_ends(
-    five: Vec<Vec<u8>>,
-    three: Vec<Vec<u8>>,
-    error_rate: f64,
-    aggressive: bool,
-) -> Vec<(Vec<u8>, End)> {
-    let mut out: Vec<(Vec<u8>, End)> = Vec::new();
-    let mut three_used = vec![false; three.len()];
-    for f in &five {
-        if let Some(j) = three
-            .iter()
-            .enumerate()
-            .position(|(j, t)| !three_used[j] && same_adapter(f, t, error_rate))
-        {
-            three_used[j] = true;
-            // Conservative inference keeps the 5' representation so its
-            // prefix remains the physical-end-facing side when extracting a
-            // terminal anchor below. Aggressive inference keeps the longer
-            // reconstruction, since it trims with the full consensus.
-            let kept = if aggressive && three[j].len() > f.len() {
-                three[j].clone()
-            } else {
-                f.clone()
-            };
-            out.push((kept, End::Both));
-        } else {
-            out.push((f.clone(), End::Five));
-        }
-    }
-    for (j, t) in three.into_iter().enumerate() {
-        if !three_used[j] {
-            out.push((t, End::Three));
-        }
-    }
-    out
-}
-
-/// Returns only the physical-end-facing part of an assembled consensus. The
-/// insert-facing extension is ambiguous for reference-free amplicon data: an
-/// unknown primer and a conserved marker-gene prefix can be recurrent at the
-/// same rate. For 5' (and merged candidates stored in 5' orientation) the outer
-/// anchor is the prefix; for 3' it is the suffix.
-fn conservative_terminal_anchor(seq: &[u8], end: End) -> Vec<u8> {
-    if seq.len() <= CONSERVATIVE_ANCHOR_LEN {
-        return seq.to_vec();
-    }
-    match end {
-        End::Five | End::Both => seq[..CONSERVATIVE_ANCHOR_LEN].to_vec(),
-        End::Three => seq[seq.len() - CONSERVATIVE_ANCHOR_LEN..].to_vec(),
-    }
-}
-
 /// Returns the best catalog matches for `seq` as `(name, percent_identity)`,
 /// sorted by identity descending, at most three, and only at or above
 /// `NAME_IDENTITY_MIN`. The result annotates an inferred adapter with the
@@ -525,76 +411,232 @@ fn stride_sample<'a>(windows: &[&'a [u8]], cap: usize) -> Vec<&'a [u8]> {
     windows.iter().step_by(step).copied().collect()
 }
 
-/// Fraction of the windows holding two candidates in which the inner one must
-/// lie inward of the outer one for it to count as insert-facing sequence.
-const INWARD_FRAC: f64 = 0.5;
+/// Encodes a set of concrete DNA bases as an IUPAC symbol.
+fn ambiguity_code(mask: usize) -> u8 {
+    b"-ACMGRSVTWYHKDBN"[mask]
+}
 
-/// Removes every candidate without a drop-trim boundary whose terminal anchor
-/// lies inward of another candidate's anchor in the windows carrying both:
-/// for a 5' end, one that starts past the midpoint of the other's occurrence;
-/// for a 3' end, one that ends before it. Such a candidate is the
-/// insert-facing remainder of a longer recurrent sequence (a conserved gene
-/// start behind a primer), which the outer candidate's uncertain region
-/// already describes and which would trim or split real sequence. A candidate
-/// with a sharp boundary is kept wherever it lies, since a primer inward of an
-/// adapter is technical sequence of its own. Anchors are compared rather than
-/// whole consensuses because a consensus nearly as long as the window aligns
-/// from its start whatever it holds.
-fn drop_inward_candidates(
-    candidates: Vec<(Vec<u8>, f64)>,
-    windows: &[&[u8]],
-    base: &AdapterConfig,
-    end: End,
-) -> Vec<(Vec<u8>, f64)> {
-    let mut fwd = crate::adapter::search::new_searcher_fwd();
-    let anchors: Vec<Vec<u8>> = candidates
-        .iter()
-        .map(|(seq, _)| conservative_terminal_anchor(seq, end))
-        .collect();
-    let occurrences: Vec<Vec<Option<(usize, usize)>>> = anchors
-        .iter()
-        .map(|anchor| {
-            let k = edit_budget(base.error_rate, anchor.len());
-            windows
-                .iter()
-                .map(|wnd| {
-                    hits(&mut fwd, anchor, wnd, k)
-                        .into_iter()
-                        .min_by_key(|h| h.start)
-                        .map(|h| (h.start, h.end))
-                })
-                .collect()
-        })
-        .collect();
-    let inward_of = |inner: usize, outer: usize| -> bool {
-        let half = anchors[outer].len() / 2;
-        let (mut both, mut inward) = (0usize, 0usize);
-        for (a, b) in occurrences[outer].iter().zip(&occurrences[inner]) {
-            let (Some(a), Some(b)) = (a, b) else {
-                continue;
-            };
-            both += 1;
-            let lies_inward = match end {
-                End::Five | End::Both => b.0 >= a.0 + half,
-                End::Three => b.1 + half <= a.1,
-            };
-            inward += usize::from(lies_inward);
+/// Refines an assembled path with one best alignment per supporting window.
+/// Majority substitutions and deletions correct graph branches caused by
+/// sequencing errors without extending the assembly into unaligned sequence.
+fn polish_consensus(seq: &[u8], windows: &[&[u8]]) -> Vec<u8> {
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let mut best: Vec<Option<sassy::Match>> = vec![None; windows.len()];
+    for hit in searcher.search_texts(seq, windows, edit_budget(0.25, seq.len())) {
+        let entry = &mut best[hit.text_idx];
+        if entry
+            .as_ref()
+            .is_none_or(|old| (hit.cost, hit.text_start) < (old.cost, old.text_start))
+        {
+            *entry = Some(hit.clone());
         }
-        both > 0 && inward as f64 >= INWARD_FRAC * both as f64
-    };
-    (0..candidates.len())
-        .filter(|&i| {
-            candidates[i].0.len() <= CONSERVATIVE_ANCHOR_LEN
-                || !(0..candidates.len()).any(|j| j != i && inward_of(i, j))
+    }
+    let mut counts = vec![[0usize; 5]; seq.len()];
+    let mut aligned = 0;
+    for (window, hit) in windows.iter().zip(best) {
+        let Some(hit) = hit else { continue };
+        aligned += 1;
+        let path = hit.to_path();
+        for (i, pos) in path.iter().enumerate() {
+            let next = path
+                .get(i + 1)
+                .map(|p| (p.0, p.1))
+                .unwrap_or((seq.len() as i32, hit.text_end as i32));
+            if next.0 != pos.0 + 1 {
+                continue;
+            }
+            let base = if next.1 == pos.1 + 1 {
+                encode_kmer(&window[pos.1 as usize..pos.1 as usize + 1]).unwrap() as usize
+            } else {
+                4
+            };
+            counts[pos.0 as usize][base] += 1;
+        }
+    }
+    if aligned < 20 {
+        return seq.to_vec();
+    }
+    seq.iter()
+        .zip(counts)
+        .filter_map(|(&base, counts)| {
+            let total: usize = counts.iter().sum();
+            if counts[4] * 2 > total {
+                return None;
+            }
+            let best = (0..4).max_by_key(|&i| counts[i]).unwrap();
+            Some(if counts[best] * 100 >= total * 70 {
+                b"ACGT"[best]
+            } else {
+                base
+            })
         })
-        .map(|i| candidates[i].clone())
         .collect()
 }
 
-/// Assembles one end's candidates: counts k-mers, reweights them by 2-error
-/// window frequency, peels paths, drop-trims each, and removes the candidates
-/// that lie inward of another. Returns `(trimmed consensus, support)` per
-/// candidate.
+/// Extends a conserved insert anchor toward the physical read end. Each round
+/// aligns the current consensus before voting on the preceding base, allowing
+/// indels to shift the supporting reads without shifting the consensus.
+fn upstream_consensus(anchor: &[u8], windows: &[&[u8]]) -> Vec<u8> {
+    let mut seq = anchor.to_vec();
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    for _ in 0..LMAX - anchor.len() {
+        let mut best = vec![None; windows.len()];
+        for hit in searcher.search_texts(&seq, windows, edit_budget(0.12, seq.len())) {
+            let entry = &mut best[hit.text_idx];
+            let key = (hit.cost, hit.text_start);
+            if entry.is_none_or(|old| key < old) {
+                *entry = Some(key);
+            }
+        }
+        let mut counts = [0usize; 4];
+        for (window, hit) in windows.iter().zip(best) {
+            if let Some((_, start)) = hit.filter(|&(_, start)| start > 0)
+                && let Some(base) = encode_kmer(&window[start - 1..start])
+            {
+                counts[base as usize] += 1;
+            }
+        }
+        let total: usize = counts.iter().sum();
+        if total < 20.max(windows.len() / 5) {
+            break;
+        }
+        let mut ranked = [0, 1, 2, 3];
+        ranked.sort_by_key(|&i| (std::cmp::Reverse(counts[i]), i));
+        let first = ranked[0];
+        let mask = if counts[first] * 100 >= total * 70 {
+            1 << first
+        } else if (counts[first] + counts[ranked[1]]) * 100 >= total * 80
+            && counts[ranked[1]] * 100 >= total * 20
+        {
+            (1 << first) | (1 << ranked[1])
+        } else {
+            break;
+        };
+        seq.insert(0, ambiguity_code(mask));
+    }
+    seq.truncate(seq.len() - anchor.len());
+    seq
+}
+
+/// Uses recurrent unprimed read starts to locate a conserved insert boundary.
+/// A primer must be independently supported upstream of that boundary; the
+/// conserved insert itself is excluded from the inferred trimming sequence.
+fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<Vec<Vec<u8>>> {
+    let reverse = end == End::Three;
+    let oriented: Vec<Vec<u8>> = windows
+        .iter()
+        .map(|w| {
+            if reverse {
+                w.iter().rev().copied().collect()
+            } else {
+                w.to_vec()
+            }
+        })
+        .collect();
+    let windows: Vec<&[u8]> = oriented.iter().map(Vec::as_slice).collect();
+    let mut seq: Vec<u8> = if reverse {
+        consensus.iter().rev().copied().collect()
+    } else {
+        consensus.to_vec()
+    };
+    let mut starts = std::collections::HashMap::<u64, usize>::new();
+    for window in &windows {
+        if window.len() >= START_K
+            && let Some(code) = encode_kmer(&window[..START_K])
+        {
+            *starts.entry(code).or_default() += 1;
+        }
+    }
+    let floor = 10.max(windows.len() / 32);
+    let positions_in = |seq: &[u8]| -> Vec<(usize, usize)> {
+        seq.windows(START_K)
+            .enumerate()
+            .take(seq.len().saturating_sub(KMER_K) + 1)
+            .map(|(pos, word)| {
+                (
+                    pos,
+                    encode_kmer(word)
+                        .and_then(|code| starts.get(&code).copied())
+                        .unwrap_or(0),
+                )
+            })
+            .filter(|&(_, count)| count >= floor)
+            .collect()
+    };
+    let mut positions = positions_in(&seq);
+    if positions.is_empty() && seq.len() >= KMER_K {
+        let mut prefix = upstream_consensus(&seq[..KMER_K], &windows);
+        if !prefix.is_empty() {
+            prefix.extend_from_slice(&seq);
+            seq = prefix;
+            positions = positions_in(&seq);
+        }
+    }
+    positions.sort_by_key(|&(pos, count)| (std::cmp::Reverse(count), pos));
+    for (pos, _) in positions {
+        let anchor = &seq[pos..pos + KMER_K];
+        let primer = upstream_consensus(anchor, &windows);
+        let mut primers = if primer.len() >= MIN_PATTERN_LEN
+            && primer
+                .iter()
+                .filter(|&&b| !matches!(b, b'A' | b'C' | b'G' | b'T'))
+                .count()
+                * 4
+                <= primer.len()
+        {
+            vec![primer]
+        } else {
+            // Distinct primer families can share an insert boundary. Cluster
+            // their adjacent sequence before extending each family separately.
+            let mut searcher = crate::adapter::search::new_searcher_fwd();
+            let mut best = vec![None; windows.len()];
+            for hit in searcher.search_texts(anchor, &windows, 2) {
+                let key = (hit.cost, hit.text_start);
+                let entry = &mut best[hit.text_idx];
+                if entry.is_none_or(|old| key < old) {
+                    *entry = Some(key);
+                }
+            }
+            let mut groups = std::collections::BTreeMap::<u64, Vec<&[u8]>>::new();
+            for (&window, hit) in windows.iter().zip(best) {
+                if let Some((_, start)) = hit.filter(|&(_, start)| start >= 6) {
+                    let key = encode_kmer(&window[start - 6..start]).unwrap();
+                    groups.entry(key).or_default().push(window);
+                }
+            }
+            let mut groups: Vec<_> = groups
+                .into_iter()
+                .filter(|(_, group)| group.len() >= 20.max(windows.len() / 10))
+                .collect();
+            groups.sort_by_key(|(key, group)| (std::cmp::Reverse(group.len()), *key));
+            groups
+                .into_iter()
+                .take(MAX_ADAPTERS_PER_END)
+                .map(|(_, group)| upstream_consensus(anchor, &group))
+                .filter(|p| {
+                    p.len() >= MIN_PATTERN_LEN
+                        && p.iter()
+                            .filter(|&&b| !matches!(b, b'A' | b'C' | b'G' | b'T'))
+                            .count()
+                            * 4
+                            <= p.len()
+                })
+                .collect()
+        };
+        if reverse {
+            for primer in &mut primers {
+                primer.reverse();
+            }
+        }
+        if !primers.is_empty() {
+            return Some(primers);
+        }
+    }
+    None
+}
+
+/// Assembles one end's candidates using exact k-mer support and validates each
+/// complete sequence against a bounded, uniformly spaced window sample.
 fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, f64)> {
     if windows.len() < 3 {
         return Vec::new();
@@ -609,119 +651,115 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
     if exact.is_empty() {
         return Vec::new();
     }
-    // The recount sample is capped and spread uniformly over the complete
-    // input range.
+    // Validation uses windows distributed across the complete sample.
     let recount = stride_sample(windows, RECOUNT_WINDOWS);
     let n_recount = recount.len();
 
     let mut fwd = crate::adapter::search::new_searcher_fwd();
-    let weighted: Vec<(u64, u32)> = exact
-        .iter()
-        .map(|&(code, _)| {
-            let kmer = decode_kmer(code, KMER_K);
-            (
-                code,
-                windows_containing(&mut fwd, &kmer, &recount, RECOUNT_EDITS),
-            )
-        })
-        .filter(|&(_, w)| w > 0)
-        .collect();
+    let weighted = exact;
     let mut out = Vec::new();
     for (cons, profile) in peel_paths(weighted, KMER_K) {
-        let (trimmed, _tprof) = drop_trim(&cons, &profile);
-        if trimmed.len() < MIN_PATTERN_LEN {
-            continue;
+        let peak = *profile.iter().max().unwrap_or(&0);
+        let weights = &profile[KMER_K - 1..];
+        let floor = (peak as f64 * BOUNDARY_SUPPORT) as u32;
+        let lo = weights.iter().position(|&w| w >= floor).unwrap_or(0);
+        let hi = weights.iter().rposition(|&w| w >= floor).unwrap_or(0) + KMER_K;
+        let trimmed = cons[lo..hi].to_vec();
+        let trimmed = if peak as usize * 4 < windows.len() {
+            polish_consensus(&trimmed, &recount)
+        } else {
+            trimmed
+        };
+        let sequences = if let Some(primers) = contrast_boundary(&cons, &recount, end) {
+            primers
+        } else {
+            let bounded = match end {
+                End::Five if hi < cons.len() => {
+                    weights[hi - KMER_K + 1] * 2 <= weights[hi - KMER_K]
+                },
+                End::Three if lo > 0 => weights[lo - 1] * 2 <= weights[lo],
+                _ => cons.len() < LMAX,
+            };
+            if !bounded {
+                tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed),
+                    "Recurrent sequence has no supported insert boundary");
+                continue;
+            }
+            vec![trimmed]
+        };
+        for trimmed in sequences {
+            if trimmed.len() < MIN_PATTERN_LEN {
+                continue;
+            }
+            // Presence counts each supporting window once, including reads
+            // whose sequencing errors disrupted individual exact k-mers.
+            let k_cons = edit_budget(base.error_rate, trimmed.len());
+            let present = windows_containing(&mut fwd, &trimmed, &recount, k_cons);
+            let support = present as f64 / n_recount as f64;
+            out.push((trimmed, support));
         }
-        // Whole-consensus presence: what fraction of the recount sample contains
-        // this trimmed consensus within a length-scaled error budget, reusing the
-        // same searcher and per-window counter (`windows_containing`) that
-        // reweighted individual k-mers above. Unlike a per-position statistic, an
-        // internal low-weight pocket cannot drag down an otherwise-correct
-        // reconstruction.
-        let k_cons = edit_budget(base.error_rate, trimmed.len());
-        let present = windows_containing(&mut fwd, &trimmed, &recount, k_cons);
-        let support = present as f64 / n_recount as f64;
-        out.push((trimmed, support));
     }
-    drop_inward_candidates(out, &recount, base, end)
+    out
 }
 
-/// Discovers adapters ab initio: per-end `assemble`, folds shared 5'/3'
-/// discoveries into `End::Both` via `merge_both_ends`, drops anything too
-/// short or too weakly supported, then annotates each survivor with its
-/// catalog matches. Conservative mode trims with a short physical-end-facing
-/// anchor and never asserts that the complete recurrent consensus is
-/// technical; `aggressive` mode trims the full consensus. Survivors are named
-/// `inferred_N` in presentation order (support descending, then sequence
-/// ascending) and carry their catalog matches from the ONT catalog plus
-/// `base.adapters` (extra naming references, such as a `--adapter-fasta`
-/// under report mode) as `name_hits`.
-pub fn discover(sample: &[&[u8]], base: &AdapterConfig, aggressive: bool) -> Vec<InferredAdapter> {
+/// Discovers supported adapter sequences independently of the reference catalog.
+/// Equivalent end assemblies share one trimming pattern. Catalog and supplied
+/// FASTA entries provide names only after the inferred boundaries are fixed.
+pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
     let (five_w, three_w) = end_windows(sample, WINDOW_LEN);
     let five = assemble(&five_w, base, End::Five);
     let three = assemble(&three_w, base, End::Three);
 
-    // A dual-end consensus inherits the strongest fuzzy-equivalent recovery
-    // from either end, including reverse-complement representations.
-    let support_of = |seq: &[u8]| -> f64 {
-        five.iter()
-            .chain(three.iter())
-            .filter(|(s, _)| same_adapter(s, seq, base.error_rate))
-            .map(|(_, sup)| *sup)
-            .fold(0.0_f64, f64::max)
-    };
+    let refs = crate::adapter::preset::preset(crate::adapter::preset::Kit::ALL);
+    let name_refs: Vec<Adapter> = refs
+        .into_iter()
+        .chain(base.adapters.iter().cloned())
+        .collect();
 
-    let merged = merge_both_ends(
-        five.iter().map(|(s, _)| s.clone()).collect(),
-        three.iter().map(|(s, _)| s.clone()).collect(),
-        base.error_rate,
-        aggressive,
-    );
-
-    // The ONT catalog and optional user entries serve only as naming references.
-    let refs = crate::adapter::preset::preset_ont();
-    let name_refs: Vec<Adapter> = if base.adapters.is_empty() {
-        refs
-    } else {
-        refs.into_iter()
-            .chain(base.adapters.iter().cloned())
-            .collect()
-    };
-
-    /// `(sequence, end, support, catalog matches)`.
-    type Candidate = (Vec<u8>, End, f64, Vec<(String, f32)>);
-    let mut candidates: Vec<Candidate> = Vec::new();
-    for (assembled_seq, end) in merged.into_iter() {
-        if assembled_seq.len() < MIN_PATTERN_LEN {
-            continue;
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let mut candidates: Vec<(Vec<u8>, f64, u32)> = five
+        .into_iter()
+        .chain(three)
+        .filter(|(seq, support)| seq.len() >= MIN_PATTERN_LEN && *support >= KEEP_SUPPORT)
+        .map(|(seq, support)| {
+            let exact = windows_containing(&mut searcher, &seq, &five_w, 0)
+                + windows_containing(&mut searcher, &seq, &three_w, 0);
+            (seq, support, exact)
+        })
+        .collect();
+    // Exact support selects the reconstruction before fuzzy duplicates merge;
+    // approximate support alone cannot distinguish a correct consensus from
+    // several nearby error variants.
+    candidates.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then(b.1.total_cmp(&a.1))
+            .then(b.0.len().cmp(&a.0.len()))
+            .then(a.0.cmp(&b.0))
+    });
+    let mut distinct: Vec<(Vec<u8>, f64)> = Vec::new();
+    for (seq, support, _) in candidates {
+        if let Some((_, previous)) = distinct
+            .iter_mut()
+            .find(|(other, _)| same_adapter(&seq, other, base.error_rate))
+        {
+            *previous = previous.max(support);
+        } else {
+            distinct.push((seq, support));
         }
-        let support = support_of(&assembled_seq);
-        if support < KEEP_SUPPORT {
-            continue;
-        }
-        let name_hits = name_against(&assembled_seq, &name_refs, base.error_rate);
-        candidates.push((assembled_seq, end, support, name_hits));
     }
-    // Stable presentation order: support descending, then sequence ascending.
-    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap().then(a.0.cmp(&b.0)));
-    // Names follow presentation order, so logs, FASTA and report agree.
-    candidates
+    distinct.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    distinct
         .into_iter()
         .enumerate()
-        .map(|(i, (assembled_seq, end, support, name_hits))| {
-            let name = format!("inferred_{}", i + 1);
-            let seq = if aggressive {
-                assembled_seq.clone()
-            } else {
-                conservative_terminal_anchor(&assembled_seq, end)
-            };
+        .map(|(i, (seq, support))| {
+            let name_hits = name_against(&seq, &name_refs, base.error_rate);
             InferredAdapter {
                 adapter: Adapter {
-                    name,
-                    seq,
+                    name: format!("inferred_{}", i + 1),
+                    seq: seq.clone(),
                     role: Role::Adapter,
                 },
-                assembled_seq,
+                assembled_seq: seq,
                 support,
                 name_hits,
             }
@@ -732,6 +770,159 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig, aggressive: bool) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn random_bases(mut state: u64, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^= z >> 31;
+                b"ACGT"[(z >> 62) as usize]
+            })
+            .collect()
+    }
+
+    fn infer_owned(reads: &[Vec<u8>]) -> Vec<InferredAdapter> {
+        let sample: Vec<&[u8]> = reads.iter().map(Vec::as_slice).collect();
+        discover(
+            &sample,
+            &AdapterConfig {
+                adapters: vec![],
+                error_rate: 0.2,
+                end_size: 150,
+                split: true,
+                min_piece: 20,
+                candidate_index: std::sync::OnceLock::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn recovers_three_distinct_adapters_without_length_cap() {
+        let adapters: Vec<Vec<u8>> = [27, 43, 71]
+            .into_iter()
+            .enumerate()
+            .map(|(i, len)| random_bases(313 + i as u64, len))
+            .collect();
+        let reads: Vec<Vec<u8>> = (0..900)
+            .map(|i| {
+                let mut read = adapters[i % 3].clone();
+                read.extend(random_bases(4321 + i as u64, 250));
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        for seq in &adapters {
+            assert!(
+                found.iter().any(|d| d.adapter.seq == *seq),
+                "missing {}: {found:?}",
+                String::from_utf8_lossy(seq)
+            );
+        }
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    fn clean_conserved_inserts_are_not_adapters() {
+        let prefix = random_bases(7877, 140);
+        let suffix = random_bases(4512, 140);
+        let reads: Vec<Vec<u8>> = (0..400)
+            .map(|i| {
+                let mut read = prefix.clone();
+                read.extend(random_bases(915 + i, 200));
+                read.extend_from_slice(&suffix);
+                read
+            })
+            .collect();
+        assert!(infer_owned(&reads).is_empty());
+    }
+
+    #[test]
+    fn recovers_degenerate_primers_at_conserved_insert_boundaries() {
+        let front = b"TCGATGARYCTACGTGACCT";
+        let rear = b"GCTAGTACCGATGCTAGTCA";
+        let prefix = random_bases(712, 140);
+        let suffix = random_bases(815, 140);
+        let reads: Vec<Vec<u8>> = (0..500usize)
+            .map(|i| {
+                let mut read = Vec::new();
+                if i % 5 != 0 {
+                    read.extend_from_slice(front);
+                    read[7] = b"AG"[(i / 5) % 2];
+                    read[8] = b"CT"[(i / 10) % 2];
+                }
+                read.extend_from_slice(&prefix);
+                read.extend(random_bases(9712 + i as u64, 200));
+                read.extend_from_slice(&suffix);
+                if i % 5 != 0 {
+                    read.extend_from_slice(rear);
+                }
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        assert!(found.iter().any(|d| d.adapter.seq == front), "{found:?}");
+        assert!(found.iter().any(|d| d.adapter.seq == rear), "{found:?}");
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn ambiguity_codes_cover_exactly_the_voted_bases() {
+        for mask in 1..16 {
+            let bases = crate::adapter::search::iupac_bases(ambiguity_code(mask)).unwrap();
+            let actual = bases
+                .iter()
+                .fold(0usize, |m, &b| m | (1 << encode_kmer(&[b]).unwrap()));
+            assert_eq!(actual, mask);
+        }
+    }
+
+    #[test]
+    fn distinct_primers_at_one_insert_boundary_remain_distinct() {
+        let primers = [random_bases(7651, 22), random_bases(2157, 24)];
+        let insert = random_bases(2871, 140);
+        let reads: Vec<Vec<u8>> = (0..600)
+            .map(|i| {
+                let mut read = Vec::new();
+                if i % 5 != 0 {
+                    read.extend_from_slice(&primers[i % 2]);
+                }
+                read.extend_from_slice(&insert);
+                read.extend(random_bases(159 + i as u64, 200));
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        for primer in &primers {
+            assert!(found.iter().any(|d| d.adapter.seq == *primer), "{found:?}");
+        }
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn truncated_insert_anchor_recovers_distinct_upstream_primers() {
+        let primers = [random_bases(7651, 22), random_bases(2157, 24)];
+        let insert = random_bases(2871, 140);
+        let reads: Vec<Vec<u8>> = (0..600)
+            .map(|i| {
+                let mut read = Vec::new();
+                if i % 5 != 0 {
+                    read.extend_from_slice(&primers[i % 2]);
+                }
+                read.extend_from_slice(&insert);
+                read.truncate(WINDOW_LEN);
+                read
+            })
+            .collect();
+        let windows: Vec<&[u8]> = reads.iter().map(Vec::as_slice).collect();
+        let found = contrast_boundary(&insert[1..90], &windows, End::Five).unwrap();
+        assert_eq!(found.len(), 2);
+        for primer in &primers {
+            assert!(found.contains(primer), "{found:?}");
+        }
+    }
 
     /// Encoding then decoding a k-mer is the identity.
     #[test]
@@ -871,93 +1062,6 @@ mod tests {
         assert!(paths[1].0.starts_with(b"TTGG"));
     }
 
-    /// A high plateau followed by a sharp drop loses its trailing low-support
-    /// positions.
-    #[test]
-    fn drop_trim_cuts_low_support_flank() {
-        let consensus = b"ACGTACGTACGTAAAA".to_vec(); // last 4 are the flank
-        let profile = vec![
-            100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 3, 3, 3, 3,
-        ];
-        let (trimmed, tprof) = drop_trim(&consensus, &profile);
-        assert_eq!(trimmed, b"ACGTACGTACGT");
-        assert_eq!(tprof.len(), trimmed.len());
-    }
-
-    /// A sequence seen at both ends becomes one `End::Both` entry; a 5'-only
-    /// sequence stays `Five` and no 3'-only entry remains.
-    #[test]
-    fn merge_folds_shared_sequence_to_both() {
-        let a = b"ACGTACGTACGTACGT".to_vec();
-        let five = vec![a.clone(), b"TTTTGGGGTTTTGGGG".to_vec()];
-        let three = vec![a.clone()]; // same adapter seen at 3' too
-        let merged = merge_both_ends(five, three, 0.2, false);
-        assert!(merged.iter().any(|(s, e)| s == &a && *e == End::Both));
-        assert!(
-            merged
-                .iter()
-                .any(|(s, e)| s == b"TTTTGGGGTTTTGGGG" && *e == End::Five)
-        );
-        assert_eq!(merged.len(), 2);
-    }
-
-    /// Under the aggressive policy, fuzzy-equivalent end assemblies retain the
-    /// longer consensus.
-    #[test]
-    fn aggressive_merge_keeps_longer_of_matched_both_end_pair() {
-        let core = b"ACGTACGTACGTACGT".to_vec(); // 16bp truncated core, at least MIN_PATTERN_LEN
-        let mut longer = b"TT".to_vec();
-        longer.extend_from_slice(&core);
-        longer.extend_from_slice(b"TT"); // 20bp; `core` is an exact substring, so same_adapter holds
-        let five = vec![core.clone()];
-        let three = vec![longer.clone()];
-        let merged = merge_both_ends(five, three, 0.2, true);
-        assert_eq!(
-            merged,
-            vec![(longer, End::Both)],
-            "The longer (3') reconstruction must be kept, not the shorter 5' core"
-        );
-    }
-
-    /// Under the conservative policy the 5' representation is kept even when
-    /// the 3' assembly is longer.
-    #[test]
-    fn conservative_merge_keeps_five_prime_orientation() {
-        let core = b"ACGTACGTACGTACGT".to_vec();
-        let mut longer_three = b"TT".to_vec();
-        longer_three.extend_from_slice(&core);
-        longer_three.extend_from_slice(b"TT");
-        let merged = merge_both_ends(vec![core.clone()], vec![longer_three], 0.2, false);
-        assert_eq!(merged, vec![(core, End::Both)]);
-    }
-
-    /// The anchor is the prefix for 5' and both-end candidates and the suffix
-    /// for 3' candidates.
-    #[test]
-    fn conservative_anchor_uses_physical_end_facing_side() {
-        let seq: Vec<u8> = (0..64).map(|i| b"ACGT"[i % 4]).collect();
-        assert_eq!(
-            conservative_terminal_anchor(&seq, End::Five),
-            seq[..CONSERVATIVE_ANCHOR_LEN]
-        );
-        assert_eq!(
-            conservative_terminal_anchor(&seq, End::Both),
-            seq[..CONSERVATIVE_ANCHOR_LEN]
-        );
-        assert_eq!(
-            conservative_terminal_anchor(&seq, End::Three),
-            seq[seq.len() - CONSERVATIVE_ANCHOR_LEN..]
-        );
-    }
-
-    /// A consensus at or below the anchor length is returned whole.
-    #[test]
-    fn conservative_anchor_does_not_pad_short_consensus() {
-        let seq = b"AATGTACTTCGTTCAGTTACGTATTGCT";
-        assert_eq!(conservative_terminal_anchor(seq, End::Five), seq);
-        assert_eq!(conservative_terminal_anchor(seq, End::Three), seq);
-    }
-
     /// An exact catalog sequence is named at 100 percent identity.
     #[test]
     fn name_against_matches_catalog_entry() {
@@ -1025,7 +1129,7 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base, false);
+        let found = discover(&sample, &base);
         assert!(!found.is_empty(), "The planted adapter is discovered");
         for (i, d) in found.iter().enumerate() {
             assert_eq!(d.adapter.name, format!("inferred_{}", i + 1));
@@ -1065,7 +1169,7 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base, false);
+        let found = discover(&sample, &base);
         assert!(
             found.is_empty(),
             "An N run is not adapter evidence (got {found:?})"
@@ -1111,7 +1215,7 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base, false);
+        let found = discover(&sample, &base);
         assert!(!found.is_empty(), "At least one adapter discovered");
         // The top candidate is a 5' or both-end adapter close to the planted
         // sequence.
@@ -1181,7 +1285,7 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base, false);
+        let found = discover(&sample, &base);
 
         // The merged entry is the one near the planted adapter; recovery is
         // approximate, so the match is within 25% edit distance.
@@ -1239,7 +1343,7 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base, false);
+        let found = discover(&sample, &base);
         assert!(
             found.is_empty(),
             "No spurious adapter in clean reads (got {found:?})"
@@ -1321,7 +1425,7 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base, false);
+        let found = discover(&sample, &base);
         assert!(
             !found.is_empty(),
             "Adapter present in a clear majority of reads after the first \
@@ -1368,7 +1472,7 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let found = discover(&sample, &base, false);
+        let found = discover(&sample, &base);
         assert!(
             !found.is_empty(),
             "Lowercase reads must be inferable (got {found:?})"

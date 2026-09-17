@@ -26,7 +26,6 @@ fn help_lists_the_quality_and_adapter_flags() {
         "--adapter-ends-only",
         "--adapter-sample-reads",
         "--discover-adapters",
-        "--adapter-discovery-policy",
     ] {
         assert!(stdout.contains(flag), "Help must list {flag}: {stdout}");
     }
@@ -507,7 +506,7 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
 }
 
 #[test]
-fn infer_policy_requires_an_inference_operation() {
+fn rejects_removed_discovery_policy() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
@@ -515,12 +514,12 @@ fn infer_policy_requires_an_inference_operation() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "--adapter-discovery-policy requires --discover-adapters",
+            "unexpected argument '--adapter-discovery-policy'",
         ));
 }
 
 #[test]
-fn infer_policy_rejects_unknown_value() {
+fn rejects_policy_with_discovery_enabled() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
@@ -533,7 +532,9 @@ fn infer_policy_rejects_unknown_value() {
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("invalid value 'balanced'"));
+        .stderr(predicates::str::contains(
+            "unexpected argument '--adapter-discovery-policy'",
+        ));
 }
 
 /// Report-only inference names discoveries against the built-in catalog and
@@ -624,7 +625,7 @@ fn write_adapted_fastq(dir: &std::path::Path, n: usize) -> std::path::PathBuf {
 }
 
 #[test]
-fn infer_action_and_policy_map_to_banner() {
+fn infer_action_maps_to_banner() {
     let dir = tempfile::tempdir().unwrap();
     let fq = write_adapted_fastq(dir.path(), 10);
 
@@ -634,7 +635,7 @@ fn infer_action_and_policy_map_to_banner() {
         .args(["-i", fq.to_str().unwrap(), "--discover-adapters", "-t", "1"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("infer trim · conservative"));
+        .stderr(predicates::str::contains("infer trim"));
 
     Command::cargo_bin("whittle")
         .unwrap()
@@ -644,14 +645,12 @@ fn infer_action_and_policy_map_to_banner() {
             fq.to_str().unwrap(),
             "--discover-adapters",
             "report",
-            "--adapter-discovery-policy",
-            "aggressive",
             "-t",
             "1",
         ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("infer report · aggressive"));
+        .stderr(predicates::str::contains("infer report"));
 }
 
 #[test]

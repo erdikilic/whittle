@@ -17,14 +17,14 @@ pub(crate) fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
 }
 
 /// Support below which a kept adapter is logged with a warning rather than a
-/// plain info line. It is about 1.5 times `infer::KEEP_SUPPORT` (0.30): a
+/// plain info line. It is three times `infer::KEEP_SUPPORT` (0.15): a
 /// barcode-specific sequence present in a fraction of reads can clear the keep
 /// floor while staying far from the near-1.0 support of a library adapter.
 pub(crate) const MARGINAL_SUPPORT: f64 = 0.45;
 
 /// Logs each ab-initio discovery: one `info!` line per adapter with its support
 /// and best catalog match (an annotation; `inferred_N` is the name), a `warn!`
-/// when the support is below `MARGINAL_SUPPORT` or the anchor is conservative,
+/// when the support is below `MARGINAL_SUPPORT`,
 /// and the sequences at `debug!`.
 pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: usize) {
     tracing::info!(
@@ -67,9 +67,7 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
                 anchor_bp = d.adapter.seq.len(),
                 uncertain_bp = d.uncertain_bases(),
                 consensus_bp = d.assembled_seq.len(),
-                "Inferred adapter trims with a conservative terminal anchor; the insert-facing \
-                 remainder is not trimmed (--adapter-discovery-policy aggressive uses the full \
-                 consensus)"
+                "Inferred adapter excludes unsupported consensus bases"
             );
         }
         let sequence = String::from_utf8_lossy(&d.adapter.seq);
@@ -104,7 +102,7 @@ pub(crate) fn print_discovered_fasta(discovered: &[infer::InferredAdapter]) {
             if d.uncertain_bases() == 0 {
                 "full"
             } else {
-                "conservative"
+                "bounded"
             },
             d.assembled_seq.len(),
             d.uncertain_bases(),
@@ -249,9 +247,7 @@ where
             }));
         }
 
-        let discovered = with_sequences(&sample, &seq_of, |seqs| {
-            infer::discover(seqs, &base, cfg.adapter_infer.is_aggressive())
-        });
+        let discovered = with_sequences(&sample, &seq_of, |seqs| infer::discover(seqs, &base));
         log_discovered(&discovered, s);
 
         if cfg.adapter_infer.is_report() {
