@@ -20,9 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-end enrichment against interior sequence. Repeated k-mers count once
   per window; short tandem repeats and primer-adjacent insert fragments are
   excluded from inferred adapters.
-- Internal adapter matching admits additional errors for sufficiently
-  informative patterns while retaining stricter tolerance for short or
-  ambiguous patterns.
+- Internal adapter matching bounds the expected chance matches per read: the
+  interior edit budget follows the adapter sequence and the read length
+  instead of a fixed half of the terminal budget.
+- Repeat-dominated read-end candidates are rejected before boundary analysis,
+  and primer extension stops when the growing consensus becomes repetitive.
 - Tagged FASTQ headers are detected per record, including after plain records
   in files or merged directories. Split suffixes precede header descriptions.
 - Modification coordinates are validated against the sequence; impossible

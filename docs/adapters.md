@@ -53,12 +53,15 @@ these treatments:
   fewer bases than `--min-length`, or by at most 11 bases, merge into one.
   `--adapter-ends-only` disables splitting and searches only the two end zones.
 
-Interior hits start with half the `--adapter-error-rate` budget (default 0.2).
-Longer, more informative patterns can use additional edits, up to the terminal
-budget. Additional tolerance requires an alignment-path probability bound of
-at most `1e-7` under independent uniform DNA; IUPAC ambiguity reduces that
-additional tolerance. This null model is a specificity guard, not a calibrated
-false-split probability for repetitive or composition-biased biological reads.
+Interior hits use a stricter budget than terminal hits. For each adapter and
+read-length class (powers of two from 4 kb upward), the interior budget is the
+largest edit count whose expected number of chance matches in a read of that
+length, over both strands under independent uniform DNA, stays within `1e-4`;
+it never exceeds the terminal budget, and exact matches are always accepted.
+Long, informative patterns keep most of their tolerance in long reads; short or
+IUPAC-rich patterns and very long reads receive fewer interior edits. This null
+model is a specificity guard, not a calibrated false-split probability for
+repetitive or composition-biased biological reads.
 Adapter trims pass through the same tag-rewrite path as
 every other trim, so `MM`/`ML`/`MN` and the per-base tags stay in register
 ([tags.md](tags.md)).

@@ -169,7 +169,7 @@ Adapter FASTA; sequences may use IUPAC codes, and entries shorter than 11 bp are
 Built\-in kit presets, comma\-separated: lsk114, rad114 (ulk114), rbk114, nbd114, pcb114 (pcs114), rpb114, mab114, rna004, pacbio, ont (every ONT kit), all. Enables adapter trimming. Defaults to none
 .TP
 \fB\-\-adapter\-error\-rate\fR \fI<FRACTION>\fR
-End\-match tolerance as a fraction of adapter length. Interior tolerance is sequence\-dependent and never exceeds this value. Requires an adapter source. Defaults to 0.2
+End\-match tolerance as a fraction of adapter length. Interior tolerance depends on the adapter sequence and read length and never exceeds this value. Requires an adapter source. Defaults to 0.2
 .TP
 \fB\-\-adapter\-end\-search\fR \fI<BASES>\fR
 Bases at each read end searched for a terminal adapter. Requires an adapter source. Defaults to 150

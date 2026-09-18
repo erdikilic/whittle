@@ -47,6 +47,10 @@ const START_K: usize = 11;
 /// used by `peel_paths` so no single peel can run away in length.
 const LMAX: usize = 100;
 
+/// Maximum distinct insert-boundary anchors evaluated for one consensus.
+/// Anchors are ranked by unprimed read-start support.
+const MAX_BOUNDARY_ANCHORS: usize = 8;
+
 /// Max number of adapters `peel_paths` will extract from one end's k-mer graph.
 const MAX_ADAPTERS_PER_END: usize = 12;
 
@@ -148,28 +152,50 @@ fn end_windows<'a>(sample: &[&'a [u8]], w: usize) -> (Vec<&'a [u8]>, Vec<&'a [u8
     (five, three)
 }
 
+/// Hashes packed k-mer codes by multiplicative mixing with a fold of the
+/// high bits, which distributes the uniformly encoded keys across buckets.
+#[derive(Default, Clone, Copy)]
+struct KmerHasher(u64);
+
+impl std::hash::Hasher for KmerHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn write_u64(&mut self, code: u64) {
+        let mixed = code.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 = mixed ^ (mixed >> 32);
+    }
+}
+
+/// Hash map keyed by packed k-mer codes.
+type KmerMap<V> = std::collections::HashMap<u64, V, std::hash::BuildHasherDefault<KmerHasher>>;
+
 /// Returns whether a k-mer consists of a short tandem repeat.
 fn is_low_complexity(kmer: &[u8]) -> bool {
     (1..=8.min(kmer.len() / 2))
         .any(|period| kmer.iter().enumerate().all(|(i, &b)| b == kmer[i % period]))
 }
 
-/// Rejects consensuses dominated by a short approximate tandem repeat.
+/// Rejects consensuses dominated by a short approximate tandem repeat. Each
+/// base is compared with the base one period earlier, so isolated insertions
+/// and deletions shift the phase without hiding the repeat. Each period is
+/// tested over at least ten comparisons so the threshold stays selective for
+/// short candidates.
 fn is_repetitive(seq: &[u8]) -> bool {
-    (1..=8.min(seq.len() / 2)).any(|period| {
-        let matches: usize = (0..period)
-            .map(|phase| {
-                let mut counts = [0usize; 4];
-                for &base in seq.iter().skip(phase).step_by(period) {
-                    if let Some(code) = encode_kmer(&[base]) {
-                        counts[code as usize] += 1;
-                    }
-                }
-                counts.into_iter().max().unwrap_or(0)
-            })
-            .sum();
-        let percent = if period * 3 <= seq.len() { 75 } else { 85 };
-        matches * 100 >= seq.len() * percent
+    (1..=8.min(seq.len() / 2).min(seq.len().saturating_sub(10))).any(|period| {
+        let matches = seq
+            .iter()
+            .zip(&seq[period..])
+            .filter(|(a, b)| a == b)
+            .count();
+        matches * 100 >= (seq.len() - period) * 65
     })
 }
 
@@ -200,8 +226,8 @@ fn terminal_support(seq: &[u8], windows: &[&[u8]], end: End, edits: usize) -> (u
 /// Counts each exact k-mer once per window, excludes short tandem repeats,
 /// sorts by count descending then code ascending, and retains at most `top`.
 fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
-    use std::collections::HashMap;
-    let mut counts: HashMap<u64, (u32, usize)> = HashMap::new();
+    let mut counts: KmerMap<(u32, usize)> =
+        KmerMap::with_capacity_and_hasher(windows.len() * 8, Default::default());
     assert!((1..=32).contains(&k));
     let mask = u64::MAX >> (64 - 2 * k);
     for (window_index, &wnd) in windows.iter().enumerate() {
@@ -555,6 +581,9 @@ fn upstream_consensus(anchor: &[u8], windows: &[&[u8]]) -> Vec<u8> {
             break;
         };
         seq.insert(0, ambiguity_code(mask));
+        if seq.len() >= 2 * anchor.len() && is_repetitive(&seq) {
+            return Vec::new();
+        }
     }
     seq.truncate(seq.len() - anchor.len());
     seq
@@ -629,8 +658,12 @@ fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<Pr
         }
     }
     positions.sort_by_key(|&(pos, count)| (std::cmp::Reverse(count), pos));
+    let mut tried = std::collections::HashSet::new();
     for (pos, _) in positions {
         let anchor = &seq[pos..pos + KMER_K];
+        if tried.len() >= MAX_BOUNDARY_ANCHORS || !tried.insert(anchor.to_vec()) {
+            continue;
+        }
         let primer = upstream_consensus(anchor, &windows);
         let mut primers = if primer.len() >= MIN_PATTERN_LEN
             && primer
@@ -798,6 +831,9 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
         let lo = weights.iter().position(|&w| w >= floor).unwrap_or(0);
         let hi = weights.iter().rposition(|&w| w >= floor).unwrap_or(0) + KMER_K;
         let trimmed = cons[lo..hi].to_vec();
+        if is_repetitive(&trimmed) {
+            continue;
+        }
         if !known_primers.is_empty()
             && predominantly_insert(
                 &trimmed,

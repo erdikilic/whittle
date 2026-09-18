@@ -162,24 +162,39 @@ pub(crate) fn edit_budget(rate: f64, len: usize) -> usize {
     (rate * len as f64 + 1e-9).floor() as usize
 }
 
-/// Edit budgets of one adapter: configured terminal tolerance and a
-/// sequence-specific additional interior tolerance screened by a null model.
+/// Expected chance interior matches per read, over both strands, that an
+/// interior edit budget may admit under an independent uniform base model.
+const INTERIOR_CHANCE_HITS_PER_READ: f64 = 1e-4;
+
+/// Read-length class `c` holds reads shorter than `2^(INTERIOR_CLASS_BITS + c)`
+/// bases. Class 0 also holds every shorter read.
+const INTERIOR_CLASS_BITS: u32 = 12;
+
+/// Number of read-length classes. The last class holds every longer read.
+const INTERIOR_CLASSES: usize = 20;
+
+/// Edit budgets of one adapter: the configured terminal tolerance and an
+/// interior tolerance bounded by the chance-match rate for each read length.
 #[derive(Debug, Clone, Copy)]
 struct Budget {
     /// Pattern length in bases.
     len: usize,
     /// Edit budget for terminal hits.
     k_end: usize,
-    /// Edit budget for interior hits.
-    k_mid: usize,
+    /// Edit budget for interior hits, per read-length class. Budgets do not
+    /// increase with the class.
+    k_mid: [usize; INTERIOR_CLASSES],
 }
 
 impl Budget {
-    /// Extends the half-rate interior budget under an independent uniform DNA
-    /// null model. The recurrence sums alignment-path probabilities, including
-    /// substitutions, insertions and deletions, and therefore overcounts
-    /// sequences admitting multiple alignments. IUPAC ambiguity increases the
-    /// probability of a zero-cost match and limits additional tolerance.
+    /// Computes the interior budgets from cumulative chance-match
+    /// probabilities under an independent uniform DNA null model. The
+    /// recurrence sums alignment-path probabilities, including substitutions,
+    /// insertions and deletions, and therefore overcounts sequences admitting
+    /// multiple alignments. IUPAC ambiguity increases the probability of a
+    /// zero-cost match. Each class admits the largest edit count whose
+    /// expected chance matches in a read at the class ceiling stay within
+    /// `INTERIOR_CHANCE_HITS_PER_READ`; exact matches are always admitted.
     fn new(pattern: &[u8], error_rate: f64) -> Self {
         let len = pattern.len();
         let k_end = edit_budget(error_rate, len);
@@ -193,15 +208,33 @@ impl Budget {
             }
             previous = current;
         }
-        let mut probability = 0.0;
-        let mut k_mid = edit_budget(0.5 * error_rate, len);
-        for (k, value) in previous.iter().enumerate() {
-            probability += value;
-            if probability <= 1e-7 {
-                k_mid = k_mid.max(k);
-            }
+        let mut cumulative = previous;
+        for k in 1..=k_end {
+            cumulative[k] += cumulative[k - 1];
         }
+        let k_mid = std::array::from_fn(|class| {
+            let positions = 2.0 * 2f64.powi(INTERIOR_CLASS_BITS as i32 + class as i32);
+            cumulative
+                .iter()
+                .take_while(|&&probability| {
+                    probability * positions <= INTERIOR_CHANCE_HITS_PER_READ
+                })
+                .count()
+                .saturating_sub(1)
+        });
         Self { len, k_end, k_mid }
+    }
+
+    /// Returns the interior edit budget for a read of `read_len` bases.
+    fn interior(&self, read_len: usize) -> usize {
+        let bits = usize::BITS - read_len.leading_zeros();
+        let class = (bits.saturating_sub(INTERIOR_CLASS_BITS) as usize).min(INTERIOR_CLASSES - 1);
+        self.k_mid[class]
+    }
+
+    /// Returns the largest interior edit budget over all read lengths.
+    fn interior_max(&self) -> usize {
+        self.k_mid[0]
     }
 }
 
@@ -274,7 +307,7 @@ impl CandidateIndex {
         let seeds = if include_interior {
             let mut seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
             for (adapter_idx, adapter) in adapters.iter().enumerate() {
-                let Budget { k_mid, .. } = budgets[adapter_idx];
+                let k_mid = budgets[adapter_idx].interior_max();
                 if !searchable[adapter_idx] || !adapter.role.splits() {
                     continue;
                 }
@@ -1269,16 +1302,17 @@ fn shifted(hit: Hit, offset: usize) -> Hit {
     }
 }
 
-/// Searches every adapter's candidate windows at `k_mid`. Exact partition
-/// seeds identify every possible interior match, and interior hits are
-/// accepted only up to `k_mid`, so the search runs at that limit rather than
-/// the looser end budget. An adapter below `MIN_PATTERN_LEN` or without a
-/// splitting role has no seeds and no windows.
+/// Searches every adapter's candidate windows at the interior budget of the
+/// read's length class. Exact partition seeds cover the largest interior
+/// budget, so they identify every possible interior match, and the search
+/// runs at the class budget rather than the looser end budget. An adapter
+/// below `MIN_PATTERN_LEN` or without a splitting role has no seeds and no
+/// windows.
 fn search_interior(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
     ctx.index.candidate_windows(ctx.read.window, engine.windows);
     for i in 0..engine.windows.len() {
         let (adapter_idx, start, end) = engine.windows[i];
-        let Budget { k_mid, .. } = ctx.index.budgets[adapter_idx];
+        let k_mid = ctx.index.budgets[adapter_idx].interior(ctx.read.window.len());
         search(
             engine,
             ctx.index,
@@ -1460,17 +1494,26 @@ mod segment_tests {
     use super::*;
 
     #[test]
-    fn interior_tolerance_scales_with_pattern_information() {
-        let short = Budget::new(&[b'A'; 20], 0.2);
-        let long = Budget::new(&[b'A'; 40], 0.2);
+    fn interior_tolerance_depends_on_pattern_and_read_length() {
+        let lsk = Budget::new(b"AATGTACTTCGTTCAGTTACGTATTGCT", 0.2);
+        assert_eq!(lsk.k_end, 5);
+        assert_eq!(lsk.interior(2_000), 4);
+        assert_eq!(lsk.interior(30_000), 4);
+        assert_eq!(lsk.interior(200_000), 3);
+        let short = Budget::new(b"TGGTTAGACTACGTATTGCTG", 0.2);
+        assert_eq!(short.interior(2_000), 2);
+        assert_eq!(short.interior(30_000), 1);
         let ambiguous = Budget::new(&[b'N'; 40], 0.2);
-        assert_eq!(short.k_mid, 2);
-        assert_eq!(long.k_mid, long.k_end);
-        assert_eq!(ambiguous.k_mid, 4);
+        assert_eq!(ambiguous.interior_max(), 0);
         for length in 11..=100 {
             let budget = Budget::new(&vec![b'A'; length], 0.2);
-            assert!(budget.k_mid >= edit_budget(0.1, length));
-            assert!(budget.k_mid <= budget.k_end);
+            assert!(budget.interior_max() <= budget.k_end);
+            assert!(budget.k_mid.windows(2).all(|pair| pair[0] >= pair[1]));
+            assert_eq!(budget.interior(0), budget.interior_max());
+            assert_eq!(
+                budget.interior(usize::MAX),
+                budget.k_mid[INTERIOR_CLASSES - 1]
+            );
         }
     }
 
@@ -1583,7 +1626,7 @@ mod segment_tests {
         }
     }
 
-    /// Plants one adapter with up to `k_mid` edits at an end or in the
+    /// Plants one adapter with up to the interior budget of edits at an end or in the
     /// interior of a random window and checks the candidate search against the
     /// full-window reference. `degenerate` rewrites a share of adapter
     /// positions to ambiguity codes; the planted copy then carries one base
@@ -1744,7 +1787,7 @@ mod segment_tests {
         let mut rng = Lcg(0x5049_4745_4f4e_484f);
         for case in 0..1000 {
             let pattern: Vec<u8> = (0..(11 + rng.below(50))).map(|_| rng.base()).collect();
-            let k = (0.1 * pattern.len() as f64).floor() as usize;
+            let k = Budget::new(&pattern, 0.2).interior_max();
             let mut mutated = pattern.clone();
             for _ in 0..rng.below(k + 1) {
                 match rng.below(3) {
@@ -1897,12 +1940,12 @@ mod segment_tests {
     /// second, so only an expanded first-piece seed finds the copy.
     #[test]
     fn degenerate_adapter_splits_with_one_substitution_in_the_plain_piece() {
-        let adapter = b"GTNGTTGGCTGT";
+        let adapter = b"GTNGTTGGCTGTACCGATCA";
         let mut w = vec![b'A'; 40];
-        w.extend_from_slice(b"GTGGTTGGATGT");
+        w.extend_from_slice(b"GTGGTTGGATGTACCGATCA");
         w.extend_from_slice(&[b'C'; 40]);
         let c = cfg_with(vec![ad("deg", adapter)], 0.2, 10, true);
-        assert_eq!(adapter_segments(&w, &c), vec![(0, 40), (52, 92)]);
+        assert_eq!(adapter_segments(&w, &c), vec![(0, 40), (60, 100)]);
     }
 
     /// Each 8-base piece holds five `N`s (1024 expansions), past the cap, so
@@ -2409,8 +2452,8 @@ mod segment_tests {
         }
     }
 
-    /// A cost-4 hit within `k_end` of 6 but above the interior `k_mid` of 3
-    /// does not split the read.
+    /// A cost-4 hit within `k_end` of 6 but above the interior budget does
+    /// not split the read.
     #[test]
     fn interior_above_k_mid_does_not_split() {
         let adapter = b"GGTTGGTTGGTT";
@@ -2429,7 +2472,7 @@ mod segment_tests {
         assert_eq!(
             adapter_segments(&w, &c),
             vec![(0, w.len())],
-            "Cost 4 hit is above k_mid=3 and must not split the read"
+            "Cost 4 hit is above the interior budget and must not split the read"
         );
     }
 
