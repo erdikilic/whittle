@@ -1,6 +1,6 @@
 //! Resolution of the adapter set a run trims against.
 //!
-//! Presence detection and ab-initio inference both read a sample before the set
+//! Presence detection and de novo inference both read a sample before the set
 //! is final. This module buffers a prefix, narrows or discovers the set, and
 //! returns the record stream with the sampled prefix chained in front of it.
 
@@ -21,7 +21,7 @@ pub(crate) fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
 /// clears the minimum discovery support.
 pub(crate) const MARGINAL_SUPPORT: f64 = 0.45;
 
-/// Logs each ab-initio discovery: one `info!` line per adapter with its support
+/// Logs each de novo discovery: one `info!` line per adapter with its support
 /// and best catalog match (an annotation; `inferred_N` is the name), a `warn!`
 /// when the support is below `MARGINAL_SUPPORT`,
 /// and the sequences at `debug!`.

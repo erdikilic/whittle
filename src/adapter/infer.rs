@@ -1,4 +1,4 @@
-//! Ab-initio adapter inference from recurrent read-end sequences.
+//! De novo adapter inference from recurrent read-end sequences.
 //!
 //! Exact k-mer graphs establish consensus boundaries. Batched approximate
 //! matching validates support and aligns primer extensions to conserved insert

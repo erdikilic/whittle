@@ -150,7 +150,7 @@ impl TagRemoval {
     }
 }
 
-/// What an enabled ab-initio adapter inference run does with its discoveries.
+/// What an enabled de novo adapter inference run does with its discoveries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum AdapterInferAction {
     /// Trim reads with the inferred sequences.
@@ -169,7 +169,7 @@ impl AdapterInferAction {
     }
 }
 
-/// Whether ab-initio adapter inference runs and how its discoveries are used.
+/// Whether de novo adapter inference runs and how its discoveries are used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterInfer {
     /// Inference does not run.
@@ -269,7 +269,7 @@ pub struct Config {
     /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
     /// `--adapter-preset` was given (adapter trimming off, no per-read cost).
     pub adapters: Option<crate::adapter::AdapterConfig>,
-    /// Whether ab-initio adapter inference runs and whether inferred adapters
+    /// Whether de novo adapter inference runs and whether inferred adapters
     /// are also used for trimming.
     pub adapter_infer: AdapterInfer,
     /// Resolved worker-thread count.

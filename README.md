@@ -20,7 +20,7 @@ whittle filters, trims, and splits Oxford Nanopore and PacBio reads in FASTQ, co
 
 - **Base-modification tags.** `MM`, `ML`, and `MN` are reconstructed for every trimmed or split uBAM read. The test suite checks the result against an independent `htslib` decoder.
 - **Kinetics and signal tags.** Per-base arrays (`ip`, `pw`, and related) are sliced with the sequence. ONT signal tags (`mv`, `ts`, `ns`, and related) are removed by default or rewritten with `--update-signal-tags`.
-- **Adapter and primer trimming.** Terminal adapters, adapters truncated by the read end, and interior adapters (chimera splitting with junction cleanup). Sequences come from built-in kit presets (ONT kit 14 ligation, rapid, barcoding, cDNA, and amplicon kits; RNA004; PacBio SMRTbell), a user FASTA with IUPAC codes, or ab-initio discovery. Presence detection restricts a preset to the sequences a library carries.
+- **Adapter and primer trimming.** Terminal adapters, adapters truncated by the read end, and interior adapters (chimera splitting with junction cleanup). Sequences come from built-in kit presets (ONT kit 14 ligation, rapid, barcoding, cDNA, and amplicon kits; RNA004; PacBio SMRTbell), a user FASTA with IUPAC codes, or de novo discovery. Presence detection restricts a preset to the sequences a library carries.
 - **Quality trimming.** End trimming to a threshold, best-segment extraction, or splitting at consecutive low-quality bases. Every segment is filtered on its own.
 - **Tagged FASTQ.** FASTQ whose headers carry SAM aux tags (`samtools fastq -T MM,ML,MN`) is trimmed with the same tag rewriting as uBAM: `MM`/`ML`/`MN` are rebuilt and per-base arrays sliced for every output segment.
 - **Formats.** FASTQ, gzip and BGZF FASTQ, and unaligned BAM as input; the same, plus BAM-to-FASTQ, as output. Formats are detected from the path or the stream, including on stdin. A directory of files is merged in one run.
@@ -109,7 +109,7 @@ whittle -i reads.fastq.gz -o trimmed.fastq.gz --discover-adapters
 
 Discovery uses one automatic boundary rule for reporting, trimming, and splitting.
 It can recover multiple recurrent adapters and degenerate primers from the same
-sample. Exact k-mer assembly and batched Sassy alignments determine the sequences;
+sample. Exact k-mer assembly and batched sassy alignments determine the sequences;
 catalog matches provide names only. Minority families require independent read
 support and enrichment near read ends; short repeats are excluded. Conserved
 amplicon sequence is excluded when reads without a primer establish the insert
@@ -188,7 +188,7 @@ Formats are taken from the path extension, a stream sniff, or `--input-format`/`
 | Page | Contents |
 |---|---|
 | [docs/cli.md](docs/cli.md) | Options, format selection, directory input, summary JSON, logging and progress |
-| [docs/adapters.md](docs/adapters.md) | Adapter roles, partial adapters, chimera splitting, presence detection, ab-initio inference, kit catalog |
+| [docs/adapters.md](docs/adapters.md) | Adapter roles, partial adapters, chimera splitting, presence detection, de novo inference, kit catalog |
 | [docs/tags.md](docs/tags.md) | Handling of `MM`/`ML`/`MN`, kinetics, and ONT signal tags |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Building, testing, commit conventions, style |

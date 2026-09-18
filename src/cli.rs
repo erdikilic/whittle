@@ -519,7 +519,7 @@ fn quality_op_for(c: &Cli) -> Option<QualityOp> {
     })
 }
 
-/// Resolves the ab-initio inference mode and checks it against the other
+/// Resolves the de novo inference mode and checks it against the other
 /// adapter sources.
 fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<AdapterInfer> {
     let adapter_infer = c

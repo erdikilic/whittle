@@ -3,7 +3,7 @@
 Adapter trimming is off by default. It is enabled by an adapter source:
 `-a`/`--adapter-fasta <FILE>` (user-supplied sequences), `--adapter-preset
 <KITS>` (the built-in catalog, scoped to the named kits), or `--discover-adapters`
-(ab-initio discovery). A FASTA and a preset combine into one search set.
+(de novo discovery). A FASTA and a preset combine into one search set.
 
 Adapter search operates on the original read before barcode restriction and
 fixed cropping. Each retained adapter segment then receives barcode
@@ -98,7 +98,7 @@ Discovery counts exact 16-mers in the first and last 100 bases of sampled reads,
 once per read-end window. Short tandem-repeat seeds are excluded.
 A bounded graph assembly retains multiple paths, locates abrupt support changes
 at insert boundaries, and corrects weak paths with aligned read evidence.
-Sassy batches the approximate searches used to align supporting reads and
+sassy batches the approximate searches used to align supporting reads and
 validate complete candidates. At most 4000 windows per end, distributed across
 the sample and extending to 200 bases, participate in alignment validation.
 Insert-facing termination is checked against both the original graph and

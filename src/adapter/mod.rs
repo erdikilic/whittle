@@ -3,7 +3,7 @@
 //! Searches each read window for catalog sequences with sassy, classifies every
 //! accepted hit as a terminal trim or an interior excision, re-trims the ends
 //! that an excision creates, and returns the kept spans. Presence detection,
-//! ab-initio inference and the built-in catalog live in the submodules.
+//! de novo inference and the built-in catalog live in the submodules.
 
 pub mod catalog;
 pub mod detect;
