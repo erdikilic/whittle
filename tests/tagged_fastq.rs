@@ -129,7 +129,7 @@ fn tagged_fastq_matches_the_bam_path_on_every_trim() {
             "1",
         ],
         vec!["--best-quality-segment", "36"],
-        vec!["--trim-barcodes", "-H", "1"],
+        vec!["--adapter-preset", "lsk114", "-H", "1"],
         vec!["--remove-kinetics", "--remove-tag", "RG", "-T", "5"],
         vec!["--fastq-tags", "MM,ML,MN", "-H", "2"],
         vec!["--fastq-tags", "none", "-H", "2"],
@@ -190,10 +190,6 @@ fn tag_flags_need_tags_in_the_input() {
     let plain = dir.path().join("plain.fastq");
     std::fs::write(&plain, "@r1 runid=x\nACGT\n+\nIIII\n").unwrap();
     for (args, msg) in [
-        (
-            vec!["--trim-barcodes"],
-            "--trim-barcodes reads barcode spans",
-        ),
         (vec!["--remove-tag", "RG"], "--remove-tag removes aux tags"),
         (
             vec!["--remove-kinetics"],

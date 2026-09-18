@@ -16,9 +16,10 @@ pub(crate) fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
     Cow::Owned(rec.sequence().iter().collect())
 }
 
-/// Support below which a kept adapter is logged with a warning rather than a
-/// plain info line. Sparse families warrant review even when their consensus
-/// clears the minimum discovery support.
+/// Support below which a discovered sequencing adapter is logged with a
+/// warning rather than a plain info line. Sparse families warrant review even
+/// when their consensus clears the minimum discovery support. End-only
+/// layers such as barcodes are sparse by design and are not warned about.
 pub(crate) const MARGINAL_SUPPORT: f64 = 0.45;
 
 /// Logs each de novo discovery: one `info!` line per adapter with its support
@@ -38,6 +39,8 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
                 let identity_pct = format!("{pct:.0}");
                 tracing::info!(
                     adapter = %d.adapter.name,
+                    layer = d.layer + 1,
+                    role = d.adapter.role.label(),
                     catalog_match = %name,
                     identity_pct = %identity_pct,
                     support = %support,
@@ -47,12 +50,14 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
             None => {
                 tracing::info!(
                     adapter = %d.adapter.name,
+                    layer = d.layer + 1,
+                    role = d.adapter.role.label(),
                     support = %support,
                     "Inferred adapter with no catalog match"
                 );
             },
         }
-        if d.support < MARGINAL_SUPPORT {
+        if d.adapter.role == crate::adapter::Role::Adapter && d.support < MARGINAL_SUPPORT {
             tracing::warn!(
                 adapter = %d.adapter.name,
                 support = %support,
@@ -96,7 +101,9 @@ pub(crate) fn print_discovered_fasta(discovered: &[infer::InferredAdapter]) {
             None => String::new(),
         };
         println!(
-            ">inferred_{n} support={:.2} boundary={} assembled_length={} uncertain_bases={}{name_suffix}",
+            ">inferred_{n} layer={} role={} support={:.2} boundary={} assembled_length={} uncertain_bases={}{name_suffix}",
+            d.layer + 1,
+            d.adapter.role.label(),
             d.support,
             if d.uncertain_bases() == 0 {
                 "full"
@@ -257,14 +264,24 @@ where
         }
 
         if discovered.is_empty() {
-            tracing::warn!(
-                reads = s,
-                "Adapter inference: no adapters inferred from the sampled prefix; keeping \
-                 reads untrimmed"
-            );
+            if base.adapters.is_empty() {
+                tracing::warn!(
+                    reads = s,
+                    "Adapter inference: no adapters inferred from the sampled prefix; keeping \
+                     reads untrimmed"
+                );
+            } else {
+                tracing::info!(
+                    reads = s,
+                    "Adapter inference: no sequences beyond the configured set"
+                );
+            }
         }
+        // Known sequences stay in the set; discoveries extend it.
         let mut reduced = base;
-        reduced.replace_adapters(discovered.into_iter().map(|d| d.adapter).collect());
+        let mut adapters = reduced.adapters.clone();
+        adapters.extend(discovered.into_iter().map(|d| d.adapter));
+        reduced.replace_adapters(adapters);
         return Ok(Some(Resolved {
             records: chain(sample, records),
             adapters: Some(reduced),

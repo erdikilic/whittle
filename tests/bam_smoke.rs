@@ -351,14 +351,21 @@ fn bam_on_stdin_without_in_format_is_detected() {
     );
 }
 
+/// Catalog barcode BC01.
+const BC01: &[u8] = b"AAGAAAGTTGTCGGTGTCTTTGTG";
+
+/// Reverse complement of BC01.
+const BC01_RC: &[u8] = b"CACAAAGACACCGACAACTTTCTT";
+
 /// Writes a one-read uBAM with `MM`/`ML`/`MN`, per-base kinetics and the aux
 /// tags a barcoded dorado record carries. `bi` is written only when `barcoded`
-/// is set, so the same read can be trimmed by `--trim-barcodes` and by the
-/// equivalent fixed crop.
+/// is set, so the same read can be trimmed from its barcode positions and by
+/// the equivalent fixed crop.
 ///
-/// Sequence: 20 bases, `CCACCCACGTCCACCCACGT`, C at 0, 1, 3, 4, 5, 7, 10, 11,
-/// 13, 14, 15, 17. `C+m,4,1,2;` marks C occurrences 4, 6 and 9, positions 5, 10
-/// and 14, all inside the barcode window.
+/// Sequence: BC01, the 20-base insert `CCACCCACGTCCACCCACGT` at [24, 44), and
+/// the reverse complement of BC01. The insert holds C occurrences 2 to 13 of
+/// the read; `C+m,2,1,2;` marks occurrences 2, 4 and 7, positions 24, 27 and
+/// 31, all inside the barcode window.
 fn write_barcode_fixture(path: &std::path::Path, barcoded: bool) {
     let header = sam::Header::default();
     let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
@@ -367,38 +374,38 @@ fn write_barcode_fixture(path: &std::path::Path, barcoded: bool) {
     let mut r = RecordBuf::default();
     *r.flags_mut() = Flags::UNMAPPED;
     *r.name_mut() = Some(b"read1".into());
-    *r.sequence_mut() = b"CCACCCACGTCCACCCACGT".to_vec().into();
-    *r.quality_scores_mut() = vec![40; 20].into();
+    *r.sequence_mut() = [BC01, b"CCACCCACGTCCACCCACGT", BC01_RC].concat().into();
+    *r.quality_scores_mut() = vec![40; 68].into();
     let data = r.data_mut();
     data.insert(
         Tag::BASE_MODIFICATIONS,
-        Value::String(b"C+m,4,1,2;".to_vec().into()),
+        Value::String(b"C+m,2,1,2;".to_vec().into()),
     );
     data.insert(
         Tag::BASE_MODIFICATION_PROBABILITIES,
         Value::Array(Array::UInt8(vec![10, 20, 30])),
     );
-    data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(20));
+    data.insert(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(68));
     data.insert(
         Tag::new(b'i', b'p'),
-        Value::Array(Array::UInt8((0..20).collect())),
+        Value::Array(Array::UInt8((0..68).collect())),
     );
     data.insert(
         Tag::new(b'p', b'w'),
-        Value::Array(Array::UInt8((100..120).collect())),
+        Value::Array(Array::UInt8((100..168).collect())),
     );
     data.insert(
         Tag::new(b'B', b'C'),
-        Value::String(b"barcode07".as_slice().into()),
+        Value::String(b"SQK-NBD114-24_barcode01".as_slice().into()),
     );
     data.insert(Tag::new(b'b', b'v'), Value::String(b"v5".as_slice().into()));
     if barcoded {
-        // Front barcode over bases [0, 4], rear barcode over [15, 18): dorado
+        // Front barcode over bases [0, 23], rear barcode over [44, 68): dorado
         // writes [score, front_start, front_len, front_score, rear_end,
-        // rear_len, rear_score], so the kept window is [0 + 4 + 1, 18 - 3).
+        // rear_len, rear_score], so the kept window is [0 + 23 + 1, 68 - 24).
         data.insert(
             Tag::new(b'b', b'i'),
-            Value::Array(Array::Float(vec![90.0, 0.0, 4.0, 88.0, 18.0, 3.0, 87.0])),
+            Value::Array(Array::Float(vec![90.0, 0.0, 23.0, 88.0, 68.0, 24.0, 87.0])),
         );
     }
     w.write_alignment_record(&header, &r).unwrap();
@@ -414,13 +421,13 @@ fn read_one(path: &std::path::Path) -> RecordBuf {
     buf
 }
 
-/// `--trim-barcodes` removes the spans `bi` records through the same machinery
-/// as a fixed crop, so the modification calls and the per-base kinetics land on
-/// exactly the bases an equivalent `--trim-front`/`--trim-tail` run leaves. `bi`
+/// Verified `bi` spans are removed through the same machinery as a fixed
+/// crop, so the modification calls and the per-base kinetics land on exactly
+/// the bases an equivalent `--trim-front`/`--trim-tail` run leaves. `bi`
 /// itself goes, since its positions index the untrimmed read; the barcode call
 /// (`BC`, `bv`) is a per-read label and stays.
 #[test]
-fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
+fn barcode_positions_match_the_equivalent_crop_and_keep_tags_in_register() {
     let dir = tempfile::tempdir().unwrap();
     let barcoded = dir.path().join("barcoded.bam");
     let plain = dir.path().join("plain.bam");
@@ -431,20 +438,20 @@ fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["--trim-barcodes", "-t", "1", "-i"])
+        .args(["--adapter-preset", "lsk114", "-t", "1", "-i"])
         .arg(&barcoded)
         .arg("-o")
         .arg(&by_tag)
         .assert()
         .success();
 
-    // The window `bi` describes is [5, 15), the same as cropping 5 from the
-    // head and 5 from the tail of a 20-base read.
+    // The window `bi` describes is [24, 44), the same as cropping 24 from the
+    // head and 24 from the tail of a 68-base read.
     let by_crop = dir.path().join("by_crop.bam");
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["--trim-front", "5", "--trim-tail", "5", "-t", "1", "-i"])
+        .args(["--trim-front", "24", "--trim-tail", "24", "-t", "1", "-i"])
         .arg(&plain)
         .arg("-o")
         .arg(&by_crop)
@@ -454,7 +461,7 @@ fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
     let tagged = read_one(&by_tag);
     let cropped = read_one(&by_crop);
 
-    assert_eq!(tagged.sequence().as_ref(), b"CACGTCCACC");
+    assert_eq!(tagged.sequence().as_ref(), b"CCACCCACGTCCACCCACGT");
     assert_eq!(
         tagged.sequence().as_ref(),
         cropped.sequence().as_ref(),
@@ -477,8 +484,8 @@ fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
             "Tag {t:?} must land on the same bases as under the equivalent crop"
         );
     }
-    // The window's C positions are 0, 2, 5, 6, 8 and 9; the three modified
-    // bases land on occurrences 0, 2 and 5, renumbered to deltas 0, 1 and 2.
+    // The three modified bases are the insert's C occurrences 0, 2 and 5,
+    // renumbered to deltas 0, 1 and 2.
     assert_eq!(
         tagged.data().get(&Tag::BASE_MODIFICATIONS),
         Some(&Value::String(b"C+m,0,1,2;".to_vec().into()))
@@ -489,7 +496,7 @@ fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
     );
     assert_eq!(
         tagged.data().get(&Tag::new(b'i', b'p')),
-        Some(&Value::Array(Array::UInt8((5..15).collect())))
+        Some(&Value::Array(Array::UInt8((24..44).collect())))
     );
 
     assert!(
@@ -498,7 +505,7 @@ fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
     );
     assert_eq!(
         tagged.data().get(&Tag::new(b'B', b'C')),
-        Some(&Value::String(b"barcode07".as_slice().into()))
+        Some(&Value::String(b"SQK-NBD114-24_barcode01".as_slice().into()))
     );
     assert_eq!(
         tagged.data().get(&Tag::new(b'b', b'v')),
@@ -506,10 +513,10 @@ fn trim_barcodes_matches_the_equivalent_crop_and_keeps_tags_in_register() {
     );
 }
 
-/// Without adapters, `--trim-front` counts from the retained barcode interval.
-/// The JSON summary records the resulting base counts.
+/// `--trim-front` counts from the retained barcode interval. The JSON summary
+/// records the resulting base counts.
 #[test]
-fn trim_barcodes_runs_before_the_crop_and_updates_json_counts() {
+fn barcode_positions_apply_before_the_crop_and_update_json_counts() {
     let dir = tempfile::tempdir().unwrap();
     let in_path = dir.path().join("barcoded.bam");
     let out_path = dir.path().join("out.bam");
@@ -519,7 +526,15 @@ fn trim_barcodes_runs_before_the_crop_and_updates_json_counts() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["--trim-barcodes", "--trim-front", "2", "-t", "1", "-i"])
+        .args([
+            "--adapter-preset",
+            "lsk114",
+            "--trim-front",
+            "2",
+            "-t",
+            "1",
+            "-i",
+        ])
         .arg(&in_path)
         .arg("-o")
         .arg(&out_path)
@@ -528,15 +543,19 @@ fn trim_barcodes_runs_before_the_crop_and_updates_json_counts() {
         .assert()
         .success();
 
-    // Window [5, 15) less a head crop of 2 leaves [7, 15).
-    assert_eq!(read_one(&out_path).sequence().as_ref(), b"CGTCCACC");
+    // Window [24, 44) less a head crop of 2 leaves [26, 44).
+    assert_eq!(
+        read_one(&out_path).sequence().as_ref(),
+        b"ACCCACGTCCACCCACGT"
+    );
 
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&summary).unwrap()).unwrap();
-    assert_eq!(v["params"]["trim_barcodes"], true);
+    assert!(v["params"].get("trim_barcodes").is_none());
     assert_eq!(v["warnings"]["barcode_tag_malformed_reads"], 0);
-    assert_eq!(v["bases"]["input"].as_u64().unwrap(), 20);
-    assert_eq!(v["bases"]["output"].as_u64().unwrap(), 8);
+    assert_eq!(v["warnings"]["barcode_tag_unverified_reads"], 0);
+    assert_eq!(v["bases"]["input"].as_u64().unwrap(), 68);
+    assert_eq!(v["bases"]["output"].as_u64().unwrap(), 18);
 }
 
 /// A `bi` that does not describe a window inside the read leaves the read
@@ -567,7 +586,7 @@ fn a_malformed_barcode_tag_is_counted_and_the_read_survives() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["--trim-barcodes", "-t", "1", "-i"])
+        .args(["--adapter-preset", "lsk114", "-t", "1", "-i"])
         .arg(&in_path)
         .arg("-o")
         .arg(&out_path)
@@ -587,36 +606,49 @@ fn a_malformed_barcode_tag_is_counted_and_the_read_survives() {
     assert_eq!(v["warnings"]["barcode_tag_malformed_reads"], 1);
 }
 
-/// The barcode spans come from a BAM aux tag, so the flag is refused on FASTQ
-/// input rather than accepted and ignored.
+/// Barcode positions over sequence that holds no barcode, as on input dorado
+/// has already trimmed, are left alone and counted.
 #[test]
-fn trim_barcodes_is_rejected_on_fastq_input() {
+fn unverified_barcode_positions_are_left_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let in_path = dir.path().join("reads.fastq");
-    std::fs::write(&in_path, "@r1\nACGTACGTAC\n+\nIIIIIIIIII\n").unwrap();
+    let in_path = dir.path().join("trimmed.bam");
+    let out_path = dir.path().join("out.bam");
+    let summary = dir.path().join("qc.json");
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(&in_path).unwrap());
+    w.write_header(&header).unwrap();
+    let mut r = RecordBuf::default();
+    *r.flags_mut() = Flags::UNMAPPED;
+    *r.name_mut() = Some(b"read1".into());
+    *r.sequence_mut() = b"CCACCCACGTCCACCCACGTACGTTGCAACGTTGCAACGT".to_vec().into();
+    *r.quality_scores_mut() = vec![40; 40].into();
+    r.data_mut().insert(
+        Tag::new(b'b', b'i'),
+        Value::Array(Array::Float(vec![90.0, 0.0, 23.0, 88.0, -1.0, 0.0, -1.0])),
+    );
+    r.data_mut().insert(
+        Tag::new(b'B', b'C'),
+        Value::String(b"SQK-NBD114-24_barcode01".as_slice().into()),
+    );
+    w.write_alignment_record(&header, &r).unwrap();
+    w.try_finish().unwrap();
 
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["--trim-barcodes", "-i"])
+        .args(["--adapter-preset", "lsk114", "-t", "1", "-i"])
         .arg(&in_path)
         .arg("-o")
-        .arg(dir.path().join("out.fastq"))
+        .arg(&out_path)
+        .arg("--summary-json")
+        .arg(&summary)
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("--trim-barcodes"));
-
-    // A stream carries no extension, so the refusal comes from the detected
-    // format instead.
-    Command::cargo_bin("whittle")
-        .unwrap()
-        .env_remove("WHITTLE_LOG")
-        .args(["--trim-barcodes", "--output-format", "fastq", "-o"])
-        .arg(dir.path().join("out2.fastq"))
-        .write_stdin("@r1\nACGTACGTAC\n+\nIIIIIIIIII\n")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("--trim-barcodes"));
+        .success();
+    let out = read_one(&out_path);
+    assert_eq!(out.sequence().len(), 40);
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&summary).unwrap()).unwrap();
+    assert_eq!(v["warnings"]["barcode_tag_unverified_reads"], 1);
 }
 
 /// The nine per-base arrays `--remove-kinetics` removes.

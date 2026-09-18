@@ -474,7 +474,7 @@ fn no_adapter_flag_is_byte_identical() {
 }
 
 #[test]
-fn infer_and_fasta_are_mutually_exclusive() {
+fn infer_accepts_a_fasta_as_known_sequences() {
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
     cmd.args([
@@ -486,7 +486,10 @@ fn infer_and_fasta_are_mutually_exclusive() {
     ]);
     cmd.assert()
         .failure()
-        .stderr(predicates::str::contains("mutually exclusive"));
+        .stderr(predicates::boolean::PredicateBooleanExt::not(
+            predicates::str::contains("mutually exclusive"),
+        ))
+        .stderr(predicates::str::contains("a.fa"));
 }
 
 #[test]
@@ -716,16 +719,13 @@ fn infer_report_prints_sequence_to_stdout() {
     );
 }
 
-/// Cross-naming considers both the ONT catalog and the supplied FASTA. The
-/// custom name sorts first and deterministically wins an equal-identity tie.
+/// A supplied FASTA is the known set: report mode trims it first and reports
+/// only sequences discovered beyond it.
 #[test]
-fn infer_report_cross_names_against_user_fasta() {
+fn infer_report_treats_fasta_as_known_sequences() {
     let dir = tempfile::tempdir().unwrap();
     let fq = write_adapted_fastq(dir.path(), 500);
-    // The filename contains no "MY_CUSTOM_ADAPTER" substring, so a path echo
-    // elsewhere in the log cannot satisfy the assertion below; only the
-    // discovered adapter's cross-name can.
-    let fa_path = dir.path().join("cross_name_refs.fa");
+    let fa_path = dir.path().join("known_refs.fa");
     std::fs::write(
         &fa_path,
         format!(">AAA_MY_CUSTOM_ADAPTER\n{PLANTED_ADAPTER}\n"),
@@ -745,12 +745,13 @@ fn infer_report_cross_names_against_user_fasta() {
         "1",
     ]);
     let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
-        stderr.contains("MY_CUSTOM_ADAPTER"),
-        "Discovered adapter is cross-named against the supplied --adapter-fasta, \
-         not only the built-in catalog: {stderr}"
+        !stdout.contains(PLANTED_ADAPTER),
+        "The known adapter is not rediscovered: {stdout}"
     );
+    assert!(stderr.contains("discovered=0"), "{stderr}");
 }
 
 #[test]

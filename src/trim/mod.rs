@@ -38,8 +38,8 @@ pub struct TrimPlan {
 /// segment. The result is flattened in original-coordinate order for final
 /// numbering and filtering by length, quality and GC.
 ///
-/// `barcode` is the retained interval resolved from the original record's `bi`
-/// tag under `--trim-barcodes`. `None` retains the whole read. An unmatched
+/// `barcode` is the retained interval resolved from the original record's
+/// verified `bi` spans. `None` retains the whole read. An unmatched
 /// read enters barcode restriction and cropping as one full-length segment.
 pub fn apply(
     seq: &[u8],

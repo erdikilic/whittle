@@ -58,7 +58,6 @@ struct Params {
     /// `None` when no quality-trimming strategy was selected.
     quality_op: Option<QualityOpParams>,
     update_moves: bool,
-    trim_barcodes: bool,
     ordered: bool,
     /// Aux tags removed from every output record, sorted. `--remove-kinetics`
     /// is folded into the same set, so the nine per-base arrays appear here
@@ -148,9 +147,12 @@ struct Warnings {
     /// Reads whose `MM`/`ML`/`MN` block was malformed and removed.
     malformed_mod_reads: u64,
     undo_tags_dropped_reads: u64,
-    /// Reads whose `bi` barcode tag was unusable under `--trim-barcodes` and
-    /// were left untrimmed by that stage.
+    /// Reads whose `bi` barcode tag was not a valid barcode window and were
+    /// left untrimmed by that stage.
     barcode_tag_malformed_reads: u64,
+    /// Reads with a recorded barcode span at which no barcode sequence was
+    /// found; those spans were left untrimmed.
+    barcode_tag_unverified_reads: u64,
 }
 
 impl Summary {
@@ -200,6 +202,7 @@ impl Summary {
                 malformed_mod_reads: stats.malformed_mod_reads,
                 undo_tags_dropped_reads: stats.undo_tags_dropped_reads,
                 barcode_tag_malformed_reads: stats.barcode_tag_malformed_reads,
+                barcode_tag_unverified_reads: stats.barcode_tag_unverified_reads,
             },
         }
     }
@@ -253,7 +256,6 @@ impl Params {
                 },
             }),
             update_moves: cfg.update_moves,
-            trim_barcodes: cfg.trim_barcodes,
             ordered: cfg.ordered,
             remove_tags: cfg
                 .remove_tags
@@ -337,6 +339,7 @@ mod tests {
             malformed_mod_reads: 0,
             undo_tags_dropped_reads: 0,
             barcode_tag_malformed_reads: 0,
+            barcode_tag_unverified_reads: 0,
             reads_with_output: 92,
             reads_trimmed_to_nothing: 5,
             reads_all_filtered: 3,

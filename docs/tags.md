@@ -51,7 +51,7 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 | ONT signal (`mv`/`ts`/`ns`/`sp`) | Removed, or rewritten with `--update-signal-tags` |
 | `pi` (parent read id) | Set to the parent's name on every ONT split segment, with or without `--update-signal-tags`; removed on a crop without it |
 | Poly-A (`pa`/`pt`) | Kept and shifted with `--update-signal-tags` when the tail survives, otherwise removed; `pa` positions are absolute POD5 sample indexes, the frame `ts` uses |
-| `bi` (barcode positions) | Read by `--trim-barcodes` to place the trim, then removed, since the positions index the untrimmed read; a tag that is not a seven-element `B:f` array, or whose positions describe an empty, inverted, or out-of-range window, leaves the read untrimmed and is counted |
+| `bi` (barcode positions) | Read with any adapter source to place the barcode trim where a barcode sequence is found, then removed, since the positions index the untrimmed read; a tag that is not a seven-element `B:f` array, or whose positions describe an empty, inverted, or out-of-range window, leaves the read untrimmed and is counted |
 | `BC`/`bv` (barcode call and kit version) | Per-read labels, copied unchanged |
 | `ds`/`ls` (PacBio undo blobs for `skera undo` and `lima-undo`) | Removed from every output record of a trimmed read, since they describe the untrimmed read; counted once per read and reported |
 | `qs:f` (dorado mean qscore) | Recomputed from the trimmed quality |
@@ -71,10 +71,11 @@ the table above, so the remaining tags stay in register. It applies to BAM
 output and to the tags carried into a BAM-to-FASTQ header, and requires BAM
 input. See [cli.md](cli.md#tag-removal).
 
-## Barcode positions under `--trim-barcodes`
+## Barcode positions
 
-`--trim-barcodes` removes the barcode spans recorded in `bi` rather than
-searching for the sequences, using an interval in the original read. Every position-indexed tag is
+With an adapter source, the barcode spans recorded in `bi` are removed where a
+barcode sequence is found at them ([cli.md](cli.md#barcode-positions)),
+using an interval in the original read. Every position-indexed tag is
 rewritten against each final interval. The tag is a `B:f` array of seven floats, `[barcode_score,
 front_start_index, front_len, front_score, rear_end_index, rear_len,
 rear_score]` (dorado `read_pipeline/base/messages.cpp`). `front_start_index +

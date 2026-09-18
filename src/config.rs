@@ -294,11 +294,6 @@ pub struct Config {
     /// only, see `workflow::bam`). When false, a trimmed read drops
     /// `mv`/`ts`/`ns`/`sp`/`pi`.
     pub update_moves: bool,
-    /// Whether the barcode spans dorado recorded in the `bi` aux tag are
-    /// removed by intersecting adapter-derived segments with the retained
-    /// original-coordinate interval before cropping. Requires BAM or tagged FASTQ;
-    /// `guards::guard_tag_flags` rejects input without auxiliary tags.
-    pub trim_barcodes: bool,
     /// Aux tags removed from every output record (`--remove-tag`,
     /// `--remove-kinetics`). Requires BAM or tagged FASTQ;
     /// `guards::guard_tag_flags` rejects input without auxiliary tags.
@@ -350,7 +345,6 @@ impl Default for Config {
             adapter_sample: 0,
             compression_level: 6,
             update_moves: false,
-            trim_barcodes: false,
             remove_tags: TagRemoval::default(),
             ordered: false,
             verbosity: 0,

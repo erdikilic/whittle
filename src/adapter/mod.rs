@@ -154,6 +154,68 @@ impl AdapterConfig {
         self.adapters = adapters;
         self.candidate_index = OnceLock::new();
     }
+
+    /// Returns whether a barcode sequence matches the read at `[start, end)`
+    /// within the error budget: a barcode-role entry of the configured set,
+    /// or a catalog barcode with the number of the barcode call `call`. The
+    /// span is widened by `BARCODE_SPAN_SLACK` bases on each side.
+    pub(crate) fn barcode_span_verified(
+        &self,
+        seq: &[u8],
+        start: usize,
+        end: usize,
+        call: Option<&[u8]>,
+    ) -> bool {
+        let lo = start.saturating_sub(BARCODE_SPAN_SLACK);
+        let hi = end.saturating_add(BARCODE_SPAN_SLACK).min(seq.len());
+        if hi <= lo {
+            return false;
+        }
+        let text = seq[lo..hi].to_ascii_uppercase();
+        let number = call.and_then(barcode_number);
+        let named = catalog_barcodes().iter().filter(|entry| {
+            number.is_some_and(|n| barcode_number(entry.name.as_bytes()) == Some(n))
+        });
+        let mut searcher = search::new_ambiguous_searcher();
+        self.adapters
+            .iter()
+            .filter(|entry| entry.role == Role::Barcode)
+            .chain(named)
+            .filter(|entry| entry.seq.len() >= MIN_PATTERN_LEN)
+            .any(|entry| {
+                let pattern = entry.seq.to_ascii_uppercase();
+                let k = edit_budget(self.error_rate, pattern.len());
+                !search::hits(&mut searcher, &pattern, &text, k).is_empty()
+            })
+    }
+}
+
+/// Bases by which a recorded barcode span is widened before verification.
+const BARCODE_SPAN_SLACK: usize = 3;
+
+/// Every barcode-role catalog entry, built once.
+fn catalog_barcodes() -> &'static [Adapter] {
+    static ENTRIES: OnceLock<Vec<Adapter>> = OnceLock::new();
+    ENTRIES.get_or_init(|| {
+        preset::preset(preset::Kit::ALL)
+            .into_iter()
+            .filter(|entry| entry.role == Role::Barcode)
+            .collect()
+    })
+}
+
+/// Returns the numeric value of the trailing digits of a barcode name, such
+/// as `07` in `SQK-NBD114-24_barcode07` or `BC07`.
+fn barcode_number(name: &[u8]) -> Option<u32> {
+    let digits = name.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    (digits > 0)
+        .then(|| {
+            std::str::from_utf8(&name[name.len() - digits..])
+                .ok()?
+                .parse()
+                .ok()
+        })
+        .flatten()
 }
 
 /// Returns the edit budget for a `len`-base pattern at `rate`, rounded down.
@@ -630,7 +692,7 @@ fn complement(base: u8) -> u8 {
 }
 
 /// Returns the reverse complement of `seq`, code by code.
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+pub(crate) fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter().rev().map(|&b| complement(b)).collect()
 }
 

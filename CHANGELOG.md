@@ -11,9 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tagged FASTQ input. A FASTQ whose headers carry SAM aux tags in the
   `samtools fastq -T` convention is trimmed on the BAM-to-FASTQ path: `MM`,
   `ML` and `MN` are rebuilt and per-base arrays sliced for every output
-  segment, `--fastq-tags` selects the output tags, and `--trim-barcodes`,
+  segment, `--fastq-tags` selects the output tags, and barcode positions,
   `--remove-tag` and `--remove-kinetics` apply. Each header is inspected;
   a field that does not parse as a SAM tag fails the run and names the read.
+
+### Changed
+- Adapter discovery proceeds in layers from each read end. Each accepted
+  layer moves the boundary inward and the next layer is assembled from the
+  unexplained sequence, so adapters, barcode flanks, barcodes and primers are
+  found in turn. A candidate whose inner segment mirrors at the opposite read
+  end at a different depth is cut back to its outer part. The outermost
+  discovered layer takes the adapter role; inner layers trim ends only.
+- A preset or FASTA given with `--discover-adapters` is trimmed first and
+  discovery continues beyond it. The final set is the union.
+- Barcode positions recorded in the `bi` tag are used with any adapter
+  source, and a recorded span is trimmed only where a barcode sequence is
+  found at it. Unverified spans are counted under
+  `warnings.barcode_tag_unverified_reads`.
+
+### Removed
+- `--trim-barcodes`. Barcode positions apply automatically with an adapter
+  source.
 
 ### Fixed
 - Minority adapter discovery continues past weak graph fragments and validates

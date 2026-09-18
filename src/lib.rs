@@ -717,7 +717,6 @@ fn is_no_op(cfg: &Config, same_format: bool) -> bool {
     no_trim
         && pass_through_filter
         && cfg.adapters.is_none()
-        && !cfg.trim_barcodes
         && cfg.remove_tags.is_empty()
         && same_format
 }

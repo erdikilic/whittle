@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-trim\-quality\fR] [\fB\-\-best\-quality\-segment\fR] [\fB\-\-split\-quality\fR] [\fB\-\-split\-min\-low\-quality\-bases\fR] [\fB\-\-update\-signal\-tags\fR] [\fB\-\-trim\-barcodes\fR] [\fB\-\-remove\-tag\fR] [\fB\-\-remove\-kinetics\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-discover\-adapters\fR] [\fB\-h\fR|\fB\-\-help\fR]
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-trim\-quality\fR] [\fB\-\-best\-quality\-segment\fR] [\fB\-\-split\-quality\fR] [\fB\-\-split\-min\-low\-quality\-bases\fR] [\fB\-\-update\-signal\-tags\fR] [\fB\-\-remove\-tag\fR] [\fB\-\-remove\-kinetics\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-discover\-adapters\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH OPTIONS
@@ -157,9 +157,6 @@ Split each cropped adapter\-derived segment at consecutive bases below PHRED. Nu
 .TP
 \fB\-\-split\-min\-low\-quality\-bases\fR \fI<BASES>\fR
 Minimum consecutive bases below \-\-split\-quality required to split. Shorter internal stretches are retained; low\-quality ends are trimmed. Requires \-\-split\-quality. Defaults to 1
-.TP
-\fB\-\-trim\-barcodes\fR
-Restrict adapter\-derived segments to the retained interval recorded in the original bi aux tag, before fixed cropping. Requires BAM or tagged FASTQ; does not detect barcodes
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<FILE>\fR
@@ -181,7 +178,7 @@ Trim adapters at read ends only; never split on interior adapters. Does not disa
 Reads inspected for preset presence or adapter discovery; at least 100. 0 disables presence detection and uses the full preset; discovery requires sampling. Ignored with \-\-adapter\-fasta unless discovering adapters. Defaults to 2000 with a preset and 40000 under \-\-discover\-adapters. Sampling is also bounded by 256 MiB of payload and 64 Mi bases
 .TP
 \fB\-\-discover\-adapters\fR [\fI<ACTION>\fR]
-Discover adapters and primers de novo with automatic boundaries. Report prints discovered FASTA to stdout and exits without read output or a JSON summary. Both actions use the same sequences. Defaults to trim when given no value
+Discover adapters, barcodes and primers de novo in layers from each read end. A preset or FASTA is trimmed first and discovery continues beyond it. Report prints discovered FASTA to stdout and exits without read output or a JSON summary. Both actions use the same sequences. Defaults to trim when given no value
 .br
 
 .br

@@ -262,9 +262,10 @@ fn parse_time_advisories_respect_the_level_filter() {
     let out = dir.path().join("out.fastq");
 
     // Report mode with a naming FASTA raises an INFO advisory, which --quiet
-    // must drop; the ignored preset raises a WARN one, which it must keep.
+    // must drop; the skipped short FASTA entry raises a WARN one, which it
+    // must keep.
     let fasta = dir.path().join("names.fa");
-    std::fs::write(&fasta, ">ref\nACGTACGTACGTACGT\n").unwrap();
+    std::fs::write(&fasta, ">ref\nACGTACGTACGTACGT\n>short\nACGT\n").unwrap();
     let args = [
         "-i",
         input.to_str().unwrap(),
@@ -296,7 +297,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         .stderr(
             predicate::str::contains("--discover-adapters report with --adapter-fasta")
                 .not()
-                .and(predicate::str::contains("--adapter-preset is ignored")),
+                .and(predicate::str::contains("Adapter entry skipped")),
         );
 }
 

@@ -31,7 +31,7 @@ FASTQ input in the same convention (a tab after the read name, then
 so tagged and plain reads can share a file or directory. Tagged records are
 decoded as SAM aux tags and rewritten per output segment exactly as a uBAM
 record's are ([tags.md](tags.md)), `--fastq-tags` selects the output tags, and
-`--trim-barcodes`, `--remove-tag` and `--remove-kinetics` apply. A field that
+barcode positions (`bi`), `--remove-tag` and `--remove-kinetics` apply. A field that
 does not parse as a SAM tag fails the run and names the read. A header whose
 tab-delimited text is not in this form is copied verbatim.
 
@@ -89,7 +89,6 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--best-quality-segment <PHRED>` | Keep the highest-scoring segment using cumulative base-error probabilities and the Phred cutoff (modified Mott); may retain bases below the cutoff |
 | `--split-quality <PHRED>` | Split at consecutive bases below PHRED and keep each surviving segment |
 | `--split-min-low-quality-bases <BASES>` | Minimum consecutive bases below the splitting threshold required to split; shorter internal stretches are retained and low-quality ends are trimmed (default 1); requires `--split-quality` |
-| `--trim-barcodes` | Intersect adapter-derived segments with the retained interval from the original `bi` tag before cropping (BAM or tagged FASTQ input) |
 | `--update-signal-tags` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM; requires DNA or RNA model metadata in the read-group description) |
 | `--remove-tag <TAG>` | Remove a two-character aux tag from every output record; repeatable (BAM or tagged FASTQ input) |
 | `--remove-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM or tagged FASTQ input) |
@@ -168,8 +167,8 @@ Each read then passes through these stages:
 
 1. Adapter trimming and interior splitting on the original sequence, including
    terminal cleanup of the resulting segments.
-2. Intersection of each segment with the retained barcode interval from the
-   original `bi` tag, when `--trim-barcodes` is enabled.
+2. Intersection of each segment with the verified barcode spans from the
+   original `bi` tag, when an adapter source is given.
 3. Fixed cropping at both ends of each retained segment.
 4. Quality end trimming, best-segment selection, or quality splitting.
 5. Length, quality, and GC filtering of each final segment.
@@ -190,17 +189,21 @@ name remains `read_segment_3`. A read producing only one final interval keeps
 its original name. PacBio names use final query coordinates according to the
 [platform rules](tags.md#platform-rules).
 
-## Barcode trimming
+## Barcode positions
 
-`--trim-barcodes` removes the barcode spans that dorado recorded in the `bi` aux
-tag. The positions are read from the original tag and define the retained
-interval. Each adapter-derived segment is intersected with that interval
-before cropping. The trim uses the same tag-rewrite machinery as every other
-stage: `MM`/`ML`/`MN`, per-base kinetics, and the ONT move table are rewritten
-for the trimmed sequence.
+With an adapter source, whittle reads the barcode spans dorado recorded in
+the `bi` aux tag and removes each span at which a barcode sequence is found:
+a barcode of the configured set, or the catalog barcode named by the read's
+`BC` call. A span holding no barcode sequence, such as stale positions on
+input dorado has already trimmed, is left alone and counted under
+`warnings.barcode_tag_unverified_reads`. There is no flag; the positions are
+used whenever the input carries them. Each adapter-derived segment is
+intersected with the retained interval before cropping, and the trim uses
+the same tag-rewrite machinery as every other stage: `MM`/`ML`/`MN`, per-base
+kinetics, and the ONT move table are rewritten for the trimmed sequence.
 
 ```bash
-whittle -i barcoded.bam -o trimmed.bam --trim-barcodes --update-signal-tags
+whittle -i barcoded.bam -o trimmed.bam --adapter-preset nbd114 --update-signal-tags
 ```
 
 The tag holds seven floats, four of which are positions: the front barcode's
@@ -215,7 +218,7 @@ that is not a seven-element float array, or whose positions describe an empty,
 inverted, or out-of-range window, leaves the read untrimmed and is counted under
 `warnings.barcode_tag_malformed_reads`.
 
-The flag requires BAM or tagged FASTQ input carrying auxiliary tags.
+Positions are read from BAM and tagged FASTQ input; plain FASTQ carries none.
 
 ## Tag removal
 
@@ -273,7 +276,7 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
   "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 30 },
   "bases": { "input": 10000000, "output": 9500000 },
   "segments_dropped": { "too_short": 12, "too_long": 0, "low_quality": 5, "high_quality": 0, "gc_out_of_range": 0 },
-  "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0, "barcode_tag_malformed_reads": 0 }
+  "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0, "barcode_tag_malformed_reads": 0, "barcode_tag_unverified_reads": 0 }
 }
 ```
 
@@ -284,9 +287,10 @@ records in input order.
 Under `warnings`, `malformed_tag_reads` counts reads whose per-base tag length
 disagreed with the sequence and was left untouched, `malformed_mod_reads` counts
 reads whose `MM`/`ML`/`MN` block could not be parsed and was removed from the
-output, and `barcode_tag_malformed_reads` counts reads whose `bi` positions did
-not describe a window inside the read under `--trim-barcodes`. All three are
-also reported on stderr at the end of the run.
+output, `barcode_tag_malformed_reads` counts reads whose `bi` positions did
+not describe a window inside the read, and `barcode_tag_unverified_reads`
+counts reads with a recorded barcode span at which no barcode sequence was
+found. All four are also reported on stderr at the end of the run.
 
 `reads.output` counts output segments, not input reads, so under `--split-quality`
 or chimera splitting it can exceed `reads.input`. The read-level buckets

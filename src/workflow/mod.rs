@@ -386,9 +386,12 @@ pub struct Counters {
     /// since they describe the untrimmed read.
     pub undo_tags_dropped_reads: AtomicU64,
     /// Input reads whose `bi` barcode tag could not be read as a barcode window
-    /// under `--trim-barcodes` (not a seven-element float array, or an empty,
-    /// inverted or out-of-range window) and were left untrimmed by that stage.
+    /// (not a seven-element float array, or an empty, inverted or out-of-range
+    /// window) and were left untrimmed by that stage.
     pub barcode_tag_malformed_reads: AtomicU64,
+    /// Input reads with a recorded barcode span at which no configured or
+    /// named catalog barcode was found; that span was left untrimmed.
+    pub barcode_tag_unverified_reads: AtomicU64,
     /// Input reads that produced at least one surviving output segment,
     /// bumped once per input read (not once per segment, unlike
     /// `output_reads`, which a `--split-quality` read can bump several times).
@@ -466,6 +469,7 @@ impl Counters {
             malformed_mod_reads: self.malformed_mod_reads.load(Ordering::Relaxed),
             undo_tags_dropped_reads: self.undo_tags_dropped_reads.load(Ordering::Relaxed),
             barcode_tag_malformed_reads: self.barcode_tag_malformed_reads.load(Ordering::Relaxed),
+            barcode_tag_unverified_reads: self.barcode_tag_unverified_reads.load(Ordering::Relaxed),
             input_bases: self.input_bases.load(Ordering::Relaxed),
             output_bases: self.output_bases.load(Ordering::Relaxed),
             malformed_tag_reads: self.malformed_tag_reads.load(Ordering::Relaxed),
@@ -580,9 +584,12 @@ pub struct Stats {
     pub malformed_mod_reads: u64,
     /// Trimmed reads whose `ds`/`ls` undo blobs were removed.
     pub undo_tags_dropped_reads: u64,
-    /// Reads whose `bi` barcode tag was unusable under `--trim-barcodes`; see
+    /// Reads whose `bi` barcode tag was unusable; see
     /// `Counters::barcode_tag_malformed_reads`.
     pub barcode_tag_malformed_reads: u64,
+    /// Reads with an unverified barcode span; see
+    /// `Counters::barcode_tag_unverified_reads`.
+    pub barcode_tag_unverified_reads: u64,
     /// Read-level: input reads with at least one written segment.
     pub reads_with_output: u64,
     /// Read-level: input reads that produced zero segments at all (empty

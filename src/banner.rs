@@ -132,9 +132,8 @@ pub(crate) fn filters_and_trim_line(
 /// whether presence detection samples. `None` when adapter trimming is off,
 /// so the caller skips the line.
 ///
-/// Under inference the count is `0` rather than `a.adapters.len()`: in report
-/// mode that field may hold a FASTA only as naming references for
-/// `infer::discover`, never as a trimming set.
+/// Under inference the count covers the known sequences that are trimmed
+/// before discovery; discoveries are logged once the sample has been read.
 pub(crate) fn adapter_banner_line(
     adapters: Option<&crate::adapter::AdapterConfig>,
     adapter_sample: usize,
@@ -153,11 +152,7 @@ pub(crate) fn adapter_banner_line(
             format!(" \u{b7} infer {}", action.label())
         },
     };
-    let (n_adapters, roles) = if adapter_infer == AdapterInfer::Off {
-        (a.adapters.len(), role_breakdown(&a.adapters))
-    } else {
-        (0, String::new())
-    };
+    let (n_adapters, roles) = (a.adapters.len(), role_breakdown(&a.adapters));
     Some(format!(
         "Adapters: {n_adapters} sequences{roles} · {mode} · error {:.2} · end-zone {} bp · {sample}{infer_suffix}",
         a.error_rate, a.end_size

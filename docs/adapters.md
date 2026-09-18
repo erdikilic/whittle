@@ -94,8 +94,26 @@ and splits with the supported sequences. Sampling requires at least 100 reads;
 a count of 0 is rejected. Reporting and trimming use the same automatic boundary
 rule. There is no conservative/aggressive policy switch.
 
-Discovery counts exact 16-mers in the first and last 100 bases of sampled reads,
-once per read-end window. Short tandem-repeat seeds are excluded.
+Discovery proceeds in layers. Sequences from `--adapter-preset` or
+`--adapter-fasta` are searched first and explain the outermost layers; a
+preset given with `--discover-adapters` is therefore trimmed as usual and
+discovery continues from the boundary it leaves, which recovers an unknown
+primer behind a known kit. Each accepted layer moves the boundary inward and
+the next layer is assembled from the unexplained sequence, so an adapter
+remnant, a barcode flank and the barcodes of a rapid barcoding library are
+found in turn. A layer ends where the support of adjacent k-mers changes
+fourfold, such as where a barcode joins its shared flank, and the sequence
+past that point belongs to the next layer. Layers stop when no candidate
+passes the checks below, after at most eight per end. A discovered sequence
+flush with the physical read end takes the adapter role and splits reads at
+interior hits; deeper sequences trim ends only, like catalog barcodes and
+primers. On barcoded amplicon libraries discovery recovers the adapter,
+flank and barcode layers; the primers behind them are best supplied by the
+kit preset or a FASTA, which discovery then extends.
+
+Discovery counts exact 16-mers in the first 100 unexplained bases at each end
+of the sampled reads, once per read-end window. Short tandem-repeat seeds are
+excluded.
 A bounded graph assembly retains multiple paths, locates abrupt support changes
 at insert boundaries, and corrects weak paths with aligned read evidence.
 sassy batches the approximate searches used to align supporting reads and
@@ -107,7 +125,15 @@ not supply evidence for an adapter boundary.
 
 A candidate must occur in at least 1% of the usable validation windows at one
 end and in at least 20 windows. At least 80% of its supporting alignments must
-lie within 35 bases of the physical read end. Candidates dominated by short
+lie within 35 bases of the current boundary. A candidate whose inner segment
+occurs as its reverse complement at the opposite physical read end at a
+different depth is cut back to its outer part, or dropped when fewer than 11
+bases remain: sequence that appears at the far end of the molecule without the
+technical layers around it is insert, such as a conserved gene end that reads
+reach from the other side. A mirror at the same depth, or none, is neutral, so
+one-sided rapid libraries are unaffected. A candidate that occupies the same
+reads as a stronger candidate of its layer is a sequencing variant and is
+dropped. Candidates dominated by short
 approximate repeats are rejected; candidate prevalence must exceed that in
 adjacent interior windows by more than fourfold. These checks allow minority
 families without treating any recurrent sequence as an adapter. Rare families,
@@ -130,7 +156,9 @@ insert-facing side of a reconstructed primer, are excluded. Candidates whose
 insert-facing boundaries remain unresolved are skipped.
 
 Without reads exposing an insert boundary, an unknown primer and a conserved
-gene prefix can be indistinguishable. Short primers, highly degenerate mixtures,
+gene prefix can be indistinguishable, and a conserved gene end that mirrors at
+the same depth in fully symmetric amplicon reads is kept as insert only when
+unprimed reads establish the boundary. Short primers, highly degenerate mixtures,
 high sequencing error, adapter lengths approaching the sampling-window length,
 or insufficient representation can prevent complete recovery. Use a known
 primer FASTA or kit preset when available. Inferred sequences use the adapter

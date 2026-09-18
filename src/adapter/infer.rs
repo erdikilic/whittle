@@ -52,11 +52,61 @@ const LMAX: usize = 100;
 const MAX_BOUNDARY_ANCHORS: usize = 8;
 
 /// Max number of adapters `peel_paths` will extract from one end's k-mer graph.
-const MAX_ADAPTERS_PER_END: usize = 12;
+/// A barcode layer holds one family per barcode.
+const MAX_ADAPTERS_PER_END: usize = 128;
 
-/// Minimum fraction of the first (heaviest) path's weight a peeled path needs
-/// to be kept; a lighter path is background rather than a distinct adapter.
-const MIN_PATH_WEIGHT_FRAC: f64 = 0.02;
+/// Maximum discovery layers at one read end.
+const MAX_LAYERS: usize = 8;
+
+/// Bases from the physical read end searched for a candidate and its mirror.
+const MIRROR_WINDOW: usize = 300;
+
+/// Window tested for a mirror at the opposite end.
+const MIRROR_SEGMENT: usize = KMER_K;
+
+/// Depth difference between an inner segment and its mirror accepted as
+/// symmetric, in bases.
+const SYMMETRY_TOLERANCE: usize = 35;
+
+/// Fraction of the terminal error rate allowed when locating a mirror, so
+/// that a mirror does not extend past the sequence present at the read end.
+const MIRROR_ERROR_RATE: f64 = 0.5;
+
+/// Bases by which the tested window slides per mirror search.
+const MIRROR_STEP: usize = 4;
+
+/// Divisor of a candidate's support giving the fewest mirror occurrences
+/// that count. A mirror occurs only in reads of the other orientation and is
+/// searched at the stricter mirror error rate.
+const MIRROR_SUPPORT_DIVISOR: usize = 8;
+
+/// Percentage of a candidate's supporting windows in which it must start
+/// within `ANCHOR_SLACK` of the boundary. A majority suffices once earlier
+/// layers explain only part of the reads.
+const ANCHORED_PERCENT: usize = 60;
+
+/// Bases from the current boundary within which a hit counts as anchored at
+/// it and advances it. The slack covers eroded or variable-length remnants
+/// of the preceding layer.
+const ANCHOR_SLACK: usize = 50;
+
+/// Largest median distance from the physical read end at which an outermost
+/// discovered sequence is a sequencing adapter, which splits reads at
+/// interior hits; deeper sequences are end-only.
+const ADAPTER_FLUSH: usize = 20;
+
+/// Shortest end shared by candidates of one layer that is treated as a
+/// neighbouring layer rather than part of the candidate.
+const SHARED_END_MIN: usize = 12;
+
+/// Percentage of the shorter of two candidates that their longest common
+/// substring must cover for them to count as one family.
+const FAMILY_OVERLAP_PERCENT: usize = 60;
+
+/// Percentage of a candidate's supporting windows that a stronger candidate
+/// of the same layer must share for the candidate to count as a sequencing
+/// variant of it rather than a distinct family.
+const VARIANT_OVERLAP_PERCENT: usize = 80;
 
 /// Minimum percent identity for a catalog entry to be reported as the match
 /// of an inferred adapter. A 16 to 32 bp anchor searched against every catalog
@@ -79,6 +129,8 @@ pub struct InferredAdapter {
     /// Catalog entries within `NAME_IDENTITY_MIN` of the consensus, best
     /// first, as `(name, percent identity)`. An annotation, not the name.
     pub name_hits: Vec<(String, f32)>,
+    /// Discovery layer, counted from the read end after any known sequences.
+    pub layer: usize,
 }
 
 impl InferredAdapter {
@@ -127,29 +179,16 @@ fn decode_kmer(mut code: u64, k: usize) -> Vec<u8> {
 }
 
 /// Slices the first and last `w` bytes of each read into 5' and 3' window
-/// lists. Returns the 5' windows (`&read[..min(w, len)]`) and the 3' windows
-/// (`&read[len - min(w, len)..]`). Empty reads are skipped, and so is any window
-/// holding a byte outside ACGT: an uncalled base is evidence of nothing, and on
-/// the IUPAC profile it would match every k-mer for free.
+/// lists. Empty reads are skipped, and so is any window holding a byte
+/// outside ACGT: an uncalled base is evidence of nothing, and on the IUPAC
+/// profile it would match every k-mer for free.
+#[cfg(test)]
 fn end_windows<'a>(sample: &[&'a [u8]], w: usize) -> (Vec<&'a [u8]>, Vec<&'a [u8]>) {
-    let mut five = Vec::new();
-    let mut three = Vec::new();
-    for &read in sample {
-        let n = read.len();
-        if n == 0 {
-            continue;
-        }
-        let take = w.min(n);
-        let head = &read[..take];
-        let tail = &read[n - take..];
-        if is_plain_acgt(head) {
-            five.push(head);
-        }
-        if is_plain_acgt(tail) {
-            three.push(tail);
-        }
-    }
-    (five, three)
+    let (five, three) = layer_windows(sample, &Boundaries::new(sample), w);
+    (
+        five.into_iter().map(|(_, window)| window).collect(),
+        three.into_iter().map(|(_, window)| window).collect(),
+    )
 }
 
 /// Hashes packed k-mer codes by multiplicative mixing with a fold of the
@@ -218,7 +257,7 @@ fn terminal_support(seq: &[u8], windows: &[&[u8]], end: End, edits: usize) -> (u
     let anchored = best
         .iter()
         .flatten()
-        .filter(|(_, distance)| *distance <= 35)
+        .filter(|(_, distance)| *distance <= ANCHOR_SLACK)
         .count();
     (present, anchored)
 }
@@ -291,6 +330,24 @@ fn windows_containing(
         |index, _| seen[index] = true,
     );
     seen.into_iter().filter(|&present| present).count() as u32
+}
+
+/// Returns, per window, whether `pattern` occurs within `max_edits`.
+fn windows_with(
+    searcher: &mut AmbiguousSearcher,
+    pattern: &[u8],
+    windows: &[&[u8]],
+    max_edits: usize,
+) -> Vec<bool> {
+    let mut seen = vec![false; windows.len()];
+    crate::adapter::search::for_each_hit_in_texts(
+        searcher,
+        pattern,
+        windows,
+        max_edits,
+        |index, _| seen[index] = true,
+    );
+    seen
 }
 
 /// Reconstructs a consensus adapter from weighted k-mer nodes by a cycle-safe
@@ -399,25 +456,35 @@ fn bounded_heaviest_path(
 
 /// Peels up to `MAX_ADAPTERS_PER_END` distinct adapter consensuses out of one
 /// end's weighted k-mer graph: each round runs `bounded_heaviest_path`, then
-/// removes that path's k-mers from `nodes` so the next round is forced onto a
-/// different, non-overlapping path. Weak fragments are removed without ending
-/// the search for remaining independently supported families.
-fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize) -> Vec<(Vec<u8>, Vec<u32>)> {
+/// removes the k-mers of that path's outermost support run from `nodes` so
+/// the next round is forced onto a different path. Sequence past a layer
+/// boundary stays available to later paths. Every path is returned; support
+/// floors apply to the validated candidates.
+fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize, end: End) -> Vec<(Vec<u8>, Vec<u32>)> {
     let mut out = Vec::new();
-    let mut first_weight: Option<u64> = None;
     while out.len() < MAX_ADAPTERS_PER_END {
-        let Some((cons, profile, weight)) = bounded_heaviest_path(&nodes, k, LMAX) else {
+        let Some((cons, _, _)) = bounded_heaviest_path(&nodes, k, LMAX) else {
             break;
         };
-        let fw = *first_weight.get_or_insert(weight);
-        // The nodes this path used are removed so the next peel finds a
-        // different one.
-        let used: std::collections::HashSet<u64> =
-            cons.windows(k).filter_map(encode_kmer).collect();
-        nodes.retain(|(code, _)| !used.contains(code));
-        if weight as f64 >= MIN_PATH_WEIGHT_FRAC * fw as f64 {
-            out.push((cons, profile));
+        let current: KmerMap<u32> = nodes.iter().copied().collect();
+        let weights: Vec<u32> = cons
+            .windows(k)
+            .map(|w| {
+                encode_kmer(w)
+                    .and_then(|code| current.get(&code).copied())
+                    .unwrap_or(0)
+            })
+            .collect();
+        let (lo, hi) = supported_span(&weights, end);
+        let mut used: std::collections::HashSet<u64> = cons[lo..hi.min(cons.len())]
+            .windows(k)
+            .filter_map(encode_kmer)
+            .collect();
+        if used.is_empty() {
+            used = cons.windows(k).filter_map(encode_kmer).collect();
         }
+        nodes.retain(|(code, _)| !used.contains(code));
+        out.push((cons, weights));
         if nodes.is_empty() {
             break;
         }
@@ -600,29 +667,19 @@ struct PrimerBoundary {
 /// Uses recurrent unprimed read starts to locate a conserved insert boundary.
 /// A primer must be independently supported upstream of that boundary; the
 /// conserved insert itself is excluded from the inferred trimming sequence.
+/// `windows` read outward from the `end` boundary, reversed for the 3' end.
 fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<PrimerBoundary> {
     if consensus.len() < 2 * KMER_K {
         return None;
     }
     let reverse = end == End::Three;
-    let oriented: Vec<Vec<u8>> = windows
-        .iter()
-        .map(|w| {
-            if reverse {
-                w.iter().rev().copied().collect()
-            } else {
-                w.to_vec()
-            }
-        })
-        .collect();
-    let windows: Vec<&[u8]> = oriented.iter().map(Vec::as_slice).collect();
     let mut seq: Vec<u8> = if reverse {
         consensus.iter().rev().copied().collect()
     } else {
         consensus.to_vec()
     };
     let mut starts = std::collections::HashMap::<u64, usize>::new();
-    for window in &windows {
+    for window in windows {
         if window.len() >= START_K
             && let Some(code) = encode_kmer(&window[..START_K])
         {
@@ -650,7 +707,7 @@ fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<Pr
     };
     let mut positions = positions_in(&seq);
     if positions.is_empty() && seq.len() >= KMER_K {
-        let mut prefix = upstream_consensus(&seq[..KMER_K], &windows);
+        let mut prefix = upstream_consensus(&seq[..KMER_K], windows);
         if !prefix.is_empty() {
             prefix.extend_from_slice(&seq);
             seq = prefix;
@@ -664,7 +721,7 @@ fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<Pr
         if tried.len() >= MAX_BOUNDARY_ANCHORS || !tried.insert(anchor.to_vec()) {
             continue;
         }
-        let primer = upstream_consensus(anchor, &windows);
+        let primer = upstream_consensus(anchor, windows);
         let mut primers = if primer.len() >= MIN_PATTERN_LEN
             && primer
                 .iter()
@@ -679,7 +736,7 @@ fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<Pr
             // their adjacent sequence before extending each family separately.
             let mut searcher = crate::adapter::search::new_searcher_fwd();
             let mut best = vec![None; windows.len()];
-            for hit in searcher.search_texts(anchor, &windows, 2) {
+            for hit in searcher.search_texts(anchor, windows, 2) {
                 let key = (hit.cost, hit.text_start);
                 let entry = &mut best[hit.text_idx];
                 if entry.is_none_or(|old| key < old) {
@@ -790,8 +847,124 @@ fn supported_termination(word: &[u8], windows: &[&[u8]], end: End) -> bool {
     present > 0 && extensions.into_iter().max().unwrap_or(0) * 2 <= present
 }
 
+/// Ratio between the support plateaus on either side of a layer boundary,
+/// such as a barcode joining its shared flank. A degenerate primer base
+/// halves the support of the k-mers over it and does not reach it.
+const RUN_JUMP: u32 = 4;
+
+/// K-mers of consistent support on each side of a boundary. A support ramp
+/// without a plateau, such as an eroded adapter start, is one run.
+const PLATEAU: usize = 8;
+
+/// K-mers spanning a boundary whose support ramps between the plateaus,
+/// as k-mers overlapping both a barcode and its flank do.
+const RAMP: usize = 4;
+
+/// K-mers over which the changed support level must persist. A
+/// sequencing-error dip spans at most `KMER_K` k-mers; a barcode spans more.
+const RUN_PERSIST: usize = 24;
+
+/// Returns the base span `[lo, hi)` of the outermost support run of a
+/// consensus. `weights` holds the support of each k-mer by start base.
+/// Scanning inward from the read end, the run ends at the first boundary
+/// between two flat plateaus whose supports differ `RUN_JUMP`-fold, where
+/// the new level persists for `RUN_PERSIST` k-mers or to the end. Within
+/// the run, k-mers below `BOUNDARY_SUPPORT` of the run peak are trimmed from
+/// both sides.
+fn supported_span(weights: &[u32], end: End) -> (usize, usize) {
+    let n = weights.len();
+    let order: Vec<usize> = match end {
+        End::Five => (0..n).collect(),
+        End::Three => (0..n).rev().collect(),
+    };
+    let first = order
+        .iter()
+        .position(|&j| weights[j] >= MIN_SUPPORT_WINDOWS as u32)
+        .unwrap_or(0);
+    let level = |idx: &[usize]| {
+        let mut values: Vec<u32> = idx.iter().map(|&j| weights[j]).collect();
+        values.sort_unstable();
+        values[values.len() / 2]
+    };
+    let flat = |idx: &[usize]| {
+        let (min, max) = idx
+            .iter()
+            .map(|&j| weights[j])
+            .fold((u32::MAX, 0), |(lo, hi), w| (lo.min(w), hi.max(w)));
+        max <= min.saturating_mul(2)
+    };
+    let mut last = order.len() - 1;
+    for j in first + PLATEAU..order.len() {
+        let left = &order[j - PLATEAU..j];
+        let right_start = j + RAMP;
+        let right_end = (right_start + PLATEAU).min(order.len());
+        if right_end < right_start + RAMP {
+            break;
+        }
+        let right = &order[right_start..right_end];
+        if !flat(left) || !flat(right) {
+            continue;
+        }
+        let (old, new) = (level(left), level(right));
+        let drop = new.saturating_mul(RUN_JUMP) <= old;
+        let rise = old.saturating_mul(RUN_JUMP) <= new;
+        if !(drop || rise) {
+            continue;
+        }
+        let persists = order[right_start..(right_start + RUN_PERSIST).min(order.len())]
+            .iter()
+            .all(|&k| {
+                if drop {
+                    weights[k].saturating_mul(RUN_JUMP) <= old
+                } else {
+                    weights[k] >= old.saturating_mul(RUN_JUMP)
+                }
+            });
+        if !persists {
+            continue;
+        }
+        // The old level ends at the last k-mer within twofold of it.
+        let mut split = j;
+        while split < right_start && {
+            let w = weights[order[split]];
+            if drop {
+                w.saturating_mul(2) >= old
+            } else {
+                w <= old.saturating_mul(2)
+            }
+        } {
+            split += 1;
+        }
+        last = split - 1;
+        break;
+    }
+    let run = &order[first..=last];
+    let peak = run.iter().map(|&j| weights[j]).max().unwrap_or(0);
+    let floor = (peak as f64 * BOUNDARY_SUPPORT) as u32;
+    let supported = run.iter().copied().filter(|&j| weights[j] >= floor);
+    let (mut lo, mut hi) = (usize::MAX, 0);
+    for j in supported {
+        lo = lo.min(j);
+        hi = hi.max(j + KMER_K);
+    }
+    if lo == usize::MAX {
+        (0, KMER_K.min(n + KMER_K - 1))
+    } else {
+        (lo, hi)
+    }
+}
+
+/// An assembled end candidate: sequence, support, whether an independent
+/// insert boundary was found, the summed original k-mer support of the
+/// retained span, and whether the assembly window could not bound the
+/// insert-facing side.
+type Candidate = (Vec<u8>, f64, bool, u64, bool);
+
 /// Assembles one end's candidates and validates support and insert boundaries.
-fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, f64, bool, u32)> {
+/// `contrast` enables primer reconstruction from recurrent unprimed window
+/// starts, which describe an insert boundary only in the first discovery
+/// layer.
+fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End, contrast: bool) -> Vec<Candidate> {
     if windows.len() < 3 {
         return Vec::new();
     }
@@ -809,7 +982,10 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
         })
         .collect();
     let exact = top_kmers(&assembly_windows, KMER_K, TOP_KMERS);
-    if exact.is_empty() {
+    if exact
+        .first()
+        .is_none_or(|&(_, count)| count < MIN_SUPPORT_WINDOWS as u32)
+    {
         return Vec::new();
     }
     // Validation uses windows distributed across the complete sample.
@@ -823,15 +999,50 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
     let mut primer_edges = vec![None; recount.len()];
     let mut primer_searcher = crate::adapter::search::new_searcher_fwd();
     let mut known_primers = std::collections::HashSet::new();
-    for (cons, profile) in peel_paths(weighted, KMER_K) {
+    // Contrast reads the validation windows outward from the end boundary.
+    let reversed: Vec<Vec<u8>> = if contrast && end == End::Three {
+        recount
+            .iter()
+            .map(|w| w.iter().rev().copied().collect())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let oriented: Vec<&[u8]> = if reversed.is_empty() {
+        recount.clone()
+    } else {
+        reversed.iter().map(Vec::as_slice).collect()
+    };
+    for (cons, _) in peel_paths(weighted, KMER_K, end) {
         tracing::debug!(sequence = %String::from_utf8_lossy(&cons), "Assembled end candidate");
-        let peak = *profile.iter().max().unwrap_or(&0);
-        let weights = &profile[KMER_K - 1..];
-        let floor = (peak as f64 * BOUNDARY_SUPPORT) as u32;
-        let lo = weights.iter().position(|&w| w >= floor).unwrap_or(0);
-        let hi = weights.iter().rposition(|&w| w >= floor).unwrap_or(0) + KMER_K;
+        // Original weights show the support of every k-mer of the path,
+        // including k-mers earlier peels removed from the graph.
+        let weights: Vec<u32> = cons
+            .windows(KMER_K)
+            .map(|w| {
+                encode_kmer(w)
+                    .and_then(|code| original_weights.get(&code).copied())
+                    .unwrap_or(0)
+            })
+            .collect();
+        let (lo, hi) = supported_span(&weights, end);
+        let span = &weights[lo..=hi - KMER_K];
+        let peak = span.iter().copied().max().unwrap_or(0);
+        // The path weight measures completeness: a fragment running into
+        // the insert or a sequencing variant carries weak k-mers.
+        let weight: u64 = span.iter().map(|&w| u64::from(w)).sum();
+        if peak < MIN_SUPPORT_WINDOWS as u32 {
+            continue;
+        }
         let trimmed = cons[lo..hi].to_vec();
         if is_repetitive(&trimmed) {
+            continue;
+        }
+        // A variant or fragment of a stronger validated candidate merges
+        // into it and needs no validation of its own.
+        if out.iter().any(|(seq, _, _, other, _): &Candidate| {
+            *other >= weight && same_adapter(&trimmed, seq, base.error_rate)
+        }) {
             continue;
         }
         if !known_primers.is_empty()
@@ -851,8 +1062,12 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
         } else {
             trimmed
         };
-        let contrast = contrast_boundary(&cons, &recount, end);
+        let contrast = contrast
+            .then(|| contrast_boundary(&cons, &oriented, end))
+            .flatten();
         let has_insert_boundary = contrast.is_some();
+        let mut unbounded = false;
+        let mut measured = None;
         let sequences = if let Some(boundary) = contrast {
             insert_starts.push(boundary.insert_start);
             boundary.primers
@@ -878,14 +1093,28 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
                 End::Five => hi < cons.len(),
                 End::Three => lo > 0,
             };
+            // Support drops at an insert boundary. It rises where a layer
+            // such as a barcode joins a shared downstream layer: the
+            // downstream k-mer is then supported by `RUN_JUMP` times more
+            // windows than contain the candidate at all, which a variant
+            // path joining its own family never reaches. A boundary inside
+            // one technical sequence changes support little.
+            let drop = continuation * 2 <= boundary_weight;
+            let (present, anchored) = terminal_support(
+                &trimmed,
+                &recount,
+                end,
+                edit_budget(base.error_rate, trimmed.len()),
+            );
+            measured = Some((present, anchored));
+            let rise = present.saturating_mul(RUN_JUMP as usize) <= continuation as usize;
             let bounded = (observed_boundary || cons.len() < LMAX)
-                && continuation * 2 <= boundary_weight
-                && supported_termination(word, &recount, end);
+                && (rise || (drop && supported_termination(word, &recount, end)));
             if !bounded {
                 tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed),
                     "Recurrent sequence has no supported insert boundary");
-                continue;
             }
+            unbounded = !bounded;
             vec![trimmed]
         };
         for trimmed in sequences {
@@ -895,12 +1124,14 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
             // Presence counts each supporting window once, including reads
             // whose sequencing errors disrupted individual exact k-mers.
             let k_cons = edit_budget(base.error_rate, trimmed.len());
-            let (present, anchored) = terminal_support(&trimmed, &recount, end, k_cons);
+            let (present, anchored) = measured
+                .take()
+                .unwrap_or_else(|| terminal_support(&trimmed, &recount, end, k_cons));
             let support = present as f64 / n_recount as f64;
             tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), present, anchored, has_insert_boundary, "Validated end candidate");
             if present >= MIN_SUPPORT_WINDOWS
                 && support >= KEEP_SUPPORT
-                && anchored * 5 >= present * 4
+                && anchored * 100 >= present * ANCHORED_PERCENT
             {
                 if has_insert_boundary && known_primers.insert(trimmed.clone()) {
                     for hit in primer_searcher.search_texts(&trimmed, &recount, k_cons) {
@@ -911,11 +1142,11 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
                         primer_edges[hit.text_idx] = Some((edge, trimmed.len() / 2));
                     }
                 }
-                out.push((trimmed, support, has_insert_boundary, peak));
+                out.push((trimmed, support, has_insert_boundary, weight, unbounded));
             }
         }
     }
-    out.retain(|(seq, _, boundary, _)| {
+    out.retain(|(seq, _, boundary, _, _)| {
         *boundary
             || !insert_starts
                 .iter()
@@ -923,7 +1154,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
     });
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     if primer_edges.iter().any(Option::is_some) {
-        out.retain(|(seq, _, boundary, _)| {
+        out.retain(|(seq, _, boundary, _, _)| {
             if *boundary {
                 return true;
             }
@@ -940,96 +1171,587 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
     out
 }
 
-/// Discovers supported adapter sequences independently of the reference catalog.
-/// Equivalent end assemblies share one trimming pattern. Catalog and supplied
-/// FASTA entries provide names only after the inferred boundaries are fixed.
-pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
-    let (five_w, three_w) = end_windows(sample, 2 * WINDOW_LEN);
-    let five = assemble(&five_w, base, End::Five);
-    let three = assemble(&three_w, base, End::Three);
-    let background: Vec<&[u8]> = sample
-        .iter()
-        .filter(|r| r.len() >= 4 * WINDOW_LEN)
-        .flat_map(|r| {
-            [
-                &r[WINDOW_LEN..2 * WINDOW_LEN],
-                &r[r.len() - 2 * WINDOW_LEN..r.len() - WINDOW_LEN],
-            ]
-        })
-        .filter(|w| is_plain_acgt(w))
+/// Per-read explained depth from each physical end, in bases.
+struct Boundaries {
+    five: Vec<usize>,
+    three: Vec<usize>,
+}
+
+impl Boundaries {
+    fn new(sample: &[&[u8]]) -> Self {
+        Self {
+            five: vec![0; sample.len()],
+            three: sample.iter().map(|r| r.len()).collect(),
+        }
+    }
+}
+
+/// Windows of one read end, each paired with its sample index.
+type EndWindows<'a> = Vec<(usize, &'a [u8])>;
+
+/// Returns the unexplained windows of at most `w` bases inward from each
+/// boundary, paired with their sample indices. Reads without unexplained
+/// bases contribute no window.
+fn layer_windows<'a>(
+    sample: &[&'a [u8]],
+    bounds: &Boundaries,
+    w: usize,
+) -> (EndWindows<'a>, EndWindows<'a>) {
+    let mut five = Vec::new();
+    let mut three = Vec::new();
+    for (i, &read) in sample.iter().enumerate() {
+        let (b5, b3) = (bounds.five[i], bounds.three[i]);
+        if b3 <= b5 {
+            continue;
+        }
+        let head = &read[b5..(b5 + w).min(b3)];
+        let tail = &read[b3.saturating_sub(w).max(b5)..b3];
+        if is_plain_acgt(head) {
+            five.push((i, head));
+        }
+        if is_plain_acgt(tail) {
+            three.push((i, tail));
+        }
+    }
+    (five, three)
+}
+
+/// Returns the interior windows `w` bases past each boundary, for reads with
+/// at least `4 * w` unexplained bases.
+fn background_windows<'a>(sample: &[&'a [u8]], bounds: &Boundaries, w: usize) -> Vec<&'a [u8]> {
+    let mut out = Vec::new();
+    for (i, &read) in sample.iter().enumerate() {
+        let (b5, b3) = (bounds.five[i], bounds.three[i]);
+        if b3 < b5 + 4 * w {
+            continue;
+        }
+        for window in [&read[b5 + w..b5 + 2 * w], &read[b3 - 2 * w..b3 - w]] {
+            if is_plain_acgt(window) {
+                out.push(window);
+            }
+        }
+    }
+    out
+}
+
+/// Advances each boundary past the innermost hit of `patterns`, on either
+/// strand, that starts within `ANCHOR_SLACK` bases of it, and with `repeat`
+/// past every further hit the window holds. Only reads flagged in `active`
+/// are searched. Returns the reads whose boundary moved, or an empty vector
+/// when none did.
+fn advance_boundaries(
+    sample: &[&[u8]],
+    bounds: &mut Boundaries,
+    patterns: &[Vec<u8>],
+    error_rate: f64,
+    active: &[bool],
+    repeat: bool,
+) -> Vec<bool> {
+    let (five_w, three_w) = layer_windows(sample, bounds, 2 * WINDOW_LEN);
+    let five_w: EndWindows = five_w.into_iter().filter(|(i, _)| active[*i]).collect();
+    let three_w: EndWindows = three_w.into_iter().filter(|(i, _)| active[*i]).collect();
+    let five_texts: Vec<&[u8]> = five_w.iter().map(|(_, w)| *w).collect();
+    let three_texts: Vec<&[u8]> = three_w.iter().map(|(_, w)| *w).collect();
+    let mut five_next = bounds.five.clone();
+    let mut three_next = bounds.three.clone();
+    // Hit spans per window, measured inward from the boundary.
+    let mut five_hits: Vec<Vec<(usize, usize)>> = vec![Vec::new(); five_texts.len()];
+    let mut three_hits: Vec<Vec<(usize, usize)>> = vec![Vec::new(); three_texts.len()];
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    for pattern in patterns {
+        for strand in [pattern.clone(), crate::adapter::reverse_complement(pattern)] {
+            let k = edit_budget(error_rate, strand.len());
+            for hit in searcher.search_texts(&strand, &five_texts, k) {
+                five_hits[hit.text_idx].push((hit.text_start, hit.text_end));
+            }
+            for hit in searcher.search_texts(&strand, &three_texts, k) {
+                let len = three_texts[hit.text_idx].len();
+                three_hits[hit.text_idx].push((len - hit.text_end, len - hit.text_start));
+            }
+        }
+    }
+    let advance = |hits: &[(usize, usize)]| {
+        let mut depth = 0;
+        loop {
+            let next = hits
+                .iter()
+                .filter(|&&(start, end)| start <= depth + ANCHOR_SLACK && end > depth)
+                .map(|&(_, end)| end)
+                .max();
+            match next {
+                Some(end) if repeat => depth = end,
+                Some(end) => return end,
+                None => return depth,
+            }
+        }
+    };
+    for ((i, _), hits) in five_w.iter().zip(&five_hits) {
+        five_next[*i] = bounds.five[*i] + advance(hits);
+    }
+    for ((i, _), hits) in three_w.iter().zip(&three_hits) {
+        three_next[*i] = bounds.three[*i] - advance(hits);
+    }
+    let moved: Vec<bool> = (0..sample.len())
+        .map(|i| five_next[i] != bounds.five[i] || three_next[i] != bounds.three[i])
         .collect();
-    let background = stride_sample(&background, RECOUNT_WINDOWS);
+    bounds.five = five_next;
+    bounds.three = three_next;
+    if moved.contains(&true) {
+        moved
+    } else {
+        Vec::new()
+    }
+}
+
+/// Returns the median depth of the inner edge of `pattern` hits in physical
+/// end windows of `end`, and the number of windows with a hit.
+fn inner_depth(
+    searcher: &mut AmbiguousSearcher,
+    pattern: &[u8],
+    windows: &[&[u8]],
+    end: End,
+    error_rate: f64,
+) -> (usize, usize) {
+    let k = edit_budget(error_rate, pattern.len());
+    let mut best: Vec<Option<(i32, usize)>> = vec![None; windows.len()];
+    for hit in searcher.search_texts(pattern, windows, k) {
+        let depth = match end {
+            End::Five => hit.text_end,
+            End::Three => windows[hit.text_idx].len() - hit.text_start,
+        };
+        let entry = &mut best[hit.text_idx];
+        if entry.is_none_or(|(cost, _)| hit.cost < cost) {
+            *entry = Some((hit.cost, depth));
+        }
+    }
+    let mut depths: Vec<usize> = best.iter().flatten().map(|&(_, d)| d).collect();
+    depths.sort_unstable();
+    let present = depths.len();
+    (depths.get(present / 2).copied().unwrap_or(0), present)
+}
+
+/// Returns the median depth of the outer edge of `pattern` hits in physical
+/// end windows of `end`, or `usize::MAX` without hits.
+fn outer_depth(
+    searcher: &mut AmbiguousSearcher,
+    pattern: &[u8],
+    windows: &[&[u8]],
+    end: End,
+    error_rate: f64,
+) -> usize {
+    let k = edit_budget(error_rate, pattern.len());
+    let mut best: Vec<Option<(i32, usize)>> = vec![None; windows.len()];
+    for hit in searcher.search_texts(pattern, windows, k) {
+        let depth = match end {
+            End::Five => hit.text_start,
+            End::Three => windows[hit.text_idx].len() - hit.text_end,
+        };
+        let entry = &mut best[hit.text_idx];
+        if entry.is_none_or(|(cost, _)| hit.cost < cost) {
+            *entry = Some((hit.cost, depth));
+        }
+    }
+    let mut depths: Vec<usize> = best.iter().flatten().map(|&(_, d)| d).collect();
+    depths.sort_unstable();
+    if depths.len() < MIN_SUPPORT_WINDOWS {
+        return usize::MAX;
+    }
+    depths[depths.len() / 2]
+}
+
+/// Cuts the insert-facing part of `seq` whose reverse complement occurs at
+/// the opposite physical end at a different depth. Returns the outer part,
+/// or `None` when fewer than `MIN_PATTERN_LEN` outer bases remain, with the
+/// removed insert stretch. A mirror at the same depth, or no mirror, leaves
+/// `seq` unchanged.
+fn symmetry_cut(
+    seq: &[u8],
+    end: End,
+    own: &[&[u8]],
+    opposite: &[&[u8]],
+    error_rate: f64,
+) -> (Option<Vec<u8>>, Vec<u8>) {
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let (own_depth, present) = inner_depth(&mut searcher, seq, own, end, error_rate);
+    if present < MIN_SUPPORT_WINDOWS {
+        return (Some(seq.to_vec()), Vec::new());
+    }
+    let opposite_end = match end {
+        End::Five => End::Three,
+        End::Three => End::Five,
+    };
+    // Windows slide from the inner edge outward. A window whose mirror
+    // lies at a different depth is insert, and the cut extends to its outer
+    // edge; a window mirrored at the same depth is technical and ends the
+    // scan. Windows without a recurrent mirror decide nothing, so a few
+    // unmatched bases at the inner tip do not hide the insert behind them.
+    let mut cut = 0;
+    let mut offset = 0;
+    while offset + MIRROR_SEGMENT <= seq.len() {
+        let segment = match end {
+            End::Five => &seq[seq.len() - offset - MIRROR_SEGMENT..seq.len() - offset],
+            End::Three => &seq[offset..offset + MIRROR_SEGMENT],
+        };
+        let mirror = crate::adapter::reverse_complement(segment);
+        let (depth, found) = inner_depth(
+            &mut searcher,
+            &mirror,
+            opposite,
+            opposite_end,
+            MIRROR_ERROR_RATE * error_rate,
+        );
+        tracing::debug!(sequence = %String::from_utf8_lossy(seq), offset, own_depth, present, depth, found, "Mirror");
+        if found >= MIN_SUPPORT_WINDOWS.max(present / MIRROR_SUPPORT_DIVISOR) {
+            if depth.abs_diff(own_depth.saturating_sub(offset)) <= SYMMETRY_TOLERANCE {
+                break;
+            }
+            cut = offset + MIRROR_SEGMENT;
+        }
+        offset += MIRROR_STEP;
+    }
+    if cut == 0 {
+        return (Some(seq.to_vec()), Vec::new());
+    }
+    // The removed stretch is insert up to the last mirrored window, which
+    // may straddle the junction with the technical sequence.
+    let core = cut - MIRROR_SEGMENT;
+    let (outer, insert) = match end {
+        End::Five => (&seq[..seq.len() - cut], &seq[seq.len() - core..]),
+        End::Three => (&seq[cut..], &seq[..core]),
+    };
+    let outer = (outer.len() >= MIN_PATTERN_LEN).then(|| outer.to_vec());
+    (outer, insert.to_vec())
+}
+
+/// Returns whether two candidates reconstruct one family: the same adapter
+/// within the error budget, or reconstructions whose longest common
+/// substring covers `FAMILY_OVERLAP_PERCENT` of the shorter, as remnants of
+/// one adapter that differ in length do.
+fn same_family(a: &[u8], b: &[u8], error_rate: f64) -> bool {
+    if same_adapter(a, b, error_rate) {
+        return true;
+    }
+    let mut longest = 0;
+    let mut previous = vec![0usize; b.len() + 1];
+    for &x in a {
+        let mut current = vec![0usize; b.len() + 1];
+        for (j, &y) in b.iter().enumerate() {
+            if x == y {
+                current[j + 1] = previous[j] + 1;
+                longest = longest.max(current[j + 1]);
+            }
+        }
+        previous = current;
+    }
+    longest * 100 >= a.len().min(b.len()) * FAMILY_OVERLAP_PERCENT
+}
+
+/// Removes from each candidate the prefix and suffix that occur in a
+/// stronger candidate of another family in the same layer and end. Sequence
+/// shared with a better supported neighbour, such as the flank around a
+/// barcode, belongs to that neighbour's layer; a fragment of the candidate
+/// itself is never stronger. Candidates left shorter than `MIN_PATTERN_LEN`
+/// are dropped.
+fn strip_shared_ends(candidates: &mut Vec<Candidate>, error_rate: f64) {
+    // Longest prefix of `a` that occurs anywhere in `b`.
+    let shared_prefix = |a: &[u8], b: &[u8]| {
+        (SHARED_END_MIN..=a.len())
+            .rev()
+            .find(|&n| b.windows(n).any(|w| w == &a[..n]))
+            .unwrap_or(0)
+    };
+    let originals: Vec<(Vec<u8>, u64)> = candidates.iter().map(|c| (c.0.clone(), c.3)).collect();
+    for (i, candidate) in candidates.iter_mut().enumerate() {
+        let (seq, weight) = &originals[i];
+        let reversed: Vec<u8> = seq.iter().rev().copied().collect();
+        let mut prefix = 0;
+        let mut suffix = 0;
+        for (j, (other, other_weight)) in originals.iter().enumerate() {
+            if j == i || other_weight <= weight || same_family(seq, other, error_rate) {
+                continue;
+            }
+            prefix = prefix.max(shared_prefix(seq, other));
+            let other_reversed: Vec<u8> = other.iter().rev().copied().collect();
+            suffix = suffix.max(shared_prefix(&reversed, &other_reversed));
+        }
+        let start = if prefix >= SHARED_END_MIN { prefix } else { 0 };
+        let end = if suffix >= SHARED_END_MIN {
+            seq.len().saturating_sub(suffix).max(start)
+        } else {
+            seq.len()
+        };
+        candidate.0 = seq[start..end].to_vec();
+    }
+    candidates.retain(|c| c.0.len() >= MIN_PATTERN_LEN);
+}
+
+/// A merged layer family ready for variant suppression: sequence, support,
+/// supporting windows, their count, whether it carries an insert boundary,
+/// its end, and its path weight.
+type Ranked = (Vec<u8>, f64, Vec<bool>, usize, bool, End, u64);
+
+/// Discovers supported technical sequences in layers from each read end.
+/// Known sequences in `base` explain the outermost layers first; each
+/// accepted layer moves the boundary inward and the next layer is assembled
+/// from the unexplained sequence. Equivalent assemblies share one trimming
+/// pattern. Catalog and supplied FASTA entries provide names only after the
+/// inferred boundaries are fixed.
+pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
+    let mut bounds = Boundaries::new(sample);
+    let known: Vec<Vec<u8>> = base
+        .adapters
+        .iter()
+        .map(|a| a.seq.to_ascii_uppercase())
+        .collect();
+    if !known.is_empty() {
+        let mut active = vec![true; sample.len()];
+        for _ in 0..MAX_LAYERS {
+            active =
+                advance_boundaries(sample, &mut bounds, &known, base.error_rate, &active, true);
+            if active.is_empty() {
+                break;
+            }
+        }
+    }
+    let physical = Boundaries::new(sample);
+    let (five_p, three_p) = layer_windows(sample, &physical, MIRROR_WINDOW);
+    let five_phys: Vec<&[u8]> = stride_sample(
+        &five_p.iter().map(|(_, w)| *w).collect::<Vec<_>>(),
+        RECOUNT_WINDOWS,
+    );
+    let three_phys: Vec<&[u8]> = stride_sample(
+        &three_p.iter().map(|(_, w)| *w).collect::<Vec<_>>(),
+        RECOUNT_WINDOWS,
+    );
+
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let mut distinct: Vec<(Vec<u8>, f64, usize, bool)> = Vec::new();
+    // An accepted primer marks the insert boundary at its end; no layer lies
+    // beyond it.
+    let mut open = [true, true];
+    for layer in 0..MAX_LAYERS {
+        let (mut five_w, mut three_w) = layer_windows(sample, &bounds, 2 * WINDOW_LEN);
+        if !open[0] {
+            five_w.clear();
+        }
+        if !open[1] {
+            three_w.clear();
+        }
+        let five_texts: Vec<&[u8]> = five_w.iter().map(|(_, w)| *w).collect();
+        let three_texts: Vec<&[u8]> = three_w.iter().map(|(_, w)| *w).collect();
+        // Ranking statistics use windows distributed across the sample.
+        let five_sample = stride_sample(&five_texts, RECOUNT_WINDOWS);
+        let three_sample = stride_sample(&three_texts, RECOUNT_WINDOWS);
+        let mut five = assemble(&five_texts, base, End::Five, layer == 0);
+        let mut three = assemble(&three_texts, base, End::Three, layer == 0);
+        strip_shared_ends(&mut five, base.error_rate);
+        strip_shared_ends(&mut three, base.error_rate);
+        let background = background_windows(sample, &bounds, WINDOW_LEN);
+        let background = stride_sample(&background, RECOUNT_WINDOWS);
+
+        // Insert stretches identified by their mirror also reject the graph
+        // fragments that reconstruct part of them.
+        let mut inserts: Vec<Vec<u8>> = Vec::new();
+        let cut: Vec<(Vec<u8>, f64, bool, u64, End)> = five
+            .into_iter()
+            .map(|c| (c, End::Five))
+            .chain(three.into_iter().map(|c| (c, End::Three)))
+            .filter(|((seq, support, _, _, _), _)| {
+                seq.len() >= MIN_PATTERN_LEN && *support >= KEEP_SUPPORT
+            })
+            .filter_map(|((seq, support, boundary, weight, unbounded), end)| {
+                let (own, opposite) = match end {
+                    End::Five => (&five_phys, &three_phys),
+                    End::Three => (&three_phys, &five_phys),
+                };
+                // A mirror at the opposite end is the only insert evidence
+                // for a candidate the assembly window could not bound.
+                let (cut, insert) = symmetry_cut(&seq, end, own, opposite, base.error_rate);
+                if insert.len() >= MIN_PATTERN_LEN {
+                    inserts.push(crate::adapter::reverse_complement(&insert));
+                    inserts.push(insert);
+                }
+                let cut = cut?;
+                if unbounded && cut.len() == seq.len() {
+                    return None;
+                }
+                Some((cut, support, boundary, weight, end))
+            })
+            .collect();
+        let mut candidates: Vec<(Vec<u8>, f64, u32, bool, u64, End)> = cut
+            .into_iter()
+            .filter(|(seq, _, _, _, _)| {
+                !inserts
+                    .iter()
+                    .any(|insert| same_family(seq, insert, base.error_rate))
+            })
+            .filter_map(|(seq, support, boundary, weight, end)| {
+                let count = windows_containing(
+                    &mut searcher,
+                    &seq,
+                    &background,
+                    edit_budget(base.error_rate, seq.len()),
+                );
+                if !background.is_empty() && count as f64 * 4.0 >= support * background.len() as f64
+                {
+                    return None;
+                }
+                let exact = windows_containing(&mut searcher, &seq, &five_sample, 0)
+                    + windows_containing(&mut searcher, &seq, &three_sample, 0);
+                tracing::debug!(sequence = %String::from_utf8_lossy(&seq), exact, "Layer candidate");
+                Some((seq, support, exact, boundary, weight, end))
+            })
+            .collect();
+        // Independently supported insert boundaries take precedence over graph
+        // fragments that may include conserved insert sequence. Exact support
+        // then distinguishes reconstructions from nearby sequencing-error variants.
+        candidates.sort_by(|a, b| {
+            b.3.cmp(&a.3)
+                .then_with(|| {
+                    if a.3 && b.3 {
+                        b.2.cmp(&a.2)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then(b.4.cmp(&a.4))
+                .then(b.2.cmp(&a.2))
+                .then(b.1.total_cmp(&a.1))
+                .then(b.0.len().cmp(&a.0.len()))
+                .then(a.0.cmp(&b.0))
+        });
+        // Contained reconstructions merge into the candidate that ranks first.
+        let mut merged: Vec<(Vec<u8>, f64, u64, bool, End)> = Vec::new();
+        for (seq, support, _, boundary, weight, end) in candidates {
+            let matched = weight;
+            // A family found again in a later layer, in reads its first
+            // occurrence did not match, is not a new layer.
+            if let Some((_, previous, _, _)) = distinct
+                .iter_mut()
+                .find(|(other, _, _, _)| same_family(&seq, other, base.error_rate))
+            {
+                *previous = previous.max(support);
+            } else if let Some((other, previous, best, _, _)) = merged
+                .iter_mut()
+                .find(|(other, _, _, _, _)| same_adapter(&seq, other, base.error_rate))
+            {
+                if matched > *best {
+                    *other = seq;
+                    *best = matched;
+                }
+                *previous = previous.max(support);
+            } else {
+                merged.push((seq, support, matched, boundary, end));
+            }
+        }
+        // Sequencing variants of a family occupy the same reads as the
+        // family; distinct families occupy different reads.
+        let layer_texts: Vec<&[u8]> = five_sample.iter().chain(&three_sample).copied().collect();
+        let mut ranked: Vec<Ranked> = merged
+            .into_iter()
+            .map(|(seq, support, matched, boundary, end)| {
+                let k = edit_budget(base.error_rate, seq.len());
+                let mut windows = windows_with(&mut searcher, &seq, &layer_texts, k);
+                let mirror = crate::adapter::reverse_complement(&seq);
+                for (window, hit) in
+                    windows
+                        .iter_mut()
+                        .zip(windows_with(&mut searcher, &mirror, &layer_texts, k))
+                {
+                    *window |= hit;
+                }
+                let own = windows.iter().filter(|&&w| w).count();
+                (seq, support, windows, own, boundary, end, matched)
+            })
+            .collect();
+        // Complete reconstructions rank above fragments that run into the
+        // insert, which match more windows over fewer exact bases.
+        ranked.sort_by(|a, b| {
+            b.6.cmp(&a.6)
+                .then(b.3.cmp(&a.3))
+                .then(b.0.len().cmp(&a.0.len()))
+                .then(a.0.cmp(&b.0))
+        });
+        let mut accepted: Vec<Vec<u8>> = Vec::new();
+        let mut accepted_windows: Vec<Vec<bool>> = Vec::new();
+        let mut accepted_ends: Vec<End> = Vec::new();
+        for (seq, support, windows, own, boundary, end, matched) in ranked {
+            let variant = accepted_windows.iter().any(|other| {
+                let shared = windows
+                    .iter()
+                    .zip(other)
+                    .filter(|(a, b)| **a && **b)
+                    .count();
+                shared * 100 >= own * VARIANT_OVERLAP_PERCENT
+            });
+            tracing::debug!(sequence = %String::from_utf8_lossy(&seq), matched, own, variant, "Ranked candidate");
+            if variant {
+                continue;
+            }
+            let flush = layer == 0
+                && known.is_empty()
+                && [(End::Five, &five_phys), (End::Three, &three_phys)]
+                    .iter()
+                    .any(|(end, phys)| {
+                        outer_depth(&mut searcher, &seq, phys, *end, base.error_rate)
+                            <= ADAPTER_FLUSH
+                    });
+            if boundary {
+                open[usize::from(end == End::Three)] = false;
+            }
+            accepted_ends.push(end);
+            accepted.push(seq.clone());
+            accepted_windows.push(windows);
+            distinct.push((seq, support, layer, flush));
+        }
+        tracing::debug!(
+            layer = layer + 1,
+            accepted = accepted.len(),
+            "Discovery layer"
+        );
+        // An end without a layer here has none deeper either.
+        for (index, end) in [End::Five, End::Three].into_iter().enumerate() {
+            if !accepted_ends.contains(&end) {
+                open[index] = false;
+            }
+        }
+        if accepted.is_empty()
+            || advance_boundaries(
+                sample,
+                &mut bounds,
+                &accepted,
+                base.error_rate,
+                &vec![true; sample.len()],
+                false,
+            )
+            .is_empty()
+        {
+            break;
+        }
+    }
 
     let refs = crate::adapter::preset::preset(crate::adapter::preset::Kit::ALL);
     let name_refs: Vec<Adapter> = refs
         .into_iter()
         .chain(base.adapters.iter().cloned())
         .collect();
-
-    let mut searcher = crate::adapter::search::new_searcher_fwd();
-    let mut candidates: Vec<(Vec<u8>, f64, u32, bool, u32)> = five
-        .into_iter()
-        .chain(three)
-        .filter(|(seq, support, _, _)| seq.len() >= MIN_PATTERN_LEN && *support >= KEEP_SUPPORT)
-        .filter_map(|(seq, support, boundary, peak)| {
-            let count = windows_containing(
-                &mut searcher,
-                &seq,
-                &background,
-                edit_budget(base.error_rate, seq.len()),
-            );
-            if !background.is_empty() && count as f64 * 4.0 >= support * background.len() as f64 {
-                return None;
-            }
-            let exact = windows_containing(&mut searcher, &seq, &five_w, 0)
-                + windows_containing(&mut searcher, &seq, &three_w, 0);
-            Some((seq, support, exact, boundary, peak))
-        })
-        .collect();
-    // Independently supported insert boundaries take precedence over graph
-    // fragments that may include conserved insert sequence. Exact support
-    // then distinguishes reconstructions from nearby sequencing-error variants.
-    candidates.sort_by(|a, b| {
-        b.3.cmp(&a.3)
-            .then_with(|| {
-                if a.3 && b.3 {
-                    b.2.cmp(&a.2)
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .then(b.4.cmp(&a.4))
-            .then(b.2.cmp(&a.2))
-            .then(b.1.total_cmp(&a.1))
-            .then(b.0.len().cmp(&a.0.len()))
-            .then(a.0.cmp(&b.0))
-    });
-    let mut distinct: Vec<(Vec<u8>, f64)> = Vec::new();
-    for (seq, support, _, _, _) in candidates {
-        if let Some((_, previous)) = distinct
-            .iter_mut()
-            .find(|(other, _)| same_adapter(&seq, other, base.error_rate))
-        {
-            *previous = previous.max(support);
-        } else {
-            distinct.push((seq, support));
-        }
-    }
-    distinct.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    distinct.sort_by(|a, b| a.2.cmp(&b.2).then(b.1.total_cmp(&a.1)).then(a.0.cmp(&b.0)));
     distinct
         .into_iter()
         .enumerate()
-        .map(|(i, (seq, support))| {
+        .map(|(i, (seq, support, layer, flush))| {
             let name_hits = name_against(&seq, &name_refs, base.error_rate);
+            let role = if flush { Role::Adapter } else { Role::Primer };
             InferredAdapter {
                 adapter: Adapter {
                     name: format!("inferred_{}", i + 1),
                     seq: seq.clone(),
-                    role: Role::Adapter,
+                    role,
                 },
                 assembled_seq: seq,
                 support,
                 name_hits,
+                layer,
             }
         })
         .collect()
@@ -1053,11 +1775,15 @@ mod tests {
     }
 
     fn infer_owned(reads: &[Vec<u8>]) -> Vec<InferredAdapter> {
+        infer_with_known(reads, Vec::new())
+    }
+
+    fn infer_with_known(reads: &[Vec<u8>], known: Vec<Adapter>) -> Vec<InferredAdapter> {
         let sample: Vec<&[u8]> = reads.iter().map(Vec::as_slice).collect();
         discover(
             &sample,
             &AdapterConfig {
-                adapters: vec![],
+                adapters: known,
                 error_rate: 0.2,
                 end_size: 150,
                 split: true,
@@ -1428,7 +2154,7 @@ mod tests {
             mk(b"TGGT", 89),
             mk(b"GGTT", 88),
         ];
-        let paths = peel_paths(nodes, 4);
+        let paths = peel_paths(nodes, 4, End::Five);
         assert_eq!(paths.len(), 2);
         assert!(paths[0].0.starts_with(b"ACGT"));
         assert!(paths[1].0.starts_with(b"TTGG"));
@@ -1865,6 +2591,127 @@ mod tests {
             top.adapter.seq.iter().all(u8::is_ascii_uppercase),
             "Discovered sequence must be uppercase: {:?}",
             String::from_utf8_lossy(&top.adapter.seq)
+        );
+    }
+
+    fn rc(seq: &[u8]) -> Vec<u8> {
+        crate::adapter::reverse_complement(seq)
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        needle.len() <= hay.len() && hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn known_adapter_precedes_a_discovered_primer_layer() {
+        let adapter = random_bases(5011, 30);
+        let primer = random_bases(5023, 22);
+        let reads: Vec<Vec<u8>> = (0..600)
+            .map(|i| {
+                let mut read = adapter.clone();
+                read.extend_from_slice(&primer);
+                read.extend(random_bases(7000 + i, 400));
+                read
+            })
+            .collect();
+        let known = vec![Adapter {
+            name: "known".into(),
+            seq: adapter.clone(),
+            role: Role::Adapter,
+        }];
+        let found = infer_with_known(&reads, known);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].adapter.seq, primer);
+        assert_eq!(found[0].adapter.role, Role::Primer);
+        assert_eq!(found[0].layer, 0);
+    }
+
+    #[test]
+    fn discovers_barcode_layer_between_flanks() {
+        let adapter = random_bases(6011, 30);
+        let flank1 = random_bases(6023, 16);
+        let flank2 = random_bases(6031, 32);
+        let barcodes: Vec<Vec<u8>> = (0..8).map(|i| random_bases(6100 + i, 24)).collect();
+        let reads: Vec<Vec<u8>> = (0..1600)
+            .map(|i| {
+                let mut read = adapter.clone();
+                read.extend_from_slice(&flank1);
+                read.extend_from_slice(&barcodes[i % 8]);
+                read.extend_from_slice(&flank2);
+                read.extend(random_bases(9000 + i as u64, 400));
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        for d in &found {
+            let technical = barcodes.iter().any(|b| {
+                contains(
+                    &[&adapter[..], &flank1, b, &flank2].concat(),
+                    &d.adapter.seq,
+                )
+            });
+            assert!(technical, "{:?}", String::from_utf8_lossy(&d.adapter.seq));
+            let expected = if contains(&d.adapter.seq, &adapter[..16]) {
+                Role::Adapter
+            } else {
+                Role::Primer
+            };
+            assert_eq!(d.adapter.role, expected, "{d:?}");
+        }
+        assert!(
+            found
+                .iter()
+                .any(|d| d.layer == 0 && contains(&d.adapter.seq, &adapter[..16]))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|d| d.layer > 0 && contains(&d.adapter.seq, &flank2)),
+            "{found:?}"
+        );
+        let cfg = AdapterConfig {
+            adapters: found.into_iter().map(|d| d.adapter).collect(),
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+            min_piece: 20,
+            candidate_index: std::sync::OnceLock::new(),
+        };
+        for read in reads.iter().take(16) {
+            let segments = crate::adapter::adapter_segments(read, &cfg);
+            assert_eq!(segments, vec![(102, read.len())], "{segments:?}");
+        }
+    }
+
+    #[test]
+    fn conserved_insert_mirrored_at_truncated_read_ends_is_excluded() {
+        let adapter = random_bases(7011, 30);
+        let primer = random_bases(7023, 20);
+        let conserved = random_bases(7031, 40);
+        let reads: Vec<Vec<u8>> = (0..800)
+            .map(|i| {
+                let mut read = adapter.clone();
+                read.extend_from_slice(&primer);
+                read.extend_from_slice(&conserved);
+                read.extend(random_bases(11000 + i as u64, 300));
+                read.extend(rc(&conserved));
+                read.extend_from_slice(&rc(&primer)[..7]);
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        assert!(!found.is_empty());
+        let technical = [&adapter[..], &primer].concat();
+        for d in &found {
+            assert!(
+                contains(&technical, &d.adapter.seq),
+                "{:?}",
+                String::from_utf8_lossy(&d.adapter.seq)
+            );
+        }
+        assert!(
+            found.iter().any(|d| contains(&d.adapter.seq, &adapter)),
+            "{found:?}"
         );
     }
 }

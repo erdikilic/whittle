@@ -107,9 +107,12 @@ whittle -i reads.fastq.gz --discover-adapters report
 whittle -i reads.fastq.gz -o trimmed.fastq.gz --discover-adapters
 ```
 
-Discovery uses one automatic boundary rule for reporting, trimming, and splitting.
-It can recover multiple recurrent adapters and degenerate primers from the same
-sample. Exact k-mer assembly and batched sassy alignments determine the sequences;
+Discovery proceeds in layers from each read end: adapter, barcode flanks,
+barcodes and primers, each accepted with its own read support and insert
+boundary. A preset or FASTA given with `--discover-adapters` is trimmed first
+and discovery continues beyond it, which recovers unknown primers behind a
+known kit. It can recover multiple recurrent adapters and degenerate primers
+from the same sample. Exact k-mer assembly and batched sassy alignments determine the sequences;
 catalog matches provide names only. Minority families require independent read
 support and enrichment near read ends; short repeats are excluded. Conserved
 amplicon sequence is excluded when reads without a primer establish the insert
@@ -157,7 +160,7 @@ original reads. Sampled reads remain in the processing stream. Processing then
 follows this order:
 
 1. **Adapters.** Search the original read, trim terminal adapters and primers, and split at interior adapters. Clean each new end. Reads without a match continue as one segment.
-2. **Barcodes.** `--trim-barcodes` intersects each segment with the retained interval from the original `bi` tag.
+2. **Barcodes.** Barcode spans recorded in the `bi` tag are removed where a barcode sequence is found at them.
 3. **Fixed crop.** `--trim-front` and `--trim-tail` crop each retained adapter-derived segment once.
 4. **Quality.** Apply `--trim-quality`, `--best-quality-segment`, or `--split-quality` to each cropped segment. Quality splitting can produce further segments; these are not cropped again.
 5. **Filter.** Each final segment must pass the length, quality, and GC bounds.

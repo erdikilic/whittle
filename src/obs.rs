@@ -393,6 +393,13 @@ impl ProgressHandle {
                  left untrimmed"
             );
         }
+        if stats.barcode_tag_unverified_reads > 0 {
+            tracing::warn!(
+                reads = stats.barcode_tag_unverified_reads,
+                "Barcode positions (bi) at which no barcode sequence was found were left \
+                 untrimmed"
+            );
+        }
 
         // Guardrail warnings: an empty input and an all-dropped run both exit
         // successfully, and both are reported at WARN so they are

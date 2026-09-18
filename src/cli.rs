@@ -224,12 +224,6 @@ struct Cli {
     /// basecall_model in the read-group description.
     #[arg(long = "update-signal-tags", help_heading = "Tags")]
     update_moves: bool,
-    /// Restrict adapter-derived segments to the retained interval recorded in
-    /// the original bi aux tag, before fixed cropping. Requires BAM or tagged
-    /// FASTQ; does not detect barcodes.
-    #[arg(long, help_heading = "Trimming")]
-    trim_barcodes: bool,
-
     /// Remove this two-character aux tag from every output record. Repeatable.
     /// BAM or tagged FASTQ input.
     #[arg(long, value_name = "TAG", help_heading = "Tags")]
@@ -283,10 +277,11 @@ struct Cli {
         help_heading = "Adapter trimming"
     )]
     adapter_sample: Option<usize>,
-    /// Discover adapters and primers de novo with automatic boundaries.
-    /// Report prints discovered FASTA to stdout and exits without read output
-    /// or a JSON summary. Both actions use the same sequences. Defaults to
-    /// trim when given no value.
+    /// Discover adapters, barcodes and primers de novo in layers from each
+    /// read end. A preset or FASTA is trimmed first and discovery continues
+    /// beyond it. Report prints discovered FASTA to stdout and exits without
+    /// read output or a JSON summary. Both actions use the same sequences.
+    /// Defaults to trim when given no value.
     #[arg(
         long = "discover-adapters",
         value_enum,
@@ -399,7 +394,6 @@ pub fn parse() -> anyhow::Result<Config> {
         progress: c.progress,
         adapter_fasta: c.adapter_fasta,
         adapters_configured: None,
-        trim_barcodes: c.trim_barcodes,
         remove_tags,
     };
 
@@ -526,33 +520,10 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
         .adapter_infer
         .map_or(AdapterInfer::Off, |action| AdapterInfer::Enabled { action });
 
-    // Trim mode excludes an explicit FASTA; report mode allows one so the
-    // discoveries can be named against it.
-    if matches!(
-        adapter_infer,
-        AdapterInfer::Enabled {
-            action: AdapterInferAction::Trim,
-            ..
-        }
-    ) && c.adapter_fasta.is_some()
-    {
-        anyhow::bail!(
-            "--discover-adapters and --adapter-fasta are mutually exclusive (one discovers \
-             the set, the other supplies it); --discover-adapters report --adapter-fasta <file> \
-             names discovered adapters against a supplied FASTA"
-        );
-    }
-    // Under inference the preset is not searched for trimming, since inference
-    // builds its own set; it is retained only to name discovered adapters.
-    if adapter_infer != AdapterInfer::Off && preset_kits(c)?.is_some() {
-        advisories.push(Advisory::warn(
-            "--adapter-preset is ignored for trimming under --discover-adapters \
-             (used only for naming discovered adapters)",
-        ));
-    }
-    // Report mode names discovered adapters against the union of the built-in
-    // adapter catalog and the supplied FASTA (see `infer::discover`), so FASTA entry
-    // names appear alongside catalog names.
+    // A FASTA or preset supplied with inference is trimmed first, and
+    // inference continues from the boundary those sequences leave. Report
+    // mode names discovered adapters against the built-in catalog and the
+    // supplied FASTA (see `infer::discover`).
     if adapter_infer.is_report() && c.adapter_fasta.is_some() {
         advisories.push(Advisory::info(
             "--discover-adapters report with --adapter-fasta: discovered adapters are named \
@@ -572,16 +543,11 @@ fn resolve_adapters(
     adapter_infer: AdapterInfer,
     advisories: &mut Vec<Advisory>,
 ) -> anyhow::Result<Option<crate::adapter::AdapterConfig>> {
-    // Under inference the trimming set is discovered later, so the preset
-    // sequences are dropped here and only the FASTA entries are carried onward,
-    // as naming references for `infer::discover`, which looks up the built-in
-    // catalog itself. A report-only FASTA is never trimmed against: discovery
-    // replaces the set before dispatch and report mode exits first. Under
-    // `Trim` a FASTA is rejected by `resolve_infer`.
+    // Preset and FASTA sequences form the known set. Under inference they are
+    // trimmed first and also name the discoveries; `infer::discover` looks up
+    // the built-in catalog itself. Report mode exits before any trimming.
     let mut adapter_seqs: Vec<crate::adapter::Adapter> = Vec::new();
-    if adapter_infer == AdapterInfer::Off
-        && let Some(kits) = preset_kits(c)?
-    {
+    if let Some(kits) = preset_kits(c)? {
         adapter_seqs.extend(crate::adapter::preset::preset(&kits));
     }
     if let Some(path) = &c.adapter_fasta {
