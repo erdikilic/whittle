@@ -109,7 +109,7 @@ whittle -i reads.fastq.gz -o trimmed.fastq.gz --discover-adapters
 
 Discovery proceeds in layers from each read end: adapter, barcode flanks,
 barcodes and primers, each accepted with its own read support and insert
-boundary. A preset or FASTA given with `--discover-adapters` is trimmed first
+boundary. Barcode panels are clustered from the reads between their flanks. A preset or FASTA given with `--discover-adapters` is trimmed first
 and discovery continues beyond it, which recovers unknown primers behind a
 known kit. It can recover multiple recurrent adapters and degenerate primers
 from the same sample. Exact k-mer assembly and batched sassy alignments determine the sequences;

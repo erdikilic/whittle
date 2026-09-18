@@ -103,13 +103,28 @@ the next layer is assembled from the unexplained sequence, so an adapter
 remnant, a barcode flank and the barcodes of a rapid barcoding library are
 found in turn. A layer ends where the support of adjacent k-mers changes
 fourfold, such as where a barcode joins its shared flank, and the sequence
-past that point belongs to the next layer. Layers stop when no candidate
-passes the checks below, after at most eight per end. A discovered sequence
-flush with the physical read end takes the adapter role and splits reads at
-interior hits; deeper sequences trim ends only, like catalog barcodes and
-primers. On barcoded amplicon libraries discovery recovers the adapter,
-flank and barcode layers; the primers behind them are best supplied by the
-kit preset or a FASTA, which discovery then extends.
+past that point belongs to the next layer. A variable layer is resolved from
+the reads rather than the graph: when the best supported candidate lies at
+least 12 bases past the boundary and every candidate at the boundary is
+fourfold rarer, the stretch before it holds one member per read, and those
+members are clustered by edit distance into families of at least 1% of the
+windows and 20 reads. This recovers each barcode of a panel between its
+flanks, from four to 96 barcodes, and reports them with the barcode role.
+Layers stop when no candidate passes the checks below, after at most eight
+per end. A discovered sequence flush with the physical read end takes the
+adapter role and splits reads at interior hits; deeper sequences trim ends
+only, like catalog barcodes and primers.
+
+Discovery separates primers from the amplicon they bind by the far end of
+the molecule. A conserved gene start that reads reach from the other side
+appears there without the primer stack around it and is left in the read; a
+primer whose reverse complement is absent from the far end, as in rapid
+amplicon libraries, is trimmed. When reads run through the far primer, the
+primer and the conserved start both recur at both ends and cannot be told
+apart by structure: discovery then leaves the primers of one-sided libraries
+and, in libraries barcoded at both ends, trims the conserved start with them.
+Supply the primers with a kit preset or `--adapter-fasta` for such
+libraries; discovery continues beyond them.
 
 Discovery counts exact 16-mers in the first 100 unexplained bases at each end
 of the sampled reads, once per read-end window. Short tandem-repeat seeds are

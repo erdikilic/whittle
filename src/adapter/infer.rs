@@ -475,7 +475,7 @@ fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize, end: End) -> Vec<(Vec<u8>, V
                     .unwrap_or(0)
             })
             .collect();
-        let (lo, hi) = supported_span(&weights, end);
+        let (lo, hi, _) = supported_span(&weights, end);
         let mut used: std::collections::HashSet<u64> = cons[lo..hi.min(cons.len())]
             .windows(k)
             .filter_map(encode_kmer)
@@ -865,13 +865,13 @@ const RAMP: usize = 4;
 const RUN_PERSIST: usize = 24;
 
 /// Returns the base span `[lo, hi)` of the outermost support run of a
-/// consensus. `weights` holds the support of each k-mer by start base.
-/// Scanning inward from the read end, the run ends at the first boundary
-/// between two flat plateaus whose supports differ `RUN_JUMP`-fold, where
-/// the new level persists for `RUN_PERSIST` k-mers or to the end. Within
-/// the run, k-mers below `BOUNDARY_SUPPORT` of the run peak are trimmed from
-/// both sides.
-fn supported_span(weights: &[u32], end: End) -> (usize, usize) {
+/// consensus and whether the run ends at a rise in support. `weights` holds
+/// the support of each k-mer by start base. Scanning inward from the read
+/// end, the run ends at the first boundary between two flat plateaus whose
+/// supports differ `RUN_JUMP`-fold, where the new level persists for
+/// `RUN_PERSIST` k-mers or to the end. Within the run, k-mers below
+/// `BOUNDARY_SUPPORT` of the run peak are trimmed from both sides.
+fn supported_span(weights: &[u32], end: End) -> (usize, usize, bool) {
     let n = weights.len();
     let order: Vec<usize> = match end {
         End::Five => (0..n).collect(),
@@ -894,6 +894,7 @@ fn supported_span(weights: &[u32], end: End) -> (usize, usize) {
         max <= min.saturating_mul(2)
     };
     let mut last = order.len() - 1;
+    let mut rises = false;
     for j in first + PLATEAU..order.len() {
         let left = &order[j - PLATEAU..j];
         let right_start = j + RAMP;
@@ -936,6 +937,7 @@ fn supported_span(weights: &[u32], end: End) -> (usize, usize) {
             split += 1;
         }
         last = split - 1;
+        rises = rise;
         break;
     }
     let run = &order[first..=last];
@@ -948,9 +950,9 @@ fn supported_span(weights: &[u32], end: End) -> (usize, usize) {
         hi = hi.max(j + KMER_K);
     }
     if lo == usize::MAX {
-        (0, KMER_K.min(n + KMER_K - 1))
+        (0, KMER_K.min(n + KMER_K - 1), rises)
     } else {
-        (lo, hi)
+        (lo, hi, rises)
     }
 }
 
@@ -1025,7 +1027,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End, contrast: bool) -
                     .unwrap_or(0)
             })
             .collect();
-        let (lo, hi) = supported_span(&weights, end);
+        let (lo, hi, rises) = supported_span(&weights, end);
         let span = &weights[lo..=hi - KMER_K];
         let peak = span.iter().copied().max().unwrap_or(0);
         // The path weight measures completeness: a fragment running into
@@ -1079,26 +1081,29 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End, contrast: bool) -
             let code = encode_kmer(word).unwrap();
             let boundary_weight = original_weights[&code];
             let mask = (1u64 << (2 * KMER_K)) - 1;
-            let continuation = (0..4)
+            let (continuation, next) = (0..4)
                 .map(|base| {
                     let next = match end {
                         End::Five => ((code << 2) | base) & mask,
                         End::Three => (code >> 2) | (base << (2 * (KMER_K - 1))),
                     };
-                    original_weights.get(&next).copied().unwrap_or(0)
+                    (original_weights.get(&next).copied().unwrap_or(0), next)
                 })
                 .max()
-                .unwrap_or(0);
+                .unwrap_or((0, 0));
             let observed_boundary = match end {
                 End::Five => hi < cons.len(),
                 End::Three => lo > 0,
             };
             // Support drops at an insert boundary. It rises where a layer
-            // such as a barcode joins a shared downstream layer: the
-            // downstream k-mer is then supported by `RUN_JUMP` times more
-            // windows than contain the candidate at all, which a variant
-            // path joining its own family never reaches. A boundary inside
-            // one technical sequence changes support little.
+            // such as a barcode joins a shared downstream layer: between the
+            // support plateaus of the path, or where the downstream k-mer
+            // occurs in `RUN_JUMP` times more windows than contain the
+            // candidate at all. Assembly windows shorter than the layer
+            // stack depress the downstream k-mer count; a twofold excess in
+            // those counts is confirmed on the validation windows, where a
+            // variant path joining its own family never reaches twofold. A
+            // boundary inside one technical sequence changes support little.
             let drop = continuation * 2 <= boundary_weight;
             let (present, anchored) = terminal_support(
                 &trimmed,
@@ -1107,11 +1112,22 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End, contrast: bool) -
                 edit_budget(base.error_rate, trimmed.len()),
             );
             measured = Some((present, anchored));
-            let rise = present.saturating_mul(RUN_JUMP as usize) <= continuation as usize;
-            let bounded = (observed_boundary || cons.len() < LMAX)
-                && (rise || (drop && supported_termination(word, &recount, end)));
+            let rise = rises
+                || present.saturating_mul(RUN_JUMP as usize) <= continuation as usize
+                || (continuation >= 2 * boundary_weight && {
+                    let downstream = windows_containing(
+                        &mut primer_searcher,
+                        &decode_kmer(next, KMER_K),
+                        &recount,
+                        edit_budget(base.error_rate, KMER_K),
+                    );
+                    downstream as usize >= 2 * present
+                });
+            let terminated = drop && supported_termination(word, &recount, end);
+            let bounded = (observed_boundary || cons.len() < LMAX) && (rise || terminated);
             if !bounded {
-                tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed),
+                tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), observed_boundary,
+                    boundary_weight, continuation, present, drop, terminated,
                     "Recurrent sequence has no supported insert boundary");
             }
             unbounded = !bounded;
@@ -1460,14 +1476,14 @@ fn strip_shared_ends(candidates: &mut Vec<Candidate>, error_rate: f64) {
             .find(|&n| b.windows(n).any(|w| w == &a[..n]))
             .unwrap_or(0)
     };
-    let originals: Vec<(Vec<u8>, u64)> = candidates.iter().map(|c| (c.0.clone(), c.3)).collect();
+    let originals: Vec<(Vec<u8>, f64)> = candidates.iter().map(|c| (c.0.clone(), c.1)).collect();
     for (i, candidate) in candidates.iter_mut().enumerate() {
-        let (seq, weight) = &originals[i];
+        let (seq, support) = &originals[i];
         let reversed: Vec<u8> = seq.iter().rev().copied().collect();
         let mut prefix = 0;
         let mut suffix = 0;
-        for (j, (other, other_weight)) in originals.iter().enumerate() {
-            if j == i || other_weight <= weight || same_family(seq, other, error_rate) {
+        for (j, (other, other_support)) in originals.iter().enumerate() {
+            if j == i || other_support <= support || same_family(seq, other, error_rate) {
                 continue;
             }
             prefix = prefix.max(shared_prefix(seq, other));
@@ -1483,6 +1499,142 @@ fn strip_shared_ends(candidates: &mut Vec<Candidate>, error_rate: f64) {
         candidate.0 = seq[start..end].to_vec();
     }
     candidates.retain(|c| c.0.len() >= MIN_PATTERN_LEN);
+}
+
+/// Resolves a variable layer in front of a constant one. When the best
+/// supported candidate lies at least `MIN_PATTERN_LEN` bases past the
+/// boundary and every candidate at the boundary is `RUN_JUMP` times rarer,
+/// the stretch before it holds one member per read of a variable layer,
+/// such as a barcode set between its flanks. The members are clustered
+/// from the reads and replace the assembled fragments that started inside
+/// the gap. Returns the candidates and the member sequences.
+fn with_variable_layer(
+    searcher: &mut AmbiguousSearcher,
+    candidates: Vec<Candidate>,
+    windows: &[&[u8]],
+    sample: &[&[u8]],
+    end: End,
+    error_rate: f64,
+) -> (Vec<Candidate>, Vec<Vec<u8>>) {
+    let depths: Vec<usize> = candidates
+        .iter()
+        .map(|c| outer_depth(searcher, &c.0, sample, end, error_rate))
+        .collect();
+    let shallow = candidates
+        .iter()
+        .zip(&depths)
+        .filter(|(_, depth)| **depth < MIN_PATTERN_LEN)
+        .map(|(c, _)| c.1)
+        .fold(0.0, f64::max);
+    let anchor = candidates
+        .iter()
+        .zip(&depths)
+        .enumerate()
+        .filter(|(_, (_, depth))| **depth >= MIN_PATTERN_LEN && **depth != usize::MAX)
+        .max_by(|a, b| a.1.0.1.total_cmp(&b.1.0.1).then(b.0.cmp(&a.0)))
+        .map(|(i, _)| i);
+    let Some(anchor) = anchor.filter(|&i| candidates[i].1 >= shallow * f64::from(RUN_JUMP)) else {
+        return (candidates, Vec::new());
+    };
+    let anchor_depth = depths[anchor];
+    let members = variable_layer(searcher, &candidates[anchor].0, windows, end, error_rate);
+    if members.is_empty() {
+        return (candidates, Vec::new());
+    }
+    tracing::debug!(anchor = %String::from_utf8_lossy(&candidates[anchor].0), anchor_depth, members = members.len(), "Variable layer");
+    let sequences: Vec<Vec<u8>> = members.iter().map(|c| c.0.clone()).collect();
+    let kept: Vec<Candidate> = candidates
+        .into_iter()
+        .zip(depths)
+        .filter(|(_, depth)| depth + MIN_PATTERN_LEN > anchor_depth)
+        .map(|(c, _)| c)
+        .chain(members)
+        .collect();
+    (kept, sequences)
+}
+
+/// Clusters the sequence between the boundary and the best `anchor` hit of
+/// each window into supported families. Each family is a candidate with
+/// its member count as support and weight.
+fn variable_layer(
+    searcher: &mut AmbiguousSearcher,
+    anchor: &[u8],
+    windows: &[&[u8]],
+    end: End,
+    error_rate: f64,
+) -> Vec<Candidate> {
+    let k = edit_budget(error_rate, anchor.len());
+    let mut best: Vec<Option<(i32, usize, usize, usize)>> = vec![None; windows.len()];
+    for hit in searcher.search_texts(anchor, windows, k) {
+        let depth = match end {
+            End::Five => hit.text_start,
+            End::Three => windows[hit.text_idx].len() - hit.text_end,
+        };
+        let entry = &mut best[hit.text_idx];
+        if entry.is_none_or(|(cost, old, _, _)| (hit.cost, depth) < (cost, old)) {
+            *entry = Some((hit.cost, depth, hit.text_start, hit.text_end));
+        }
+    }
+    let gaps: Vec<&[u8]> = windows
+        .iter()
+        .zip(&best)
+        .filter_map(|(window, hit)| {
+            hit.map(|(_, _, start, stop)| match end {
+                End::Five => &window[..start],
+                End::Three => &window[stop..],
+            })
+        })
+        .filter(|gap| gap.len() >= MIN_PATTERN_LEN)
+        .collect();
+    let floor = MIN_SUPPORT_WINDOWS.max((windows.len() as f64 * KEEP_SUPPORT).ceil() as usize);
+    cluster_sequences(searcher, &gaps, error_rate, floor)
+        .into_iter()
+        .map(|(seq, members)| {
+            let support = members as f64 / windows.len() as f64;
+            let weight = members as u64 * (seq.len().saturating_sub(KMER_K) + 1) as u64;
+            (seq, support, false, weight, false)
+        })
+        .collect()
+}
+
+/// Groups `sequences` into families by edit distance. Each family is seeded
+/// by the most frequent exact sequence left, polished by its members, and
+/// kept when it has at least `floor` members. Returns `(consensus, members)`.
+fn cluster_sequences(
+    searcher: &mut AmbiguousSearcher,
+    sequences: &[&[u8]],
+    error_rate: f64,
+    floor: usize,
+) -> Vec<(Vec<u8>, usize)> {
+    let mut unassigned: Vec<usize> = (0..sequences.len()).collect();
+    let mut out = Vec::new();
+    while unassigned.len() >= floor && out.len() < MAX_ADAPTERS_PER_END {
+        let mut counts: std::collections::HashMap<&[u8], usize> = std::collections::HashMap::new();
+        for &i in &unassigned {
+            *counts.entry(sequences[i]).or_default() += 1;
+        }
+        let Some((&seed, _)) = counts.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))) else {
+            break;
+        };
+        let texts: Vec<&[u8]> = unassigned.iter().map(|&i| sequences[i]).collect();
+        let hits = windows_with(searcher, seed, &texts, edit_budget(error_rate, seed.len()));
+        let members: Vec<&[u8]> = texts
+            .iter()
+            .zip(&hits)
+            .filter(|(_, hit)| **hit)
+            .map(|(&text, _)| text)
+            .collect();
+        if members.len() >= floor {
+            out.push((polish_consensus(seed, &members), members.len()));
+        }
+        unassigned = unassigned
+            .into_iter()
+            .zip(hits)
+            .filter(|(_, hit)| !hit)
+            .map(|(i, _)| i)
+            .collect();
+    }
+    out
 }
 
 /// A merged layer family ready for variant suppression: sequence, support,
@@ -1525,7 +1677,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     );
 
     let mut searcher = crate::adapter::search::new_searcher_fwd();
-    let mut distinct: Vec<(Vec<u8>, f64, usize, bool)> = Vec::new();
+    let mut distinct: Vec<(Vec<u8>, f64, usize, bool, bool)> = Vec::new();
     // An accepted primer marks the insert boundary at its end; no layer lies
     // beyond it.
     let mut open = [true, true];
@@ -1546,6 +1698,23 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         let mut three = assemble(&three_texts, base, End::Three, layer == 0);
         strip_shared_ends(&mut five, base.error_rate);
         strip_shared_ends(&mut three, base.error_rate);
+        let (five, five_variable) = with_variable_layer(
+            &mut searcher,
+            five,
+            &five_texts,
+            &five_sample,
+            End::Five,
+            base.error_rate,
+        );
+        let (three, three_variable) = with_variable_layer(
+            &mut searcher,
+            three,
+            &three_texts,
+            &three_sample,
+            End::Three,
+            base.error_rate,
+        );
+        let variable: Vec<Vec<u8>> = five_variable.into_iter().chain(three_variable).collect();
         let background = background_windows(sample, &bounds, WINDOW_LEN);
         let background = stride_sample(&background, RECOUNT_WINDOWS);
 
@@ -1625,12 +1794,15 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         for (seq, support, _, boundary, weight, end) in candidates {
             let matched = weight;
             // A family found again in a later layer, in reads its first
-            // occurrence did not match, is not a new layer.
-            if let Some((_, previous, _, _)) = distinct
-                .iter_mut()
-                .find(|(other, _, _, _)| same_family(&seq, other, base.error_rate))
-            {
-                *previous = previous.max(support);
+            // occurrence did not match, is not a new layer; a shorter
+            // sequence contained in an earlier candidate is a layer that the
+            // candidate fused with its neighbour. The heaviest
+            // reconstruction represents a family with its own support.
+            if distinct.iter().any(|(other, _, _, _, _)| {
+                other.len() <= seq.len() + edit_budget(base.error_rate, seq.len())
+                    && same_adapter(&seq, other, base.error_rate)
+            }) {
+                continue;
             } else if let Some((other, previous, best, _, _)) = merged
                 .iter_mut()
                 .find(|(other, _, _, _, _)| same_adapter(&seq, other, base.error_rate))
@@ -1638,8 +1810,8 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 if matched > *best {
                     *other = seq;
                     *best = matched;
+                    *previous = support;
                 }
-                *previous = previous.max(support);
             } else {
                 merged.push((seq, support, matched, boundary, end));
             }
@@ -1676,14 +1848,20 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         let mut accepted_windows: Vec<Vec<bool>> = Vec::new();
         let mut accepted_ends: Vec<End> = Vec::new();
         for (seq, support, windows, own, boundary, end, matched) in ranked {
-            let variant = accepted_windows.iter().any(|other| {
-                let shared = windows
-                    .iter()
-                    .zip(other)
-                    .filter(|(a, b)| **a && **b)
-                    .count();
-                shared * 100 >= own * VARIANT_OVERLAP_PERCENT
-            });
+            // Members of a variable layer share their reads with the
+            // constant layer behind them by construction.
+            let member = variable
+                .iter()
+                .any(|v| same_adapter(&seq, v, base.error_rate));
+            let variant = !member
+                && accepted_windows.iter().any(|other| {
+                    let shared = windows
+                        .iter()
+                        .zip(other)
+                        .filter(|(a, b)| **a && **b)
+                        .count();
+                    shared * 100 >= own * VARIANT_OVERLAP_PERCENT
+                });
             tracing::debug!(sequence = %String::from_utf8_lossy(&seq), matched, own, variant, "Ranked candidate");
             if variant {
                 continue;
@@ -1701,8 +1879,10 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             }
             accepted_ends.push(end);
             accepted.push(seq.clone());
-            accepted_windows.push(windows);
-            distinct.push((seq, support, layer, flush));
+            if !member {
+                accepted_windows.push(windows);
+            }
+            distinct.push((seq, support, layer, flush, member));
         }
         tracing::debug!(
             layer = layer + 1,
@@ -1739,9 +1919,15 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     distinct
         .into_iter()
         .enumerate()
-        .map(|(i, (seq, support, layer, flush))| {
+        .map(|(i, (seq, support, layer, flush, member))| {
             let name_hits = name_against(&seq, &name_refs, base.error_rate);
-            let role = if flush { Role::Adapter } else { Role::Primer };
+            let role = if flush {
+                Role::Adapter
+            } else if member {
+                Role::Barcode
+            } else {
+                Role::Primer
+            };
             InferredAdapter {
                 adapter: Adapter {
                     name: format!("inferred_{}", i + 1),
@@ -2653,6 +2839,8 @@ mod tests {
             assert!(technical, "{:?}", String::from_utf8_lossy(&d.adapter.seq));
             let expected = if contains(&d.adapter.seq, &adapter[..16]) {
                 Role::Adapter
+            } else if barcodes.iter().any(|b| contains(&d.adapter.seq, &b[4..20])) {
+                Role::Barcode
             } else {
                 Role::Primer
             };
@@ -2669,6 +2857,15 @@ mod tests {
                 .any(|d| d.layer > 0 && contains(&d.adapter.seq, &flank2)),
             "{found:?}"
         );
+        let recovered = barcodes
+            .iter()
+            .filter(|b| {
+                found
+                    .iter()
+                    .any(|d| d.adapter.role == Role::Barcode && contains(&d.adapter.seq, &b[4..20]))
+            })
+            .count();
+        assert!(recovered >= 6, "{recovered} barcodes recovered: {found:?}");
         let cfg = AdapterConfig {
             adapters: found.into_iter().map(|d| d.adapter).collect(),
             error_rate: 0.2,

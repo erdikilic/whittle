@@ -19,9 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adapter discovery proceeds in layers from each read end. Each accepted
   layer moves the boundary inward and the next layer is assembled from the
   unexplained sequence, so adapters, barcode flanks, barcodes and primers are
-  found in turn. A candidate whose inner segment mirrors at the opposite read
-  end at a different depth is cut back to its outer part. The outermost
-  discovered layer takes the adapter role; inner layers trim ends only.
+  found in turn. A variable layer between a boundary and a constant layer
+  behind it, such as a barcode panel between its flanks, is clustered from
+  the reads and reported with the barcode role. A candidate whose inner
+  segment mirrors at the opposite read end at a different depth is cut back
+  to its outer part. The outermost discovered layer takes the adapter role;
+  inner layers trim ends only.
 - A preset or FASTA given with `--discover-adapters` is trimmed first and
   discovery continues beyond it. The final set is the union.
 - Barcode positions recorded in the `bi` tag are used with any adapter
