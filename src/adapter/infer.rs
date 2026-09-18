@@ -27,9 +27,12 @@ const WINDOW_LEN: usize = 100;
 
 /// Minimum presence-fraction support required to keep a discovered adapter.
 /// Support is the fraction of sampled end windows containing the consensus
-/// within its length-scaled edit budget. The threshold retains common library
-/// adapters while excluding sparse barcode-specific sequences and background.
-const KEEP_SUPPORT: f64 = 0.15;
+/// within its length-scaled edit budget. Absolute support also limits sparse
+/// discoveries in small samples.
+const KEEP_SUPPORT: f64 = 0.01;
+
+/// Minimum independently supporting read windows for a retained consensus.
+const MIN_SUPPORT_WINDOWS: usize = 20;
 
 /// Maximum windows used for alignment and support validation.
 const RECOUNT_WINDOWS: usize = 4000;
@@ -45,11 +48,11 @@ const START_K: usize = 11;
 const LMAX: usize = 100;
 
 /// Max number of adapters `peel_paths` will extract from one end's k-mer graph.
-const MAX_ADAPTERS_PER_END: usize = 3;
+const MAX_ADAPTERS_PER_END: usize = 12;
 
 /// Minimum fraction of the first (heaviest) path's weight a peeled path needs
 /// to be kept; a lighter path is background rather than a distinct adapter.
-const MIN_PATH_WEIGHT_FRAC: f64 = 0.25;
+const MIN_PATH_WEIGHT_FRAC: f64 = 0.02;
 
 /// Minimum percent identity for a catalog entry to be reported as the match
 /// of an inferred adapter. A 16 to 32 bp anchor searched against every catalog
@@ -145,35 +148,74 @@ fn end_windows<'a>(sample: &[&'a [u8]], w: usize) -> (Vec<&'a [u8]>, Vec<&'a [u8
     (five, three)
 }
 
-/// Returns whether a k-mer is too low-complexity to serve as an adapter seed: a
-/// homopolymer or a dinucleotide repeat.
+/// Returns whether a k-mer consists of a short tandem repeat.
 fn is_low_complexity(kmer: &[u8]) -> bool {
-    if kmer.windows(2).all(|w| w[0] == w[1]) {
-        return true; // homopolymer
-    }
-    // Period-2 repeat, such as ACACAC.
-    if kmer.len() >= 4 && kmer.iter().enumerate().all(|(i, &b)| b == kmer[i % 2]) {
-        return true;
-    }
-    false
+    (1..=8.min(kmer.len() / 2))
+        .any(|period| kmer.iter().enumerate().all(|(i, &b)| b == kmer[i % period]))
 }
 
-/// Returns the exact k-mer counts across all windows, low-complexity k-mers
-/// dropped, sorted by count descending then code ascending, and truncated to
-/// `top`.
+/// Rejects consensuses dominated by a short approximate tandem repeat.
+fn is_repetitive(seq: &[u8]) -> bool {
+    (1..=8.min(seq.len() / 2)).any(|period| {
+        let matches: usize = (0..period)
+            .map(|phase| {
+                let mut counts = [0usize; 4];
+                for &base in seq.iter().skip(phase).step_by(period) {
+                    if let Some(code) = encode_kmer(&[base]) {
+                        counts[code as usize] += 1;
+                    }
+                }
+                counts.into_iter().max().unwrap_or(0)
+            })
+            .sum();
+        let percent = if period * 3 <= seq.len() { 75 } else { 85 };
+        matches * 100 >= seq.len() * percent
+    })
+}
+
+/// Requires supporting alignments to concentrate near the physical read end.
+fn terminal_support(seq: &[u8], windows: &[&[u8]], end: End, edits: usize) -> (usize, usize) {
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let mut best = vec![None; windows.len()];
+    for hit in searcher.search_texts(seq, windows, edits) {
+        let distance = match end {
+            End::Five => hit.text_start,
+            End::Three => windows[hit.text_idx].len() - hit.text_end,
+        };
+        let key = (hit.cost, distance);
+        let entry = &mut best[hit.text_idx];
+        if entry.is_none_or(|old| key < old) {
+            *entry = Some(key);
+        }
+    }
+    let present = best.iter().filter(|hit| hit.is_some()).count();
+    let anchored = best
+        .iter()
+        .flatten()
+        .filter(|(_, distance)| *distance <= 35)
+        .count();
+    (present, anchored)
+}
+
+/// Counts each exact k-mer once per window, excludes short tandem repeats,
+/// sorts by count descending then code ascending, and retains at most `top`.
 fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
     use std::collections::HashMap;
-    let mut counts: HashMap<u64, u32> = HashMap::new();
+    let mut counts: HashMap<u64, (u32, usize)> = HashMap::new();
     assert!((1..=32).contains(&k));
     let mask = u64::MAX >> (64 - 2 * k);
-    for &wnd in windows {
+    for (window_index, &wnd) in windows.iter().enumerate() {
         let (mut code, mut valid) = (0, 0);
         for &base in wnd {
             if let Some(bits) = encode_kmer(&[base]) {
                 code = ((code << 2) | bits) & mask;
                 valid += 1;
                 if valid >= k {
-                    *counts.entry(code).or_insert(0) += 1;
+                    let entry = counts.entry(code).or_insert((0, usize::MAX));
+                    if entry.1 != window_index {
+                        entry.0 += 1;
+                        entry.1 = window_index;
+                    }
                 }
             } else {
                 code = 0;
@@ -183,9 +225,11 @@ fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
     }
     let mut ranked: Vec<(u64, u32)> = counts
         .into_iter()
+        .map(|(code, (count, _))| (code, count))
         .filter(|&(code, _)| {
             if k >= 4 {
-                code & (mask >> 4) != code >> 4
+                !(1..=8.min(k / 2))
+                    .any(|period| code & (mask >> (2 * period)) == code >> (2 * period))
             } else {
                 !is_low_complexity(&decode_kmer(code, k))
             }
@@ -330,9 +374,8 @@ fn bounded_heaviest_path(
 /// Peels up to `MAX_ADAPTERS_PER_END` distinct adapter consensuses out of one
 /// end's weighted k-mer graph: each round runs `bounded_heaviest_path`, then
 /// removes that path's k-mers from `nodes` so the next round is forced onto a
-/// different, non-overlapping path. Stops early once a path's weight falls
-/// below `MIN_PATH_WEIGHT_FRAC` of the first (heaviest) path's weight, or once
-/// no path or no nodes remain.
+/// different, non-overlapping path. Weak fragments are removed without ending
+/// the search for remaining independently supported families.
 fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize) -> Vec<(Vec<u8>, Vec<u32>)> {
     let mut out = Vec::new();
     let mut first_weight: Option<u64> = None;
@@ -341,15 +384,14 @@ fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize) -> Vec<(Vec<u8>, Vec<u32>)> 
             break;
         };
         let fw = *first_weight.get_or_insert(weight);
-        if (weight as f64) < MIN_PATH_WEIGHT_FRAC * fw as f64 {
-            break;
-        }
         // The nodes this path used are removed so the next peel finds a
         // different one.
         let used: std::collections::HashSet<u64> =
             cons.windows(k).filter_map(encode_kmer).collect();
         nodes.retain(|(code, _)| !used.contains(code));
-        out.push((cons, profile));
+        if weight as f64 >= MIN_PATH_WEIGHT_FRAC * fw as f64 {
+            out.push((cons, profile));
+        }
         if nodes.is_empty() {
             break;
         }
@@ -497,7 +539,7 @@ fn upstream_consensus(anchor: &[u8], windows: &[&[u8]]) -> Vec<u8> {
             }
         }
         let total: usize = counts.iter().sum();
-        if total < 20.max(windows.len() / 5) {
+        if total < MIN_SUPPORT_WINDOWS.max((windows.len() as f64 * KEEP_SUPPORT).ceil() as usize) {
             break;
         }
         let mut ranked = [0, 1, 2, 3];
@@ -518,10 +560,21 @@ fn upstream_consensus(anchor: &[u8], windows: &[&[u8]]) -> Vec<u8> {
     seq
 }
 
+/// Primer families reconstructed at one conserved insert boundary.
+struct PrimerBoundary {
+    /// Supported primer sequences, oriented as they occur in the read.
+    primers: Vec<Vec<u8>>,
+    /// First `START_K` bases of the conserved insert, in read orientation.
+    insert_start: Vec<u8>,
+}
+
 /// Uses recurrent unprimed read starts to locate a conserved insert boundary.
 /// A primer must be independently supported upstream of that boundary; the
 /// conserved insert itself is excluded from the inferred trimming sequence.
-fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<Vec<Vec<u8>>> {
+fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<PrimerBoundary> {
+    if consensus.len() < 2 * KMER_K {
+        return None;
+    }
     let reverse = end == End::Three;
     let oriented: Vec<Vec<u8>> = windows
         .iter()
@@ -548,10 +601,13 @@ fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<Ve
         }
     }
     let floor = 10.max(windows.len() / 32);
+    if starts.values().all(|&count| count < floor) {
+        return None;
+    }
     let positions_in = |seq: &[u8]| -> Vec<(usize, usize)> {
         seq.windows(START_K)
             .enumerate()
-            .take(seq.len().saturating_sub(KMER_K) + 1)
+            .take(seq.len().saturating_sub(2 * KMER_K) + usize::from(seq.len() >= 2 * KMER_K))
             .map(|(pos, word)| {
                 (
                     pos,
@@ -606,7 +662,11 @@ fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<Ve
             }
             let mut groups: Vec<_> = groups
                 .into_iter()
-                .filter(|(_, group)| group.len() >= 20.max(windows.len() / 10))
+                .filter(|(_, group)| {
+                    group.len()
+                        >= MIN_SUPPORT_WINDOWS
+                            .max((windows.len() as f64 * KEEP_SUPPORT).ceil() as usize)
+                })
                 .collect();
             groups.sort_by_key(|(key, group)| (std::cmp::Reverse(group.len()), *key));
             groups
@@ -629,15 +689,76 @@ fn contrast_boundary(consensus: &[u8], windows: &[&[u8]], end: End) -> Option<Ve
             }
         }
         if !primers.is_empty() {
-            return Some(primers);
+            let mut insert_start = anchor[..START_K].to_vec();
+            if reverse {
+                insert_start.reverse();
+            }
+            return Some(PrimerBoundary {
+                primers,
+                insert_start,
+            });
         }
     }
     None
 }
 
-/// Assembles one end's candidates using exact k-mer support and validates each
-/// complete sequence against a bounded, uniformly spaced window sample.
-fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, f64)> {
+/// Tests whether a candidate is predominantly on the insert-facing side of
+/// independently reconstructed primers.
+fn predominantly_insert(
+    seq: &[u8],
+    windows: &[&[u8]],
+    end: End,
+    edits: usize,
+    primer_edges: &[Option<(usize, usize)>],
+    searcher: &mut AmbiguousSearcher,
+) -> bool {
+    let mut present = vec![false; windows.len()];
+    let mut downstream = vec![false; windows.len()];
+    for hit in searcher.search_texts(seq, windows, edits) {
+        present[hit.text_idx] = true;
+        if let Some((edge, overlap)) = primer_edges[hit.text_idx] {
+            downstream[hit.text_idx] |= match end {
+                End::Five => hit.text_start + overlap >= edge,
+                End::Three => hit.text_end <= edge + overlap,
+            };
+        }
+    }
+    let n = present.iter().filter(|&&p| p).count();
+    let paired = downstream.iter().filter(|&&p| p).count();
+    paired >= MIN_SUPPORT_WINDOWS && paired * 2 >= n
+}
+
+/// Checks insert-facing continuation outside the bounded assembly windows.
+/// Each window contributes at most once to each continuation count.
+fn supported_termination(word: &[u8], windows: &[&[u8]], end: End) -> bool {
+    let mut present = 0;
+    let mut extensions = [0; 4];
+    for window in windows {
+        let mut seen = false;
+        let mut extended = [false; 4];
+        for (pos, matched) in window.windows(word.len()).enumerate() {
+            if matched != word {
+                continue;
+            }
+            let next = match end {
+                End::Five => window.get(pos + word.len()),
+                End::Three => pos.checked_sub(1).and_then(|i| window.get(i)),
+            };
+            if let Some(code) = next.and_then(|b| encode_kmer(std::slice::from_ref(b))) {
+                seen = true;
+                extended[code as usize] = true;
+            }
+        }
+        present += usize::from(seen);
+        for (count, seen) in extensions.iter_mut().zip(extended) {
+            *count += usize::from(seen);
+        }
+    }
+    present > 0 && extensions.into_iter().max().unwrap_or(0) * 2 <= present
+}
+
+/// Assembles one end's candidates and validates support and insert boundaries.
+fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, f64, bool, u32)> {
     if windows.len() < 3 {
         return Vec::new();
     }
@@ -647,7 +768,14 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
     let windows: Vec<&[u8]> = upper.iter().map(Vec::as_slice).collect();
     let windows = windows.as_slice();
 
-    let exact = top_kmers(windows, KMER_K, TOP_KMERS);
+    let assembly_windows: Vec<&[u8]> = windows
+        .iter()
+        .map(|w| match end {
+            End::Five => &w[..WINDOW_LEN.min(w.len())],
+            End::Three => &w[w.len().saturating_sub(WINDOW_LEN)..],
+        })
+        .collect();
+    let exact = top_kmers(&assembly_windows, KMER_K, TOP_KMERS);
     if exact.is_empty() {
         return Vec::new();
     }
@@ -655,31 +783,68 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
     let recount = stride_sample(windows, RECOUNT_WINDOWS);
     let n_recount = recount.len();
 
-    let mut fwd = crate::adapter::search::new_searcher_fwd();
+    let original_weights: std::collections::HashMap<u64, u32> = exact.iter().copied().collect();
     let weighted = exact;
     let mut out = Vec::new();
+    let mut insert_starts = Vec::new();
+    let mut primer_edges = vec![None; recount.len()];
+    let mut primer_searcher = crate::adapter::search::new_searcher_fwd();
+    let mut known_primers = std::collections::HashSet::new();
     for (cons, profile) in peel_paths(weighted, KMER_K) {
+        tracing::debug!(sequence = %String::from_utf8_lossy(&cons), "Assembled end candidate");
         let peak = *profile.iter().max().unwrap_or(&0);
         let weights = &profile[KMER_K - 1..];
         let floor = (peak as f64 * BOUNDARY_SUPPORT) as u32;
         let lo = weights.iter().position(|&w| w >= floor).unwrap_or(0);
         let hi = weights.iter().rposition(|&w| w >= floor).unwrap_or(0) + KMER_K;
         let trimmed = cons[lo..hi].to_vec();
+        if !known_primers.is_empty()
+            && predominantly_insert(
+                &trimmed,
+                &recount,
+                end,
+                edit_budget(base.error_rate, trimmed.len()),
+                &primer_edges,
+                &mut primer_searcher,
+            )
+        {
+            continue;
+        }
         let trimmed = if peak as usize * 4 < windows.len() {
             polish_consensus(&trimmed, &recount)
         } else {
             trimmed
         };
-        let sequences = if let Some(primers) = contrast_boundary(&cons, &recount, end) {
-            primers
+        let contrast = contrast_boundary(&cons, &recount, end);
+        let has_insert_boundary = contrast.is_some();
+        let sequences = if let Some(boundary) = contrast {
+            insert_starts.push(boundary.insert_start);
+            boundary.primers
         } else {
-            let bounded = match end {
-                End::Five if hi < cons.len() => {
-                    weights[hi - KMER_K + 1] * 2 <= weights[hi - KMER_K]
-                },
-                End::Three if lo > 0 => weights[lo - 1] * 2 <= weights[lo],
-                _ => cons.len() < LMAX,
+            let word = match end {
+                End::Five => &cons[hi - KMER_K..hi],
+                End::Three => &cons[lo..lo + KMER_K],
             };
+            let code = encode_kmer(word).unwrap();
+            let boundary_weight = original_weights[&code];
+            let mask = (1u64 << (2 * KMER_K)) - 1;
+            let continuation = (0..4)
+                .map(|base| {
+                    let next = match end {
+                        End::Five => ((code << 2) | base) & mask,
+                        End::Three => (code >> 2) | (base << (2 * (KMER_K - 1))),
+                    };
+                    original_weights.get(&next).copied().unwrap_or(0)
+                })
+                .max()
+                .unwrap_or(0);
+            let observed_boundary = match end {
+                End::Five => hi < cons.len(),
+                End::Three => lo > 0,
+            };
+            let bounded = (observed_boundary || cons.len() < LMAX)
+                && continuation * 2 <= boundary_weight
+                && supported_termination(word, &recount, end);
             if !bounded {
                 tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed),
                     "Recurrent sequence has no supported insert boundary");
@@ -688,16 +853,53 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
             vec![trimmed]
         };
         for trimmed in sequences {
-            if trimmed.len() < MIN_PATTERN_LEN {
+            if trimmed.len() < MIN_PATTERN_LEN || is_repetitive(&trimmed) {
                 continue;
             }
             // Presence counts each supporting window once, including reads
             // whose sequencing errors disrupted individual exact k-mers.
             let k_cons = edit_budget(base.error_rate, trimmed.len());
-            let present = windows_containing(&mut fwd, &trimmed, &recount, k_cons);
+            let (present, anchored) = terminal_support(&trimmed, &recount, end, k_cons);
             let support = present as f64 / n_recount as f64;
-            out.push((trimmed, support));
+            tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), present, anchored, has_insert_boundary, "Validated end candidate");
+            if present >= MIN_SUPPORT_WINDOWS
+                && support >= KEEP_SUPPORT
+                && anchored * 5 >= present * 4
+            {
+                if has_insert_boundary && known_primers.insert(trimmed.clone()) {
+                    for hit in primer_searcher.search_texts(&trimmed, &recount, k_cons) {
+                        let edge = match end {
+                            End::Five => hit.text_end,
+                            End::Three => hit.text_start,
+                        };
+                        primer_edges[hit.text_idx] = Some((edge, trimmed.len() / 2));
+                    }
+                }
+                out.push((trimmed, support, has_insert_boundary, peak));
+            }
         }
+    }
+    out.retain(|(seq, _, boundary, _)| {
+        *boundary
+            || !insert_starts
+                .iter()
+                .any(|start| seq.windows(start.len()).any(|word| word == start))
+    });
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    if primer_edges.iter().any(Option::is_some) {
+        out.retain(|(seq, _, boundary, _)| {
+            if *boundary {
+                return true;
+            }
+            !predominantly_insert(
+                seq,
+                &recount,
+                end,
+                edit_budget(base.error_rate, seq.len()),
+                &primer_edges,
+                &mut searcher,
+            )
+        });
     }
     out
 }
@@ -706,9 +908,21 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End) -> Vec<(Vec<u8>, 
 /// Equivalent end assemblies share one trimming pattern. Catalog and supplied
 /// FASTA entries provide names only after the inferred boundaries are fixed.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
-    let (five_w, three_w) = end_windows(sample, WINDOW_LEN);
+    let (five_w, three_w) = end_windows(sample, 2 * WINDOW_LEN);
     let five = assemble(&five_w, base, End::Five);
     let three = assemble(&three_w, base, End::Three);
+    let background: Vec<&[u8]> = sample
+        .iter()
+        .filter(|r| r.len() >= 4 * WINDOW_LEN)
+        .flat_map(|r| {
+            [
+                &r[WINDOW_LEN..2 * WINDOW_LEN],
+                &r[r.len() - 2 * WINDOW_LEN..r.len() - WINDOW_LEN],
+            ]
+        })
+        .filter(|w| is_plain_acgt(w))
+        .collect();
+    let background = stride_sample(&background, RECOUNT_WINDOWS);
 
     let refs = crate::adapter::preset::preset(crate::adapter::preset::Kit::ALL);
     let name_refs: Vec<Adapter> = refs
@@ -717,27 +931,45 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         .collect();
 
     let mut searcher = crate::adapter::search::new_searcher_fwd();
-    let mut candidates: Vec<(Vec<u8>, f64, u32)> = five
+    let mut candidates: Vec<(Vec<u8>, f64, u32, bool, u32)> = five
         .into_iter()
         .chain(three)
-        .filter(|(seq, support)| seq.len() >= MIN_PATTERN_LEN && *support >= KEEP_SUPPORT)
-        .map(|(seq, support)| {
+        .filter(|(seq, support, _, _)| seq.len() >= MIN_PATTERN_LEN && *support >= KEEP_SUPPORT)
+        .filter_map(|(seq, support, boundary, peak)| {
+            let count = windows_containing(
+                &mut searcher,
+                &seq,
+                &background,
+                edit_budget(base.error_rate, seq.len()),
+            );
+            if !background.is_empty() && count as f64 * 4.0 >= support * background.len() as f64 {
+                return None;
+            }
             let exact = windows_containing(&mut searcher, &seq, &five_w, 0)
                 + windows_containing(&mut searcher, &seq, &three_w, 0);
-            (seq, support, exact)
+            Some((seq, support, exact, boundary, peak))
         })
         .collect();
-    // Exact support selects the reconstruction before fuzzy duplicates merge;
-    // approximate support alone cannot distinguish a correct consensus from
-    // several nearby error variants.
+    // Independently supported insert boundaries take precedence over graph
+    // fragments that may include conserved insert sequence. Exact support
+    // then distinguishes reconstructions from nearby sequencing-error variants.
     candidates.sort_by(|a, b| {
-        b.2.cmp(&a.2)
+        b.3.cmp(&a.3)
+            .then_with(|| {
+                if a.3 && b.3 {
+                    b.2.cmp(&a.2)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then(b.4.cmp(&a.4))
+            .then(b.2.cmp(&a.2))
             .then(b.1.total_cmp(&a.1))
             .then(b.0.len().cmp(&a.0.len()))
             .then(a.0.cmp(&b.0))
     });
     let mut distinct: Vec<(Vec<u8>, f64)> = Vec::new();
-    for (seq, support, _) in candidates {
+    for (seq, support, _, _, _) in candidates {
         if let Some((_, previous)) = distinct
             .iter_mut()
             .find(|(other, _)| same_adapter(&seq, other, base.error_rate))
@@ -825,6 +1057,81 @@ mod tests {
     }
 
     #[test]
+    fn recovers_minority_adapter_beside_a_dominant_family() {
+        let common = random_bases(47319, 31);
+        let rare = random_bases(18971, 43);
+        let reads: Vec<Vec<u8>> = (0..2000)
+            .map(|i| {
+                let mut read = match i % 100 {
+                    0..=69 => common.clone(),
+                    70..=74 => rare.clone(),
+                    _ => Vec::new(),
+                };
+                read.extend(random_bases(18231 + i, 420));
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        assert!(found.iter().any(|d| d.adapter.seq == common), "{found:?}");
+        assert!(found.iter().any(|d| d.adapter.seq == rare), "{found:?}");
+        assert_eq!(found.len(), 2, "{found:?}");
+    }
+
+    #[test]
+    fn tandem_repeat_ends_do_not_produce_adapters() {
+        let reads: Vec<Vec<u8>> = (0..600)
+            .map(|i| {
+                let mut read = b"TTAGGG".repeat(10);
+                if i % 3 == 0 {
+                    read[19] = b'C';
+                }
+                read.extend(random_bases(87123 + i, 400));
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn minority_primer_uses_unprimed_insert_boundaries() {
+        let primer = random_bases(88971, 24);
+        let anchor = random_bases(34723, 140);
+        let reads: Vec<Vec<u8>> = (0..2000)
+            .map(|i| {
+                let mut read = if i % 20 == 0 {
+                    primer.clone()
+                } else {
+                    Vec::new()
+                };
+                read.extend_from_slice(&anchor);
+                read.extend(random_bases(8921 + i, 300));
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].adapter.seq, primer);
+    }
+
+    #[test]
+    fn kmer_support_counts_independent_windows() {
+        let seed = b"ACGTCAGTGCATGACT";
+        let repeated = seed.repeat(5);
+        let windows = vec![repeated.as_slice(), seed.as_slice()];
+        let counts = top_kmers(&windows, 16, 500);
+        assert_eq!(
+            counts
+                .iter()
+                .find(|(key, _)| *key == encode_kmer(seed).unwrap())
+                .unwrap()
+                .1,
+            2
+        );
+        assert!(top_kmers(&[b"TTAGGGTTAGGGTTAGGG"], 16, 500).is_empty());
+    }
+
+    #[test]
     fn clean_conserved_inserts_are_not_adapters() {
         let prefix = random_bases(7877, 140);
         let suffix = random_bases(4512, 140);
@@ -837,6 +1144,34 @@ mod tests {
             })
             .collect();
         assert!(infer_owned(&reads).is_empty());
+    }
+
+    #[test]
+    fn variable_conserved_inserts_extend_beyond_assembly_windows() {
+        let anchors: Vec<_> = (0..4)
+            .map(|i| (random_bases(7877 + i, 120), random_bases(4512 + i, 120)))
+            .collect();
+        let reads: Vec<Vec<u8>> = (0..2000)
+            .map(|i| {
+                let (prefix, suffix) = &anchors[i % anchors.len()];
+                let mut read = prefix.clone();
+                read.extend(random_bases(915 + i as u64, 300));
+                read.extend_from_slice(suffix);
+                let mutations = random_bases(54371 + i as u64, read.len() * 5);
+                let mut mutated = Vec::new();
+                for (&base, event) in read.iter().zip(mutations.chunks_exact(5)) {
+                    match encode_kmer(&event[..4]).unwrap() {
+                        0..=4 => mutated.push(event[4]),
+                        5..=6 => {},
+                        7 => mutated.extend_from_slice(&[base, event[4]]),
+                        _ => mutated.push(base),
+                    }
+                }
+                mutated
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]
@@ -865,7 +1200,7 @@ mod tests {
         let found = infer_owned(&reads);
         assert!(found.iter().any(|d| d.adapter.seq == front), "{found:?}");
         assert!(found.iter().any(|d| d.adapter.seq == rear), "{found:?}");
-        assert_eq!(found.len(), 2);
+        assert_eq!(found.len(), 2, "{found:?}");
     }
 
     #[test]
@@ -917,7 +1252,9 @@ mod tests {
             })
             .collect();
         let windows: Vec<&[u8]> = reads.iter().map(Vec::as_slice).collect();
-        let found = contrast_boundary(&insert[1..90], &windows, End::Five).unwrap();
+        let found = contrast_boundary(&insert[1..90], &windows, End::Five)
+            .unwrap()
+            .primers;
         assert_eq!(found.len(), 2);
         for primer in &primers {
             assert!(found.contains(primer), "{found:?}");
@@ -967,13 +1304,12 @@ mod tests {
     /// A 16-mer planted in every window ranks first over unique filler.
     #[test]
     fn top_kmers_ranks_planted_over_background() {
-        let planted = b"ACGTACGTACGTACGT"; // 16bp, not low-complexity
+        let planted = b"ACGTCAGTGCATGACT";
         let mut owned: Vec<Vec<u8>> = Vec::new();
         for i in 0..50u8 {
             let mut wnd = planted.to_vec();
-            // Varied filler; first byte cycles B..E (never 'A') so a window's
-            // filler can never spell "ACGT" and accidentally reconstruct the
-            // planted (period-4) k-mer at the trailing slide offset.
+            // An uncalled separator prevents shifted copies of the seed.
+            wnd.push(b'N');
             wnd.extend_from_slice(&[b'B' + (i % 4), b'C', b'G', b'T']);
             owned.push(wnd);
         }

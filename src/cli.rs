@@ -255,8 +255,9 @@ struct Cli {
     /// ONT kit), all. Enables adapter trimming. Defaults to none.
     #[arg(long, value_name = "KITS", help_heading = "Adapter trimming")]
     adapter_preset: Option<String>,
-    /// End-match tolerance as a fraction of adapter length; interior splits use
-    /// half. Requires an adapter source. Defaults to 0.2.
+    /// End-match tolerance as a fraction of adapter length. Interior tolerance
+    /// is sequence-dependent and never exceeds this value. Requires an adapter
+    /// source. Defaults to 0.2.
     #[arg(long, value_name = "FRACTION", help_heading = "Adapter trimming")]
     adapter_error_rate: Option<f64>,
     /// Bases at each read end searched for a terminal adapter. Requires an

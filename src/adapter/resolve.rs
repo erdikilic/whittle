@@ -17,9 +17,8 @@ pub(crate) fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
 }
 
 /// Support below which a kept adapter is logged with a warning rather than a
-/// plain info line. It is three times `infer::KEEP_SUPPORT` (0.15): a
-/// barcode-specific sequence present in a fraction of reads can clear the keep
-/// floor while staying far from the near-1.0 support of a library adapter.
+/// plain info line. Sparse families warrant review even when their consensus
+/// clears the minimum discovery support.
 pub(crate) const MARGINAL_SUPPORT: f64 = 0.45;
 
 /// Logs each ab-initio discovery: one `info!` line per adapter with its support

@@ -162,8 +162,8 @@ pub(crate) fn edit_budget(rate: f64, len: usize) -> usize {
     (rate * len as f64 + 1e-9).floor() as usize
 }
 
-/// Edit budgets of one adapter: `k_end` for terminal hits and `k_mid`, half
-/// of it, for interior hits.
+/// Edit budgets of one adapter: configured terminal tolerance and a
+/// sequence-specific additional interior tolerance screened by a null model.
 #[derive(Debug, Clone, Copy)]
 struct Budget {
     /// Pattern length in bases.
@@ -175,13 +175,33 @@ struct Budget {
 }
 
 impl Budget {
-    /// Computes the budgets for a `len`-base pattern at `error_rate`.
-    fn new(len: usize, error_rate: f64) -> Self {
-        Self {
-            len,
-            k_end: edit_budget(error_rate, len),
-            k_mid: edit_budget(0.5 * error_rate, len),
+    /// Extends the half-rate interior budget under an independent uniform DNA
+    /// null model. The recurrence sums alignment-path probabilities, including
+    /// substitutions, insertions and deletions, and therefore overcounts
+    /// sequences admitting multiple alignments. IUPAC ambiguity increases the
+    /// probability of a zero-cost match and limits additional tolerance.
+    fn new(pattern: &[u8], error_rate: f64) -> Self {
+        let len = pattern.len();
+        let k_end = edit_budget(error_rate, len);
+        let mut previous = vec![1.0; k_end + 1];
+        for &base in pattern {
+            let p = search::iupac_degeneracy(base).unwrap_or(4) as f64 / 4.0;
+            let mut current = vec![0.0; k_end + 1];
+            current[0] = p * previous[0];
+            for k in 1..=k_end {
+                current[k] = p * previous[k] + (2.0 - p) * previous[k - 1] + current[k - 1];
+            }
+            previous = current;
         }
+        let mut probability = 0.0;
+        let mut k_mid = edit_budget(0.5 * error_rate, len);
+        for (k, value) in previous.iter().enumerate() {
+            probability += value;
+            if probability <= 1e-7 {
+                k_mid = k_mid.max(k);
+            }
+        }
+        Self { len, k_end, k_mid }
     }
 }
 
@@ -238,7 +258,7 @@ impl CandidateIndex {
     fn new(adapters: &[Adapter], error_rate: f64, include_interior: bool) -> Self {
         let budgets: Vec<Budget> = adapters
             .iter()
-            .map(|adapter| Budget::new(adapter.seq.len(), error_rate))
+            .map(|adapter| Budget::new(&adapter.seq, error_rate))
             .collect();
         let plain: Vec<bool> = adapters
             .iter()
@@ -1438,6 +1458,21 @@ fn segments_with(
 mod segment_tests {
     use super::preset::preset_ont;
     use super::*;
+
+    #[test]
+    fn interior_tolerance_scales_with_pattern_information() {
+        let short = Budget::new(&[b'A'; 20], 0.2);
+        let long = Budget::new(&[b'A'; 40], 0.2);
+        let ambiguous = Budget::new(&[b'N'; 40], 0.2);
+        assert_eq!(short.k_mid, 2);
+        assert_eq!(long.k_mid, long.k_end);
+        assert_eq!(ambiguous.k_mid, 4);
+        for length in 11..=100 {
+            let budget = Budget::new(&vec![b'A'; length], 0.2);
+            assert!(budget.k_mid >= edit_budget(0.1, length));
+            assert!(budget.k_mid <= budget.k_end);
+        }
+    }
 
     /// Builds a configuration at error rate 0.2 and `end_size` 20.
     fn cfg(adapters: Vec<Adapter>, split: bool) -> AdapterConfig {

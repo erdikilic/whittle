@@ -53,9 +53,13 @@ these treatments:
   fewer bases than `--min-length`, or by at most 11 bases, merge into one.
   `--adapter-ends-only` disables splitting and searches only the two end zones.
 
-Interior hits are held to half the `--adapter-error-rate` budget (default 0.2)
-of terminal hits, so a marginal end match trims while only a close interior
-match splits a read. Adapter trims pass through the same tag-rewrite path as
+Interior hits start with half the `--adapter-error-rate` budget (default 0.2).
+Longer, more informative patterns can use additional edits, up to the terminal
+budget. Additional tolerance requires an alignment-path probability bound of
+at most `1e-7` under independent uniform DNA; IUPAC ambiguity reduces that
+additional tolerance. This null model is a specificity guard, not a calibrated
+false-split probability for repetitive or composition-biased biological reads.
+Adapter trims pass through the same tag-rewrite path as
 every other trim, so `MM`/`ML`/`MN` and the per-base tags stay in register
 ([tags.md](tags.md)).
 
@@ -87,25 +91,40 @@ and splits with the supported sequences. Sampling requires at least 100 reads;
 a count of 0 is rejected. Reporting and trimming use the same automatic boundary
 rule. There is no conservative/aggressive policy switch.
 
-Discovery counts exact 16-mers in the first and last 100 bases of sampled reads.
+Discovery counts exact 16-mers in the first and last 100 bases of sampled reads,
+once per read-end window. Short tandem-repeat seeds are excluded.
 A bounded graph assembly retains multiple paths, locates abrupt support changes
 at insert boundaries, and corrects weak paths with aligned read evidence.
 Sassy batches the approximate searches used to align supporting reads and
 validate complete candidates. At most 4000 windows per end, distributed across
-the sample, participate in alignment validation.
+the sample and extending to 200 bases, participate in alignment validation.
+Insert-facing termination is checked against both the original graph and
+continuing bases in these longer windows, so the assembly window itself does
+not supply evidence for an adapter boundary.
 
-A candidate must occur in at least 15% of the usable windows at one end.
-Discovery can therefore recover several adapter families from a mixed library,
-but rare adapters or large barcode panels may fall below its support floor.
-Related candidates and reverse complements are merged using exact sequence
-support before approximate equivalence, so sequencing-error variants do not
-replace a better-supported reconstruction.
+A candidate must occur in at least 1% of the usable validation windows at one
+end and in at least 20 windows. At least 80% of its supporting alignments must
+lie within 35 bases of the physical read end. Candidates dominated by short
+approximate repeats are rejected; candidate prevalence must exceed that in
+adjacent interior windows by more than fourfold. These checks allow minority
+families without treating any recurrent sequence as an adapter. Rare families,
+large barcode panels, distant adapters and insufficient samples can still be
+missed. The bounded graph considers up to 12 paths per end; a weak fragment
+does not terminate the search for other families.
+
+Related candidates and reverse complements are merged after prioritizing
+independently supported primer boundaries, with exact sequence support choosing
+among their reconstructions. Other candidates are ranked by exact graph support
+before complete-sequence support, so short error-derived fragments do not
+displace a stronger assembly merely because they match more reads.
 
 For amplicons, recurrent read starts can identify an insert boundary in reads
 that lack a primer. Discovery aligns the upstream sequence in primer-bearing
 reads, reconstructs supported IUPAC variants, and excludes the conserved insert.
 Distinct primer families sharing an insert boundary are considered separately.
-Candidates whose insert-facing boundaries remain unresolved are skipped.
+Candidates overlapping a validated insert start, or supported mainly on the
+insert-facing side of a reconstructed primer, are excluded. Candidates whose
+insert-facing boundaries remain unresolved are skipped.
 
 Without reads exposing an insert boundary, an unknown primer and a conserved
 gene prefix can be indistinguishable. Short primers, highly degenerate mixtures,

@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Fixed
+- Minority adapter discovery continues past weak graph fragments and validates
+  read-end enrichment against interior sequence. Repeated k-mers count once
+  per window; short tandem repeats and primer-adjacent insert fragments are
+  excluded from inferred adapters.
+- Internal adapter matching admits additional errors for sufficiently
+  informative patterns while retaining stricter tolerance for short or
+  ambiguous patterns.
 - Tagged FASTQ headers are detected per record, including after plain records
   in files or merged directories. Split suffixes precede header descriptions.
 - Modification coordinates are validated against the sequence; impossible
