@@ -51,6 +51,10 @@ const LMAX: usize = 100;
 /// Anchors are ranked by unprimed read-start support.
 const MAX_BOUNDARY_ANCHORS: usize = 8;
 
+/// Minimum fraction of a layer's windows that one member of a variable
+/// layer must hold, below which a barcode panel would exceed 1000 members.
+const VARIABLE_MEMBER_SUPPORT: f64 = 0.001;
+
 /// Max number of adapters `peel_paths` will extract from one end's k-mer graph.
 /// A barcode layer holds one family per barcode.
 const MAX_ADAPTERS_PER_END: usize = 128;
@@ -1144,7 +1148,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End, contrast: bool) -
                 .take()
                 .unwrap_or_else(|| terminal_support(&trimmed, &recount, end, k_cons));
             let support = present as f64 / n_recount as f64;
-            tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), present, anchored, has_insert_boundary, "Validated end candidate");
+            tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), present, anchored, peak, has_insert_boundary, "Validated end candidate");
             if present >= MIN_SUPPORT_WINDOWS
                 && support >= KEEP_SUPPORT
                 && anchored * 100 >= present * ANCHORED_PERCENT
@@ -1274,15 +1278,56 @@ fn advance_boundaries(
     let mut five_hits: Vec<Vec<(usize, usize)>> = vec![Vec::new(); five_texts.len()];
     let mut three_hits: Vec<Vec<(usize, usize)>> = vec![Vec::new(); three_texts.len()];
     let mut searcher = crate::adapter::search::new_searcher_fwd();
+    // Patterns of one length, such as a barcode panel, share one tiled
+    // search per window; other patterns are searched one strand at a time.
+    let mut by_length: std::collections::BTreeMap<usize, Vec<Vec<u8>>> =
+        std::collections::BTreeMap::new();
     for pattern in patterns {
-        for strand in [pattern.clone(), crate::adapter::reverse_complement(pattern)] {
-            let k = edit_budget(error_rate, strand.len());
-            for hit in searcher.search_texts(&strand, &five_texts, k) {
-                five_hits[hit.text_idx].push((hit.text_start, hit.text_end));
+        by_length
+            .entry(pattern.len())
+            .or_default()
+            .push(pattern.clone());
+    }
+    for (len, group) in by_length {
+        let k = edit_budget(error_rate, len);
+        if group.len() > 1 && len <= crate::adapter::search::MAX_TILED_PATTERN_LEN {
+            let encoded = crate::adapter::search::encode_patterns(&group);
+            for (text, hits) in five_texts.iter().zip(&mut five_hits) {
+                let reversed: Vec<u8> = text.iter().rev().copied().collect();
+                crate::adapter::search::encoded_pattern_hits(
+                    &mut searcher,
+                    &encoded,
+                    text,
+                    &reversed,
+                    k,
+                    |_, start, end, _| hits.push((start, end)),
+                );
             }
-            for hit in searcher.search_texts(&strand, &three_texts, k) {
-                let len = three_texts[hit.text_idx].len();
-                three_hits[hit.text_idx].push((len - hit.text_end, len - hit.text_start));
+            for (text, hits) in three_texts.iter().zip(&mut three_hits) {
+                let reversed: Vec<u8> = text.iter().rev().copied().collect();
+                crate::adapter::search::encoded_pattern_hits(
+                    &mut searcher,
+                    &encoded,
+                    text,
+                    &reversed,
+                    k,
+                    |_, start, end, _| hits.push((text.len() - end, text.len() - start)),
+                );
+            }
+            continue;
+        }
+        for pattern in group {
+            for strand in [
+                pattern.clone(),
+                crate::adapter::reverse_complement(&pattern),
+            ] {
+                for hit in searcher.search_texts(&strand, &five_texts, k) {
+                    five_hits[hit.text_idx].push((hit.text_start, hit.text_end));
+                }
+                for hit in searcher.search_texts(&strand, &three_texts, k) {
+                    let len = three_texts[hit.text_idx].len();
+                    three_hits[hit.text_idx].push((len - hit.text_end, len - hit.text_start));
+                }
             }
         }
     }
@@ -1444,9 +1489,24 @@ fn symmetry_cut(
 /// substring covers `FAMILY_OVERLAP_PERCENT` of the shorter, as remnants of
 /// one adapter that differ in length do.
 fn same_family(a: &[u8], b: &[u8], error_rate: f64) -> bool {
-    if same_adapter(a, b, error_rate) {
-        return true;
+    same_adapter(a, b, error_rate)
+        || longest_common_substring(a, b) * 100 >= a.len().min(b.len()) * FAMILY_OVERLAP_PERCENT
+}
+
+/// Returns whether the shorter of two candidates is a fragment of the
+/// longer: one family by `same_family`, with less than `MIN_PATTERN_LEN` of
+/// the shorter outside their longest common substring, as an end of the
+/// longer extended by a few bases the assembly could not support is.
+fn fragment_of(a: &[u8], b: &[u8], error_rate: f64) -> bool {
+    let short = a.len().min(b.len());
+    same_adapter(a, b, error_rate) || {
+        let shared = longest_common_substring(a, b);
+        shared * 100 >= short * FAMILY_OVERLAP_PERCENT && short - shared < MIN_PATTERN_LEN
     }
+}
+
+/// Length of the longest common substring of `a` and `b`.
+fn longest_common_substring(a: &[u8], b: &[u8]) -> usize {
     let mut longest = 0;
     let mut previous = vec![0usize; b.len() + 1];
     for &x in a {
@@ -1459,15 +1519,15 @@ fn same_family(a: &[u8], b: &[u8], error_rate: f64) -> bool {
         }
         previous = current;
     }
-    longest * 100 >= a.len().min(b.len()) * FAMILY_OVERLAP_PERCENT
+    longest
 }
 
 /// Removes from each candidate the prefix and suffix that occur in a
-/// stronger candidate of another family in the same layer and end. Sequence
-/// shared with a better supported neighbour, such as the flank around a
-/// barcode, belongs to that neighbour's layer; a fragment of the candidate
-/// itself is never stronger. Candidates left shorter than `MIN_PATTERN_LEN`
-/// are dropped.
+/// better supported candidate of another family in the same layer and end.
+/// Sequence shared with a better supported neighbour, such as the flank
+/// around a barcode, belongs to that neighbour's layer; a fragment of the
+/// candidate itself is never stronger. Candidates left shorter than
+/// `MIN_PATTERN_LEN` are dropped.
 fn strip_shared_ends(candidates: &mut Vec<Candidate>, error_rate: f64) {
     // Longest prefix of `a` that occurs anywhere in `b`.
     let shared_prefix = |a: &[u8], b: &[u8]| {
@@ -1586,7 +1646,8 @@ fn variable_layer(
         })
         .filter(|gap| gap.len() >= MIN_PATTERN_LEN)
         .collect();
-    let floor = MIN_SUPPORT_WINDOWS.max((windows.len() as f64 * KEEP_SUPPORT).ceil() as usize);
+    let floor =
+        MIN_SUPPORT_WINDOWS.max((windows.len() as f64 * VARIABLE_MEMBER_SUPPORT).ceil() as usize);
     cluster_sequences(searcher, &gaps, error_rate, floor)
         .into_iter()
         .map(|(seq, members)| {
@@ -1625,7 +1686,9 @@ fn cluster_sequences(
             .map(|(&text, _)| text)
             .collect();
         if members.len() >= floor {
-            out.push((polish_consensus(seed, &members), members.len()));
+            let consensus = polish_consensus(seed, &members);
+            tracing::debug!(seed = %String::from_utf8_lossy(seed), consensus = %String::from_utf8_lossy(&consensus), members = members.len(), "Variable layer member");
+            out.push((consensus, members.len()));
         }
         unassigned = unassigned
             .into_iter()
@@ -1726,7 +1789,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             .map(|c| (c, End::Five))
             .chain(three.into_iter().map(|c| (c, End::Three)))
             .filter(|((seq, support, _, _, _), _)| {
-                seq.len() >= MIN_PATTERN_LEN && *support >= KEEP_SUPPORT
+                seq.len() >= MIN_PATTERN_LEN && (*support >= KEEP_SUPPORT || variable.contains(seq))
             })
             .filter_map(|((seq, support, boundary, weight, unbounded), end)| {
                 let (own, opposite) = match end {
@@ -1789,7 +1852,10 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 .then(b.0.len().cmp(&a.0.len()))
                 .then(a.0.cmp(&b.0))
         });
-        // Contained reconstructions merge into the candidate that ranks first.
+        // Contained reconstructions and fragments merge into the heaviest
+        // reconstruction of their family. A sequence supported `RUN_JUMP`
+        // times better than the candidate containing it is the shared layer
+        // of that candidate, not its fragment.
         let mut merged: Vec<(Vec<u8>, f64, u64, bool, End)> = Vec::new();
         for (seq, support, _, boundary, weight, end) in candidates {
             let matched = weight;
@@ -1803,9 +1869,12 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                     && same_adapter(&seq, other, base.error_rate)
             }) {
                 continue;
-            } else if let Some((other, previous, best, _, _)) = merged
-                .iter_mut()
-                .find(|(other, _, _, _, _)| same_adapter(&seq, other, base.error_rate))
+            } else if let Some((other, previous, best, _, _)) =
+                merged.iter_mut().find(|(other, previous, _, _, _)| {
+                    support < *previous * f64::from(RUN_JUMP)
+                        && *previous < support * f64::from(RUN_JUMP)
+                        && fragment_of(&seq, other, base.error_rate)
+                })
             {
                 if matched > *best {
                     *other = seq;
@@ -1853,16 +1922,19 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             let member = variable
                 .iter()
                 .any(|v| same_adapter(&seq, v, base.error_rate));
-            let variant = !member
-                && accepted_windows.iter().any(|other| {
-                    let shared = windows
+            let shared = accepted_windows
+                .iter()
+                .map(|other| {
+                    windows
                         .iter()
                         .zip(other)
                         .filter(|(a, b)| **a && **b)
-                        .count();
-                    shared * 100 >= own * VARIANT_OVERLAP_PERCENT
-                });
-            tracing::debug!(sequence = %String::from_utf8_lossy(&seq), matched, own, variant, "Ranked candidate");
+                        .count()
+                })
+                .max()
+                .unwrap_or(0);
+            let variant = !member && shared * 100 >= own * VARIANT_OVERLAP_PERCENT;
+            tracing::debug!(sequence = %String::from_utf8_lossy(&seq), matched, own, shared, variant, "Ranked candidate");
             if variant {
                 continue;
             }
