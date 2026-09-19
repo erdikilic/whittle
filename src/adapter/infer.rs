@@ -1256,9 +1256,11 @@ fn background_windows<'a>(sample: &[&'a [u8]], bounds: &Boundaries, w: usize) ->
 
 /// Advances each boundary past the innermost hit of `patterns`, on either
 /// strand, that starts within `ANCHOR_SLACK` bases of it, and with `repeat`
-/// past every further hit the window holds. Only reads flagged in `active`
-/// are searched. Returns the reads whose boundary moved, or an empty vector
-/// when none did.
+/// past every further hit the window holds. With `eroded`, a pattern may
+/// hang off the boundary by up to its edit budget in overhang cost, as an
+/// eroded adapter does at the physical read end, with at least
+/// `MIN_OVERLAP` aligned bases. Only reads flagged in `active` are searched.
+/// Returns the reads whose boundary moved, or an empty vector when none did.
 fn advance_boundaries(
     sample: &[&[u8]],
     bounds: &mut Boundaries,
@@ -1266,6 +1268,7 @@ fn advance_boundaries(
     error_rate: f64,
     active: &[bool],
     repeat: bool,
+    eroded: bool,
 ) -> Vec<bool> {
     let (five_w, three_w) = layer_windows(sample, bounds, 2 * WINDOW_LEN);
     let five_w: EndWindows = five_w.into_iter().filter(|(i, _)| active[*i]).collect();
@@ -1280,6 +1283,8 @@ fn advance_boundaries(
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     // Patterns of one length, such as a barcode panel, share one tiled
     // search per window; other patterns are searched one strand at a time.
+    // Windows without a hit are then searched with overhang when eroded.
+    let mut singletons: Vec<Vec<u8>> = Vec::new();
     let mut by_length: std::collections::BTreeMap<usize, Vec<Vec<u8>>> =
         std::collections::BTreeMap::new();
     for pattern in patterns {
@@ -1327,6 +1332,32 @@ fn advance_boundaries(
                 for hit in searcher.search_texts(&strand, &three_texts, k) {
                     let len = three_texts[hit.text_idx].len();
                     three_hits[hit.text_idx].push((len - hit.text_end, len - hit.text_start));
+                }
+            }
+            singletons.push(pattern);
+        }
+    }
+    if eroded && !singletons.is_empty() {
+        let mut partial = crate::adapter::search::new_overhang_searcher(error_rate as f32);
+        let missing = |hits: &[Vec<(usize, usize)>]| -> Vec<usize> {
+            (0..hits.len()).filter(|&i| hits[i].is_empty()).collect()
+        };
+        let five_missing = missing(&five_hits);
+        let three_missing = missing(&three_hits);
+        let five_subset: Vec<&[u8]> = five_missing.iter().map(|&i| five_texts[i]).collect();
+        let three_subset: Vec<&[u8]> = three_missing.iter().map(|&i| three_texts[i]).collect();
+        for pattern in &singletons {
+            let k = edit_budget(error_rate, pattern.len());
+            for hit in partial.search_texts(pattern, &five_subset, k) {
+                if hit.text_end - hit.text_start >= crate::adapter::MIN_OVERLAP {
+                    five_hits[five_missing[hit.text_idx]].push((hit.text_start, hit.text_end));
+                }
+            }
+            for hit in partial.search_texts(pattern, &three_subset, k) {
+                let len = three_subset[hit.text_idx].len();
+                if hit.text_end - hit.text_start >= crate::adapter::MIN_OVERLAP {
+                    three_hits[three_missing[hit.text_idx]]
+                        .push((len - hit.text_end, len - hit.text_start));
                 }
             }
         }
@@ -1490,7 +1521,7 @@ fn symmetry_cut(
 /// one adapter that differ in length do.
 fn same_family(a: &[u8], b: &[u8], error_rate: f64) -> bool {
     same_adapter(a, b, error_rate)
-        || longest_common_substring(a, b) * 100 >= a.len().min(b.len()) * FAMILY_OVERLAP_PERCENT
+        || shared_substring(a, b) * 100 >= a.len().min(b.len()) * FAMILY_OVERLAP_PERCENT
 }
 
 /// Returns whether the shorter of two candidates is a fragment of the
@@ -1500,9 +1531,17 @@ fn same_family(a: &[u8], b: &[u8], error_rate: f64) -> bool {
 fn fragment_of(a: &[u8], b: &[u8], error_rate: f64) -> bool {
     let short = a.len().min(b.len());
     same_adapter(a, b, error_rate) || {
-        let shared = longest_common_substring(a, b);
+        let shared = shared_substring(a, b);
         shared * 100 >= short * FAMILY_OVERLAP_PERCENT && short - shared < MIN_PATTERN_LEN
     }
+}
+
+/// Length of the longest substring `a` shares with `b` on either strand.
+fn shared_substring(a: &[u8], b: &[u8]) -> usize {
+    longest_common_substring(a, b).max(longest_common_substring(
+        &crate::adapter::reverse_complement(a),
+        b,
+    ))
 }
 
 /// Length of the longest common substring of `a` and `b`.
@@ -1721,8 +1760,15 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     if !known.is_empty() {
         let mut active = vec![true; sample.len()];
         for _ in 0..MAX_LAYERS {
-            active =
-                advance_boundaries(sample, &mut bounds, &known, base.error_rate, &active, true);
+            active = advance_boundaries(
+                sample,
+                &mut bounds,
+                &known,
+                base.error_rate,
+                &active,
+                true,
+                true,
+            );
             if active.is_empty() {
                 break;
             }
@@ -1975,6 +2021,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 base.error_rate,
                 &vec![true; sample.len()],
                 false,
+                layer == 0,
             )
             .is_empty()
         {
