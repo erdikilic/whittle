@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- Terminal edit budgets are bounded by a chance-match null model that
+  lowers the budget of the shortest patterns by one edit; catalog adapters,
+  barcodes, flanks and primers keep their configured budget.
+- BAM records whose QUAL field is absent (`0xFF`) are refused like records
+  with a QUAL length mismatch, instead of being read as Phred 255.
+- Folder-merge and output-creation errors name the file involved, and a
+  FASTQ run rejected by a tag-flag guard finishes its output file first.
 - Adapter discovery proceeds in layers from each read end. Each accepted
   layer moves the boundary inward and the next layer is assembled from the
   unexplained sequence, so adapters, barcode flanks, barcodes and primers are

@@ -3,6 +3,8 @@
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 
+use anyhow::Context;
+
 use flate2::bufread::MultiGzDecoder;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
@@ -593,7 +595,9 @@ pub(crate) fn writer(
     parallel: bool,
 ) -> anyhow::Result<FastqOut> {
     let inner: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
-        Some(p) => Box::new(File::create(p)?),
+        Some(p) => {
+            Box::new(File::create(p).with_context(|| format!("creating output {}", p.display()))?)
+        },
         None => Box::new(io::stdout()),
     };
     let base = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, inner);

@@ -156,7 +156,7 @@ pub fn fastq_records(
                         counters.clone(),
                     ))
                 })
-                .map_err(anyhow::Error::from);
+                .with_context(|| format!("opening {}", p.display()));
             let reader = counted.and_then(|mut inner| {
                 let format = match from_extension(&p) {
                     Some(Format::FastqGz) => crate::io::probe_gz(&mut inner)?,
@@ -170,8 +170,11 @@ pub fn fastq_records(
                     Format::Bam => unreachable!("`classify` admits no BAM into a FASTQ folder"),
                 }
             });
+            // Errors name the member file they arose in.
             match reader {
-                Ok(reader) => reader,
+                Ok(reader) => Box::new(
+                    reader.map(move |r| r.with_context(|| format!("reading {}", p.display()))),
+                ),
                 Err(e) => Box::new(std::iter::once(Err(e))),
             }
         },
@@ -206,7 +209,7 @@ pub fn bam_reader(
     // See `fastq_records`: counting wraps the file, so BGZF bytes are measured
     // compressed, matching the summed file sizes the bar is scaled against.
     let counted = |p: &Path, counters: Arc<Counters>| -> anyhow::Result<Box<dyn Read + Send>> {
-        let f = std::fs::File::open(p)?;
+        let f = std::fs::File::open(p).with_context(|| format!("opening {}", p.display()))?;
         Ok(Box::new(crate::io::counting::CountingReader::new(
             f, counters,
         )))

@@ -53,15 +53,22 @@ these treatments:
   fewer bases than `--min-length`, or by at most 11 bases, merge into one.
   `--adapter-ends-only` disables splitting and searches only the two end zones.
 
-Interior hits use a stricter budget than terminal hits. For each adapter and
-read-length class (powers of two from 4 kb upward), the interior budget is the
-largest edit count whose expected number of chance matches in a read of that
-length, over both strands under independent uniform DNA, stays within `1e-4`;
-it never exceeds the terminal budget, and exact matches are always accepted.
-Long, informative patterns keep most of their tolerance in long reads; short or
-IUPAC-rich patterns and very long reads receive fewer interior edits. This null
-model is a specificity guard, not a calibrated false-split probability for
-repetitive or composition-biased biological reads.
+The edit budget of a hit is the error rate times the pattern length, rounded
+down, bounded by a chance-match null model. A pattern's terminal budget is
+the largest edit count whose expected chance matches over both end zones
+and both strands, under independent uniform DNA, stay within `0.1` per
+read; the model sums alignment paths and overstates real read ends by more
+than an order of magnitude, so at the default error rate the bound lowers
+only the budget of 11-, 12- and 15-base patterns by one edit. Interior hits
+use a stricter budget. For each adapter
+and read-length class (powers of two from 4 kb upward), the interior budget
+is the largest edit count whose expected number of chance matches in a read
+of that length stays within `1e-4`; it never exceeds the terminal budget, and
+exact matches are always accepted. Long, informative patterns keep most of
+their tolerance in long reads; short or IUPAC-rich patterns and very long
+reads receive fewer interior edits. This null model is a specificity guard,
+not a calibrated false-split probability for repetitive or composition-biased
+biological reads.
 Adapter trims pass through the same tag-rewrite path as
 every other trim, so `MM`/`ML`/`MN` and the per-base tags stay in register
 ([tags.md](tags.md)).

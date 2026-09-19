@@ -1179,7 +1179,8 @@ fn count_undo_tags_dropped(
 /// is assembled field by field: aux tags are copied in source order with the
 /// rewritten ones replaced in place, removed ones skipped and added ones
 /// appended. A `Malformed` block is removed. An untrimmed, unsplit record with
-/// an `Absent` or `Consistent` block is cloned as is.
+/// an `Absent` or `Consistent` block and nothing to remove is returned as
+/// `None`: its output is its input.
 ///
 /// `remove` names the tags `--remove-tag` and `--remove-kinetics` drop. Removal
 /// is applied last, to the rewritten tag set, so a removed tag whittle
@@ -1192,7 +1193,7 @@ fn reconstruct_window_record(
     indexed: Option<&IndexedMods>,
     moves: Option<&MoveIndex<'_>>,
     remove: &TagRemoval,
-) -> RecordBuf {
+) -> Option<RecordBuf> {
     let Window {
         start, end, total, ..
     } = window;
@@ -1206,15 +1207,15 @@ fn reconstruct_window_record(
         && remove.is_empty()
         && matches!(mod_block, ModBlock::Absent | ModBlock::Consistent)
     {
-        return src.clone();
+        return None;
     }
 
     let platform = platform(src);
     let mut out = RecordBuf::default();
     *out.name_mut() = if trimmed || split {
-        let name = src.name().map(|n| n.to_vec()).unwrap_or_default();
+        let name: &[u8] = src.name().map(AsRef::as_ref).unwrap_or_default();
         let coords = query_span(src).map(|(qs0, _)| window_coords(qs0, start, end));
-        Some(segment_name(platform, &name, window, coords).into())
+        Some(segment_name(platform, name, window, coords).into())
     } else {
         src.name().map(Into::into)
     };
@@ -1282,7 +1283,7 @@ fn reconstruct_window_record(
         }
     }
 
-    out
+    Some(out)
 }
 
 /// Rebuilds the `MM`/`ML` block of a `Consistent` or `MissingMn` record for the
@@ -1336,10 +1337,10 @@ fn prepare_read<'a>(
     crate::io::bam::ensure_trimmable(rec)?;
     let seq = rec.sequence().as_ref();
     let qual = rec.quality_scores().as_ref();
-    if qual.len() != seq.len() {
+    if qual.len() != seq.len() || crate::io::bam::quality_absent(qual) {
         anyhow::bail!(
             "read {}: BAM record SEQ length {} != QUAL length {} \
-             (records without full per-base quality are not supported)",
+             (records without per-base quality are not supported)",
             crate::io::bam::display_name(rec.name().map(AsRef::as_ref)),
             seq.len(),
             qual.len()
@@ -1434,40 +1435,44 @@ fn render_windows(
 /// Renders one decoded record for BAM output: every surviving window is
 /// rebuilt into an output record and handed to `emit`. Shared by the
 /// sequential and parallel drivers.
+/// `emit` receives `None` for a window whose output record is the input
+/// record.
 fn render_bam_read(
     header: &sam::Header,
     rec: &RecordBuf,
     cfg: &Config,
     counters: &Counters,
-    mut emit: impl FnMut(RecordBuf) -> io::Result<()>,
+    mut emit: impl FnMut(Option<RecordBuf>) -> io::Result<()>,
 ) -> anyhow::Result<()> {
-    let direction = signal_reversed(header, rec);
-    let moves = if cfg.update_moves {
-        direction.and_then(|reverse| MoveIndex::new(rec, reverse))
+    let direction = if cfg.update_moves {
+        signal_reversed(header, rec)
     } else {
         None
     };
+    // The move table is indexed on the first window that needs it.
+    let moves: std::cell::OnceCell<Option<MoveIndex<'_>>> = std::cell::OnceCell::new();
     let seq = rec.sequence().as_ref();
     render_windows(rec, cfg, counters, |window, mod_block, indexed| {
+        let partial = window.start != 0 || window.end != seq.len();
         if cfg.update_moves
             && direction.is_none()
+            && partial
             && rec.data().get(&Tag::new(b'm', b'v')).is_some()
-            && (window.start != 0 || window.end != seq.len())
         {
             anyhow::bail!(
                 "read {}: --update-signal-tags requires a DNA or RNA basecall_model in the @RG description",
                 crate::io::bam::display_name(rec.name().map(AsRef::as_ref))
             );
         }
-
-        let out = reconstruct_window_record(
-            rec,
-            window,
-            mod_block,
-            indexed,
-            moves.as_ref(),
-            &cfg.remove_tags,
-        );
+        let moves = if partial {
+            moves
+                .get_or_init(|| direction.and_then(|reverse| MoveIndex::new(rec, reverse)))
+                .as_ref()
+        } else {
+            None
+        };
+        let out =
+            reconstruct_window_record(rec, window, mod_block, indexed, moves, &cfg.remove_tags);
         Ok(emit(out)?)
     })
 }
@@ -1488,7 +1493,7 @@ fn run_bam_seq(
             .input_bases
             .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
         render_bam_read(header, &rec, cfg, counters, |out| {
-            sink.write_record(header, &out)
+            sink.write_record(header, out.as_ref().unwrap_or(&rec))
         })?;
     }
     Ok(counters.snapshot())
@@ -1511,7 +1516,7 @@ where
     T: Send,
     P: Send,
     S: Send,
-    Render: Fn(&RecordBuf, &Config, &mut Vec<T>) -> anyhow::Result<()> + Sync,
+    Render: Fn(&bam::Record, &RecordBuf, &Config, &mut Vec<T>) -> anyhow::Result<()> + Sync,
     Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
     WriteOne: Fn(&mut S, &P) -> std::io::Result<()> + Send,
 {
@@ -1521,7 +1526,7 @@ where
         |record: &bam::Record| record.sequence().len(),
         cfg,
         sink,
-        |rec, cfg, out| render(&decode_raw_record(&rec)?, cfg, out),
+        |rec, cfg, out| render(&rec, &decode_raw_record(&rec)?, cfg, out),
         pack,
         write_one,
         counters,
@@ -1713,10 +1718,10 @@ fn process_raw_full_window(
     let seq_len = record.sequence().len();
     let qualities = record.quality_scores();
     let qual = qualities.as_ref();
-    if qual.len() != seq_len {
+    if qual.len() != seq_len || crate::io::bam::quality_absent(qual) {
         anyhow::bail!(
             "read {}: BAM record SEQ length {} != QUAL length {} \
-             (records without full per-base quality are not supported)",
+             (records without per-base quality are not supported)",
             crate::io::bam::display_name(record.name().map(AsRef::as_ref)),
             seq_len,
             qual.len()
@@ -1768,14 +1773,17 @@ fn process_raw_full_window(
                 idx: 0,
                 total: 1,
             };
-            BamOutputRecord::Decoded(reconstruct_window_record(
+            match reconstruct_window_record(
                 &decoded,
                 window,
                 mod_block,
                 None,
                 None,
                 &cfg.remove_tags,
-            ))
+            ) {
+                Some(rebuilt) => BamOutputRecord::Decoded(rebuilt),
+                None => BamOutputRecord::Raw(record),
+            }
         },
     };
     Ok(Some(output))
@@ -1881,10 +1889,14 @@ pub(crate) fn run_bam(
         records,
         cfg,
         sink,
-        // Render: the survivors of one record.
-        |rec, cfg, items| {
+        // Render: the survivors of one record. An untouched record is
+        // written from its raw input without re-encoding.
+        |raw, rec, cfg, items| {
             render_bam_read(header, rec, cfg, counters, |out| {
-                items.push(BamOutputRecord::Decoded(out));
+                items.push(match out {
+                    Some(out) => BamOutputRecord::Decoded(out),
+                    None => BamOutputRecord::Raw(raw.clone()),
+                });
                 Ok(())
             })
         },
@@ -2149,6 +2161,7 @@ mod tests {
                 .as_ref(),
             &TagRemoval::default(),
         )
+        .unwrap_or_else(|| src.clone())
     }
 
     fn ubam_with_mods(seq: &[u8], quals: Vec<u8>, mm: &[u8], ml: Vec<u8>) -> RecordBuf {
@@ -3355,7 +3368,7 @@ mod tests {
             recs.into_iter(),
             &cfg,
             &mut sink,
-            |_rec, _cfg, out: &mut Vec<()>| {
+            |_raw, _rec, _cfg, out: &mut Vec<()>| {
                 out.push(());
                 Ok(())
             },
@@ -3400,7 +3413,7 @@ mod tests {
             recs,
             &cfg,
             &mut sink,
-            |_rec, _cfg, out: &mut Vec<()>| {
+            |_raw, _rec, _cfg, out: &mut Vec<()>| {
                 out.push(());
                 Ok(())
             },

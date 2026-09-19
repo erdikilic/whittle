@@ -483,11 +483,11 @@ impl Session {
                     .counters
                     .tagged_fastq
                     .load(std::sync::atomic::Ordering::Relaxed);
+                writer.finish()?;
                 guards::guard_tag_flags(cfg, in_fmt, tagged)?;
                 if !tagged {
                     note_tags_ignored(cfg, in_fmt, out_fmt);
                 }
-                writer.finish()?;
                 self.finish(obs, &stats, cfg)
             },
         }

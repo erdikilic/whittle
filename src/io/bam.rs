@@ -5,6 +5,7 @@ use std::io::{self, BufReader, BufWriter, Write};
 use std::num::NonZero;
 use std::path::Path;
 
+use anyhow::Context;
 use noodles_bam as bam;
 use noodles_bgzf as bgzf;
 use noodles_sam::alignment::RecordBuf;
@@ -96,6 +97,12 @@ pub(crate) fn refuse_untrimmable(
 /// Errors (naming the read) if a decoded record is aligned, flagged
 /// reverse-complemented or carries a legacy `Mm`/`Ml` tag; see
 /// `refuse_untrimmable`. Only unaligned BAM (uBAM) input is supported.
+/// Returns whether a BAM QUAL field encodes absent quality: `0xFF` in every
+/// position, which BAM writes for a `*` QUAL.
+pub fn quality_absent(qual: &[u8]) -> bool {
+    !qual.is_empty() && qual.iter().all(|&q| q == 0xFF)
+}
+
 pub fn ensure_trimmable(rec: &RecordBuf) -> anyhow::Result<()> {
     let legacy_tag = LEGACY_MOD_TAGS
         .into_iter()
@@ -181,7 +188,9 @@ pub fn writer(
 ) -> anyhow::Result<BamSink> {
     let clevel = compression_level(level)?;
     let inner: Box<dyn Write + Send> = match output {
-        Some(p) => Box::new(File::create(p)?),
+        Some(p) => {
+            Box::new(File::create(p).with_context(|| format!("creating output {}", p.display()))?)
+        },
         None => Box::new(io::stdout()),
     };
     let inner = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, inner);

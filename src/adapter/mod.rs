@@ -228,6 +228,16 @@ pub(crate) fn edit_budget(rate: f64, len: usize) -> usize {
 /// interior edit budget may admit under an independent uniform base model.
 const INTERIOR_CHANCE_HITS_PER_READ: f64 = 1e-4;
 
+/// Expected chance terminal matches per read and pattern, over both strands
+/// and both end zones, that a terminal edit budget may admit under the same
+/// null model. The model sums alignment paths and overstates the rate on
+/// real read ends by more than an order of magnitude, so the bound guards
+/// only against budgets no read end could support: at the default error
+/// rate it lowers the budget of 11-, 12- and 15-base patterns by one edit
+/// and leaves catalog adapters, barcodes, flanks and degenerate primers at
+/// their configured budget.
+const TERMINAL_CHANCE_HITS_PER_READ: f64 = 0.1;
+
 /// Read-length class `c` holds reads shorter than `2^(INTERIOR_CLASS_BITS + c)`
 /// bases. Class 0 also holds every shorter read.
 const INTERIOR_CLASS_BITS: u32 = 12;
@@ -235,7 +245,8 @@ const INTERIOR_CLASS_BITS: u32 = 12;
 /// Number of read-length classes. The last class holds every longer read.
 const INTERIOR_CLASSES: usize = 20;
 
-/// Edit budgets of one adapter: the configured terminal tolerance and an
+/// Edit budgets of one adapter: the configured terminal tolerance bounded by
+/// the chance-match rate over the end zones of the pattern set, and an
 /// interior tolerance bounded by the chance-match rate for each read length.
 #[derive(Debug, Clone, Copy)]
 struct Budget {
@@ -257,7 +268,11 @@ impl Budget {
     /// zero-cost match. Each class admits the largest edit count whose
     /// expected chance matches in a read at the class ceiling stay within
     /// `INTERIOR_CHANCE_HITS_PER_READ`; exact matches are always admitted.
-    fn new(pattern: &[u8], error_rate: f64) -> Self {
+    /// The terminal budget is the configured tolerance, lowered to the
+    /// largest edit count whose expected chance hits over both end zones of
+    /// `end_size` bases and both strands stay within
+    /// `TERMINAL_CHANCE_HITS_PER_READ`.
+    fn new(pattern: &[u8], error_rate: f64, end_size: usize) -> Self {
         let len = pattern.len();
         let k_end = edit_budget(error_rate, len);
         let mut previous = vec![1.0; k_end + 1];
@@ -284,6 +299,13 @@ impl Budget {
                 .count()
                 .saturating_sub(1)
         });
+        let positions = 4.0 * (end_size + 1) as f64;
+        let k_end = cumulative
+            .iter()
+            .take_while(|&&probability| probability * positions <= TERMINAL_CHANCE_HITS_PER_READ)
+            .count()
+            .saturating_sub(1)
+            .min(k_end);
         Self { len, k_end, k_mid }
     }
 
@@ -348,22 +370,23 @@ struct TerminalBatch {
 }
 
 impl CandidateIndex {
-    /// Builds the index for `adapters`; interior seeds are built only when
-    /// `include_interior`, and only for roles that split.
-    fn new(adapters: &[Adapter], error_rate: f64, include_interior: bool) -> Self {
-        let budgets: Vec<Budget> = adapters
-            .iter()
-            .map(|adapter| Budget::new(&adapter.seq, error_rate))
-            .collect();
-        let plain: Vec<bool> = adapters
-            .iter()
-            .map(|adapter| is_plain_acgt(&adapter.seq))
-            .collect();
+    /// Builds the index for `adapters` searched over end zones of `end_size`
+    /// bases; interior seeds are built only when `include_interior`, and
+    /// only for roles that split.
+    fn new(adapters: &[Adapter], error_rate: f64, end_size: usize, include_interior: bool) -> Self {
         // A pattern below `MIN_PATTERN_LEN` takes part in no search: it gets
         // no seeds, no batch and no singleton search.
         let searchable: Vec<bool> = adapters
             .iter()
             .map(|adapter| adapter.seq.len() >= MIN_PATTERN_LEN)
+            .collect();
+        let budgets: Vec<Budget> = adapters
+            .iter()
+            .map(|adapter| Budget::new(&adapter.seq, error_rate, end_size))
+            .collect();
+        let plain: Vec<bool> = adapters
+            .iter()
+            .map(|adapter| is_plain_acgt(&adapter.seq))
             .collect();
         let mut unfiltered = vec![false; adapters.len()];
         let seeds = if include_interior {
@@ -782,14 +805,20 @@ const AMBIGUOUS_READ_BASE: u8 = b'X';
 /// the common case, is returned as is; any other read is rewritten into
 /// `buf`, which keeps its capacity across calls. Sassy's profiles fold case
 /// themselves; the seed table does not, so the text is folded once here
-/// rather than on every lookup.
-pub(crate) fn normalize_into<'a>(window: &'a [u8], buf: &'a mut Vec<u8>) -> &'a [u8] {
+/// rather than on every lookup. Also returns whether the normalized read
+/// holds no `AMBIGUOUS_READ_BASE`.
+pub(crate) fn normalize_into<'a>(window: &'a [u8], buf: &'a mut Vec<u8>) -> (&'a [u8], bool) {
     if is_upper_acgt(window) {
-        return window;
+        return (window, true);
     }
     buf.clear();
-    buf.extend(window.iter().map(|&b| normalize_base(b)));
-    buf
+    let mut plain = true;
+    buf.extend(window.iter().map(|&b| {
+        let normalized = normalize_base(b);
+        plain &= normalized != AMBIGUOUS_READ_BASE;
+        normalized
+    }));
+    (buf, plain)
 }
 
 /// Returns the normalized form of one read byte: its uppercase base, or
@@ -1449,9 +1478,9 @@ fn segments_tallied(
     if cfg.adapters.is_empty() {
         return vec![(0, n)];
     }
-    let index = cfg
-        .candidate_index
-        .get_or_init(|| CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.split));
+    let index = cfg.candidate_index.get_or_init(|| {
+        CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.end_size, cfg.split)
+    });
     // The overhang cost per base of the terminal search is the error rate, so
     // a partial adapter costs what its missing part would have been allowed
     // in edits.
@@ -1468,9 +1497,10 @@ fn segments_tallied(
             head_flags,
             tail_flags,
         } = state;
-        let window = normalize_into(window, normalized);
+        let (window, plain_read) = normalize_into(window, normalized);
         reversed.clear();
-        reversed.extend(window.iter().rev());
+        reversed.extend_from_slice(window);
+        reversed.reverse();
         let overhang = match overhang {
             Some((a, s)) if *a == alpha => s,
             slot => &mut slot.insert((alpha, new_overhang_searcher(alpha))).1,
@@ -1481,7 +1511,7 @@ fn segments_tallied(
             read: Read { window, reversed },
         };
         let mut engine = Engine {
-            plain_read: !window.contains(&AMBIGUOUS_READ_BASE),
+            plain_read,
             plain,
             ambiguous,
             overhang,
@@ -1557,18 +1587,18 @@ mod segment_tests {
 
     #[test]
     fn interior_tolerance_depends_on_pattern_and_read_length() {
-        let lsk = Budget::new(b"AATGTACTTCGTTCAGTTACGTATTGCT", 0.2);
+        let lsk = Budget::new(b"AATGTACTTCGTTCAGTTACGTATTGCT", 0.2, 150);
         assert_eq!(lsk.k_end, 5);
         assert_eq!(lsk.interior(2_000), 4);
         assert_eq!(lsk.interior(30_000), 4);
         assert_eq!(lsk.interior(200_000), 3);
-        let short = Budget::new(b"TGGTTAGACTACGTATTGCTG", 0.2);
+        let short = Budget::new(b"TGGTTAGACTACGTATTGCTG", 0.2, 150);
         assert_eq!(short.interior(2_000), 2);
         assert_eq!(short.interior(30_000), 1);
-        let ambiguous = Budget::new(&[b'N'; 40], 0.2);
+        let ambiguous = Budget::new(&[b'N'; 40], 0.2, 150);
         assert_eq!(ambiguous.interior_max(), 0);
         for length in 11..=100 {
-            let budget = Budget::new(&vec![b'A'; length], 0.2);
+            let budget = Budget::new(&vec![b'A'; length], 0.2, 150);
             assert!(budget.interior_max() <= budget.k_end);
             assert!(budget.k_mid.windows(2).all(|pair| pair[0] >= pair[1]));
             assert_eq!(budget.interior(0), budget.interior_max());
@@ -1577,6 +1607,19 @@ mod segment_tests {
                 budget.k_mid[INTERIOR_CLASSES - 1]
             );
         }
+    }
+
+    #[test]
+    fn terminal_tolerance_shrinks_with_short_patterns() {
+        assert_eq!(Budget::new(b"AAGAAAGTTGTCGGTGTCTTTGTG", 0.2, 150).k_end, 4);
+        assert_eq!(Budget::new(b"AGAGTTTGATYMTGGCTCAG", 0.2, 150).k_end, 4);
+        assert_eq!(Budget::new(b"TGGTTAGACTACGTAT", 0.2, 150).k_end, 3);
+        assert_eq!(Budget::new(b"TGGTTAGACTACGTA", 0.2, 150).k_end, 2);
+        assert_eq!(Budget::new(b"GCTTGGGTGTT", 0.2, 150).k_end, 1);
+        assert_eq!(
+            Budget::new(b"AATGTACTTCGTTCAGTTACGTATTGCT", 0.2, 150).k_end,
+            5
+        );
     }
 
     /// Builds a configuration at error rate 0.2 and `end_size` 20.
@@ -1657,7 +1700,7 @@ mod segment_tests {
     /// whole window instead of its candidate windows, as the reference for the
     /// seed filter. Every other pass is shared with `adapter_segments`.
     fn reference_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
-        let mut index = CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.split);
+        let mut index = CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.end_size, cfg.split);
         index.seeds = None;
         for (adapter_idx, adapter) in cfg.adapters.iter().enumerate() {
             index.unfiltered[adapter_idx] =
@@ -1849,7 +1892,7 @@ mod segment_tests {
         let mut rng = Lcg(0x5049_4745_4f4e_484f);
         for case in 0..1000 {
             let pattern: Vec<u8> = (0..(11 + rng.below(50))).map(|_| rng.base()).collect();
-            let k = Budget::new(&pattern, 0.2).interior_max();
+            let k = Budget::new(&pattern, 0.2, 150).interior_max();
             let mut mutated = pattern.clone();
             for _ in 0..rng.below(k + 1) {
                 match rng.below(3) {
@@ -1868,7 +1911,7 @@ mod segment_tests {
                     _ => {},
                 }
             }
-            let index = CandidateIndex::new(&[ad("a", &pattern)], 0.2, true);
+            let index = CandidateIndex::new(&[ad("a", &pattern)], 0.2, 150, true);
             let mut text: Vec<u8> = (0..17).map(|_| rng.base()).collect();
             text.extend_from_slice(&mutated);
             text.extend((0..19).map(|_| rng.base()));
@@ -1877,7 +1920,7 @@ mod segment_tests {
             }
             let mut buf = Vec::new();
             assert!(
-                !windows_by_adapter(&index, normalize_into(&text, &mut buf))[0].is_empty(),
+                !windows_by_adapter(&index, normalize_into(&text, &mut buf).0)[0].is_empty(),
                 "Lossless seed filter rejected <=k edit case {case}"
             );
         }
@@ -1910,7 +1953,7 @@ mod segment_tests {
             if longest < END_SEED_LEN {
                 continue;
             }
-            let index = CandidateIndex::new(&[ad("a", &pattern)], 0.2, true);
+            let index = CandidateIndex::new(&[ad("a", &pattern)], 0.2, 150, true);
             let mut text = rng.dna(60);
             text.extend_from_slice(&copy);
             let (mut head, mut tail) = (Vec::new(), Vec::new());
@@ -2019,7 +2062,7 @@ mod segment_tests {
         w.extend_from_slice(b"CACGTGGTTGGACGTC");
         w.extend_from_slice(&[b'C'; 41]);
         let c = cfg_with(vec![ad("deg", adapter)], 0.2, 10, true);
-        let index = CandidateIndex::new(&c.adapters, c.error_rate, true);
+        let index = CandidateIndex::new(&c.adapters, c.error_rate, c.end_size, true);
         assert_eq!(index.unfiltered, vec![true]);
         assert!(
             index.seeds.is_none(),
@@ -2538,22 +2581,22 @@ mod segment_tests {
         );
     }
 
-    /// A six-base insertion expands the terminal alignment from 20 to 26 bases.
+    /// A six-base insertion expands the terminal alignment from 40 to 46 bases.
     /// The terminal search window includes `k_end` additional bases, so
-    /// ends-only and split modes select the same [2, 28) alignment.
+    /// ends-only and split modes select the same [2, 48) alignment.
     #[test]
     fn ends_only_equals_split_on_indel_terminal_adapter() {
-        let adapter = b"AAAACCCCGGGGTTTTACGT";
+        let adapter = b"AAAACCCCGGGGTTTTACGTTGCATCAGTCCAGTGACTGA";
         let extra = b"CTGACT";
-        let mut copy = adapter[..10].to_vec();
+        let mut copy = adapter[..20].to_vec();
         copy.extend_from_slice(extra);
-        copy.extend_from_slice(&adapter[10..]);
+        copy.extend_from_slice(&adapter[20..]);
 
         let mut w = b"AA".to_vec();
         w.extend_from_slice(&copy);
         w.extend_from_slice(b"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT");
 
-        let c_split = cfg_with(vec![ad("five", adapter)], 0.3, 4, true);
+        let c_split = cfg_with(vec![ad("five", adapter)], 0.15, 4, true);
         let c_ends_only = AdapterConfig {
             split: false,
             ..c_split.clone()
@@ -2564,15 +2607,15 @@ mod segment_tests {
 
         assert_eq!(
             split_segs,
-            vec![(28, w.len())],
-            "Split mode finds the full 26bp indel-bearing hit and trims to 28"
+            vec![(48, w.len())],
+            "Split mode finds the full 46bp indel-bearing hit and trims to 48"
         );
         assert_eq!(
             ends_only_segs, split_segs,
             "Ends-only must match split mode exactly: the end zone must be wide \
              enough (end_size + len + k_end) to contain the full indel-lengthened hit"
         );
-        assert_eq!(ends_only_segs[0].0, 28);
+        assert_eq!(ends_only_segs[0].0, 48);
     }
 
     /// A 40 bp insert plus a 20 bp adapter at the 3' end with `end_size >= n`,
