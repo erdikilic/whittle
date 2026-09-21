@@ -651,7 +651,7 @@ fn unverified_barcode_positions_are_left_alone() {
     assert_eq!(v["warnings"]["barcode_tag_unverified_reads"], 1);
 }
 
-/// The nine per-base arrays `--remove-kinetics` removes.
+/// The nine per-base arrays the `kinetics` removal group names.
 const KINETICS_TAGS: [[u8; 2]; 9] = [
     *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sm", *b"sx", *b"sa",
 ];
@@ -817,12 +817,12 @@ fn remove_tag_drops_tags_from_the_fastq_header() {
     assert!(header.contains("ip:B:C,0,1,2,3,4,5,6,7"), "{header}");
 }
 
-/// `--remove-kinetics` removes all nine per-base arrays and leaves every other
-/// tag alone.
+/// `--remove-tag kinetics` removes all nine per-base arrays and leaves every
+/// other tag alone.
 #[test]
-fn strip_kinetics_removes_the_nine_per_base_arrays() {
+fn kinetics_group_removes_the_nine_per_base_arrays() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run_with_tag_fixture(dir.path(), "stripped.bam", &["--remove-kinetics"]);
+    let out = run_with_tag_fixture(dir.path(), "stripped.bam", &["--remove-tag", "kinetics"]);
 
     for tag in KINETICS_TAGS {
         assert!(
@@ -846,7 +846,7 @@ fn remove_tag_flags_are_rejected_on_fastq_input() {
 
     for (args, flag) in [
         (vec!["--remove-tag", "RG"], "--remove-tag"),
-        (vec!["--remove-kinetics"], "--remove-kinetics"),
+        (vec!["--remove-tag", "kinetics,ML"], "--remove-tag"),
     ] {
         Command::cargo_bin("whittle")
             .unwrap()

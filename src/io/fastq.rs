@@ -913,8 +913,7 @@ mod tests {
             b"\tMM:Z:C+m,0;\tMN:i:4"
         );
         // Each removed field goes on its own, leaving the rest of the block.
-        let removal =
-            |tag: &str| crate::config::TagRemoval::parse(&[tag.to_string()], false).unwrap();
+        let removal = |tag: &str| crate::config::TagRemoval::parse(&[tag.to_string()]).unwrap();
         assert_eq!(
             mods_aux(b"C+m,0;", Some(&[10]), 6, &removal("ML")),
             b"\tMM:Z:C+m,0;\tMN:i:6"

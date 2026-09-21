@@ -65,57 +65,54 @@ impl FastqTags {
     }
 }
 
-/// The per-base arrays `--remove-kinetics` removes: the PacBio kinetics
-/// `ip`/`pw`/`fi`/`fp`, the reverse-strand `ri`/`rp`, the per-base aligned match
-/// and mismatch counts `sm`/`sx`, and the run-length subread coverage `sa`.
-/// Derived from the per-base tag constants, so the flag covers exactly the
-/// arrays the BAM writer slices.
+/// The per-base arrays the `kinetics` removal group names: the PacBio kinetics
+/// and alignment-count arrays a BAM writer slices with the sequence.
 pub fn kinetics_tags() -> impl Iterator<Item = [u8; 2]> {
-    crate::workflow::bam::KNOWN_PERBASE_TAGS
-        .into_iter()
-        .chain([crate::workflow::bam::RLE_COVERAGE_TAG])
+    [
+        *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sa", *b"sm", *b"sx",
+    ]
+    .into_iter()
 }
 
-/// Aux tags removed from every output record. `--remove-tag` names them one at a
-/// time and `--remove-kinetics` folds in `kinetics_tags`, so both flags fill one
-/// set and the writers have a single removal path. Removal runs after the
-/// rewrite of a tag whittle maintains, so a removed `MM` or `mv` leaves the rest
-/// of the record intact.
+/// The ONT signal tags the `signal` removal group names and the BAM writer
+/// maintains under `--update-moves`.
+pub const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
+
+/// The modification block the `mods` removal group names.
+pub const MOD_TAGS: [[u8; 2]; 3] = [*b"MM", *b"ML", *b"MN"];
+
+/// Aux tags removed from every output record, filled by `--remove-tag` from
+/// tags and group names. Removal runs after the rewrite of a tag whittle
+/// maintains, so a removed `MM` or `mv` leaves the rest of the record intact.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TagRemoval {
     /// The removed tags, sorted.
     tags: BTreeSet<[u8; 2]>,
-    /// Whether `--remove-tag` named at least one tag.
-    named: bool,
-    /// Whether `--remove-kinetics` was given.
-    kinetics: bool,
 }
 
 impl TagRemoval {
-    /// Parses the `--remove-tag` values and folds in `--remove-kinetics`. Each
-    /// value is exactly two ASCII alphanumeric characters, the shape of a SAM
-    /// tag.
-    pub fn parse(values: &[String], strip_kinetics: bool) -> anyhow::Result<Self> {
+    /// Parses the `--remove-tag` values. Each value is a comma-separated list
+    /// whose items are two ASCII alphanumeric characters, the shape of a SAM
+    /// tag, or one of the group names `kinetics`, `mods` and `signal`.
+    pub fn parse(values: &[String]) -> anyhow::Result<Self> {
         let mut tags = BTreeSet::new();
-        for value in values {
-            if value.len() != 2 || !value.bytes().all(|c| c.is_ascii_alphanumeric()) {
-                anyhow::bail!(
-                    "--remove-tag: invalid tag {value:?} (SAM tags are exactly 2 alphanumeric \
-                     characters, such as `ML` or `RG`)"
-                );
+        for item in values.iter().flat_map(|v| v.split(',')) {
+            let item = item.trim();
+            match item {
+                "kinetics" => tags.extend(kinetics_tags()),
+                "mods" => tags.extend(MOD_TAGS),
+                "signal" => tags.extend(SIGNAL_TAGS),
+                _ if item.len() == 2 && item.bytes().all(|c| c.is_ascii_alphanumeric()) => {
+                    let b = item.as_bytes();
+                    tags.insert([b[0], b[1]]);
+                },
+                _ => anyhow::bail!(
+                    "--remove-tag: invalid item {item:?} (a SAM tag is exactly 2 alphanumeric \
+                     characters, such as `ML` or `RG`; the groups are kinetics, mods and signal)"
+                ),
             }
-            let b = value.as_bytes();
-            tags.insert([b[0], b[1]]);
         }
-        let named = !tags.is_empty();
-        if strip_kinetics {
-            tags.extend(kinetics_tags());
-        }
-        Ok(TagRemoval {
-            tags,
-            named,
-            kinetics: strip_kinetics,
-        })
+        Ok(TagRemoval { tags })
     }
 
     /// Whether nothing is removed, so every writer keeps its pass-through path.
@@ -131,22 +128,6 @@ impl TagRemoval {
     /// The removed tags, sorted, for the run summary.
     pub fn tags(&self) -> impl Iterator<Item = &[u8; 2]> {
         self.tags.iter()
-    }
-
-    /// Whether `--remove-kinetics` was given, which the run summary records
-    /// alongside the resolved set the flag expands to.
-    pub fn strips_kinetics(&self) -> bool {
-        self.kinetics
-    }
-
-    /// The flag or flags that configured the removal, for a diagnostic that has
-    /// to name what the user wrote.
-    pub fn flags(&self) -> &'static str {
-        match (self.named, self.kinetics) {
-            (true, true) => "--remove-tag and --remove-kinetics",
-            (false, true) => "--remove-kinetics",
-            _ => "--remove-tag",
-        }
     }
 }
 
@@ -295,7 +276,7 @@ pub struct Config {
     /// `mv`/`ts`/`ns`/`sp`/`pi`.
     pub update_moves: bool,
     /// Aux tags removed from every output record (`--remove-tag`,
-    /// `--remove-kinetics`). Requires BAM or tagged FASTQ;
+    /// its groups). Requires BAM or tagged FASTQ;
     /// `guards::guard_tag_flags` rejects input without auxiliary tags.
     pub remove_tags: TagRemoval,
     /// Whether multithreaded runs write records in input order. When false,
@@ -484,11 +465,11 @@ mod tests {
         );
     }
 
-    /// `--remove-kinetics` folds in exactly the nine per-base arrays the BAM
-    /// writer slices, so the flag and the writer cannot drift apart.
+    /// The `kinetics` group folds in exactly the nine per-base arrays the BAM
+    /// writer slices, so the group and the writer cannot drift apart.
     #[test]
-    fn strip_kinetics_folds_in_the_nine_per_base_arrays() {
-        let r = TagRemoval::parse(&[], true).unwrap();
+    fn kinetics_group_folds_in_the_nine_per_base_arrays() {
+        let r = TagRemoval::parse(&["kinetics".to_string()]).unwrap();
         let names: Vec<String> = r
             .tags()
             .map(|t| String::from_utf8_lossy(t).into_owned())
@@ -505,28 +486,32 @@ mod tests {
         assert!(!r.contains(b"MM"));
     }
 
-    /// Both flags fill one set, so the writers have a single removal path.
+    /// Comma lists, repeated values and groups fill one set, so the writers
+    /// have a single removal path.
     #[test]
-    fn remove_tag_and_strip_kinetics_share_one_set() {
-        let r = TagRemoval::parse(&["MM".to_string(), "RG".to_string()], true).unwrap();
+    fn comma_lists_and_groups_share_one_set() {
+        let r = TagRemoval::parse(&["MM,RG".to_string(), "kinetics".to_string()]).unwrap();
         assert!(r.contains(b"MM") && r.contains(b"RG") && r.contains(b"ip"));
         assert_eq!(r.tags().count(), 11);
-        assert_eq!(r.flags(), "--remove-tag and --remove-kinetics");
-        assert_eq!(
-            TagRemoval::parse(&[], true).unwrap().flags(),
-            "--remove-kinetics"
-        );
-        assert_eq!(
-            TagRemoval::parse(&["MM".to_string()], false)
-                .unwrap()
-                .flags(),
-            "--remove-tag"
-        );
+        let r = TagRemoval::parse(&["mods,signal".to_string()]).unwrap();
+        assert_eq!(r.tags().count(), 8);
+        assert!(r.contains(b"ML") && r.contains(b"mv") && r.contains(b"pi"));
+        assert!(TagRemoval::parse(&[]).unwrap().is_empty());
+    }
+
+    /// Group names are exact lowercase words; any other spelling is rejected
+    /// rather than read as a tag or a group.
+    #[test]
+    fn group_names_are_lowercase_only() {
+        for item in ["Kinetics", "KINETICS", "kinetic", "MODS", "xyz"] {
+            let err = TagRemoval::parse(&[item.to_string()]).unwrap_err();
+            assert!(err.to_string().contains("invalid item"), "{item}: {err}");
+        }
     }
 
     #[test]
     fn no_flag_removes_nothing() {
-        let r = TagRemoval::parse(&[], false).unwrap();
+        let r = TagRemoval::parse(&[]).unwrap();
         assert!(r.is_empty());
         assert!(!r.contains(b"MM"));
         assert_eq!(r, TagRemoval::default());
@@ -537,12 +522,12 @@ mod tests {
     #[test]
     fn remove_tag_rejects_a_malformed_value() {
         for bad in ["M", "MMM", "M_", "", "\u{e9}"] {
-            let err = TagRemoval::parse(&[bad.to_string()], false)
+            let err = TagRemoval::parse(&[bad.to_string()])
                 .unwrap_err()
                 .to_string();
             assert!(err.starts_with("--remove-tag:"), "{bad:?}: {err}");
         }
-        assert!(TagRemoval::parse(&["M1".to_string()], false).is_ok());
+        assert!(TagRemoval::parse(&["M1".to_string()]).is_ok());
     }
 
     #[test]

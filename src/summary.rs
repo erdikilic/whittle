@@ -15,7 +15,7 @@ use crate::trim::QualityOp;
 use crate::workflow::Stats;
 
 /// Incremented only when an existing field changes meaning or is removed.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// The `--summary-json` document for one run.
 #[derive(Debug, Serialize)]
@@ -59,13 +59,9 @@ struct Params {
     quality_op: Option<QualityOpParams>,
     update_moves: bool,
     ordered: bool,
-    /// Aux tags removed from every output record, sorted. `--remove-kinetics`
-    /// is folded into the same set, so the nine per-base arrays appear here
-    /// when it was given.
+    /// Aux tags removed from every output record, sorted, with every
+    /// `--remove-tag` group expanded.
     remove_tags: Vec<String>,
-    /// Whether `--remove-kinetics` was given, which `remove_tags` alone does not
-    /// distinguish from the same nine tags named one at a time.
-    strip_kinetics: bool,
     /// `all`, `none`, or the comma-joined tag list.
     fastq_tags: String,
     /// `None` when adapter trimming is off.
@@ -262,7 +258,6 @@ impl Params {
                 .tags()
                 .map(|t| String::from_utf8_lossy(t).into_owned())
                 .collect(),
-            strip_kinetics: cfg.remove_tags.strips_kinetics(),
             fastq_tags: match &cfg.fastq_tags {
                 FastqTags::All => "all".to_string(),
                 FastqTags::None => "none".to_string(),
@@ -385,7 +380,7 @@ mod tests {
             std::time::Duration::ZERO,
         );
         let v = value(&s);
-        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["schema_version"], 2);
         assert_eq!(v["tool"], "whittle");
         assert_eq!(v["params"]["threads"], 8);
         assert_eq!(v["params"]["min_length"], 500);

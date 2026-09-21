@@ -130,7 +130,7 @@ fn tagged_fastq_matches_the_bam_path_on_every_trim() {
         ],
         vec!["--best-quality-segment", "36"],
         vec!["--adapter-preset", "lsk114", "-H", "1"],
-        vec!["--remove-kinetics", "--remove-tag", "RG", "-T", "5"],
+        vec!["--remove-tag", "kinetics,RG", "-T", "5"],
         vec!["--fastq-tags", "MM,ML,MN", "-H", "2"],
         vec!["--fastq-tags", "none", "-H", "2"],
     ]
@@ -192,8 +192,8 @@ fn tag_flags_need_tags_in_the_input() {
     for (args, msg) in [
         (vec!["--remove-tag", "RG"], "--remove-tag removes aux tags"),
         (
-            vec!["--remove-kinetics"],
-            "--remove-kinetics removes aux tags",
+            vec!["--remove-tag", "kinetics"],
+            "--remove-tag removes aux tags",
         ),
     ] {
         whittle()

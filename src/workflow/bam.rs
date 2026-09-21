@@ -60,7 +60,7 @@ pub(crate) const FIXED_ARRAY_TAGS: [[u8; 2]; 3] = [*b"sn", *b"ac", *b"bc"];
 /// and the `sp`/`pi` split linkage. On a trimmed read these are either rewritten
 /// (`--update-moves`) or dropped (default), never left stale. Handled by
 /// `signal_tag_updates`, not the per-base pass.
-pub(crate) const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
+pub(crate) use crate::config::SIGNAL_TAGS;
 
 /// Poly-A tail tags handled together with the move table: `pa` (signal
 /// boundaries) and `pt` (tail length in bases). `pa` positions are absolute
@@ -1182,7 +1182,7 @@ fn count_undo_tags_dropped(
 /// an `Absent` or `Consistent` block and nothing to remove is returned as
 /// `None`: its output is its input.
 ///
-/// `remove` names the tags `--remove-tag` and `--remove-kinetics` drop. Removal
+/// `remove` names the tags `--remove-tag` drops. Removal
 /// is applied last, to the rewritten tag set, so a removed tag whittle
 /// maintains (`MM`, the move table, a per-base array) is absent from the
 /// output rather than left stale.
@@ -4544,9 +4544,9 @@ mod tests {
     }
 
     /// Builds the removal set the flags produce.
-    fn removal(tags: &[&str], strip_kinetics: bool) -> crate::config::TagRemoval {
+    fn removal(tags: &[&str]) -> crate::config::TagRemoval {
         let tags: Vec<String> = tags.iter().map(|t| (*t).to_string()).collect();
-        crate::config::TagRemoval::parse(&tags, strip_kinetics).unwrap()
+        crate::config::TagRemoval::parse(&tags).unwrap()
     }
 
     /// An 8-base record carrying a rewritten block (`MM`/`ML`/`MN`), a per-base
@@ -4578,7 +4578,7 @@ mod tests {
     fn removal_drops_a_rewritten_and_a_copied_tag_on_a_trimmed_record() {
         let rec = record_with_mixed_tags();
         let mut cfg = cfg_bam2fq(None, 2, FastqTags::All);
-        cfg.remove_tags = removal(&["MM", "RG"], false);
+        cfg.remove_tags = removal(&["MM", "RG"]);
         let (_stats, out) = bam2bam(vec![rec], &cfg);
 
         assert_eq!(out.len(), 1);
@@ -4606,7 +4606,7 @@ mod tests {
     fn removal_applies_to_an_untrimmed_record() {
         let rec = record_with_mixed_tags();
         let mut cfg = cfg_bam2fq(None, 0, FastqTags::All);
-        cfg.remove_tags = removal(&["RG"], false);
+        cfg.remove_tags = removal(&["RG"]);
         let (_stats, out) = bam2bam(vec![rec.clone()], &cfg);
 
         assert_eq!(out.len(), 1);
@@ -4623,9 +4623,9 @@ mod tests {
         assert_eq!(out[0].sequence().as_ref(), rec.sequence().as_ref());
     }
 
-    /// `--remove-kinetics` removes all nine per-base arrays and nothing else.
+    /// The `kinetics` group removes all nine per-base arrays and nothing else.
     #[test]
-    fn strip_kinetics_removes_every_per_base_array() {
+    fn kinetics_group_removes_every_per_base_array() {
         let mut rec = ubam_with_mods(b"CCACCCAC", vec![40; 8], b"C+m,0,1,0;", vec![10, 20, 30]);
         let names: [[u8; 2]; 9] = [
             *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sm", *b"sx", *b"sa",
@@ -4647,7 +4647,7 @@ mod tests {
         }
 
         let mut cfg = cfg_bam2fq(None, 0, FastqTags::All);
-        cfg.remove_tags = removal(&[], true);
+        cfg.remove_tags = removal(&["kinetics"]);
         let (_stats, out) = bam2bam(vec![rec], &cfg);
 
         assert_eq!(out.len(), 1);
@@ -4672,7 +4672,7 @@ mod tests {
     fn removal_drops_the_tag_from_a_fastq_header() {
         let rec = record_with_mixed_tags();
         let mut cfg = cfg_bam2fq(None, 2, FastqTags::All);
-        cfg.remove_tags = removal(&["MM", "RG"], false);
+        cfg.remove_tags = removal(&["MM", "RG"]);
         let (_stats, text) = bam2fq(vec![rec.clone()], &cfg);
 
         let header = text.lines().next().unwrap();

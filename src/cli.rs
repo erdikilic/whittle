@@ -224,14 +224,12 @@ struct Cli {
     /// requires a DNA or RNA basecall_model in the read-group description.
     #[arg(long = "update-moves", help_heading = "Tags")]
     update_moves: bool,
-    /// Remove this two-character aux tag from every output record. Repeatable.
-    /// BAM or tagged FASTQ input.
-    #[arg(long, value_name = "TAG", help_heading = "Tags")]
+    /// Remove aux tags from every output record. Comma-separated and
+    /// repeatable; an item is a two-character tag or a group: kinetics (ip pw
+    /// fi fp ri rp sa sm sx), mods (MM ML MN), signal (mv ts ns sp pi). BAM or
+    /// tagged FASTQ input.
+    #[arg(long, value_name = "TAGS", help_heading = "Tags")]
     remove_tag: Vec<String>,
-    /// Remove the per-base kinetics and alignment-count arrays (ip pw fi fp ri
-    /// rp sa sm sx). BAM or tagged FASTQ input.
-    #[arg(long = "remove-kinetics", help_heading = "Tags")]
-    strip_kinetics: bool,
 
     /// Adapter FASTA; sequences may use IUPAC codes, and entries shorter than
     /// 11 bp are skipped. An entry whose header description contains the word
@@ -337,7 +335,7 @@ pub fn parse() -> anyhow::Result<Config> {
     let compression_level = compression_level_for(&c);
     let quality = quality_op_for(&c);
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
-    let remove_tags = TagRemoval::parse(&c.remove_tag, c.strip_kinetics)?;
+    let remove_tags = TagRemoval::parse(&c.remove_tag)?;
 
     let mut advisories: Vec<Advisory> = Vec::new();
     let adapter_infer = resolve_infer(&c, &mut advisories)?;
@@ -821,6 +819,7 @@ mod tests {
             "--qual-split",
             "--qual-split-window",
             "--update-signal-tags",
+            "--remove-kinetics",
             "--strip-kinetics",
             "--adapter-end-size",
             "--adapter-sample",

@@ -53,7 +53,7 @@ fn summary_counts_match_the_run() {
         .success();
 
     let v = summary(dir.path());
-    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["schema_version"], 2);
     assert_eq!(v["tool"], "whittle");
     assert_eq!(v["reads"]["input"], 4);
 

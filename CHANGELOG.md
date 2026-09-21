@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `--update-signal-tags` is renamed `--update-moves`, after the ONT move
   table it maintains. The old spelling is not accepted.
+- `--remove-kinetics` is folded into `--remove-tag`, which now takes
+  comma-separated lists and the group names `kinetics`, `mods` and `signal`.
+  The summary JSON drops `params.strip_kinetics` and moves to
+  `schema_version` 2.
 - `-t` bounds the working threads: BGZF input takes its decode workers out
   of the budget instead of adding them to the render pool.
 - BGZF blocks are compressed with one libdeflate compressor per thread,

@@ -64,9 +64,10 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 
 ## Tag removal
 
-`--remove-tag <TAG>` removes a named aux tag from every output record, and
-`--remove-kinetics` removes the nine per-base arrays (`ip`, `pw`, `fi`, `fp`,
-`ri`, `rp`, `sa`, `sm`, `sx`) in one flag. Removal runs after the rewrites in
+`--remove-tag <TAGS>` removes named aux tags from every output record; the
+groups `kinetics` (`ip`, `pw`, `fi`, `fp`, `ri`, `rp`, `sa`, `sm`, `sx`),
+`mods` (`MM`, `ML`, `MN`) and `signal` (`mv`, `ts`, `ns`, `sp`, `pi`) name
+several at once. Removal runs after the rewrites in
 the table above, so the remaining tags stay in register. It applies to BAM
 output and to the tags carried into a BAM-to-FASTQ header, and requires BAM
 input. See [cli.md](cli.md#tag-removal).

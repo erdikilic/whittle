@@ -31,7 +31,7 @@ FASTQ input in the same convention (a tab after the read name, then
 so tagged and plain reads can share a file or directory. Tagged records are
 decoded as SAM aux tags and rewritten per output segment exactly as a uBAM
 record's are ([tags.md](tags.md)), `--fastq-tags` selects the output tags, and
-barcode positions (`bi`), `--remove-tag` and `--remove-kinetics` apply. A field that
+barcode positions (`bi`) and `--remove-tag` apply. A field that
 does not parse as a SAM tag fails the run and names the read. A header whose
 tab-delimited text is not in this form is copied verbatim.
 
@@ -93,8 +93,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--split-quality <PHRED>` | Split at consecutive bases below PHRED and keep each surviving segment |
 | `--split-min-low-quality-bases <BASES>` | Minimum consecutive bases below the splitting threshold required to split; shorter internal stretches are retained and low-quality ends are trimmed (default 1); requires `--split-quality` |
 | `--update-moves` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM; requires DNA or RNA model metadata in the read-group description) |
-| `--remove-tag <TAG>` | Remove a two-character aux tag from every output record; repeatable (BAM or tagged FASTQ input) |
-| `--remove-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM or tagged FASTQ input) |
+| `--remove-tag <TAGS>` | Remove aux tags from every output record; comma-separated and repeatable; an item is a two-character tag or a group: `kinetics` (`ip pw fi fp ri rp sa sm sx`), `mods` (`MM ML MN`), `signal` (`mv ts ns sp pi`) (BAM or tagged FASTQ input) |
 | `-a, --adapter-fasta <FILE>` | Adapter and primer FASTA (IUPAC codes accepted; `primer` or `barcode` in a header description restricts the entry to the read ends); enables adapter trimming |
 | `--adapter-preset <KITS>` | Built-in kit presets, comma-separated: `lsk114`, `rad114` (`ulk114`), `rbk114`, `nbd114`, `pcb114` (`pcs114`), `rpb114`, `mab114`, `rna004`, `pacbio`, `ont`, `all`; enables adapter trimming |
 | `--adapter-error-rate <FRACTION>` | End-match tolerance as a fraction of adapter length (default 0.2); requires an adapter source |
@@ -225,17 +224,19 @@ Positions are read from BAM and tagged FASTQ input; plain FASTQ carries none.
 
 ## Tag removal
 
-`--remove-tag <TAG>` removes one two-character aux tag from every output record.
-It is repeatable, and each value must be exactly two alphanumeric characters,
-validated before the run starts.
+`--remove-tag <TAGS>` removes aux tags from every output record. The value is
+a comma-separated list and the flag is repeatable. An item is either a
+two-character alphanumeric tag or one of three group names, validated before
+the run starts:
 
-`--remove-kinetics` removes the per-base kinetics and alignment-count arrays in
-one flag: `ip`, `pw`, `fi`, `fp`, `ri`, `rp`, `sa`, `sm`, and `sx`. It is
-equivalent to naming each with `--remove-tag`, and the two flags fill one
-removal set.
+| group | tags |
+|---|---|
+| `kinetics` | `ip`, `pw`, `fi`, `fp`, `ri`, `rp`, `sa`, `sm`, `sx` (PacBio per-base kinetics and alignment counts) |
+| `mods` | `MM`, `ML`, `MN` (base modifications) |
+| `signal` | `mv`, `ts`, `ns`, `sp`, `pi` (ONT signal mapping) |
 
 ```bash
-whittle -i reads.bam -o smaller.bam --remove-kinetics --remove-tag ML
+whittle -i reads.bam -o smaller.bam --remove-tag kinetics,ML
 ```
 
 Removal runs after the tags kept in register have been rewritten, so removing
@@ -248,10 +249,10 @@ records back without decoding them; with tag removal each record is rebuilt
 instead, which costs the decode and changes nothing else. On BAM-to-FASTQ the
 removal applies to the header tags selected by `--fastq-tags`.
 
-Both flags require BAM or tagged FASTQ input. Tag removal is a complete run on its own:
-`whittle -i in.bam -o out.bam --remove-kinetics` with no trimming options is
-valid. The resolved set is recorded under `params.remove_tags` in the summary
-JSON, and `params.strip_kinetics` records which flag requested it.
+The flag requires BAM or tagged FASTQ input. Tag removal is a complete run on its own:
+`whittle -i in.bam -o out.bam --remove-tag kinetics` with no trimming options is
+valid. The resolved set, with groups expanded, is recorded under
+`params.remove_tags` in the summary JSON.
 
 ## Summary JSON
 
@@ -267,7 +268,7 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "tool": "whittle",
   "version": "0.2.0",
   "command": "whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json",
