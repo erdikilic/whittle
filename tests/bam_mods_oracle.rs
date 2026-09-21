@@ -559,7 +559,7 @@ fn infer_on_ubam_preserves_mm_ml() {
             input.to_str().unwrap(),
             "-o",
             output.to_str().unwrap(),
-            "--discover-adapters",
+            "--adapter-discover",
             "-t",
             "1",
         ])

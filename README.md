@@ -103,13 +103,13 @@ whittle -i hifi.bam -o trimmed.bam --adapter-preset pacbio
 Discover adapters de novo: report the candidates, or trim with them directly.
 
 ```bash
-whittle -i reads.fastq.gz --discover-adapters report
-whittle -i reads.fastq.gz -o trimmed.fastq.gz --discover-adapters
+whittle -i reads.fastq.gz --adapter-report
+whittle -i reads.fastq.gz -o trimmed.fastq.gz --adapter-discover
 ```
 
 Discovery proceeds in layers from each read end: adapter, barcode flanks,
 barcodes and primers, each accepted with its own read support and insert
-boundary. Barcode panels are clustered from the reads between their flanks. A preset or FASTA given with `--discover-adapters` is trimmed first
+boundary. Barcode panels are clustered from the reads between their flanks. A preset or FASTA given with `--adapter-discover` is trimmed first
 and discovery continues beyond it, which recovers unknown primers behind a
 known kit. It can recover multiple recurrent adapters and degenerate primers
 from the same sample. Exact k-mer assembly and batched sassy alignments determine the sequences;

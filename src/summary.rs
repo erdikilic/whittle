@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::config::{AdapterInfer, Config, FastqTags};
+use crate::config::{Config, FastqTags};
 use crate::trim::QualityOp;
 use crate::workflow::Stats;
 
@@ -276,10 +276,7 @@ impl Params {
                 end_size: ac.end_size,
                 split: ac.split,
                 sample: cfg.adapter_sample,
-                infer: match cfg.adapter_infer {
-                    AdapterInfer::Off => "off",
-                    AdapterInfer::Enabled { action, .. } => action.label(),
-                },
+                infer: cfg.adapter_infer.label(),
             }),
         }
     }

@@ -78,7 +78,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--input-format`, `--output-format <FORMAT>` | Force a format instead of detecting it: `fastq`, `fastq-gz`, `fastq-bgz`, `bam` |
 | `--fastq-tags <all\|none\|TAGS>` | Aux tags written into FASTQ headers on BAM or tagged FASTQ input (default `all`) |
 | `-c, --compression-level <0-9>` | BGZF level for `.gz`, `.bgz` and BAM output (default 4 for `.gz`, 6 for `.bgz` and BAM); ignored for plain FASTQ |
-| `--summary-json <PATH>` | Write a machine-readable run summary to PATH; ignored under `--discover-adapters report` |
+| `--summary-json <PATH>` | Write a machine-readable run summary to PATH; ignored under `--adapter-report` |
 | `-t, --threads <N>` | Worker threads, at least 1 (default: all detected CPUs, clamped to that maximum) |
 | `--preserve-order` | Write records in input order under `-t > 1` |
 | `-l, --min-length <BASES>` | Minimum length to keep, per output segment (default 1) |
@@ -100,7 +100,8 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--adapter-end-search <BASES>` | End-zone width searched for terminal adapters (default 150); requires an adapter source |
 | `--adapter-ends-only` | Trim adapters at ends only; disable interior adapter splitting independently of quality splitting |
 | `--adapter-sample-reads <COUNT>` | Reads inspected for preset presence or adapter discovery (defaults 2000 and 40000; at least 100); `0` disables preset detection and is rejected for discovery; ignored with `--adapter-fasta` unless discovering adapters |
-| `--discover-adapters [<ACTION>]` | Discover adapters and primers with automatic boundaries: `trim` (the bare flag) or `report` (FASTA to stdout, then exit without read output or a JSON summary); both use the same sequences |
+| `--adapter-discover` | Discover adapters, barcodes and primers from the sampled reads and trim them; a preset or FASTA is trimmed first and discovery continues beyond it; enables adapter trimming |
+| `--adapter-report` | Run the same discovery, print the discovered FASTA to stdout and exit without read output or a JSON summary; conflicts with `--adapter-discover` |
 | `-v, --verbose` (repeatable) | Stage detail with `-v`, per-read decisions with `-vv` |
 | `--progress <MODE>` | Progress reporting, independent of the log level: `auto` (default), `bar`, `plain`, `none` |
 | `--quiet` | Silence progress and the summary; warnings and errors still print. Conflicts with `-v` and `--progress` |
@@ -110,7 +111,7 @@ strategies for one stage, so at most one is accepted. `-H`/`-T` combine with any
 of them.
 
 An adapter source is `--adapter-fasta`, `--adapter-preset`, or
-`--discover-adapters`. `--adapter-error-rate`, `--adapter-end-search`, and
+`--adapter-discover`. `--adapter-error-rate`, `--adapter-end-search`, and
 `--adapter-sample-reads` are rejected without one. A forced `--input-format` that
 disagrees with the stream, an output extension that names no format, and
 FASTQ-to-BAM output are reported before any output is written. Adapter trimming is described in
@@ -303,7 +304,7 @@ or chimera splitting it can exceed `reads.input`. The read-level buckets
 Under `params.adapters`, `configured` is the set requested (preset and/or FASTA)
 and `count` is the set searched, after presence detection narrowed it or
 inference replaced it. The two are equal when neither ran. The startup banner
-prints `configured`. Under `--discover-adapters` nothing is configured up front, so
+prints `configured`. Under `--adapter-discover` and `--adapter-report` nothing is configured up front, so
 `configured` is `0`.
 
 `schema_version` is incremented only when an existing field changes meaning or

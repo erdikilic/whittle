@@ -156,7 +156,7 @@ pub(crate) fn guard_output_collisions(
     // A mistyped artifact path is caught during setup rather than after the
     // reads are written. Probing the parent directory instead of creating the
     // file leaves nothing behind on a run that writes no artifact
-    // (`--discover-adapters report`). A permission failure still surfaces at write
+    // (`--adapter-report`). A permission failure still surfaces at write
     // time; a nonexistent directory does not.
     for &(flag, path) in &targets {
         if path.is_dir() {

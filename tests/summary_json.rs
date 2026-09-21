@@ -241,7 +241,7 @@ fn report_mode_warns_that_summary_json_is_ignored() {
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
-        .args(["--discover-adapters", "report"])
+        .args(["--adapter-report"])
         .assert()
         .success()
         .stderr(predicate::str::contains("--summary-json is ignored"))
@@ -275,8 +275,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         "ont",
         "--adapter-fasta",
         fasta.to_str().unwrap(),
-        "--discover-adapters",
-        "report",
+        "--adapter-report",
     ];
 
     whittle()
@@ -284,7 +283,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "--discover-adapters report with --adapter-fasta",
+            "--adapter-report with --adapter-fasta",
         ));
 
     whittle()
@@ -295,7 +294,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         // The INFO advisory is filtered out; the WARN one still belongs on stderr,
         // since --quiet keeps warnings.
         .stderr(
-            predicate::str::contains("--discover-adapters report with --adapter-fasta")
+            predicate::str::contains("--adapter-report with --adapter-fasta")
                 .not()
                 .and(predicate::str::contains("Adapter entry skipped")),
         );
@@ -403,11 +402,11 @@ fn inference_reports_zero_configured_adapters() {
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
-        .args(["--discover-adapters", "trim"])
+        .args(["--adapter-discover"])
         .assert()
         .success();
 
     let a = summary(dir.path())["params"]["adapters"].clone();
     assert_eq!(a["configured"], 0, "Inference configures nothing up front");
-    assert_eq!(a["infer"], "trim");
+    assert_eq!(a["infer"], "discover");
 }

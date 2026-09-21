@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::config::{
-    AdapterInfer, AdapterInferAction, Advisory, Config, FastqTags, IoConfig, ProgressMode,
-    TagRemoval,
+    AdapterInfer, Advisory, Config, FastqTags, IoConfig, ProgressMode, TagRemoval,
 };
 use crate::filter::FilterConfig;
 use crate::io::Format;
@@ -267,7 +266,8 @@ struct Cli {
     /// Reads inspected for preset presence or adapter discovery; at least 100.
     /// 0 disables presence detection and uses the full preset; discovery
     /// requires sampling. Ignored with --adapter-fasta unless discovering
-    /// adapters. Defaults to 2000 with a preset and 40000 under --discover-adapters.
+    /// adapters. Defaults to 2000 with a preset and 40000 under
+    /// --adapter-discover or --adapter-report.
     /// Sampling is also bounded by 256 MiB of payload and 64 Mi bases.
     #[arg(
         long = "adapter-sample-reads",
@@ -276,19 +276,18 @@ struct Cli {
     )]
     adapter_sample: Option<usize>,
     /// Discover adapters, barcodes and primers de novo in layers from each
-    /// read end. A preset or FASTA is trimmed first and discovery continues
-    /// beyond it. Report prints discovered FASTA to stdout and exits without
-    /// read output or a JSON summary. Both actions use the same sequences.
-    /// Defaults to trim when given no value.
+    /// read end and trim them. A preset or FASTA is trimmed first and
+    /// discovery continues beyond it. Enables adapter trimming.
     #[arg(
-        long = "discover-adapters",
-        value_enum,
-        num_args = 0..=1,
-        default_missing_value = "trim",
-        value_name = "ACTION",
-        help_heading = "Adapter trimming"
+        long = "adapter-discover",
+        help_heading = "Adapter trimming",
+        conflicts_with = "adapter_report"
     )]
-    adapter_infer: Option<AdapterInferAction>,
+    adapter_discover: bool,
+    /// Run the same discovery as --adapter-discover, print the discovered
+    /// FASTA to stdout and exit without read output or a JSON summary.
+    #[arg(long = "adapter-report", help_heading = "Adapter trimming")]
+    adapter_report: bool,
 }
 
 /// The examples block at the end of `--help`.
@@ -297,6 +296,7 @@ Examples:
   whittle -i reads.fastq.gz -o trimmed.fastq.gz -H 20 -T 20 --trim-quality 8 -l 500 -q 10 -t 8
   whittle -i reads.bam -o trimmed.bam --split-quality 9 --split-min-low-quality-bases 50 -l 1000
   whittle -i reads.bam -o trimmed.bam --adapter-preset lsk114 -l 500
+  whittle -i reads.bam -o trimmed.bam --adapter-discover -l 500
   whittle -i 16s.fastq.gz -o trimmed.fastq.gz --adapter-preset mab114
   samtools fastq -T MM,ML,MN reads.bam | whittle -o trimmed.fastq.gz -H 10 -T 10
   whittle -i reads.bam -o reads.fastq.gz --quiet --summary-json qc.json";
@@ -305,7 +305,7 @@ Examples:
 const DEFAULT_ADAPTER_ERROR_RATE: f64 = 0.2;
 /// The default `--adapter-end-search`.
 const DEFAULT_ADAPTER_END_SIZE: usize = 150;
-/// The default `--adapter-sample-reads` under `--discover-adapters`.
+/// The default `--adapter-sample-reads` under `--adapter-discover` and `--adapter-report`.
 const DEFAULT_INFER_SAMPLE: usize = 40_000;
 /// The default `--adapter-sample-reads` for preset presence detection.
 const DEFAULT_PRESET_SAMPLE: usize = 2_000;
@@ -514,9 +514,13 @@ fn quality_op_for(c: &Cli) -> Option<QualityOp> {
 /// Resolves the de novo inference mode and checks it against the other
 /// adapter sources.
 fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<AdapterInfer> {
-    let adapter_infer = c
-        .adapter_infer
-        .map_or(AdapterInfer::Off, |action| AdapterInfer::Enabled { action });
+    let adapter_infer = if c.adapter_report {
+        AdapterInfer::Report
+    } else if c.adapter_discover {
+        AdapterInfer::Discover
+    } else {
+        AdapterInfer::Off
+    };
 
     // A FASTA or preset supplied with inference is trimmed first, and
     // inference continues from the boundary those sequences leave. Report
@@ -524,7 +528,7 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
     // supplied FASTA (see `infer::discover`).
     if adapter_infer.is_report() && c.adapter_fasta.is_some() {
         advisories.push(Advisory::info(
-            "--discover-adapters report with --adapter-fasta: discovered adapters are named \
+            "--adapter-report with --adapter-fasta: discovered adapters are named \
              against the built-in adapter catalog and the supplied FASTA",
         ));
     }
@@ -566,7 +570,7 @@ fn resolve_adapters(
         if c.adapter_ends_only {
             advisories.push(Advisory::warn(
                 "--adapter-ends-only has no effect without --adapter-fasta, --adapter-preset or \
-                 --discover-adapters",
+                 --adapter-discover",
             ));
         }
         return Ok(None);
@@ -611,7 +615,7 @@ fn require_adapter_source(c: &Cli) -> anyhow::Result<()> {
     if let Some((flag, _)) = explicit.iter().find(|(_, given)| *given) {
         anyhow::bail!(
             "{flag} requires an adapter source (--adapter-fasta, --adapter-preset, or \
-             --discover-adapters)"
+             --adapter-discover)"
         );
     }
     Ok(())
@@ -644,7 +648,7 @@ fn resolve_sample(
             }
             if n == 0 && adapter_infer != AdapterInfer::Off {
                 anyhow::bail!(
-                    "--adapter-sample-reads 0 disables sampling, which --discover-adapters requires; \
+                    "--adapter-sample-reads 0 disables sampling, which adapter discovery requires; \
                      omit it or pass >= {min}"
                 );
             }
@@ -820,6 +824,7 @@ mod tests {
             "--qual-split-window",
             "--update-signal-tags",
             "--remove-kinetics",
+            "--discover-adapters",
             "--strip-kinetics",
             "--adapter-end-size",
             "--adapter-sample",
@@ -833,6 +838,15 @@ mod tests {
                 "{flag}"
             );
         }
+    }
+
+    /// The two discovery modes are exclusive, so asking for both is a parse
+    /// error rather than a silent choice.
+    #[test]
+    fn adapter_discover_and_report_conflict() {
+        let error =
+            Cli::try_parse_from(["whittle", "--adapter-discover", "--adapter-report"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     /// Help text quotes the matcher's minimum pattern length and the detection

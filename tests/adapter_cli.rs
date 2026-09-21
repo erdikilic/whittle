@@ -25,7 +25,7 @@ fn help_lists_the_quality_and_adapter_flags() {
         "--adapter-end-search",
         "--adapter-ends-only",
         "--adapter-sample-reads",
-        "--discover-adapters",
+        "--adapter-discover",
     ] {
         assert!(stdout.contains(flag), "Help must list {flag}: {stdout}");
     }
@@ -480,7 +480,7 @@ fn infer_accepts_a_fasta_as_known_sequences() {
     cmd.args([
         "-i",
         "x.fastq",
-        "--discover-adapters",
+        "--adapter-discover",
         "--adapter-fasta",
         "a.fa",
     ]);
@@ -499,7 +499,7 @@ fn adapter_sample_below_min_still_rejected_under_infer() {
     cmd.args([
         "-i",
         "x.fastq",
-        "--discover-adapters",
+        "--adapter-discover",
         "--adapter-sample-reads",
         "50",
     ]);
@@ -529,7 +529,7 @@ fn rejects_policy_with_discovery_enabled() {
         .args([
             "-i",
             "x.fastq",
-            "--discover-adapters",
+            "--adapter-discover",
             "--adapter-discovery-policy",
             "balanced",
         ])
@@ -556,8 +556,7 @@ fn infer_report_with_fasta_notes_naming_includes_fasta() {
         .args([
             "-i",
             fq.path().to_str().unwrap(),
-            "--discover-adapters",
-            "report",
+            "--adapter-report",
             "--adapter-fasta",
             fa.path().to_str().unwrap(),
         ])
@@ -635,25 +634,18 @@ fn infer_action_maps_to_banner() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["-i", fq.to_str().unwrap(), "--discover-adapters", "-t", "1"])
+        .args(["-i", fq.to_str().unwrap(), "--adapter-discover", "-t", "1"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("infer trim"));
+        .stderr(predicates::str::contains("\u{b7} discover"));
 
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args([
-            "-i",
-            fq.to_str().unwrap(),
-            "--discover-adapters",
-            "report",
-            "-t",
-            "1",
-        ])
+        .args(["-i", fq.to_str().unwrap(), "--adapter-report", "-t", "1"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("infer report"));
+        .stderr(predicates::str::contains("\u{b7} report"));
 }
 
 #[test]
@@ -662,14 +654,7 @@ fn infer_report_prints_and_does_not_trim() {
     let fq = write_adapted_fastq(dir.path(), 500);
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
-    cmd.args([
-        "-i",
-        fq.to_str().unwrap(),
-        "--discover-adapters",
-        "report",
-        "-t",
-        "1",
-    ]);
+    cmd.args(["-i", fq.to_str().unwrap(), "--adapter-report", "-t", "1"]);
     let assert = cmd.assert().success();
     let out = assert.get_output();
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -692,14 +677,7 @@ fn infer_report_prints_sequence_to_stdout() {
     let fq = write_adapted_fastq(dir.path(), 500);
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
-    cmd.args([
-        "-i",
-        fq.to_str().unwrap(),
-        "--discover-adapters",
-        "report",
-        "-t",
-        "1",
-    ]);
+    cmd.args(["-i", fq.to_str().unwrap(), "--adapter-report", "-t", "1"]);
     let assert = cmd.assert().success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(
@@ -737,8 +715,7 @@ fn infer_report_treats_fasta_as_known_sequences() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--discover-adapters",
-        "report",
+        "--adapter-report",
         "--adapter-fasta",
         fa_path.to_str().unwrap(),
         "-t",
@@ -767,7 +744,7 @@ fn infer_trims_planted_adapter() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--discover-adapters",
+        "--adapter-discover",
         "-t",
         "1",
     ]);
@@ -828,7 +805,7 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--discover-adapters",
+        "--adapter-discover",
         "-t",
         "1",
     ]);
@@ -866,8 +843,7 @@ fn infer_report_tiny_input_writes_no_output() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--discover-adapters",
-        "report",
+        "--adapter-report",
         "-t",
         "1",
     ]);
@@ -912,8 +888,7 @@ fn infer_report_does_not_clobber_output_file() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--discover-adapters",
-        "report",
+        "--adapter-report",
         "-t",
         "1",
     ]);
@@ -926,7 +901,7 @@ fn infer_report_does_not_clobber_output_file() {
     );
 }
 
-/// The same input run twice through `--discover-adapters` at `-t 1` produces
+/// The same input run twice through `--adapter-discover` at `-t 1` produces
 /// byte-identical output. Discovery (`infer::discover`) is pure over its sampled
 /// slice with no RNG or hash-map iteration-order dependence, and `-t 1` pins the
 /// FASTQ dispatch to its sequential (order-preserving) path, so this is a
@@ -944,7 +919,7 @@ fn infer_is_deterministic() {
             fq.to_str().unwrap(),
             "-o",
             out.to_str().unwrap(),
-            "--discover-adapters",
+            "--adapter-discover",
             "-t",
             "1",
         ]);
@@ -1009,14 +984,7 @@ fn infer_warns_on_marginal_support() {
     let fq = write_adapted_fastq_marginal(dir.path(), 500);
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
-    cmd.args([
-        "-i",
-        fq.to_str().unwrap(),
-        "--discover-adapters",
-        "report",
-        "-t",
-        "1",
-    ]);
+    cmd.args(["-i", fq.to_str().unwrap(), "--adapter-report", "-t", "1"]);
     let assert = cmd.assert().success();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
@@ -1063,8 +1031,7 @@ fn infer_report_on_bam_input_with_piped_stdout_succeeds() {
         .args([
             "-i",
             in_path.to_str().unwrap(),
-            "--discover-adapters",
-            "report",
+            "--adapter-report",
             "-t",
             "1",
         ])

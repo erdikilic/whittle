@@ -611,7 +611,7 @@ impl Session {
 /// place so every dispatch arm sees the same narrowed set and pool size.
 ///
 /// `Ok(None)` means the run is over without writing records: that is
-/// `--discover-adapters report`, which prints the inferred FASTA and stops.
+/// `--adapter-report`, which prints the inferred FASTA and stops.
 fn settle<R, I, F>(
     records: I,
     cfg: &mut Config,
@@ -640,9 +640,7 @@ where
 /// the run exits 0 without creating any of them.
 fn note_report_only_ignores(cfg: &Config) {
     for (flag, _) in cfg.write_targets() {
-        tracing::warn!(
-            "{flag} is ignored under --discover-adapters report, which writes no records"
-        );
+        tracing::warn!("{flag} is ignored under --adapter-report, which writes no records");
     }
 }
 

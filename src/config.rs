@@ -131,47 +131,30 @@ impl TagRemoval {
     }
 }
 
-/// What an enabled de novo adapter inference run does with its discoveries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum AdapterInferAction {
-    /// Trim reads with the inferred sequences.
-    Trim,
-    /// Print inferred FASTA to stdout and do not write read output.
+/// Whether de novo adapter discovery runs and what it does with its findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterInfer {
+    /// Discovery does not run.
+    Off,
+    /// Discovery runs and the run trims with the discovered sequences.
+    Discover,
+    /// Discovery runs, prints the discovered FASTA and the run ends.
     Report,
 }
 
-impl AdapterInferAction {
-    /// Lowercase label, as the banner and the summary print it.
+impl AdapterInfer {
+    /// Whether discovery runs in report mode.
+    pub fn is_report(self) -> bool {
+        matches!(self, Self::Report)
+    }
+
+    /// The mode name used by the banner and the summary.
     pub fn label(self) -> &'static str {
         match self {
-            AdapterInferAction::Trim => "trim",
-            AdapterInferAction::Report => "report",
+            Self::Off => "off",
+            Self::Discover => "discover",
+            Self::Report => "report",
         }
-    }
-}
-
-/// Whether de novo adapter inference runs and how its discoveries are used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdapterInfer {
-    /// Inference does not run.
-    Off,
-    /// Inference runs with the given action.
-    Enabled {
-        /// What is done with the discoveries.
-        action: AdapterInferAction,
-    },
-}
-
-impl AdapterInfer {
-    /// Whether inference is enabled in report mode.
-    pub fn is_report(self) -> bool {
-        matches!(
-            self,
-            Self::Enabled {
-                action: AdapterInferAction::Report,
-                ..
-            }
-        )
     }
 }
 

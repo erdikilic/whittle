@@ -62,7 +62,7 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
                 adapter = %d.adapter.name,
                 support = %support,
                 floor = MARGINAL_SUPPORT,
-                "Inferred adapter support is marginal; verify with --discover-adapters report"
+                "Inferred adapter support is marginal; verify with --adapter-report"
             );
         }
         if d.uncertain_bases() > 0 {
@@ -196,7 +196,7 @@ pub(crate) struct Resolved<R> {
 /// needed, and returns it with the stream intact.
 ///
 /// `Ok(None)` means the run is over without writing records: that is
-/// `--discover-adapters report`, which prints the inferred FASTA and stops.
+/// `--adapter-report`, which prints the inferred FASTA and stops.
 ///
 /// Takes `&Config` and returns the outcome rather than writing back into the
 /// config: the set is final only after reads have been seen, which is after the

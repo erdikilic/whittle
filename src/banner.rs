@@ -148,9 +148,7 @@ pub(crate) fn adapter_banner_line(
     };
     let infer_suffix = match adapter_infer {
         AdapterInfer::Off => String::new(),
-        AdapterInfer::Enabled { action } => {
-            format!(" \u{b7} infer {}", action.label())
-        },
+        mode => format!(" \u{b7} {}", mode.label()),
     };
     let (n_adapters, roles) = (a.adapters.len(), role_breakdown(&a.adapters));
     Some(format!(
@@ -222,7 +220,6 @@ pub(crate) fn output_desc(output: Option<&std::path::Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AdapterInferAction;
 
     fn base_filter() -> filter::FilterConfig {
         filter::FilterConfig {
@@ -484,25 +481,11 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
         };
-        let trim_line = adapter_banner_line(
-            Some(&cfg),
-            40000,
-            AdapterInfer::Enabled {
-                action: AdapterInferAction::Trim,
-            },
-        )
-        .unwrap();
-        assert!(trim_line.ends_with("infer trim"), "{trim_line}");
+        let trim_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::Discover).unwrap();
+        assert!(trim_line.ends_with("\u{b7} discover"), "{trim_line}");
 
-        let report_line = adapter_banner_line(
-            Some(&cfg),
-            40000,
-            AdapterInfer::Enabled {
-                action: AdapterInferAction::Report,
-            },
-        )
-        .unwrap();
-        assert!(report_line.ends_with("infer report"), "{report_line}");
+        let report_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::Report).unwrap();
+        assert!(report_line.ends_with("\u{b7} report"), "{report_line}");
     }
 
     #[test]

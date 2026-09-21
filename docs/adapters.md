@@ -2,7 +2,7 @@
 
 Adapter trimming is off by default. It is enabled by an adapter source:
 `-a`/`--adapter-fasta <FILE>` (user-supplied sequences), `--adapter-preset
-<KITS>` (the built-in catalog, scoped to the named kits), or `--discover-adapters`
+<KITS>` (the built-in catalog, scoped to the named kits), or `--adapter-discover`
 (de novo discovery). A FASTA and a preset combine into one search set.
 
 Adapter search operates on the original read before barcode restriction and
@@ -95,15 +95,15 @@ the actual sample size is reported, and all sampled reads are processed.
 
 ## Adapter discovery
 
-`--discover-adapters` (equivalent to `--discover-adapters trim`) discovers recurrent
-sequences from the first `--adapter-sample-reads` reads (default 40000), then trims
-and splits with the supported sequences. Sampling requires at least 100 reads;
+`--adapter-discover` discovers recurrent sequences from the first
+`--adapter-sample-reads` reads (default 40000), then trims and splits with the
+supported sequences. Sampling requires at least 100 reads;
 a count of 0 is rejected. Reporting and trimming use the same automatic boundary
 rule. There is no conservative/aggressive policy switch.
 
 Discovery proceeds in layers. Sequences from `--adapter-preset` or
 `--adapter-fasta` are searched first and explain the outermost layers; a
-preset given with `--discover-adapters` is therefore trimmed as usual and
+preset given with `--adapter-discover` is therefore trimmed as usual and
 discovery continues from the boundary it leaves, which recovers an unknown
 primer behind a known kit. Each accepted layer moves the boundary inward and
 the next layer is assembled from the unexplained sequence, so an adapter
@@ -188,7 +188,7 @@ role: they trim ends and can excise interior junctions. Use
 `--adapter-ends-only` to suppress adapter splitting, or an explicit FASTA with
 `primer` in its headers to restrict primer matches to the ends.
 
-`--discover-adapters report` prints the same sequences used for trimming,
+`--adapter-report` runs the same discovery and prints the sequences trimming would use,
 together with their support, length, and catalog or supplied-FASTA annotations,
 then exits without writing records or a JSON summary. Catalog entries provide
 names only; their sequences do not choose or extend an inferred consensus.

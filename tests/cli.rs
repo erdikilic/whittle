@@ -309,7 +309,7 @@ fn every_validation_names_its_flag() {
         ),
         (
             vec![
-                "--discover-adapters".into(),
+                "--adapter-discover".into(),
                 "--adapter-sample-reads".into(),
                 "0".into(),
             ],

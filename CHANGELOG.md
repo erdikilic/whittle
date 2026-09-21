@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `samtools fastq -T` convention is trimmed on the BAM-to-FASTQ path: `MM`,
   `ML` and `MN` are rebuilt and per-base arrays sliced for every output
   segment, `--fastq-tags` selects the output tags, and barcode positions,
-  `--remove-tag` and `--remove-kinetics` apply. Each header is inspected;
+  `--remove-tag` applies. Each header is inspected;
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comma-separated lists and the group names `kinetics`, `mods` and `signal`.
   The summary JSON drops `params.strip_kinetics` and moves to
   `schema_version` 2.
+- `--discover-adapters [trim|report]` is replaced by `--adapter-discover`
+  (discover and trim) and `--adapter-report` (print the discovered FASTA and
+  exit). `params.adapters.infer` in the summary JSON reads `off`, `discover`
+  or `report`.
 - `-t` bounds the working threads: BGZF input takes its decode workers out
   of the budget instead of adding them to the render pool.
 - BGZF blocks are compressed with one libdeflate compressor per thread,
