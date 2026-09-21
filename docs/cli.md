@@ -92,7 +92,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--best-quality-segment <PHRED>` | Keep the highest-scoring segment using cumulative base-error probabilities and the Phred cutoff (modified Mott); may retain bases below the cutoff |
 | `--split-quality <PHRED>` | Split at consecutive bases below PHRED and keep each surviving segment |
 | `--split-min-low-quality-bases <BASES>` | Minimum consecutive bases below the splitting threshold required to split; shorter internal stretches are retained and low-quality ends are trimmed (default 1); requires `--split-quality` |
-| `--update-signal-tags` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM; requires DNA or RNA model metadata in the read-group description) |
+| `--update-moves` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM; requires DNA or RNA model metadata in the read-group description) |
 | `--remove-tag <TAG>` | Remove a two-character aux tag from every output record; repeatable (BAM or tagged FASTQ input) |
 | `--remove-kinetics` | Remove the per-base kinetics and alignment-count arrays `ip pw fi fp ri rp sa sm sx` (BAM or tagged FASTQ input) |
 | `-a, --adapter-fasta <FILE>` | Adapter and primer FASTA (IUPAC codes accepted; `primer` or `barcode` in a header description restricts the entry to the read ends); enables adapter trimming |
@@ -206,7 +206,7 @@ the same tag-rewrite machinery as every other stage: `MM`/`ML`/`MN`, per-base
 kinetics, and the ONT move table are rewritten for the trimmed sequence.
 
 ```bash
-whittle -i barcoded.bam -o trimmed.bam --adapter-preset nbd114 --update-signal-tags
+whittle -i barcoded.bam -o trimmed.bam --adapter-preset nbd114 --update-moves
 ```
 
 The tag holds seven floats, four of which are positions: the front barcode's

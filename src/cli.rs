@@ -218,11 +218,11 @@ struct Cli {
         help_heading = "Trimming"
     )]
     qual_split_window: Option<usize>,
-    /// Keep ONT signal tags consistent through trimming (slice mv, update ts,
-    /// ns, sp and pi) for signal-aware tools such as Remora and Clair3 v2,
-    /// instead of dropping them. BAM-to-BAM only; requires a DNA or RNA
-    /// basecall_model in the read-group description.
-    #[arg(long = "update-signal-tags", help_heading = "Tags")]
+    /// Keep the ONT move table consistent through trimming (slice mv, update
+    /// ts, ns, sp, pi and the poly-A tags) for signal-aware tools such as
+    /// Remora and Clair3 v2, instead of dropping them. BAM-to-BAM only;
+    /// requires a DNA or RNA basecall_model in the read-group description.
+    #[arg(long = "update-moves", help_heading = "Tags")]
     update_moves: bool,
     /// Remove this two-character aux tag from every output record. Repeatable.
     /// BAM or tagged FASTQ input.
@@ -820,7 +820,7 @@ mod tests {
             "--qual-best-segment",
             "--qual-split",
             "--qual-split-window",
-            "--update-moves",
+            "--update-signal-tags",
             "--strip-kinetics",
             "--adapter-end-size",
             "--adapter-sample",

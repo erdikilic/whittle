@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- `--update-signal-tags` is renamed `--update-moves`, after the ONT move
+  table it maintains. The old spelling is not accepted.
 - `-t` bounds the working threads: BGZF input takes its decode workers out
   of the budget instead of adding them to the render pool.
 - BGZF blocks are compressed with one libdeflate compressor per thread,

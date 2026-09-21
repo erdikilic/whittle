@@ -853,12 +853,12 @@ fn fastq_to_bam_is_rejected_before_the_run() {
 #[test]
 fn update_moves_requires_bam_input() {
     whittle()
-        .args(["-i", "reads.fastq", "--update-signal-tags"])
+        .args(["-i", "reads.fastq", "--update-moves"])
         .assert()
         .failure()
         .code(2)
         .stderr(predicates::str::contains(
-            "--update-signal-tags rewrites the ONT signal tags of BAM records and requires BAM input",
+            "--update-moves rewrites the ONT signal tags of BAM records and requires BAM input",
         ));
 }
 

@@ -48,9 +48,9 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 | Reverse-strand kinetics (`ri`/`rp`) | Sliced from the opposite end, since the PacBio BAM specification stores them last base first |
 | `sa` (PacBio run-length subread coverage, `B:I`) | Decoded to per-base coverage, sliced, and re-encoded as `<length>,<coverage>` runs; runs that do not sum to the read length leave the tag unchanged and count as malformed |
 | Fixed-size PacBio arrays (`sn`/`ac`/`bc`) | Copied verbatim |
-| ONT signal (`mv`/`ts`/`ns`/`sp`) | Removed, or rewritten with `--update-signal-tags` |
-| `pi` (parent read id) | Set to the parent's name on every ONT split segment, with or without `--update-signal-tags`; removed on a crop without it |
-| Poly-A (`pa`/`pt`) | Kept and shifted with `--update-signal-tags` when the tail survives, otherwise removed; `pa` positions are absolute POD5 sample indexes, the frame `ts` uses |
+| ONT signal (`mv`/`ts`/`ns`/`sp`) | Removed, or rewritten with `--update-moves` |
+| `pi` (parent read id) | Set to the parent's name on every ONT split segment, with or without `--update-moves`; removed on a crop without it |
+| Poly-A (`pa`/`pt`) | Kept and shifted with `--update-moves` when the tail survives, otherwise removed; `pa` positions are absolute POD5 sample indexes, the frame `ts` uses |
 | `bi` (barcode positions) | Read with any adapter source to place the barcode trim where a barcode sequence is found, then removed, since the positions index the untrimmed read; a tag that is not a seven-element `B:f` array, or whose positions describe an empty, inverted, or out-of-range window, leaves the read untrimmed and is counted |
 | `BC`/`bv` (barcode call and kit version) | Per-read labels, copied unchanged |
 | `ds`/`ls` (PacBio undo blobs for `skera undo` and `lima-undo`) | Removed from every output record of a trimmed read, since they describe the untrimmed read; counted once per read and reported |
@@ -58,7 +58,7 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 | `qs:i`/`qe:i` (PacBio query coordinates) | Rewritten as `qs + start` and `qs + end` of the window, since the PacBio BAM specification keeps them relative to the original read; one without the other leaves both unchanged |
 | Read name | A crop updates an existing PacBio query interval in the name; other names are kept. A split names ONT segments `{name}_segment_N`; PacBio segments (an integer `qs`, or a `{movie}/{zmw}/ccs[/fwd|/rev]` or `{movie}/{zmw}/{qStart}_{qEnd}` name) take the specification's `{stem}/{qStart}_{qEnd}` from the rewritten coordinates, replacing any existing interval |
 | `rn` (read number) | Kept on a crop; `-1` on an ONT split (dorado's convention); PacBio's `rn` is a pass count and is copied |
-| `st`/`du` (start time, duration) | Kept on a crop. On a split, recomputed with `--update-signal-tags`, otherwise removed; pbmarkdup's `du:Z` is not a duration and is copied |
+| `st`/`du` (start time, duration) | Kept on a crop. On a split, recomputed with `--update-moves`, otherwise removed; pbmarkdup's `du:Z` is not a duration and is copied |
 | `me`/`er` (MinKNOW event count, end reason) | On an ONT split, `me` is 0 on every segment and `er` is `unknown` except on the segment retaining the parent signal end when moves are rewritten, or the last sequence segment otherwise; only when the source carries them |
 | `RG`, `ch`, `mx`, `sd`/`sv`, and other scalar tags | Copied verbatim |
 
@@ -106,7 +106,7 @@ form `{movie}/{zmw}/{qStart}_{qEnd}`. Every other record is treated as ONT. The
 platform selects the split naming and the `rn`, `pi`, `me`, and `er` rules
 above; the remaining rules are keyed on the tag type.
 
-## ONT signal tags under `--update-signal-tags`
+## ONT signal tags under `--update-moves`
 
 Signal direction comes from `basecall_model=dna...` or `basecall_model=rna...`
 in the record's `@RG` description. A record without `RG` can use a direction
@@ -115,7 +115,7 @@ requires a resolvable direction; otherwise the run fails with the read name.
 RNA sequence intervals are reversed into signal order before locating move
 boundaries, since RNA basecalls and move tables have opposite directions.
 
-With `--update-signal-tags`, a crop slices `mv`, advances `ts` by the removed head
+With `--update-moves`, a crop slices `mv`, advances `ts` by the removed head
 signal, and sets `ns` to the end of the kept signal. A DNA head-only crop and
 an RNA tail-only crop preserve the original signal end. A split emits subreads
 in dorado's convention: `pi` parent id, `sp` offset from the parent's POD5 signal start, `ns` subread span, `ts` 0, so each

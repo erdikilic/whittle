@@ -238,7 +238,7 @@ fn bam_to_bam_slices_pacbio_kinetics() {
     assert_eq!(pw, vec![103, 104, 105, 106, 107], "pw must be sliced too");
 }
 
-/// `--update-signal-tags` slices the ONT `mv` move table and advances `ts` through
+/// `--update-moves` slices the ONT `mv` move table and advances `ts` through
 /// the compiled binary, so a trimmed read stays signal-mappable for Remora and
 /// Clair3 v2 instead of dropping the move table.
 #[test]
@@ -276,7 +276,7 @@ fn bam_update_moves_slices_move_table() {
             "bam",
             "--output-format",
             "bam",
-            "--update-signal-tags",
+            "--update-moves",
             "--trim-front",
             "2",
             "-t",
@@ -954,7 +954,7 @@ fn rna_signal_windows_follow_signal_order() {
                 .arg(&input)
                 .arg("-o")
                 .arg(&output)
-                .args([flag, "1", "--update-signal-tags", "-t", threads, "--quiet"])
+                .args([flag, "1", "--update-moves", "-t", threads, "--quiet"])
                 .assert()
                 .success();
             let records = read_signal_records(&output);
@@ -984,7 +984,7 @@ fn rna_signal_windows_follow_signal_order() {
             .args([
                 "--split-quality",
                 "10",
-                "--update-signal-tags",
+                "--update-moves",
                 "--preserve-order",
                 "-t",
                 threads,
@@ -1031,7 +1031,7 @@ fn signal_rewriting_requires_resolvable_model_direction() {
         .arg(&input)
         .arg("-o")
         .arg(dir.path().join("out.bam"))
-        .args(["-H", "1", "--update-signal-tags", "--quiet"])
+        .args(["-H", "1", "--update-moves", "--quiet"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(

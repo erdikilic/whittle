@@ -46,7 +46,7 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
     Ok(())
 }
 
-/// Rejects `--update-signal-tags` on any input format other than BAM: the ONT
+/// Rejects `--update-moves` on any input format other than BAM: the ONT
 /// signal tags are rewritten only on BAM-to-BAM output, so elsewhere the flag
 /// would be accepted and silently do nothing. `cli::parse` applies this to the
 /// format an explicit `--input-format` or a known extension names, and `run`
@@ -54,7 +54,7 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
 pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::Result<()> {
     if in_fmt != io::Format::Bam && cfg.update_moves {
         anyhow::bail!(
-            "--update-signal-tags rewrites the ONT signal tags of BAM records and requires BAM input \
+            "--update-moves rewrites the ONT signal tags of BAM records and requires BAM input \
              (got {})",
             in_fmt.label()
         );

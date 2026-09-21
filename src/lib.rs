@@ -462,7 +462,10 @@ impl Session {
                 let mut source = source;
                 #[cfg(feature = "paraseq")]
                 let sampling = cfg.adapter_infer != config::AdapterInfer::Off
-                    || cfg.adapters.as_ref().is_some_and(|a| !a.adapters.is_empty());
+                    || cfg
+                        .adapters
+                        .as_ref()
+                        .is_some_and(|a| !a.adapters.is_empty());
                 #[cfg(feature = "paraseq")]
                 let paraseq = workflow::paraseq_selected()
                     && !sampling
@@ -767,13 +770,13 @@ fn note_tags_ignored(cfg: &Config, in_fmt: Format, out_fmt: Format) {
     }
 }
 
-/// Warns that `--update-signal-tags` has no effect on BAM-to-FASTQ output, which
+/// Warns that `--update-moves` has no effect on BAM-to-FASTQ output, which
 /// drops the signal tags on every trim.
 fn note_update_moves_ignored(cfg: &Config, out_fmt: Format) {
     if cfg.update_moves {
         tracing::warn!(
             output = out_fmt.label(),
-            "--update-signal-tags applies only to BAM-to-BAM output and is ignored"
+            "--update-moves applies only to BAM-to-BAM output and is ignored"
         );
     }
 }

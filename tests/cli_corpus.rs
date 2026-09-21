@@ -629,7 +629,7 @@ fn expected_fastq_from_bam_with_tags(reads: &[SourceRead], cfg: ExpectCfg) -> Ve
 }
 
 /// The sorted BAM output expected for `reads` under `cfg`, with or without
-/// `--update-signal-tags`.
+/// `--update-moves`.
 fn expected_bam(reads: &[SourceRead], cfg: ExpectCfg, update_moves: bool) -> Vec<BamRecord> {
     let mut out = Vec::new();
     for read in reads {
@@ -1004,7 +1004,7 @@ fn adapter_crop_and_quality_splits_preserve_final_names_and_tags() {
                     .arg("--summary-json")
                     .arg(&json);
                 if output_bam {
-                    cmd.arg("--update-signal-tags");
+                    cmd.arg("--update-moves");
                 } else if carries_tags {
                     cmd.args(["--fastq-tags", "MM,ML,RG"]);
                 }
@@ -1307,7 +1307,7 @@ fn bam_corpus_update_moves_matches_expected() {
             "bam",
             "--output-format",
             "bam",
-            "--update-signal-tags",
+            "--update-moves",
             "-H",
             "5",
             "-T",

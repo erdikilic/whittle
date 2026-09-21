@@ -19,7 +19,7 @@ whittle filters, trims, and splits Oxford Nanopore and PacBio reads in FASTQ, co
 ## Features
 
 - **Base-modification tags.** `MM`, `ML`, and `MN` are reconstructed for every trimmed or split uBAM read. The test suite checks the result against an independent `htslib` decoder.
-- **Kinetics and signal tags.** Per-base arrays (`ip`, `pw`, and related) are sliced with the sequence. ONT signal tags (`mv`, `ts`, `ns`, and related) are removed by default or rewritten with `--update-signal-tags`.
+- **Kinetics and signal tags.** Per-base arrays (`ip`, `pw`, and related) are sliced with the sequence. ONT signal tags (`mv`, `ts`, `ns`, and related) are removed by default or rewritten with `--update-moves`.
 - **Adapter and primer trimming.** Terminal adapters, adapters truncated by the read end, and interior adapters (chimera splitting with junction cleanup). Sequences come from built-in kit presets (ONT kit 14 ligation, rapid, barcoding, cDNA, and amplicon kits; RNA004; PacBio SMRTbell), a user FASTA with IUPAC codes, or de novo discovery. Presence detection restricts a preset to the sequences a library carries.
 - **Quality trimming.** End trimming to a threshold, best-segment extraction, or splitting at consecutive low-quality bases. Every segment is filtered on its own.
 - **Tagged FASTQ.** FASTQ whose headers carry SAM aux tags (`samtools fastq -T MM,ML,MN`) is trimmed with the same tag rewriting as uBAM: `MM`/`ML`/`MN` are rebuilt and per-base arrays sliced for every output segment.
@@ -202,7 +202,7 @@ Formats are taken from the path extension, a stream sniff, or `--input-format`/`
 - **No FASTQ-to-BAM.** BAM-to-FASTQ is supported.
 - **`--min-length` applies after trimming**, per output segment, not to the raw read.
 - **BAM folder output requires matching read groups.** Conflicting definitions are rejected.
-- **Signal rewriting requires model direction.** `--update-signal-tags` uses a DNA or RNA `basecall_model` in the BAM read-group description.
+- **Signal rewriting requires model direction.** `--update-moves` uses a DNA or RNA `basecall_model` in the BAM read-group description.
 - **One quality-trim strategy per run.** `--trim-quality`, `--best-quality-segment`, and `--split-quality` are mutually exclusive; `-H`/`-T` combine with any of them.
 
 ## Citation
