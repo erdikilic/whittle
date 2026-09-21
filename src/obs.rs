@@ -355,6 +355,10 @@ impl ProgressHandle {
             tracing::info!("{}", line);
         }
 
+        if let Some(line) = tag_filtered_line(stats) {
+            tracing::info!("{}", line);
+        }
+
         if let Some(line) = trimmed_to_nothing_line(stats) {
             tracing::info!("{}", line);
         }
@@ -627,6 +631,18 @@ fn bases_line(stats: &Stats) -> Option<String> {
         "Bases: {} in, {} out ({pct:.1}% kept)",
         human_bases(stats.input_bases),
         human_bases(stats.output_bases),
+    ))
+}
+
+/// The end-of-run tag-filter line: `Tag filtered: 1,234 input reads did not
+/// satisfy --tag-filter`. `None` when no read was rejected by the filter.
+fn tag_filtered_line(stats: &Stats) -> Option<String> {
+    if stats.reads_tag_filtered == 0 {
+        return None;
+    }
+    Some(format!(
+        "Tag filtered: {} input reads did not satisfy --tag-filter",
+        commas(stats.reads_tag_filtered)
     ))
 }
 

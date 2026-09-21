@@ -87,6 +87,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `-Q, --max-quality <PHRED>` | Maximum post-trim segment quality, a finite value of at least 0 (default 1000) |
 | `-g, --min-gc <FRACTION>`, `-G, --max-gc <FRACTION>` | GC-fraction bounds (0 to 1; `0.4` means 40%) |
 | `-m, --quality-mode <MODE>` | Quality calculation for `--min-quality`/`--max-quality` only: `mean` (mean error probability as a Phred score, the default), `arithmetic` (mean of the Phred scores), `median` |
+| `--tag-filter <EXPR>` | Keep only reads whose aux tags satisfy EXPR (samtools `-e` syntax over `[tag]` values); repeatable, every expression must hold; applied before adapter discovery and trimming (BAM or tagged FASTQ input) |
 | `-H, --trim-front <BASES>`, `-T, --trim-tail <BASES>` | Fixed crop from each adapter-derived segment after barcode restriction and before quality processing; applied once |
 | `--trim-quality <PHRED>` | Trim both ends up to the first base of quality at least PHRED |
 | `--best-quality-segment <PHRED>` | Keep the highest-scoring segment using cumulative base-error probabilities and the Phred cutoff (modified Mott); may retain bases below the cutoff |
@@ -162,11 +163,45 @@ to each output segment.
 `--trim-tail`. Both appear in `--help`, accept a base count, and retain the
 short options `-H` and `-T`. Other parameters use the names listed above.
 
+## Filtering by aux tag
+
+`--tag-filter <EXPR>` keeps only the reads whose aux tags satisfy an expression
+and drops the rest before anything else happens: a rejected read is not
+sampled for adapter discovery, not trimmed and not written. The flag is
+repeatable and every expression must hold. It reads tags, so it requires BAM
+or tagged FASTQ input.
+
+The syntax is the aux-tag subset of `samtools view -e`: `[tag]` names a tag,
+the comparisons are `==`, `!=`, `<`, `<=`, `>`, `>=`, the connectives are `!`,
+`&&`, `||` and parentheses, string literals are double-quoted, and `[tag]`
+alone (or `exists([tag])`) tests presence.
+
+```bash
+# Drop dorado's adaptive-sampling rejects.
+whittle -i reads.bam -o kept.bam --tag-filter '[er]!="data_service_unblock_mux_change"'
+# Duplex reads, or simplex reads with a dorado Q-score of at least 15.
+whittle -i reads.bam -o kept.bam --tag-filter '[dx]==1 || ([dx]==0 && [qs]>=15)'
+# HiFi reads by predicted accuracy and passes.
+whittle -i hifi.bam -o kept.bam --tag-filter '[rq]>=0.99 && [np]>=3'
+# One barcode, or unclassified reads.
+whittle -i reads.bam -o kept.bam --tag-filter '[BC]=="barcode03" || ![BC]'
+```
+
+Numbers compare numerically whatever the tag's integer width or float type;
+strings compare bytewise, so ISO 8601 timestamps such as `st` order correctly.
+A comparison with a tag the read does not carry is false whatever the
+operator, as in samtools, so `![tag]` or a negated comparison is the way to
+accept absence. Comparing a number with a string, or comparing an array, is an
+error that names the read and the tag, so a typo does not silently select or
+drop every read. Rejected reads are counted as input and reported as `Tag
+filtered` on stderr and as `reads.tag_filtered` in the summary JSON.
+
 ## Stage order
 
 Adapter preparation loads a FASTA or preset, or discovers adapters from a
-sample of original reads. Sampled reads remain in the processing stream.
-Each read then passes through these stages:
+sample of original reads. Reads rejected by `--tag-filter` never reach the
+sample. Sampled reads remain in the processing stream. Each read then passes
+through these stages:
 
 1. Adapter trimming and interior splitting on the original sequence, including
    terminal cleanup of the resulting segments.
@@ -278,7 +313,7 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
   "elapsed_seconds": 12.34,
   "params": { "threads": 8, "ordered": false, "min_length": 500, "qual_mode": "mean", "quality_op": null,
               "adapters": { "configured": 120, "count": 4, "sample": 500, "infer": "off" } },
-  "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 30 },
+  "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 20, "tag_filtered": 10 },
   "bases": { "input": 10000000, "output": 9500000 },
   "segments_dropped": { "too_short": 12, "too_long": 0, "low_quality": 5, "high_quality": 0, "gc_out_of_range": 0 },
   "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0, "barcode_tag_malformed_reads": 0, "barcode_tag_unverified_reads": 0 }
@@ -299,7 +334,8 @@ found. All four are also reported on stderr at the end of the run.
 
 `reads.output` counts output segments, not input reads, so under `--split-quality`
 or chimera splitting it can exceed `reads.input`. The read-level buckets
-`with_output`, `trimmed_to_nothing`, and `all_filtered` partition `reads.input`.
+`with_output`, `trimmed_to_nothing`, `all_filtered` and `tag_filtered` partition
+`reads.input`; `params.tag_filter` lists the expressions as written.
 
 Under `params.adapters`, `configured` is the set requested (preset and/or FASTA)
 and `count` is the set searched, after presence detection narrowed it or

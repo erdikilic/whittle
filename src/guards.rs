@@ -76,6 +76,11 @@ pub(crate) fn guard_tag_flags(
         return Ok(());
     }
     let got = format!("{} without header tags", in_fmt.label());
+    if !cfg.tag_filters.is_empty() {
+        anyhow::bail!(
+            "--tag-filter reads aux tags and requires BAM or tagged FASTQ input (got {got})"
+        );
+    }
     if !cfg.remove_tags.is_empty() {
         anyhow::bail!(
             "--remove-tag removes aux tags and requires BAM or tagged FASTQ input (got {got})"

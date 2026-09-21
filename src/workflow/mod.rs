@@ -7,13 +7,50 @@ mod paraseq;
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rayon::prelude::*;
 
 pub(crate) use bam::run_bam_to_fastq;
 pub use bam::run_raw_bam;
+
+/// Wraps a record stream so that only reads `keep` accepts pass on. A rejected
+/// read is counted here as input and as tag-filtered, since no workflow sees
+/// it; an evaluation error names the read.
+pub(crate) fn filter_by_tags<R, I, K, W, N>(
+    records: I,
+    counters: Arc<Counters>,
+    keep: K,
+    weight: W,
+    name: N,
+) -> Box<dyn Iterator<Item = anyhow::Result<R>> + Send>
+where
+    R: Send + 'static,
+    I: Iterator<Item = anyhow::Result<R>> + Send + 'static,
+    K: Fn(&R) -> anyhow::Result<bool> + Send + 'static,
+    W: Fn(&R) -> usize + Send + 'static,
+    N: Fn(&R) -> String + Send + 'static,
+{
+    Box::new(records.filter_map(move |item| {
+        let rec = match item {
+            Ok(rec) => rec,
+            Err(e) => return Some(Err(e)),
+        };
+        match keep(&rec) {
+            Ok(true) => Some(Ok(rec)),
+            Ok(false) => {
+                counters.input_reads.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .input_bases
+                    .fetch_add(weight(&rec) as u64, Ordering::Relaxed);
+                counters.tag_filtered_reads.fetch_add(1, Ordering::Relaxed);
+                None
+            },
+            Err(e) => Some(Err(e.context(format!("read {}", name(&rec))))),
+        }
+    }))
+}
 pub(crate) use fastq::run_fastq;
 #[cfg(feature = "paraseq")]
 pub(crate) use paraseq::{run_fastq_paraseq, selected as paraseq_selected};
@@ -396,6 +433,9 @@ pub struct Counters {
     /// Input reads with a recorded barcode span at which no configured or
     /// named catalog barcode was found; that span was left untrimmed.
     pub barcode_tag_unverified_reads: AtomicU64,
+    /// Input reads rejected by `--tag-filter` before any workflow saw them.
+    /// Read-level, part of the invariant below.
+    pub tag_filtered_reads: AtomicU64,
     /// Input reads that produced at least one surviving output segment,
     /// bumped once per input read (not once per segment, unlike
     /// `output_reads`, which a `--split-quality` read can bump several times).
@@ -449,22 +489,23 @@ impl Counters {
         let reads_with_output = self.reads_with_output.load(Ordering::Relaxed);
         let reads_trimmed_to_nothing = self.reads_trimmed_to_nothing.load(Ordering::Relaxed);
         let reads_all_filtered = self.reads_all_filtered.load(Ordering::Relaxed);
+        let reads_tag_filtered = self.tag_filtered_reads.load(Ordering::Relaxed);
         let segments_dropped_short = self.segments_dropped_short.load(Ordering::Relaxed);
         let segments_dropped_long = self.segments_dropped_long.load(Ordering::Relaxed);
         let segments_dropped_low_qual = self.segments_dropped_low_qual.load(Ordering::Relaxed);
         let segments_dropped_high_qual = self.segments_dropped_high_qual.load(Ordering::Relaxed);
         let segments_dropped_gc = self.segments_dropped_gc.load(Ordering::Relaxed);
 
-        // Every input read lands in exactly one of the three read-level buckets: it
-        // produced surviving segments, produced none at all, or produced some and
-        // lost them all to `filter::check`. Segment-level drops are excluded, since a
-        // read can shed segments and still survive. The assertion catches an early
-        // return that skips one of the three.
+        // Every input read lands in exactly one of the four read-level buckets: it
+        // was rejected by the tag filter, produced surviving segments, produced
+        // none at all, or produced some and lost them all to `filter::check`.
+        // Segment-level drops are excluded, since a read can shed segments and
+        // still survive. The assertion catches an early return that skips one.
         debug_assert_eq!(
-            reads_with_output + reads_trimmed_to_nothing + reads_all_filtered,
+            reads_with_output + reads_trimmed_to_nothing + reads_all_filtered + reads_tag_filtered,
             input_reads,
-            "Every input read must be exactly one of: produced output, trimmed to \
-             nothing, or had every segment filtered"
+            "Every input read must be exactly one of: tag filtered, produced output, \
+             trimmed to nothing, or had every segment filtered"
         );
 
         Stats {
@@ -480,6 +521,7 @@ impl Counters {
             reads_with_output,
             reads_trimmed_to_nothing,
             reads_all_filtered,
+            reads_tag_filtered,
             segments_dropped_short,
             segments_dropped_long,
             segments_dropped_low_qual,
@@ -604,6 +646,8 @@ pub struct Stats {
     /// Read-level: input reads that produced at least one segment, but every
     /// one of them was rejected by post-trim `filter::check`.
     pub reads_all_filtered: u64,
+    /// Read-level: input reads rejected by `--tag-filter` before trimming.
+    pub reads_tag_filtered: u64,
     /// Segment-level: segments dropped by post-trim `filter::check` for being
     /// shorter than `min_length` (including empty segments).
     pub segments_dropped_short: u64,

@@ -147,6 +147,13 @@ struct Cli {
     /// Minimum post-trim GC fraction (0 to 1; 0.4 means 40%).
     #[arg(short = 'g', long, value_name = "FRACTION", help_heading = "Filtering")]
     min_gc: Option<f64>,
+    /// Keep only reads whose aux tags satisfy EXPR, a samtools-style
+    /// expression over [tag] values, for example '[er]!="unblock_mux_change"'
+    /// or '[qs]>=10 && [dx]==1'. Repeatable; every expression must hold.
+    /// Applied before adapter discovery and trimming. BAM or tagged FASTQ
+    /// input.
+    #[arg(long = "tag-filter", value_name = "EXPR", help_heading = "Filtering")]
+    tag_filter: Vec<String>,
     /// Maximum post-trim GC fraction (0 to 1; 0.4 means 40%).
     #[arg(short = 'G', long, value_name = "FRACTION", help_heading = "Filtering")]
     max_gc: Option<f64>,
@@ -336,6 +343,7 @@ pub fn parse() -> anyhow::Result<Config> {
     let quality = quality_op_for(&c);
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
     let remove_tags = TagRemoval::parse(&c.remove_tag)?;
+    let tag_filters = crate::tagfilter::TagFilters::parse(&c.tag_filter)?;
 
     let mut advisories: Vec<Advisory> = Vec::new();
     let adapter_infer = resolve_infer(&c, &mut advisories)?;
@@ -393,6 +401,7 @@ pub fn parse() -> anyhow::Result<Config> {
         adapter_fasta: c.adapter_fasta,
         adapters_configured: None,
         remove_tags,
+        tag_filters,
     };
 
     // Only an explicit `--input-format` or a known extension decides the input

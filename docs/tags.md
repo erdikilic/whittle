@@ -62,6 +62,13 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 | `me`/`er` (MinKNOW event count, end reason) | On an ONT split, `me` is 0 on every segment and `er` is `unknown` except on the segment retaining the parent signal end when moves are rewritten, or the last sequence segment otherwise; only when the source carries them |
 | `RG`, `ch`, `mx`, `sd`/`sv`, and other scalar tags | Copied verbatim |
 
+## Filtering by aux tag
+
+`--tag-filter <EXPR>` selects reads by their aux tags (dorado's `er`, `dx`,
+`qs`, `BC`, PacBio's `rq`, `np`, and any other scalar or string tag) before
+discovery and trimming, on BAM and tagged FASTQ input. See
+[cli.md](cli.md#filtering-by-aux-tag) for the syntax.
+
 ## Tag removal
 
 `--remove-tag <TAGS>` removes named aux tags from every output record; the

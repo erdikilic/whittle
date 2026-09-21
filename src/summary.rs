@@ -62,6 +62,8 @@ struct Params {
     /// Aux tags removed from every output record, sorted, with every
     /// `--remove-tag` group expanded.
     remove_tags: Vec<String>,
+    /// The `--tag-filter` expressions as written; empty when unset.
+    tag_filter: Vec<String>,
     /// `all`, `none`, or the comma-joined tag list.
     fastq_tags: String,
     /// `None` when adapter trimming is off.
@@ -100,7 +102,7 @@ struct AdapterParams {
     infer: &'static str,
 }
 
-/// Read-level counts: input, output, and the three-way split of the input.
+/// Read-level counts: input, output, and the four-way split of the input.
 #[derive(Debug, Serialize)]
 struct Reads {
     input: u64,
@@ -114,6 +116,8 @@ struct Reads {
     trimmed_to_nothing: u64,
     /// Input reads that produced segments, all of which the filters rejected.
     all_filtered: u64,
+    /// Input reads rejected by `--tag-filter` before trimming.
+    tag_filtered: u64,
 }
 
 /// Base-level counts for input and output.
@@ -181,6 +185,7 @@ impl Summary {
                 with_output: stats.reads_with_output,
                 trimmed_to_nothing: stats.reads_trimmed_to_nothing,
                 all_filtered: stats.reads_all_filtered,
+                tag_filtered: stats.reads_tag_filtered,
             },
             bases: Bases {
                 input: stats.input_bases,
@@ -258,6 +263,7 @@ impl Params {
                 .tags()
                 .map(|t| String::from_utf8_lossy(t).into_owned())
                 .collect(),
+            tag_filter: cfg.tag_filters.texts().map(str::to_owned).collect(),
             fastq_tags: match &cfg.fastq_tags {
                 FastqTags::All => "all".to_string(),
                 FastqTags::None => "none".to_string(),
@@ -335,6 +341,7 @@ mod tests {
             reads_with_output: 92,
             reads_trimmed_to_nothing: 5,
             reads_all_filtered: 3,
+            reads_tag_filtered: 0,
             segments_dropped_short: 7,
             segments_dropped_long: 0,
             segments_dropped_low_qual: 1,

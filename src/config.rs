@@ -262,6 +262,9 @@ pub struct Config {
     /// its groups). Requires BAM or tagged FASTQ;
     /// `guards::guard_tag_flags` rejects input without auxiliary tags.
     pub remove_tags: TagRemoval,
+    /// The `--tag-filter` expressions; a read must satisfy every one to be
+    /// processed. Requires BAM or tagged FASTQ input.
+    pub tag_filters: crate::tagfilter::TagFilters,
     /// Whether multithreaded runs write records in input order. When false,
     /// records are written in completion order.
     pub ordered: bool,
@@ -310,6 +313,7 @@ impl Default for Config {
             compression_level: 6,
             update_moves: false,
             remove_tags: TagRemoval::default(),
+            tag_filters: crate::tagfilter::TagFilters::default(),
             ordered: false,
             verbosity: 0,
             quiet: false,

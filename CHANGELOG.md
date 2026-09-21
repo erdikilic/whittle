@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--tag-filter <EXPR>` keeps only reads whose aux tags satisfy a
+  samtools-style expression (`[er]!="data_service_unblock_mux_change"`,
+  `[dx]==1 || ([dx]==0 && [qs]>=15)`, `[rq]>=0.99 && [np]>=3`). Rejected
+  reads are dropped before adapter discovery and trimming and reported as
+  `Tag filtered` and `reads.tag_filtered`. BAM and tagged FASTQ input.
 - Tagged FASTQ input. A FASTQ whose headers carry SAM aux tags in the
   `samtools fastq -T` convention is trimmed on the BAM-to-FASTQ path: `MM`,
   `ML` and `MN` are rebuilt and per-base arrays sliced for every output

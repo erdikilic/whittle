@@ -21,6 +21,7 @@ whittle filters, trims, and splits Oxford Nanopore and PacBio reads in FASTQ, co
 - **Base-modification tags.** `MM`, `ML`, and `MN` are reconstructed for every trimmed or split uBAM read. The test suite checks the result against an independent `htslib` decoder.
 - **Kinetics and signal tags.** Per-base arrays (`ip`, `pw`, and related) are sliced with the sequence. ONT signal tags (`mv`, `ts`, `ns`, and related) are removed by default or rewritten with `--update-moves`.
 - **Adapter and primer trimming.** Terminal adapters, adapters truncated by the read end, and interior adapters (chimera splitting with junction cleanup). Sequences come from built-in kit presets (ONT kit 14 ligation, rapid, barcoding, cDNA, and amplicon kits; RNA004; PacBio SMRTbell), a user FASTA with IUPAC codes, or de novo discovery. Presence detection restricts a preset to the sequences a library carries.
+- **Read selection by tag.** `--tag-filter` keeps reads by an expression over their aux tags (end reason, duplex state, dorado Q-score, barcode call, HiFi accuracy and passes) before discovery and trimming.
 - **Quality trimming.** End trimming to a threshold, best-segment extraction, or splitting at consecutive low-quality bases. Every segment is filtered on its own.
 - **Tagged FASTQ.** FASTQ whose headers carry SAM aux tags (`samtools fastq -T MM,ML,MN`) is trimmed with the same tag rewriting as uBAM: `MM`/`ML`/`MN` are rebuilt and per-base arrays sliced for every output segment.
 - **Formats.** FASTQ, gzip and BGZF FASTQ, and unaligned BAM as input; the same, plus BAM-to-FASTQ, as output. Formats are detected from the path or the stream, including on stdin. A directory of files is merged in one run.
@@ -120,6 +121,14 @@ boundary. Candidates with unresolved boundaries are skipped. For known primers,
 an explicit FASTA or kit preset remains the most direct choice; see
 [adapter discovery](docs/adapters.md#adapter-discovery) for sampling
 requirements and limitations.
+
+Select reads by their aux tags before trimming: drop adaptive-sampling
+rejects, or keep duplex reads only.
+
+```bash
+whittle -i reads.bam -o kept.bam --tag-filter '[er]!="data_service_unblock_mux_change"' -l 500
+whittle -i reads.bam -o duplex.bam --tag-filter '[dx]==1'
+```
 
 Merge a directory, convert BAM to FASTQ, and write a machine-readable summary.
 

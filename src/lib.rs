@@ -14,6 +14,7 @@ pub mod obs;
 pub mod qual;
 pub mod record;
 pub mod summary;
+pub mod tagfilter;
 pub mod trim;
 pub mod workflow;
 
@@ -406,6 +407,7 @@ impl Session {
             (Format::Bam, Format::Bam) => {
                 note_tags_ignored(cfg, in_fmt, out_fmt);
                 let (header, records) = self.bam_reader(source, true)?;
+                let records = self.tag_filtered_bam(cfg, records);
                 let Some(records) = settle(
                     records,
                     cfg,
@@ -439,6 +441,7 @@ impl Session {
             (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
                 note_update_moves_ignored(cfg, out_fmt);
                 let (_header, records) = self.bam_reader(source, false)?;
+                let records = self.tag_filtered_bam(cfg, records);
                 let Some(records) = settle(
                     records,
                     cfg,
@@ -469,6 +472,7 @@ impl Session {
                 #[cfg(feature = "paraseq")]
                 let paraseq = workflow::paraseq_selected()
                     && !sampling
+                    && cfg.tag_filters.is_empty()
                     && in_fmt != Format::FastqBgzf
                     && cfg.threads > 1;
                 #[cfg(feature = "paraseq")]
@@ -491,6 +495,7 @@ impl Session {
                     return self.finish(obs, &stats, cfg);
                 }
                 let records = self.fastq_reader(source, in_fmt)?;
+                let records = self.tag_filtered_fastq(cfg, records);
                 let Some(records) = settle(
                     records,
                     cfg,
@@ -544,6 +549,69 @@ impl Session {
                 check_read_groups,
             ),
         }
+    }
+
+    /// Applies the run's tag filters to a raw BAM stream, or returns it as is.
+    fn tag_filtered_bam(
+        &self,
+        cfg: &Config,
+        records: io::bam::RawRecordIter,
+    ) -> io::bam::RawRecordIter {
+        if cfg.tag_filters.is_empty() {
+            return records;
+        }
+        let filters = cfg.tag_filters.clone();
+        workflow::filter_by_tags(
+            records,
+            Arc::clone(&self.counters),
+            move |rec| filters.keeps(rec),
+            |rec| rec.sequence().len(),
+            |rec| io::bam::display_name(rec.name().map(AsRef::as_ref)),
+        )
+    }
+
+    /// Applies the run's tag filters to a FASTQ stream, or returns it as is.
+    /// A header without aux tags offers no tags, so every comparison on it is
+    /// false; the input guard reports a plain FASTQ after the run.
+    fn tag_filtered_fastq(
+        &self,
+        cfg: &Config,
+        records: Box<dyn Iterator<Item = anyhow::Result<record::ReadRecord>> + Send>,
+    ) -> Box<dyn Iterator<Item = anyhow::Result<record::ReadRecord>> + Send> {
+        if cfg.tag_filters.is_empty() {
+            return records;
+        }
+        let filters = cfg.tag_filters.clone();
+        let counters = Arc::clone(&self.counters);
+        workflow::filter_by_tags(
+            records,
+            Arc::clone(&self.counters),
+            move |rec| {
+                if !io::tagged::has_aux_tags(&rec.name) {
+                    return filters.keeps(&tagfilter::NoTags);
+                }
+                counters
+                    .tagged_fastq
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                let fields = rec
+                    .name
+                    .iter()
+                    .position(|&b| b == b'\t')
+                    .map_or(&[][..], |t| &rec.name[t + 1..]);
+                let data = io::tagged::parse_aux_fields(fields)?;
+                filters.keeps(&data)
+            },
+            |rec| rec.seq.len(),
+            |rec| {
+                String::from_utf8_lossy(
+                    rec.name
+                        .split(|&b| b == b'\t' || b == b' ')
+                        .next()
+                        .unwrap_or(&[]),
+                )
+                .into_owned()
+            },
+        )
     }
 
     /// Opens the FASTQ-family record stream for `in_fmt`.
@@ -684,6 +752,9 @@ fn announce(
         );
         tracing::info!("{}", banner::threads_banner_line(cfg.threads, s.budget));
         tracing::info!("{}", banner::filters_and_trim_line(&cfg.filter, &cfg.trim));
+        for text in cfg.tag_filters.texts() {
+            tracing::info!("Tag filter: {text}");
+        }
         if let Some(line) = banner::adapter_banner_line(
             cfg.adapters.as_ref(),
             cfg.adapter_sample,
@@ -748,6 +819,7 @@ fn is_no_op(cfg: &Config, same_format: bool) -> bool {
         && pass_through_filter
         && cfg.adapters.is_none()
         && cfg.remove_tags.is_empty()
+        && cfg.tag_filters.is_empty()
         && same_format
 }
 
