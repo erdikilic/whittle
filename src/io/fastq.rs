@@ -28,7 +28,13 @@ pub fn reader_from(
     inner: Box<dyn Read + Send>,
     gz: bool,
 ) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
-    let inner: Box<dyn Read + Send> = if gz {
+    Box::new(RecordIter::new(byte_stream(inner, gz)))
+}
+
+/// Returns the decoded byte stream of a FASTQ source, inflating gzip when
+/// `gz` is true.
+pub fn byte_stream(inner: Box<dyn Read + Send>, gz: bool) -> Box<dyn Read + Send> {
+    if gz {
         // `bufread::MultiGzDecoder` over an explicit buffer; the `read` variant
         // wraps its source in an 8 KiB `BufReader`.
         Box::new(MultiGzDecoder::new(BufReader::with_capacity(
@@ -37,8 +43,7 @@ pub fn reader_from(
         )))
     } else {
         inner
-    };
-    Box::new(RecordIter::new(inner))
+    }
 }
 
 /// Builds a FASTQ iterator over BGZF-compressed input. Unlike ordinary gzip,
@@ -107,7 +112,7 @@ impl<R: Read> RecordIter<R> {
 
 /// Names the first quality byte outside the Phred+33 range. `qual` holds at
 /// least one such byte.
-fn invalid_quality(id: &[u8], qual: &[u8]) -> anyhow::Error {
+pub(crate) fn invalid_quality(id: &[u8], qual: &[u8]) -> anyhow::Error {
     let (pos, &byte) = qual
         .iter()
         .enumerate()

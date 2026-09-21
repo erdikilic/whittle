@@ -34,7 +34,7 @@ fn run_fastq_seq<W: Write>(
 
 /// Trims one record, filters each produced segment through
 /// `process_read_segments`, and appends survivors to the reusable output buffer.
-fn render_record(
+pub(super) fn render_record(
     rec: ReadRecord,
     cfg: &Config,
     counters: &Counters,

@@ -29,6 +29,7 @@ anyhow = "1"
 rayon = "1"
 
 seq_io = "0.3.4"
+paraseq = { version = "0.6", default-features = false, features = ["anyhow"], optional = true }
 noodles-bam = "0.95.0"
 noodles-sam = "0.90.0"
 noodles-bgzf = { version = "0.51.0", features = ["libdeflate"] }
@@ -47,6 +48,9 @@ indicatif = { version = "0.18", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 jiff = "0.2"
+
+[features]
+paraseq = ["dep:paraseq"]
 
 [dev-dependencies]
 assert_cmd = "2"

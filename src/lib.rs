@@ -458,6 +458,35 @@ impl Session {
                 anyhow::bail!("FASTQ-to-BAM conversion is not supported")
             },
             (Format::Fastq | Format::FastqGz | Format::FastqBgzf, _) => {
+                #[cfg(feature = "paraseq")]
+                let mut source = source;
+                #[cfg(feature = "paraseq")]
+                let sampling = cfg.adapter_infer != config::AdapterInfer::Off
+                    || cfg.adapters.as_ref().is_some_and(|a| !a.adapters.is_empty());
+                #[cfg(feature = "paraseq")]
+                let paraseq = workflow::paraseq_selected()
+                    && !sampling
+                    && in_fmt != Format::FastqBgzf
+                    && cfg.threads > 1;
+                #[cfg(feature = "paraseq")]
+                if let (true, Source::Stream(src)) = (paraseq, &mut source) {
+                    let src = std::mem::replace(src, Box::new(std::io::empty()));
+                    cfg.render_workers = self.budget.render;
+                    let stream = io::fastq::byte_stream(src, in_fmt == Format::FastqGz);
+                    let mut writer = io::fastq::writer(cfg, out_fmt, true)?;
+                    let stats =
+                        workflow::run_fastq_paraseq(stream, &mut writer, cfg, &self.counters)?;
+                    let tagged = self
+                        .counters
+                        .tagged_fastq
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    writer.finish()?;
+                    guards::guard_tag_flags(cfg, in_fmt, tagged)?;
+                    if !tagged {
+                        note_tags_ignored(cfg, in_fmt, out_fmt);
+                    }
+                    return self.finish(obs, &stats, cfg);
+                }
                 let records = self.fastq_reader(source, in_fmt)?;
                 let Some(records) = settle(
                     records,

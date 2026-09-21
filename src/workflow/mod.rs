@@ -2,6 +2,8 @@
 
 pub(crate) mod bam;
 mod fastq;
+#[cfg(feature = "paraseq")]
+mod paraseq;
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -13,6 +15,8 @@ use rayon::prelude::*;
 pub(crate) use bam::run_bam_to_fastq;
 pub use bam::run_raw_bam;
 pub(crate) use fastq::run_fastq;
+#[cfg(feature = "paraseq")]
+pub(crate) use paraseq::{run_fastq_paraseq, selected as paraseq_selected};
 
 use crate::config::Config;
 use crate::filter::{DropReason, FilterConfig};
