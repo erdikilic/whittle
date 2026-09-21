@@ -4,7 +4,10 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use super::{BatchSink, Counters, FASTQ_BATCH, Stats, process_read_segments, run_bytes_parallel};
+use super::reject::{self, Reason, RejectItem};
+use super::{
+    BatchSink, Counters, FASTQ_BATCH, Rejection, Stats, process_read_segments, run_bytes_parallel,
+};
 use crate::config::Config;
 use crate::io::fastq::write_segment;
 use crate::record::ReadRecord;
@@ -59,7 +62,53 @@ pub(super) fn render_record(
             write_segment(w, &rec.name, &rec.seq[s..e], &rec.qual[s..e], total, idx)?;
             Ok(())
         },
+        |rejection| {
+            if !counters.wants_rejects() {
+                return Ok(());
+            }
+            counters.reject(RejectItem::Fastq(rejected_fastq(&rec, rejection)))
+        },
     )
+}
+
+/// Renders a rejected plain FASTQ segment, or the whole read, with its reason
+/// tag in the header.
+pub(super) fn rejected_fastq(rec: &ReadRecord, rejection: Rejection) -> Vec<u8> {
+    let mut out = Vec::new();
+    match rejection {
+        Rejection::Segment {
+            idx,
+            total,
+            start,
+            end,
+            reason,
+        } => {
+            crate::io::fastq::write_head(&mut out, &rec.name, total, idx)
+                .expect("Writing to a Vec does not fail");
+            reject::push_fastq_tag(&mut out, Reason::Dropped(reason));
+            crate::io::fastq::write_body(&mut out, &rec.seq[start..end], &rec.qual[start..end])
+                .expect("Writing to a Vec does not fail");
+        },
+        Rejection::Whole => {
+            crate::io::fastq::write_head(&mut out, &rec.name, 1, 0)
+                .expect("Writing to a Vec does not fail");
+            reject::push_fastq_tag(&mut out, Reason::TrimmedToNothing);
+            crate::io::fastq::write_body(&mut out, &rec.seq, &rec.qual)
+                .expect("Writing to a Vec does not fail");
+        },
+    }
+    out
+}
+
+/// Renders a plain FASTQ read rejected by the tag filter.
+pub(crate) fn tag_filtered_fastq(rec: &ReadRecord) -> Vec<u8> {
+    let mut out = Vec::new();
+    crate::io::fastq::write_head(&mut out, &rec.name, 1, 0)
+        .expect("Writing to a Vec does not fail");
+    reject::push_fastq_tag(&mut out, Reason::TagFilter);
+    crate::io::fastq::write_body(&mut out, &rec.seq, &rec.qual)
+        .expect("Writing to a Vec does not fail");
+    out
 }
 
 /// Runs the FASTQ workflow: sequential when `cfg.threads <= 1`; otherwise

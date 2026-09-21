@@ -12,8 +12,10 @@ use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use noodles_sam::{self as sam};
 
+use super::reject::{self, Reason, RejectItem};
 use super::{
-    BAM_BATCH, BatchSink, Counters, Stats, process_read_segments, run_bytes_parallel, run_parallel,
+    BAM_BATCH, BatchSink, Counters, Rejection, Stats, process_read_segments, run_bytes_parallel,
+    run_parallel,
 };
 use crate::config::{Config, FastqTags, TagRemoval};
 use crate::io::fastq::{push_aux_field, push_mods_aux, push_record_body};
@@ -103,7 +105,7 @@ const MOD_TAGS: [Tag; 3] = [
 /// BAM's `CG:B:I` overflow representation of a CIGAR longer than 65535
 /// operations is not expanded: the workflows accept unaligned records only,
 /// whose CIGAR is empty.
-fn decode_raw_record(src: &bam::Record) -> std::io::Result<RecordBuf> {
+pub(crate) fn decode_raw_record(src: &bam::Record) -> std::io::Result<RecordBuf> {
     let mut dst = RecordBuf::default();
     *dst.name_mut() = src.name().map(Into::into);
     *dst.flags_mut() = src.flags();
@@ -1383,14 +1385,17 @@ fn prepare_read<'a>(
 }
 
 /// Runs the per-read guards and the trim on a decoded record, filters each
-/// produced segment and calls `render` with every survivor's window and the
-/// record's modification block. Counts a dropped undo blob once the survivors
-/// are known. Shared by the BAM and FASTQ output paths.
+/// produced segment and calls `render` with every window and the record's
+/// modification block: `None` for a survivor, or the reason for a rejected
+/// segment (a read that produced no segment is one rejected full window).
+/// Rejected windows are rendered only while a rejected output is open.
+/// Counts a dropped undo blob once the survivors are known. Shared by the BAM
+/// and FASTQ output paths.
 fn render_windows(
     rec: &RecordBuf,
     cfg: &Config,
     counters: &Counters,
-    mut render: impl FnMut(Window, ModBlock, Option<&IndexedMods>) -> anyhow::Result<()>,
+    render: impl FnMut(Window, ModBlock, Option<&IndexedMods>, Option<Reason>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let PreparedRead {
         seq,
@@ -1408,6 +1413,8 @@ fn render_windows(
             None
         };
     let mut survivors: Vec<(usize, usize)> = Vec::new();
+    // Both callbacks render, so the closure is shared through a cell.
+    let render = std::cell::RefCell::new(render);
     process_read_segments(
         &produced,
         seq,
@@ -1416,7 +1423,7 @@ fn render_windows(
         counters,
         |idx, total, start, end| {
             survivors.push((start, end));
-            render(
+            render.borrow_mut()(
                 Window {
                     start,
                     end,
@@ -1425,7 +1432,40 @@ fn render_windows(
                 },
                 mod_block,
                 indexed.as_ref(),
+                None,
             )
+        },
+        |rejection| {
+            if !counters.wants_rejects() {
+                return Ok(());
+            }
+            let (window, reason) = match rejection {
+                Rejection::Segment {
+                    idx,
+                    total,
+                    start,
+                    end,
+                    reason,
+                } => (
+                    Window {
+                        start,
+                        end,
+                        idx,
+                        total,
+                    },
+                    Reason::Dropped(reason),
+                ),
+                Rejection::Whole => (
+                    Window {
+                        start: 0,
+                        end: seq.len(),
+                        idx: 0,
+                        total: 1,
+                    },
+                    Reason::TrimmedToNothing,
+                ),
+            };
+            render.borrow_mut()(window, mod_block, indexed.as_ref(), Some(reason))
         },
     )?;
     count_undo_tags_dropped(counters, rec, seq.len(), &survivors);
@@ -1452,7 +1492,7 @@ fn render_bam_read(
     // The move table is indexed on the first window that needs it.
     let moves: std::cell::OnceCell<Option<MoveIndex<'_>>> = std::cell::OnceCell::new();
     let seq = rec.sequence().as_ref();
-    render_windows(rec, cfg, counters, |window, mod_block, indexed| {
+    render_windows(rec, cfg, counters, |window, mod_block, indexed, reason| {
         let partial = window.start != 0 || window.end != seq.len();
         if cfg.update_moves
             && direction.is_none()
@@ -1473,8 +1513,51 @@ fn render_bam_read(
         };
         let out =
             reconstruct_window_record(rec, window, mod_block, indexed, moves, &cfg.remove_tags);
-        Ok(emit(out)?)
+        match reason {
+            None => Ok(emit(out)?),
+            Some(reason) => {
+                let mut rejected = out.unwrap_or_else(|| rec.clone());
+                reject::tag_record(&mut rejected, reason);
+                counters.reject(RejectItem::Bam(rejected))
+            },
+        }
     })
+}
+
+/// Renders a raw record rejected by the tag filter for BAM output.
+pub(crate) fn tag_filtered_bam(record: &bam::Record) -> anyhow::Result<RejectItem> {
+    let mut rec = decode_raw_record(record)?;
+    reject::tag_record(&mut rec, Reason::TagFilter);
+    Ok(RejectItem::Bam(rec))
+}
+
+/// Renders a raw record rejected by the tag filter for FASTQ output: the whole
+/// read with its selected tags and the reason tag.
+pub(crate) fn tag_filtered_bam_fastq(
+    record: &bam::Record,
+    cfg: &Config,
+) -> anyhow::Result<RejectItem> {
+    let rec = decode_raw_record(record)?;
+    let seq_len = rec.sequence().len();
+    let mut out = Vec::new();
+    render_fastq_window(
+        &mut out,
+        &rec,
+        &[],
+        Window {
+            start: 0,
+            end: seq_len,
+            idx: 0,
+            total: 1,
+        },
+        inspect_mod_block(&rec, seq_len),
+        None,
+        platform(&rec),
+        &cfg.fastq_tags,
+        &cfg.remove_tags,
+        Some(Reason::TagFilter),
+    );
+    Ok(RejectItem::Fastq(out))
 }
 
 /// Runs the single-threaded uBAM workflow: refuses aligned reads, trims, filters
@@ -1732,23 +1815,28 @@ fn process_raw_full_window(
         counters.malformed_tag_reads.fetch_add(1, Ordering::Relaxed);
     }
 
-    let dropped = if seq_len == 0 {
+    let rejected = if seq_len == 0 {
         counters
             .reads_trimmed_to_nothing
             .fetch_add(1, Ordering::Relaxed);
-        true
+        Some(Reason::TrimmedToNothing)
     } else {
         match crate::filter::check_with_gc(seq_len, qual, || raw_gc_fraction(&record), &cfg.filter)
         {
             Some(reason) => {
                 counters.record_segment_drop(reason);
                 counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
-                true
+                Some(Reason::Dropped(reason))
             },
-            None => false,
+            None => None,
         }
     };
-    if dropped {
+    if let Some(reason) = rejected {
+        if counters.wants_rejects() {
+            let mut rec = decode_raw_record(&record)?;
+            reject::tag_record(&mut rec, reason);
+            counters.reject(RejectItem::Bam(rec))?;
+        }
         return Ok(None);
     }
 
@@ -1993,6 +2081,7 @@ fn render_fastq_window(
     platform: Platform,
     sel: &FastqTags,
     remove: &TagRemoval,
+    reason: Option<Reason>,
 ) {
     let Window { start, end, .. } = window;
     let seq = rec.sequence().as_ref();
@@ -2009,6 +2098,9 @@ fn render_fastq_window(
     push_fastq_tags(
         out, rec, seq, window, mod_block, indexed, sel, platform, remove,
     );
+    if let Some(reason) = reason {
+        reject::push_fastq_tag(out, reason);
+    }
     push_record_body(out, &seq[start..end], &qual[start..end]);
 }
 
@@ -2022,9 +2114,15 @@ fn render_bam_fastq_read(
     description: &[u8],
 ) -> anyhow::Result<()> {
     let platform = platform(rec);
-    render_windows(rec, cfg, counters, |window, mod_block, indexed| {
+    render_windows(rec, cfg, counters, |window, mod_block, indexed, reason| {
+        let mut rejected = Vec::new();
+        let out = if reason.is_some() {
+            &mut rejected
+        } else {
+            &mut *buf
+        };
         render_fastq_window(
-            buf,
+            out,
             rec,
             description,
             window,
@@ -2033,7 +2131,11 @@ fn render_bam_fastq_read(
             platform,
             &cfg.fastq_tags,
             &cfg.remove_tags,
+            reason,
         );
+        if reason.is_some() {
+            counters.reject(RejectItem::Fastq(rejected))?;
+        }
         Ok(())
     })
 }

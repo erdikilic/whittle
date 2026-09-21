@@ -64,6 +64,8 @@ struct Params {
     remove_tags: Vec<String>,
     /// The `--tag-filter` expressions as written; empty when unset.
     tag_filter: Vec<String>,
+    /// The `--rejected-output` path, or `None`.
+    rejected_output: Option<String>,
     /// `all`, `none`, or the comma-joined tag list.
     fastq_tags: String,
     /// `None` when adapter trimming is off.
@@ -264,6 +266,10 @@ impl Params {
                 .map(|t| String::from_utf8_lossy(t).into_owned())
                 .collect(),
             tag_filter: cfg.tag_filters.texts().map(str::to_owned).collect(),
+            rejected_output: cfg
+                .rejected_output
+                .as_ref()
+                .map(|p| p.display().to_string()),
             fastq_tags: match &cfg.fastq_tags {
                 FastqTags::All => "all".to_string(),
                 FastqTags::None => "none".to_string(),

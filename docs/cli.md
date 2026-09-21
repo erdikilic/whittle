@@ -79,6 +79,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--fastq-tags <all\|none\|TAGS>` | Aux tags written into FASTQ headers on BAM or tagged FASTQ input (default `all`) |
 | `-c, --compression-level <0-9>` | BGZF level for `.gz`, `.bgz` and BAM output (default 4 for `.gz`, 6 for `.bgz` and BAM); ignored for plain FASTQ |
 | `--summary-json <PATH>` | Write a machine-readable run summary to PATH; ignored under `--adapter-report` |
+| `--rejected-output <PATH>` | Write every input read or trimmed segment that does not reach the output to PATH, in the output's format family, with a `wr:Z` tag naming the reason |
 | `-t, --threads <N>` | Worker threads, at least 1 (default: all detected CPUs, clamped to that maximum) |
 | `--preserve-order` | Write records in input order under `-t > 1` |
 | `-l, --min-length <BASES>` | Minimum length to keep, per output segment (default 1) |
@@ -289,6 +290,26 @@ The flag requires BAM or tagged FASTQ input. Tag removal is a complete run on it
 `whittle -i in.bam -o out.bam --remove-tag kinetics` with no trimming options is
 valid. The resolved set, with groups expanded, is recorded under
 `params.remove_tags` in the summary JSON.
+
+## Rejected output
+
+`--rejected-output <PATH>` writes everything that does not reach the main output
+to a second file: reads rejected by `--tag-filter` (as read, untrimmed),
+reads that trimming left without a segment (as read), and every trimmed
+segment a filter dropped (as trimmed, with its `_segment_N` name and its
+rewritten tags). Each record carries a `wr:Z` tag with one of `tag_filter`,
+`trimmed_to_nothing`, `too_short`, `too_long`, `low_quality`, `high_quality`
+or `gc`. In FASTQ output the tag is a header field, as for tagged FASTQ.
+
+The file takes the output's format family, BAM for BAM output and FASTQ for
+FASTQ output, with compression from its own extension (`.bam`, `.fastq`,
+`.fastq.gz`, `.fastq.bgz`), and is written by one extra thread. Counts in the
+summary are unchanged by the flag.
+
+```bash
+whittle -i reads.bam -o kept.bam --rejected-output rejected.bam -l 500 -q 10 --tag-filter '[dx]==1'
+samtools view rejected.bam | cut -f 1,10 | head
+```
 
 ## Summary JSON
 

@@ -162,7 +162,7 @@ impl<R: Read> Iterator for RecordIter<R> {
 /// Writes the `@`-prefixed header id for a segment (no trailing newline, no tags).
 /// On splits (`total_segments > 1`) the id gets a `_segment_N` suffix inserted
 /// before any space-separated description.
-fn write_head<W: Write>(
+pub(crate) fn write_head<W: Write>(
     w: &mut W,
     name: &[u8],
     total_segments: usize,
@@ -212,7 +212,7 @@ pub(crate) fn push_record_body(out: &mut Vec<u8>, seq: &[u8], phred: &[u8]) {
 
 /// Writes the rest of a record after its header line: the newline, the
 /// sequence, the `+` line and the Phred+33 qualities.
-fn write_body<W: Write>(w: &mut W, seq: &[u8], phred: &[u8]) -> io::Result<()> {
+pub(crate) fn write_body<W: Write>(w: &mut W, seq: &[u8], phred: &[u8]) -> io::Result<()> {
     w.write_all(b"\n")?;
     w.write_all(seq)?;
     w.write_all(b"\n+\n")?;
@@ -595,7 +595,23 @@ pub(crate) fn writer(
     out_fmt: crate::io::Format,
     parallel: bool,
 ) -> anyhow::Result<FastqOut> {
-    let inner: Box<dyn Write + Send> = match cfg.io.output.as_deref() {
+    writer_to(
+        cfg.io.output.as_deref(),
+        out_fmt,
+        cfg.compression_level,
+        parallel,
+    )
+}
+
+/// Builds a FASTQ output writer over `path`, or stdout when `None`, at
+/// `level` for the compressed formats; see `writer`.
+pub(crate) fn writer_to(
+    path: Option<&std::path::Path>,
+    out_fmt: crate::io::Format,
+    level: u8,
+    parallel: bool,
+) -> anyhow::Result<FastqOut> {
+    let inner: Box<dyn Write + Send> = match path {
         Some(p) => {
             Box::new(File::create(p).with_context(|| format!("creating output {}", p.display()))?)
         },
@@ -604,7 +620,6 @@ pub(crate) fn writer(
     let base = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, inner);
     match out_fmt {
         crate::io::Format::FastqGz | crate::io::Format::FastqBgzf => {
-            let level = cfg.compression_level;
             crate::io::bgzf::compression_level(level)?;
             if parallel {
                 return Ok(FastqOut::Blocks { inner: base, level });

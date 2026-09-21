@@ -4,11 +4,12 @@ pub(crate) mod bam;
 mod fastq;
 #[cfg(feature = "paraseq")]
 mod paraseq;
+pub(crate) mod reject;
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rayon::prelude::*;
 
@@ -17,13 +18,15 @@ pub use bam::run_raw_bam;
 
 /// Wraps a record stream so that only reads `keep` accepts pass on. A rejected
 /// read is counted here as input and as tag-filtered, since no workflow sees
-/// it; an evaluation error names the read.
-pub(crate) fn filter_by_tags<R, I, K, W, N>(
+/// it, and handed to `reject`, which writes it to the rejected output when one
+/// is open; an evaluation error names the read.
+pub(crate) fn filter_by_tags<R, I, K, W, N, J>(
     records: I,
     counters: Arc<Counters>,
     keep: K,
     weight: W,
     name: N,
+    reject: J,
 ) -> Box<dyn Iterator<Item = anyhow::Result<R>> + Send>
 where
     R: Send + 'static,
@@ -31,6 +34,7 @@ where
     K: Fn(&R) -> anyhow::Result<bool> + Send + 'static,
     W: Fn(&R) -> usize + Send + 'static,
     N: Fn(&R) -> String + Send + 'static,
+    J: Fn(&R) -> anyhow::Result<()> + Send + 'static,
 {
     Box::new(records.filter_map(move |item| {
         let rec = match item {
@@ -45,13 +49,16 @@ where
                     .input_bases
                     .fetch_add(weight(&rec) as u64, Ordering::Relaxed);
                 counters.tag_filtered_reads.fetch_add(1, Ordering::Relaxed);
-                None
+                match reject(&rec) {
+                    Ok(()) => None,
+                    Err(e) => Some(Err(e.context(format!("read {}", name(&rec))))),
+                }
             },
             Err(e) => Some(Err(e.context(format!("read {}", name(&rec))))),
         }
     }))
 }
-pub(crate) use fastq::run_fastq;
+pub(crate) use fastq::{run_fastq, tag_filtered_fastq};
 #[cfg(feature = "paraseq")]
 pub(crate) use paraseq::{run_fastq_paraseq, selected as paraseq_selected};
 
@@ -436,6 +443,9 @@ pub struct Counters {
     /// Input reads rejected by `--tag-filter` before any workflow saw them.
     /// Read-level, part of the invariant below.
     pub tag_filtered_reads: AtomicU64,
+    /// The `--rejected-output` channel, set before the first record is read when
+    /// the flag is given; unset otherwise.
+    pub(crate) rejects: OnceLock<reject::Rejects>,
     /// Input reads that produced at least one surviving output segment,
     /// bumped once per input read (not once per segment, unlike
     /// `output_reads`, which a `--split-quality` read can bump several times).
@@ -470,6 +480,19 @@ pub struct Counters {
 }
 
 impl Counters {
+    /// Whether rejected records are written, so producers can skip rendering them.
+    pub(crate) fn wants_rejects(&self) -> bool {
+        self.rejects.get().is_some()
+    }
+
+    /// Queues a rejected record when `--rejected-output` is set.
+    pub(crate) fn reject(&self, item: reject::RejectItem) -> anyhow::Result<()> {
+        match self.rejects.get() {
+            Some(rejects) => rejects.send(item),
+            None => Ok(()),
+        }
+    }
+
     /// Bumps the segment-level counter matching a `filter::check` failure
     /// reason. Called once per rejected segment (post-trim), not per read.
     pub fn record_segment_drop(&self, reason: DropReason) {
@@ -550,18 +573,21 @@ pub(crate) fn read_span(name: &[u8]) -> tracing::Span {
 /// `produced` contains the final ranges from adapter and quality processing
 /// in original-coordinate order. Segment numbers index this flattened list
 /// before filtering; they do not restart at adapter boundaries. For each survivor,
-/// `render` receives `(idx, total, start, end)`. A render error stops
-/// processing before the read-level outcome counter is updated.
-pub(crate) fn process_read_segments<Rn>(
+/// `render` receives `(idx, total, start, end)`; for each rejected segment and
+/// for a read that produced none, `reject` receives the `Rejection`. A render
+/// error stops processing before the read-level outcome counter is updated.
+pub(crate) fn process_read_segments<Rn, Rj>(
     produced: &[(usize, usize)],
     seq: &[u8],
     qual: &[u8],
     filter_cfg: &FilterConfig,
     counters: &Counters,
     mut render: Rn,
+    mut reject: Rj,
 ) -> anyhow::Result<()>
 where
     Rn: FnMut(usize, usize, usize, usize) -> anyhow::Result<()>,
+    Rj: FnMut(Rejection) -> anyhow::Result<()>,
 {
     let total = produced.len();
     let mut survived = 0usize;
@@ -579,6 +605,13 @@ where
                 "Segment dropped"
             );
             counters.record_segment_drop(reason);
+            reject(Rejection::Segment {
+                idx,
+                total,
+                start: s,
+                end: e,
+                reason,
+            })?;
             continue;
         }
         tracing::trace!(
@@ -601,6 +634,7 @@ where
         counters
             .reads_trimmed_to_nothing
             .fetch_add(1, Ordering::Relaxed);
+        reject(Rejection::Whole)?;
     } else if survived == 0 {
         tracing::trace!(produced = total, "Every segment filtered");
         counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
@@ -608,6 +642,27 @@ where
         counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
+}
+
+/// What `process_read_segments` rejected: one trimmed segment, or the whole
+/// read because trimming produced no segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rejection {
+    /// A produced segment that failed a post-trim filter.
+    Segment {
+        /// 0-based segment index.
+        idx: usize,
+        /// Number of segments produced from the read.
+        total: usize,
+        /// First base of the segment, inclusive.
+        start: usize,
+        /// End of the segment, exclusive.
+        end: usize,
+        /// The failed filter.
+        reason: DropReason,
+    },
+    /// The read produced no segment.
+    Whole,
 }
 
 /// End-of-run counters, snapshotted from `Counters`.
@@ -760,10 +815,18 @@ mod tests {
         {
             let counters = Counters::default();
             let mut calls: Vec<(usize, usize, usize, usize)> = Vec::new();
-            process_read_segments(&[], b"", b"", &filter_cfg, &counters, |idx, total, s, e| {
-                calls.push((idx, total, s, e));
-                Ok(())
-            })
+            process_read_segments(
+                &[],
+                b"",
+                b"",
+                &filter_cfg,
+                &counters,
+                |idx, total, s, e| {
+                    calls.push((idx, total, s, e));
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
             .unwrap();
             assert!(calls.is_empty());
             assert_eq!(counters.reads_trimmed_to_nothing.load(Ordering::Relaxed), 1);
@@ -790,6 +853,7 @@ mod tests {
                     calls.push((idx, total, s, e));
                     Ok(())
                 },
+                |_| Ok(()),
             )
             .unwrap();
             assert!(calls.is_empty());
@@ -816,6 +880,7 @@ mod tests {
                     calls.push((idx, total, s, e));
                     Ok(())
                 },
+                |_| Ok(()),
             )
             .unwrap();
             assert_eq!(calls, vec![(0, 2, 0, 3), (1, 2, 3, 6)]);

@@ -91,6 +91,12 @@ struct Cli {
     /// settings) to this path. Written even under --quiet.
     #[arg(long, value_name = "PATH", help_heading = "Setup")]
     summary_json: Option<PathBuf>,
+    /// Write every input read or trimmed segment that does not reach the
+    /// output to this path, in the output's format family, with a wr:Z tag
+    /// naming the reason: tag_filter, trimmed_to_nothing, too_short,
+    /// too_long, low_quality, high_quality or gc.
+    #[arg(long = "rejected-output", value_name = "PATH", help_heading = "Setup")]
+    rejected_output: Option<PathBuf>,
 
     /// Increase logging detail: -v is debug, -vv is trace (at most two).
     /// Overridden by WHITTLE_LOG.
@@ -396,6 +402,7 @@ pub fn parse() -> anyhow::Result<Config> {
         quiet: c.quiet,
         threads_clamped,
         summary_json: c.summary_json,
+        rejected_output: c.rejected_output,
         advisories,
         progress: c.progress,
         adapter_fasta: c.adapter_fasta,

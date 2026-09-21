@@ -69,6 +69,12 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 discovery and trimming, on BAM and tagged FASTQ input. See
 [cli.md](cli.md#filtering-by-aux-tag) for the syntax.
 
+## Rejection reason
+
+Records written to `--rejected-output` carry `wr:Z:<reason>`, in the aux data of
+a BAM record or as a header field of a FASTQ record; see
+[cli.md](cli.md#rejected-outputput) for the reasons.
+
 ## Tag removal
 
 `--remove-tag <TAGS>` removes named aux tags from every output record; the

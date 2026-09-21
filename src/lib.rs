@@ -407,7 +407,13 @@ impl Session {
             (Format::Bam, Format::Bam) => {
                 note_tags_ignored(cfg, in_fmt, out_fmt);
                 let (header, records) = self.bam_reader(source, true)?;
-                let records = self.tag_filtered_bam(cfg, records);
+                let out_header = io::bam::provenance_header(
+                    header,
+                    cfg.threads <= 1 || cfg.ordered,
+                    &command_line(std::env::args_os()),
+                );
+                let rejects = self.start_rejects(cfg, out_fmt, Some(&out_header))?;
+                let records = self.tag_filtered_bam(cfg, records, out_fmt);
                 let Some(records) = settle(
                     records,
                     cfg,
@@ -418,11 +424,6 @@ impl Session {
                 else {
                     return Ok(());
                 };
-                let out_header = io::bam::provenance_header(
-                    header,
-                    cfg.threads <= 1 || cfg.ordered,
-                    &command_line(std::env::args_os()),
-                );
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
                     &out_header,
@@ -436,12 +437,14 @@ impl Session {
                 // the final flush (ENOSPC) would otherwise yield a truncated BAM
                 // and a success exit code.
                 sink.finish()?;
+                finish_rejects(rejects)?;
                 self.finish(obs, &stats, cfg)
             },
             (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
                 note_update_moves_ignored(cfg, out_fmt);
                 let (_header, records) = self.bam_reader(source, false)?;
-                let records = self.tag_filtered_bam(cfg, records);
+                let rejects = self.start_rejects(cfg, out_fmt, None)?;
+                let records = self.tag_filtered_bam(cfg, records, out_fmt);
                 let Some(records) = settle(
                     records,
                     cfg,
@@ -455,12 +458,14 @@ impl Session {
                 let mut writer = io::fastq::writer(cfg, out_fmt, cfg.threads > 1)?;
                 let stats = workflow::run_bam_to_fastq(records, &mut writer, cfg, &self.counters)?;
                 writer.finish()?;
+                finish_rejects(rejects)?;
                 self.finish(obs, &stats, cfg)
             },
             (Format::Fastq | Format::FastqGz | Format::FastqBgzf, Format::Bam) => {
                 anyhow::bail!("FASTQ-to-BAM conversion is not supported")
             },
             (Format::Fastq | Format::FastqGz | Format::FastqBgzf, _) => {
+                let rejects = self.start_rejects(cfg, out_fmt, None)?;
                 #[cfg(feature = "paraseq")]
                 let mut source = source;
                 #[cfg(feature = "paraseq")]
@@ -488,6 +493,7 @@ impl Session {
                         .tagged_fastq
                         .load(std::sync::atomic::Ordering::Relaxed);
                     writer.finish()?;
+                    finish_rejects(rejects)?;
                     guards::guard_tag_flags(cfg, in_fmt, tagged)?;
                     if !tagged {
                         note_tags_ignored(cfg, in_fmt, out_fmt);
@@ -521,6 +527,7 @@ impl Session {
                     .tagged_fastq
                     .load(std::sync::atomic::Ordering::Relaxed);
                 writer.finish()?;
+                finish_rejects(rejects)?;
                 guards::guard_tag_flags(cfg, in_fmt, tagged)?;
                 if !tagged {
                     note_tags_ignored(cfg, in_fmt, out_fmt);
@@ -556,18 +563,60 @@ impl Session {
         &self,
         cfg: &Config,
         records: io::bam::RawRecordIter,
+        out_fmt: Format,
     ) -> io::bam::RawRecordIter {
         if cfg.tag_filters.is_empty() {
             return records;
         }
         let filters = cfg.tag_filters.clone();
+        let counters = Arc::clone(&self.counters);
+        let cfg = cfg.clone();
         workflow::filter_by_tags(
             records,
             Arc::clone(&self.counters),
             move |rec| filters.keeps(rec),
             |rec| rec.sequence().len(),
             |rec| io::bam::display_name(rec.name().map(AsRef::as_ref)),
+            move |rec| {
+                if !counters.wants_rejects() {
+                    return Ok(());
+                }
+                let item = if out_fmt == Format::Bam {
+                    workflow::bam::tag_filtered_bam(rec)?
+                } else {
+                    workflow::bam::tag_filtered_bam_fastq(rec, &cfg)?
+                };
+                counters.reject(item)
+            },
         )
+    }
+
+    /// Opens the rejected output when `--rejected-output` is set, registers its
+    /// channel with the counters and returns the writer to finish after the
+    /// run. Called before the first record is read, so tag-filtered reads
+    /// reach it too.
+    fn start_rejects(
+        &self,
+        cfg: &Config,
+        out_fmt: Format,
+        header: Option<&noodles_sam::Header>,
+    ) -> anyhow::Result<Option<workflow::reject::RejectWriter>> {
+        let Some(path) = cfg.rejected_output.as_deref() else {
+            return Ok(None);
+        };
+        let format = workflow::reject::resolve_format(path, out_fmt)?;
+        let (rejects, writer) = workflow::reject::RejectWriter::start(
+            path,
+            format,
+            cfg.compression_level,
+            header.cloned(),
+            cfg.threads.max(1),
+        )?;
+        self.counters
+            .rejects
+            .set(rejects)
+            .map_err(|_| anyhow::anyhow!("the rejected output was opened twice"))?;
+        Ok(Some(writer))
     }
 
     /// Applies the run's tag filters to a FASTQ stream, or returns it as is.
@@ -610,6 +659,17 @@ impl Session {
                         .unwrap_or(&[]),
                 )
                 .into_owned()
+            },
+            {
+                let counters = Arc::clone(&self.counters);
+                move |rec| {
+                    if !counters.wants_rejects() {
+                        return Ok(());
+                    }
+                    counters.reject(workflow::reject::RejectItem::Fastq(
+                        workflow::tag_filtered_fastq(rec),
+                    ))
+                }
             },
         )
     }
@@ -751,6 +811,9 @@ fn announce(
             banner::output_banner_line(cfg.io.output.as_deref(), s.out_fmt, cfg.compression_level)
         );
         tracing::info!("{}", banner::threads_banner_line(cfg.threads, s.budget));
+        if let Some(p) = cfg.rejected_output.as_deref() {
+            tracing::info!("Rejected: {}", p.display());
+        }
         tracing::info!("{}", banner::filters_and_trim_line(&cfg.filter, &cfg.trim));
         for text in cfg.tag_filters.texts() {
             tracing::info!("Tag filter: {text}");
@@ -821,6 +884,14 @@ fn is_no_op(cfg: &Config, same_format: bool) -> bool {
         && cfg.remove_tags.is_empty()
         && cfg.tag_filters.is_empty()
         && same_format
+}
+
+/// Finishes the rejected output, if one was opened.
+fn finish_rejects(writer: Option<workflow::reject::RejectWriter>) -> anyhow::Result<()> {
+    match writer {
+        Some(writer) => writer.finish(),
+        None => Ok(()),
+    }
 }
 
 /// Warning for a run that neither trims nor filters.

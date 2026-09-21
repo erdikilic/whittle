@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[dx]==1 || ([dx]==0 && [qs]>=15)`, `[rq]>=0.99 && [np]>=3`). Rejected
   reads are dropped before adapter discovery and trimming and reported as
   `Tag filtered` and `reads.tag_filtered`. BAM and tagged FASTQ input.
+- `--rejected-output <PATH>` writes every input read or trimmed segment that
+  does not reach the output to a second file in the output's format family,
+  each with a `wr:Z` tag naming the reason (`tag_filter`,
+  `trimmed_to_nothing`, `too_short`, `too_long`, `low_quality`,
+  `high_quality`, `gc`).
 - Tagged FASTQ input. A FASTQ whose headers carry SAM aux tags in the
   `samtools fastq -T` convention is trimmed on the BAM-to-FASTQ path: `MM`,
   `ML` and `MN` are rebuilt and per-base arrays sliced for every output

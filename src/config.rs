@@ -278,6 +278,9 @@ pub struct Config {
     /// Destination for the machine-readable run summary (`--summary-json`), or
     /// `None`. Written regardless of `--quiet` and the log level.
     pub summary_json: Option<PathBuf>,
+    /// Destination for rejected reads and segments (`--rejected-output`), in the
+    /// output's format family with a `wr:Z` reason tag, or `None`.
+    pub rejected_output: Option<PathBuf>,
     /// Diagnostics raised while parsing arguments, emitted by `run` once the log
     /// subscriber exists. See `Advisory`.
     pub advisories: Vec<Advisory>,
@@ -319,6 +322,7 @@ impl Default for Config {
             quiet: false,
             threads_clamped: None,
             summary_json: None,
+            rejected_output: None,
             advisories: Vec::new(),
             progress: ProgressMode::Auto,
             adapter_fasta: None,
@@ -334,6 +338,7 @@ impl Config {
     pub fn write_targets(&self) -> impl Iterator<Item = (&'static str, &Path)> {
         [
             ("-o/--output", self.io.output.as_deref()),
+            ("--rejected-output", self.rejected_output.as_deref()),
             ("--summary-json", self.summary_json.as_deref()),
         ]
         .into_iter()
