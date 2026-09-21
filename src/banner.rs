@@ -305,7 +305,7 @@ mod tests {
         let b = config::thread_budget(8, true);
         assert_eq!(
             threads_banner_line(8, b),
-            "Threads: 8 (trim and compress 8, decode 2)"
+            "Threads: 8 (trim and compress 6, decode 2)"
         );
         // A single-threaded run collapses to a plain `sequential` label.
         let b = config::thread_budget(1, true);

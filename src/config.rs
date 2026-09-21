@@ -374,8 +374,8 @@ impl Config {
 }
 
 /// How a `-t` total worker budget is spent. The render pool trims, rebuilds
-/// tags and compresses the output blocks, so it holds the whole budget; BGZF
-/// input adds decode workers that block whenever the pool is behind.
+/// tags and compresses the output blocks; BGZF input takes decode workers out
+/// of the budget, which block whenever the pool is behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadBudget {
     /// Workers for input decoding.
@@ -384,19 +384,23 @@ pub struct ThreadBudget {
     pub render: usize,
 }
 
-/// Returns the budget for `total` workers. `parallel_decode` names BGZF input,
-/// whose blocks inflate in parallel: a quarter of the budget, at least one,
-/// decodes ahead of the pool.
+/// Returns the budget for `total` workers, which the two stages share.
+/// `parallel_decode` names BGZF input, whose blocks inflate in parallel: a
+/// quarter of the budget, at least one, decodes ahead of the pool and the rest
+/// renders. Other input decodes on the pool, which then holds the whole budget.
 pub fn thread_budget(total: usize, parallel_decode: bool) -> ThreadBudget {
     let total = total.max(1);
-    let decode = if parallel_decode && total > 1 {
-        (total / 4).max(1)
+    if parallel_decode && total > 1 {
+        let decode = (total / 4).max(1);
+        ThreadBudget {
+            decode,
+            render: total - decode,
+        }
     } else {
-        1
-    };
-    ThreadBudget {
-        decode,
-        render: total,
+        ThreadBudget {
+            decode: 1,
+            render: total,
+        }
     }
 }
 
@@ -438,15 +442,23 @@ mod resolve_threads_tests {
 mod tests {
     use super::*;
 
-    /// The render pool holds the whole budget; BGZF input adds a quarter of it
-    /// as decode workers, at least one, and a single worker stays sequential.
+    /// The stages share the budget: BGZF input takes a quarter of it, at least
+    /// one, for decoding and the rest renders; other input renders on every
+    /// worker, and a single worker stays sequential.
     #[test]
-    fn thread_budget_gives_the_pool_every_worker() {
+    fn thread_budget_shares_the_workers_between_stages() {
         assert_eq!(
             thread_budget(8, true),
             ThreadBudget {
                 decode: 2,
-                render: 8
+                render: 6
+            }
+        );
+        assert_eq!(
+            thread_budget(32, true),
+            ThreadBudget {
+                decode: 8,
+                render: 24
             }
         );
         assert_eq!(
@@ -460,7 +472,7 @@ mod tests {
             thread_budget(2, true),
             ThreadBudget {
                 decode: 1,
-                render: 2
+                render: 1
             }
         );
         assert_eq!(

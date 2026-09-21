@@ -37,11 +37,14 @@ tab-delimited text is not in this form is copied verbatim.
 
 ### Threads
 
-`-t`/`--threads` sets the worker count (default: every detected CPU). Trimming,
-record serialization, and output compression run on a pool of that size. BGZF
-input (BAM and FASTQ.bgz) is decompressed by an additional set of one quarter of
-the workers, at least one; plain gzip input is decompressed serially. The
-startup banner reports both figures.
+`-t`/`--threads` sets the worker count (default: every detected CPU) and bounds
+the threads that do work. Trimming, record serialization, and output
+compression run on a pool; BGZF input (BAM and FASTQ.bgz) is decompressed by one
+quarter of the workers, at least one, and the pool takes the rest. Plain gzip
+input is a single DEFLATE stream and is decompressed by one thread, so a gzip
+FASTQ run stops gaining from more workers once that thread is saturated; BGZF
+FASTQ input (`bgzip`, or whittle's own `.gz` output) has no such limit. The
+startup banner reports the split.
 
 Records are written in completion order under `-t > 1`. `--preserve-order` restores
 the input order using bounded groups of batches. A slow batch limits read-ahead
