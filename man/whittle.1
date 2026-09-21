@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-trim\-quality\fR] [\fB\-\-best\-quality\-segment\fR] [\fB\-\-split\-quality\fR] [\fB\-\-split\-min\-low\-quality\-bases\fR] [\fB\-\-update\-signal\-tags\fR] [\fB\-\-remove\-tag\fR] [\fB\-\-remove\-kinetics\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-discover\-adapters\fR] [\fB\-h\fR|\fB\-\-help\fR]
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-trim\-quality\fR] [\fB\-\-best\-quality\-segment\fR] [\fB\-\-split\-quality\fR] [\fB\-\-split\-min\-low\-quality\-bases\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-report\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH OPTIONS
@@ -67,19 +67,19 @@ BGZF compression level (0\-9) for BAM, .bgz and .gz output. Lower levels are fas
 .TP
 \fB\-\-summary\-json\fR \fI<PATH>\fR
 Write a machine\-readable JSON run summary (counters plus the resolved settings) to this path. Written even under \-\-quiet
+.TP
+\fB\-\-rejected\-output\fR \fI<PATH>\fR
+Write every input read or trimmed segment that does not reach the output to this path, in the output\*(Aqs format family, with a wr:Z tag naming the reason: tag_filter, trimmed_to_nothing, too_short, too_long, low_quality, high_quality or gc
 .SH TAGS
 .TP
 \fB\-\-fastq\-tags\fR \fI<all|none|TAGS>\fR [default: all]
 Aux tags written into FASTQ headers on BAM or tagged FASTQ input: all, none, or a list such as MM,ML,RG
 .TP
-\fB\-\-update\-signal\-tags\fR
-Keep ONT signal tags consistent through trimming (slice mv, update ts, ns, sp and pi) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM\-to\-BAM only; requires a DNA or RNA basecall_model in the read\-group description
+\fB\-\-update\-moves\fR
+Keep the ONT move table consistent through trimming (slice mv, update ts, ns, sp, pi and the poly\-A tags) for signal\-aware tools such as Remora and Clair3 v2, instead of dropping them. BAM\-to\-BAM only; requires a DNA or RNA basecall_model in the read\-group description
 .TP
-\fB\-\-remove\-tag\fR \fI<TAG>\fR
-Remove this two\-character aux tag from every output record. Repeatable. BAM or tagged FASTQ input
-.TP
-\fB\-\-remove\-kinetics\fR
-Remove the per\-base kinetics and alignment\-count arrays (ip pw fi fp ri rp sa sm sx). BAM or tagged FASTQ input
+\fB\-\-remove\-tag\fR \fI<TAGS>\fR
+Remove aux tags from every output record. Comma\-separated and repeatable; an item is a two\-character tag or a group: kinetics (ip pw fi fp ri rp sa sm sx), mods (MM ML MN), signal (mv ts ns sp pi). BAM or tagged FASTQ input
 .SH LOGGING
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
@@ -120,6 +120,9 @@ Maximum post\-trim segment quality under \-\-quality\-mode
 .TP
 \fB\-g\fR, \fB\-\-min\-gc\fR \fI<FRACTION>\fR
 Minimum post\-trim GC fraction (0 to 1; 0.4 means 40%)
+.TP
+\fB\-\-tag\-filter\fR \fI<EXPR>\fR
+Keep only reads whose aux tags satisfy EXPR, a samtools\-style expression over [tag] values, for example \*(Aq[er]!="unblock_mux_change"\*(Aq or \*(Aq[qs]>=10 && [dx]==1\*(Aq. Repeatable; every expression must hold. Applied before adapter discovery and trimming. BAM or tagged FASTQ input
 .TP
 \fB\-G\fR, \fB\-\-max\-gc\fR \fI<FRACTION>\fR
 Maximum post\-trim GC fraction (0 to 1; 0.4 means 40%)
@@ -175,25 +178,19 @@ Bases at each read end searched for a terminal adapter. Requires an adapter sour
 Trim adapters at read ends only; never split on interior adapters. Does not disable quality splitting
 .TP
 \fB\-\-adapter\-sample\-reads\fR \fI<COUNT>\fR
-Reads inspected for preset presence or adapter discovery; at least 100. 0 disables presence detection and uses the full preset; discovery requires sampling. Ignored with \-\-adapter\-fasta unless discovering adapters. Defaults to 2000 with a preset and 40000 under \-\-discover\-adapters. Sampling is also bounded by 256 MiB of payload and 64 Mi bases
+Reads inspected for preset presence or adapter discovery; at least 100. 0 disables presence detection and uses the full preset; discovery requires sampling. Ignored with \-\-adapter\-fasta unless discovering adapters. Defaults to 2000 with a preset and 40000 under \-\-adapter\-discover or \-\-adapter\-report. Sampling is also bounded by 256 MiB of payload and 64 Mi bases
 .TP
-\fB\-\-discover\-adapters\fR [\fI<ACTION>\fR]
-Discover adapters, barcodes and primers de novo in layers from each read end. A preset or FASTA is trimmed first and discovery continues beyond it. Report prints discovered FASTA to stdout and exits without read output or a JSON summary. Both actions use the same sequences. Defaults to trim when given no value
-.br
-
-.br
-\fIPossible values:\fR
-.RS 14
-.IP \(bu 2
-trim: Trim reads with the inferred sequences
-.IP \(bu 2
-report: Print inferred FASTA to stdout and do not write read output
-.RE
+\fB\-\-adapter\-discover\fR
+Discover adapters, barcodes and primers de novo in layers from each read end and trim them. A preset or FASTA is trimmed first and discovery continues beyond it. Enables adapter trimming
+.TP
+\fB\-\-adapter\-report\fR
+Run the same discovery as \-\-adapter\-discover, print the discovered FASTA to stdout and exit without read output or a JSON summary
 .SH EXTRA
 Examples:
   whittle \-i reads.fastq.gz \-o trimmed.fastq.gz \-H 20 \-T 20 \-\-trim\-quality 8 \-l 500 \-q 10 \-t 8
   whittle \-i reads.bam \-o trimmed.bam \-\-split\-quality 9 \-\-split\-min\-low\-quality\-bases 50 \-l 1000
   whittle \-i reads.bam \-o trimmed.bam \-\-adapter\-preset lsk114 \-l 500
+  whittle \-i reads.bam \-o trimmed.bam \-\-adapter\-discover \-l 500
   whittle \-i 16s.fastq.gz \-o trimmed.fastq.gz \-\-adapter\-preset mab114
   samtools fastq \-T MM,ML,MN reads.bam | whittle \-o trimmed.fastq.gz \-H 10 \-T 10
   whittle \-i reads.bam \-o reads.fastq.gz \-\-quiet \-\-summary\-json qc.json
