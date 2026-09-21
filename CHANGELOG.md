@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- `-t` bounds the working threads: BGZF input takes its decode workers out
+  of the budget instead of adding them to the render pool.
+- BGZF blocks are compressed with one libdeflate compressor per thread,
+  reused across blocks, on every compressed output path.
 - Terminal edit budgets are bounded by a chance-match null model that
   lowers the budget of the shortest patterns by one edit; catalog adapters,
   barcodes, flanks and primers keep their configured budget.

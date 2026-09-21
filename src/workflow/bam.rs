@@ -1,7 +1,7 @@
 //! uBAM workflows: record reconstruction (sequence, quality, MM/ML/MN, per-base and signal tags) and the sequential, parallel and raw full-window drivers for BAM and FASTQ output.
 
 use std::borrow::Cow;
-use std::io::{self, Write};
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -1540,20 +1540,16 @@ fn pack_bam_blocks(
     records: Vec<BamOutputRecord>,
 ) -> std::io::Result<Vec<u8>> {
     use noodles_sam::alignment::io::Write as _;
-    let clevel = crate::io::bam::compression_level(level).map_err(std::io::Error::other)?;
-    let bgzf_w = noodles_bgzf::io::writer::Builder::default()
-        .set_compression_level(clevel)
-        .build_from_writer(Vec::new());
-    let mut w = bam::io::Writer::from(bgzf_w);
+    let mut w = bam::io::Writer::from(Vec::new());
     for rec in &records {
         match rec {
             BamOutputRecord::Raw(record) => w.write_record(header, record)?,
             BamOutputRecord::Decoded(record) => w.write_alignment_record(header, record)?,
         }
     }
-    let mut bgzf_w = w.into_inner();
-    bgzf_w.flush()?;
-    Ok(bgzf_w.into_inner())
+    let mut blocks = Vec::new();
+    crate::io::bgzf::encode(level, &w.into_inner(), &mut blocks)?;
+    Ok(blocks)
 }
 
 /// A record ready to write: the untouched raw input or a rebuilt decoded record.

@@ -32,6 +32,7 @@ seq_io = "0.3.4"
 noodles-bam = "0.95.0"
 noodles-sam = "0.90.0"
 noodles-bgzf = { version = "0.51.0", features = ["libdeflate"] }
+libdeflater = "1"
 
 flate2 = { version = "1", features = ["zlib-rs"], default-features = false }
 

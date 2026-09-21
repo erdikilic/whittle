@@ -1,6 +1,7 @@
 //! Input and output format detection, and the FASTQ, BAM and directory readers.
 
 pub mod bam;
+pub mod bgzf;
 pub mod counting;
 pub mod dir;
 pub mod fastq;

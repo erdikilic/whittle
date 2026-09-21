@@ -1776,6 +1776,7 @@ dependencies = [
  "flate2",
  "indicatif",
  "jiff",
+ "libdeflater",
  "noodles-bam",
  "noodles-bgzf",
  "noodles-sam",

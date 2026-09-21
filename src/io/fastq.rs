@@ -520,7 +520,7 @@ pub(crate) enum FastqOut {
     /// Plain buffered output.
     Plain(BufferedOutput),
     /// BGZF output compressed in the writing thread.
-    Bgzf(noodles_bgzf::io::Writer<BufferedOutput>),
+    Bgzf(crate::io::bgzf::Writer<BufferedOutput>),
     /// Pre-compressed BGZF blocks.
     Blocks {
         /// The output.
@@ -563,7 +563,7 @@ impl FastqOut {
             FastqOut::Plain(w) => w,
             FastqOut::Bgzf(w) => w.finish()?,
             FastqOut::Blocks { mut inner, .. } => {
-                inner.write_all(&crate::io::bam::eof_block())?;
+                inner.write_all(&crate::io::bgzf::EOF_BLOCK)?;
                 inner
             },
         };
@@ -576,13 +576,9 @@ impl FastqOut {
 /// fragment with complete blocks and no EOF block, which a `FastqOut::Blocks`
 /// writes through.
 pub(crate) fn encode_blocks(level: u8, data: &[u8]) -> std::io::Result<Vec<u8>> {
-    let clevel = crate::io::bam::compression_level(level).map_err(std::io::Error::other)?;
-    let mut w = noodles_bgzf::io::writer::Builder::default()
-        .set_compression_level(clevel)
-        .build_from_writer(Vec::new());
-    w.write_all(data)?;
-    w.flush()?;
-    Ok(w.into_inner())
+    let mut blocks = Vec::new();
+    crate::io::bgzf::encode(level, data, &mut blocks)?;
+    Ok(blocks)
 }
 
 /// Builds the FASTQ output writer over a file or stdout: for `FastqGz` and
@@ -604,13 +600,11 @@ pub(crate) fn writer(
     match out_fmt {
         crate::io::Format::FastqGz | crate::io::Format::FastqBgzf => {
             let level = cfg.compression_level;
+            crate::io::bgzf::compression_level(level)?;
             if parallel {
                 return Ok(FastqOut::Blocks { inner: base, level });
             }
-            let w = noodles_bgzf::io::writer::Builder::default()
-                .set_compression_level(crate::io::bam::compression_level(level)?)
-                .build_from_writer(base);
-            Ok(FastqOut::Bgzf(w))
+            Ok(FastqOut::Bgzf(crate::io::bgzf::Writer::new(base, level)))
         },
         crate::io::Format::Fastq => Ok(FastqOut::Plain(base)),
         crate::io::Format::Bam => unreachable!("BAM output is written by `io::bam::writer`"),

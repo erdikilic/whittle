@@ -167,7 +167,7 @@ type BufferedOutput = BufWriter<Box<dyn Write + Send>>;
 /// (see `workflow::run_parallel`) and writes the bytes through.
 pub enum BamSink {
     /// Single-threaded BGZF writer.
-    Single(bam::io::Writer<bgzf::io::Writer<BufferedOutput>>),
+    Single(bam::io::Writer<crate::io::bgzf::Writer<BufferedOutput>>),
     /// Pre-compressed BGZF blocks, header already written.
     Blocks {
         /// The output, positioned after the header blocks.
@@ -186,7 +186,7 @@ pub fn writer(
     parallel: bool,
     level: u8,
 ) -> anyhow::Result<BamSink> {
-    let clevel = compression_level(level)?;
+    crate::io::bgzf::compression_level(level)?;
     let inner: Box<dyn Write + Send> = match output {
         Some(p) => {
             Box::new(File::create(p).with_context(|| format!("creating output {}", p.display()))?)
@@ -194,29 +194,15 @@ pub fn writer(
         None => Box::new(io::stdout()),
     };
     let inner = BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, inner);
-    // The single-threaded BGZF writer is built explicitly rather than through
-    // `bam::io::Writer::new`, which would force the default level.
-    let bgzf_w = bgzf::io::writer::Builder::default()
-        .set_compression_level(clevel)
-        .build_from_writer(inner);
-    let mut w = bam::io::Writer::from(bgzf_w);
+    let mut w = bam::io::Writer::from(crate::io::bgzf::Writer::new(inner, level));
     w.write_header(header)?;
     if !parallel {
         return Ok(BamSink::Single(w));
     }
-    let mut bgzf_w = w.into_inner();
-    bgzf_w.flush()?;
     Ok(BamSink::Blocks {
-        inner: bgzf_w.into_inner(),
+        inner: w.into_inner().into_inner()?,
         level,
     })
-}
-
-/// Returns the BGZF compression level for `level`, or an error naming the
-/// accepted range.
-pub(crate) fn compression_level(level: u8) -> anyhow::Result<bgzf::io::writer::CompressionLevel> {
-    bgzf::io::writer::CompressionLevel::new(level)
-        .ok_or_else(|| anyhow::anyhow!("invalid BGZF compression level {level} (expected 0-9)"))
 }
 
 /// Encodes `records` under `header` into BGZF blocks at `level`: the bytes of
@@ -227,24 +213,13 @@ pub fn encode_blocks<'a>(
     level: u8,
     records: impl IntoIterator<Item = &'a RecordBuf>,
 ) -> io::Result<Vec<u8>> {
-    let clevel = compression_level(level).map_err(io::Error::other)?;
-    let bgzf_w = bgzf::io::writer::Builder::default()
-        .set_compression_level(clevel)
-        .build_from_writer(Vec::new());
-    let mut w = bam::io::Writer::from(bgzf_w);
+    let mut w = bam::io::Writer::from(Vec::new());
     for rec in records {
         w.write_alignment_record(header, rec)?;
     }
-    let mut bgzf_w = w.into_inner();
-    bgzf_w.flush()?;
-    Ok(bgzf_w.into_inner())
-}
-
-/// The BGZF EOF block: the empty block every BGZF stream ends with.
-pub(crate) fn eof_block() -> Vec<u8> {
-    bgzf::io::Writer::new(Vec::new())
-        .finish()
-        .expect("An in-memory BGZF writer finishes without I/O errors")
+    let mut blocks = Vec::new();
+    crate::io::bgzf::encode(level, &w.into_inner(), &mut blocks)?;
+    Ok(blocks)
 }
 
 impl BamSink {
@@ -293,7 +268,7 @@ impl BamSink {
         let mut inner = match self {
             BamSink::Single(w) => w.into_inner().finish()?,
             BamSink::Blocks { mut inner, .. } => {
-                inner.write_all(&eof_block())?;
+                inner.write_all(&crate::io::bgzf::EOF_BLOCK)?;
                 inner
             },
         };
