@@ -139,7 +139,11 @@ impl TagFilter {
     /// Parses one expression.
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         let tokens = lex(text).map_err(|e| anyhow::anyhow!("--tag-filter {text:?}: {e}"))?;
-        let mut parser = Parser { tokens, pos: 0 };
+        let mut parser = Parser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        };
         let expr = parser
             .expr()
             .and_then(|e| {
@@ -353,9 +357,17 @@ fn lex(text: &str) -> Result<Vec<Token>, String> {
 }
 
 /// A recursive-descent parser over the token list.
+/// Deepest nesting of negations and parentheses an expression may use. The
+/// parser, the evaluator and the drop of the expression tree recurse once per
+/// level, so the bound keeps a pathological expression a parse error instead
+/// of a stack overflow; hand-written filters stay far below it.
+const MAX_NESTING: usize = 100;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Current nesting of negations and parentheses.
+    depth: usize,
 }
 
 impl Parser {
@@ -404,10 +416,23 @@ impl Parser {
         Ok(left)
     }
 
+    /// Enters one level of nesting, or fails past `MAX_NESTING`.
+    fn descend(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(format!(
+                "negations and parentheses are nested more than {MAX_NESTING} deep"
+            ));
+        }
+        Ok(())
+    }
+
     fn not(&mut self) -> Result<Expr, String> {
         if self.peek() == Some(&Token::Not) {
             self.pos += 1;
+            self.descend()?;
             let inner = self.not()?;
+            self.depth -= 1;
             require_condition(&inner)?;
             return Ok(Expr::Not(Box::new(inner)));
         }
@@ -432,7 +457,9 @@ impl Parser {
     fn primary(&mut self) -> Result<Expr, String> {
         match self.next() {
             Some(Token::LParen) => {
+                self.descend()?;
                 let e = self.expr()?;
+                self.depth -= 1;
                 self.expect(Token::RParen)?;
                 Ok(e)
             },
@@ -732,6 +759,22 @@ mod tests {
         let b = Rec::new(&[(*b"qs", TagValue::Num(10.0))]);
         assert!(keeps("[qs]>=10", &a) && keeps("[qs]>=10", &b));
         assert!(keeps("[qs]==10.0", &a));
+    }
+
+    #[test]
+    fn deep_nesting_is_a_parse_error() {
+        let negations = format!("{}[qs] == 1", "!".repeat(MAX_NESTING + 1));
+        let parens = format!(
+            "{}[qs] == 1{}",
+            "(".repeat(MAX_NESTING + 1),
+            ")".repeat(MAX_NESTING + 1)
+        );
+        for expr in [negations, parens] {
+            let err = TagFilter::parse(&expr).unwrap_err().to_string();
+            assert!(err.contains("nested more than"), "{err}");
+        }
+        let shallow = format!("{}([qs] == 1)", "!!".repeat(MAX_NESTING / 4));
+        assert!(TagFilter::parse(&shallow).is_ok());
     }
 
     #[test]
