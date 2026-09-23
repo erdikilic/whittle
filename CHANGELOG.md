@@ -68,6 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- FASTQ input with BAM output is refused before the run starts also when the
+  input is a stream or a directory, with the same message as for a named file.
+- An empty BGZF stream, such as the output of `bgzip` on an empty file, is read
+  as empty input instead of failing with a read error.
+- BAM quality values above 93 are written to FASTQ as 93 (`~`), the highest
+  value Phred+33 FASTQ represents, instead of bytes outside the FASTQ range.
+- `--tag-filter` rejects expressions nested more than 100 levels deep with a
+  parse error instead of overflowing the stack, and a NaN tag value satisfies
+  only `!=`. String tags of BAM records are compared without copying.
+- A partial adapter hit that overhangs both ends of a short read is charged
+  the overhang cost the search applies to each side, and a very large custom
+  adapter set no longer exhausts the seed table.
 - Terminal adapter matching bounds the expected chance matches per read over
   the whole set of distinct sequences rather than per sequence, so a large
   panel of short barcodes no longer trims read ends at chance hits deep in
