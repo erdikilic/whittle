@@ -226,7 +226,7 @@ pub(super) fn accept_batch_hits(
     site: Site,
     keep: &mut Keep<'_>,
 ) {
-    let accept = |pattern_idx: usize, start: usize, end: usize, cost: usize| {
+    let accept = |pattern_idx: usize, start: usize, end: usize, cost: usize, reverse: bool| {
         let adapter_idx = batch.adapter_indices[pattern_idx];
         if cost > keep.budgets[adapter_idx].k_end {
             return;
@@ -240,6 +240,7 @@ pub(super) fn accept_batch_hits(
                 cost,
                 left_overhang: 0,
                 right_overhang: 0,
+                reverse,
             },
         );
     };

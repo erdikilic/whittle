@@ -121,6 +121,8 @@ pub struct Hit {
     pub left_overhang: usize,
     /// Pattern bases hanging off the text end.
     pub right_overhang: usize,
+    /// Whether the reverse complement of the pattern matched.
+    pub reverse: bool,
 }
 
 impl Hit {
@@ -142,6 +144,7 @@ impl Hit {
             cost: m.cost as usize,
             left_overhang,
             right_overhang,
+            reverse: m.strand == sassy::Strand::Rc,
         }
     }
 }
@@ -192,8 +195,8 @@ pub fn encode_patterns(patterns: &[Vec<u8>]) -> EncodedAdapterBatch {
 }
 
 /// Searches a pre-encoded batch over both strands of `text`, one pattern per
-/// SIMD lane, and calls `accept` with each hit's pattern index, text span and
-/// cost. `reversed` is `text` reversed, which the caller keeps per read so the
+/// SIMD lane, and calls `accept` with each hit's pattern index, text span,
+/// cost, and whether the reverse complement matched. `reversed` is `text` reversed, which the caller keeps per read so the
 /// reverse strand needs no copy. Hits are the rightmost local minima within
 /// `k`, as `hits` returns them. The tiled search uses only the searcher's
 /// pattern-tiling state, which its single-pattern searches never touch, so
@@ -204,11 +207,17 @@ pub fn encoded_pattern_hits(
     text: &[u8],
     reversed: &[u8],
     k: usize,
-    mut accept: impl FnMut(usize, usize, usize, usize),
+    mut accept: impl FnMut(usize, usize, usize, usize, bool),
 ) {
     debug_assert_eq!(text.len(), reversed.len());
     for m in searcher.search_encoded_patterns(&encoded.forward, text, k) {
-        accept(m.pattern_idx, m.text_start, m.text_end, m.cost as usize);
+        accept(
+            m.pattern_idx,
+            m.text_start,
+            m.text_end,
+            m.cost as usize,
+            false,
+        );
     }
     let n = text.len();
     for m in searcher.search_encoded_patterns(&encoded.complement, reversed, k) {
@@ -217,6 +226,7 @@ pub fn encoded_pattern_hits(
             n - m.text_end,
             n - m.text_start,
             m.cost as usize,
+            true,
         );
     }
 }

@@ -150,12 +150,12 @@ pub(super) struct Keep<'a> {
     pub(super) hi: usize,
     /// Accepted excisions, merged by `into_cuts`.
     pub(super) interior: Vec<(usize, usize)>,
-    /// The adapter of each excision in `interior`.
-    excised: Vec<usize>,
-    /// Applied 5' trims as (adapter, start, end), for `refine`.
-    five: Vec<(usize, usize, usize)>,
-    /// Applied 3' trims as (adapter, start, end), for `refine`.
-    three: Vec<(usize, usize, usize)>,
+    /// The hit behind each excision in `interior`, for `refine`.
+    excised: Vec<Applied>,
+    /// The hits behind the applied 5' trims, for `refine`.
+    five: Vec<Applied>,
+    /// The hits behind the applied 3' trims, for `refine`.
+    three: Vec<Applied>,
     /// 5' boundary set by trims that `refine` leaves as found.
     fixed_lo: usize,
     /// 3' boundary set by trims that `refine` leaves as found.
@@ -165,6 +165,21 @@ pub(super) struct Keep<'a> {
     /// Terminal trims above the `k_far` budget of their adapter, applied by
     /// `settle` once anchored.
     pub(super) deferred: Vec<Deferred>,
+}
+
+/// An applied hit, kept so `refine` can realign it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Applied {
+    /// Index into the configured adapters.
+    adapter_idx: usize,
+    /// Hit start in window coordinates.
+    start: usize,
+    /// Hit end in window coordinates.
+    end: usize,
+    /// Edit cost of the hit.
+    cost: usize,
+    /// Whether the reverse complement of the adapter matched.
+    reverse: bool,
 }
 
 /// A terminal trim held until it is anchored at the read end or at an
@@ -179,6 +194,8 @@ pub(super) struct Deferred {
     pub(super) end: usize,
     /// Edit cost of the hit.
     pub(super) cost: usize,
+    /// Whether the reverse complement of the adapter matched.
+    pub(super) reverse: bool,
     /// `TrimFivePrime` or `TrimThreePrime`.
     pub(super) action: HitAction,
 }
@@ -292,11 +309,12 @@ impl<'a> Keep<'a> {
                 start,
                 end,
                 cost,
+                reverse: hit.reverse,
                 action,
             });
             return;
         }
-        self.apply(adapter_idx, start, end, cost, action);
+        self.apply(adapter_idx, start, end, cost, hit.reverse, action);
     }
 
     /// Applies an accepted hit to the keep boundaries or the excisions.
@@ -306,6 +324,7 @@ impl<'a> Keep<'a> {
         start: usize,
         end: usize,
         cost: usize,
+        reverse: bool,
         action: HitAction,
     ) {
         trace_hit(
@@ -316,18 +335,25 @@ impl<'a> Keep<'a> {
             Some(action),
         );
         self.acted.push(adapter_idx);
+        let applied = Applied {
+            adapter_idx,
+            start,
+            end,
+            cost,
+            reverse,
+        };
         match action {
             HitAction::TrimFivePrime => {
                 self.lo = self.lo.max(end);
-                self.five.push((adapter_idx, start, end));
+                self.five.push(applied);
             },
             HitAction::TrimThreePrime => {
                 self.hi = self.hi.min(start);
-                self.three.push((adapter_idx, start, end));
+                self.three.push(applied);
             },
             HitAction::Excise => {
                 self.interior.push((start, end));
-                self.excised.push(adapter_idx);
+                self.excised.push(applied);
             },
         }
     }
@@ -350,40 +376,47 @@ impl<'a> Keep<'a> {
     /// A boundary never moves outward, and only the hits that could still set
     /// a boundary are realigned: the 5' trims in decreasing end order until a
     /// raw end falls at or below the best refined one, and the 3' trims
-    /// likewise.
+    /// likewise. A hit without edits is its own best alignment and keeps its
+    /// span.
     pub(super) fn refine(&mut self, text: &[u8]) {
         debug_assert_eq!(text.len(), self.n);
         let adapters = self.adapters;
+        let seq = |a: &Applied| adapters[a.adapter_idx].seq.as_slice();
         if !self.five.is_empty() {
-            self.five
-                .sort_unstable_by_key(|&(_, _, end)| std::cmp::Reverse(end));
+            self.five.sort_unstable_by_key(|a| std::cmp::Reverse(a.end));
             let mut lo = self.fixed_lo;
-            for &(idx, start, end) in &self.five {
-                if end <= lo {
+            for a in &self.five {
+                if a.end <= lo {
                     break;
                 }
-                lo = lo.max(refine::refined_end(&adapters[idx].seq, text, start, end));
+                lo = lo.max(match a.cost {
+                    0 => a.end,
+                    _ => refine::refined_end(seq(a), a.reverse, text, a.start, a.end),
+                });
             }
             self.lo = lo;
         }
         if !self.three.is_empty() {
-            self.three.sort_unstable_by_key(|&(_, start, _)| start);
+            self.three.sort_unstable_by_key(|a| a.start);
             let mut hi = self.fixed_hi;
-            for &(idx, start, end) in &self.three {
-                if start >= hi {
+            for a in &self.three {
+                if a.start >= hi {
                     break;
                 }
-                hi = hi.min(refine::refined_start(&adapters[idx].seq, text, start, end));
+                hi = hi.min(match a.cost {
+                    0 => a.start,
+                    _ => refine::refined_start(seq(a), a.reverse, text, a.start, a.end),
+                });
             }
             self.hi = hi;
         }
-        for (cut, &idx) in self.interior.iter_mut().zip(&self.excised) {
-            let (start, end) = *cut;
-            let seq = &adapters[idx].seq;
-            *cut = (
-                refine::refined_start(seq, text, start, end),
-                refine::refined_end(seq, text, start, end),
-            );
+        for (cut, a) in self.interior.iter_mut().zip(&self.excised) {
+            if a.cost > 0 {
+                *cut = (
+                    refine::refined_start(seq(a), a.reverse, text, a.start, a.end),
+                    refine::refined_end(seq(a), a.reverse, text, a.start, a.end),
+                );
+            }
         }
     }
 
@@ -403,7 +436,7 @@ impl<'a> Keep<'a> {
                 return;
             };
             let d = self.deferred.swap_remove(i);
-            self.apply(d.adapter_idx, d.start, d.end, d.cost, d.action);
+            self.apply(d.adapter_idx, d.start, d.end, d.cost, d.reverse, d.action);
         }
     }
 
