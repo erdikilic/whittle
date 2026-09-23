@@ -1810,6 +1810,10 @@ fn segments_with(
     if cfg.split {
         search_interior(ctx, engine, &mut keep);
     }
+    // A trim near an end found by the interior search can anchor a deferred
+    // terminal hit, so deferred hits are settled before the tally counts the
+    // adapters that acted.
+    keep.settle();
     tally(&keep);
     let (lo, hi, cuts) = keep.into_cuts(cfg.min_piece);
     if lo >= hi {
