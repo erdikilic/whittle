@@ -555,13 +555,13 @@ fn ambiguity_code(mask: usize) -> u8 {
     b"-ACMGRSVTWYHKDBN"[mask]
 }
 
-/// Refines an assembled path with one best alignment per supporting window.
-/// Majority substitutions and deletions correct graph branches caused by
-/// sequencing errors without extending the assembly into unaligned sequence.
-fn polish_consensus(seq: &[u8], windows: &[&[u8]]) -> Vec<u8> {
+/// Returns, for each base of `seq`, how often the best alignment of each
+/// window within `edits` places A, C, G, T or a deletion against it, or
+/// `None` when fewer than `MIN_SUPPORT_WINDOWS` windows align.
+fn column_counts(seq: &[u8], windows: &[&[u8]], edits: usize) -> Option<Vec<[usize; 5]>> {
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     let mut best: Vec<Option<sassy::Match>> = vec![None; windows.len()];
-    for hit in searcher.search_texts(seq, windows, edit_budget(0.25, seq.len())) {
+    for hit in searcher.search_texts(seq, windows, edits) {
         let entry = &mut best[hit.text_idx];
         if entry
             .as_ref()
@@ -592,9 +592,16 @@ fn polish_consensus(seq: &[u8], windows: &[&[u8]]) -> Vec<u8> {
             counts[pos.0 as usize][base] += 1;
         }
     }
-    if aligned < 20 {
+    (aligned >= MIN_SUPPORT_WINDOWS).then_some(counts)
+}
+
+/// Refines an assembled path with one best alignment per supporting window.
+/// Majority substitutions and deletions correct graph branches caused by
+/// sequencing errors without extending the assembly into unaligned sequence.
+fn polish_consensus(seq: &[u8], windows: &[&[u8]]) -> Vec<u8> {
+    let Some(counts) = column_counts(seq, windows, edit_budget(0.25, seq.len())) else {
         return seq.to_vec();
-    }
+    };
     seq.iter()
         .zip(counts)
         .filter_map(|(&base, counts)| {
@@ -610,6 +617,89 @@ fn polish_consensus(seq: &[u8], windows: &[&[u8]]) -> Vec<u8> {
             })
         })
         .collect()
+}
+
+/// Returns the counts of A, C, G and T in the read base that follows the
+/// inner edge of the best `core` alignment of each window, among alignments
+/// within `edits` that start within `ANCHOR_SLACK` of the physical `end`, or
+/// `None` when fewer than `MIN_SUPPORT_WINDOWS` windows have that base. The
+/// base lies outside the alignment, so gap placement at the alignment edge
+/// does not bias it toward the consensus.
+fn following_base_counts(
+    core: &[u8],
+    windows: &[&[u8]],
+    end: End,
+    edits: usize,
+) -> Option<[usize; 4]> {
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let mut best: Vec<Option<(i32, usize, usize)>> = vec![None; windows.len()];
+    for hit in searcher.search_texts(core, windows, edits) {
+        let len = windows[hit.text_idx].len();
+        let distance = match end {
+            End::Five => hit.text_start,
+            End::Three => len - hit.text_end,
+        };
+        if distance > ANCHOR_SLACK {
+            continue;
+        }
+        let entry = &mut best[hit.text_idx];
+        if entry.is_none_or(|(cost, old, _)| (hit.cost, distance) < (cost, old)) {
+            let edge = match end {
+                End::Five => hit.text_end,
+                End::Three => hit.text_start,
+            };
+            *entry = Some((hit.cost, distance, edge));
+        }
+    }
+    let mut counts = [0usize; 4];
+    for (window, hit) in windows.iter().zip(best) {
+        let Some((_, _, edge)) = hit else { continue };
+        let base = match end {
+            End::Five => window.get(edge),
+            End::Three => edge.checked_sub(1).and_then(|i| window.get(i)),
+        };
+        if let Some(code) = base.and_then(|b| encode_kmer(std::slice::from_ref(b))) {
+            counts[code as usize] += 1;
+        }
+    }
+    (counts.iter().sum::<usize>() >= MIN_SUPPORT_WINDOWS).then_some(counts)
+}
+
+/// Removes the insert-facing bases of `seq` that the supporting windows do
+/// not conserve. Each round aligns `seq` without its inner base and tallies
+/// the read base that follows the alignment (see `following_base_counts`).
+/// A technical base is read at the per-base accuracy of the platform, above
+/// one half; an insert base agrees across reads only as often as the most
+/// frequent base of the insert composition, below one half outside
+/// low-complexity sequence. An inner base whose most frequent read base holds
+/// less than half of the tally is therefore insert and is removed. Assembly
+/// support cannot place this boundary for a layer about one k-mer long:
+/// erosion at the physical end removes the first bases of the layer from part
+/// of the reads, which depresses the k-mer spanning the whole layer toward the
+/// level of its insert continuations. At least `MIN_PATTERN_LEN` bases are
+/// kept.
+fn trim_unconserved_inner_end(seq: &[u8], windows: &[&[u8]], end: End, error_rate: f64) -> Vec<u8> {
+    let (mut lo, mut hi) = (0, seq.len());
+    while hi - lo > MIN_PATTERN_LEN {
+        let core = match end {
+            End::Five => &seq[lo..hi - 1],
+            End::Three => &seq[lo + 1..hi],
+        };
+        let edits = edit_budget(error_rate, core.len());
+        let Some(counts) = following_base_counts(core, windows, end, edits) else {
+            break;
+        };
+        let total: usize = counts.iter().sum();
+        let best = counts.iter().copied().max().unwrap_or(0);
+        if best * 2 >= total {
+            break;
+        }
+        match end {
+            End::Five => hi -= 1,
+            End::Three => lo += 1,
+        }
+    }
+    seq[lo..hi].to_vec()
 }
 
 /// Extends a conserved insert anchor toward the physical read end. Each round
@@ -1068,6 +1158,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End, contrast: bool) -
         } else {
             trimmed
         };
+        let trimmed = trim_unconserved_inner_end(&trimmed, &recount, end, base.error_rate);
         let contrast = contrast
             .then(|| contrast_boundary(&cons, &oriented, end))
             .flatten();
@@ -2997,6 +3088,32 @@ mod tests {
             let segments = crate::adapter::adapter_segments(read, &cfg);
             assert_eq!(segments, vec![(102, read.len())], "{segments:?}");
         }
+    }
+
+    #[test]
+    fn eroded_short_barcodes_end_at_the_insert_boundary() {
+        let barcodes: Vec<Vec<u8>> = (0..12).map(|i| random_bases(8100 + i, 16)).collect();
+        let reads: Vec<Vec<u8>> = (0..2400)
+            .map(|i| {
+                let barcode = &barcodes[i % 12];
+                let mut read = barcode[(i / 12) % 2..].to_vec();
+                read.extend(random_bases(12000 + i as u64, 400));
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        for d in &found {
+            assert!(
+                barcodes.iter().any(|b| contains(b, &d.adapter.seq)),
+                "{:?}",
+                String::from_utf8_lossy(&d.adapter.seq)
+            );
+        }
+        let recovered = barcodes
+            .iter()
+            .filter(|b| found.iter().any(|d| contains(&d.adapter.seq, &b[1..])))
+            .count();
+        assert!(recovered >= 10, "{recovered} barcodes recovered: {found:?}");
     }
 
     #[test]
