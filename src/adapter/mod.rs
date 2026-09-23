@@ -26,6 +26,7 @@ mod budget;
 mod hits;
 mod index;
 mod passes;
+mod refine;
 pub(crate) use budget::*;
 use hits::*;
 pub(crate) use index::*;

@@ -411,7 +411,7 @@ pub(super) fn search_residue(
                             h.cost,
                             Some(HitAction::TrimFivePrime),
                         );
-                        keep.lo = keep.lo.max(h.end);
+                        keep.trim_five_fixed(h.end);
                     }
                 });
             }
@@ -429,7 +429,7 @@ pub(super) fn search_residue(
                     {
                         let (s, e) = (start + h.start, start + h.end.min(reach));
                         trace_hit(&adapter.name, s, e, h.cost, Some(HitAction::TrimThreePrime));
-                        keep.hi = keep.hi.min(s);
+                        keep.trim_three_fixed(s);
                     }
                 });
             }
@@ -585,7 +585,7 @@ pub(super) fn segments_with(
     // adapters that acted.
     keep.settle();
     tally(&keep);
-    let (lo, hi, cuts) = keep.into_cuts(cfg.min_piece);
+    let (lo, hi, cuts) = keep.into_cuts(ctx.read.window, cfg.min_piece);
     if lo >= hi {
         return vec![];
     }
@@ -606,6 +606,7 @@ pub(super) fn segments_with(
         }
         let mut keep = Keep::new(cfg, ctx.index, e - s, false);
         search_terminal(ctx, (s, e), engine, &mut keep);
+        keep.refine(&ctx.read.window[s..e]);
         tally(&keep);
         if keep.lo < keep.hi {
             segs.push((s + keep.lo, s + keep.hi));

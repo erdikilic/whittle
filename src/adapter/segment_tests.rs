@@ -552,6 +552,30 @@ fn leading_junk_is_trimmed_through_a_reverse_complement_hit() {
     assert_eq!(adapter_segments(&w, &c), vec![(9 + front.len(), w.len())]);
 }
 
+/// A longer entry sharing its core with the primer in the read, its extra
+/// bases matched as edits against the insert, trims at the end of the core.
+#[test]
+fn extended_entry_trims_at_the_end_of_its_shared_core() {
+    let primer = b"TTTCTGTTGGTGCTGATATTGC";
+    let extended = b"TTTCTGTTGGTGCTGATATTGCTTT";
+    let mut w = primer.to_vec();
+    w.extend(splitmix_dna(7, 300));
+    w.extend(reverse_complement(primer));
+    let c = cfg_with(
+        vec![
+            entry("primer", primer, Role::Primer),
+            entry("extended", extended, Role::Primer),
+        ],
+        0.2,
+        150,
+        true,
+    );
+    assert_eq!(
+        adapter_segments(&w, &c),
+        vec![(primer.len(), w.len() - primer.len())]
+    );
+}
+
 /// A rear adapter cut short by the read end is trimmed from its first
 /// aligned base when at least `MIN_OVERLAP` bases align, and left in place
 /// below that.

@@ -150,6 +150,16 @@ pub(super) struct Keep<'a> {
     pub(super) hi: usize,
     /// Accepted excisions, merged by `into_cuts`.
     pub(super) interior: Vec<(usize, usize)>,
+    /// The adapter of each excision in `interior`.
+    excised: Vec<usize>,
+    /// Applied 5' trims as (adapter, start, end), for `refine`.
+    five: Vec<(usize, usize, usize)>,
+    /// Applied 3' trims as (adapter, start, end), for `refine`.
+    three: Vec<(usize, usize, usize)>,
+    /// 5' boundary set by trims that `refine` leaves as found.
+    fixed_lo: usize,
+    /// 3' boundary set by trims that `refine` leaves as found.
+    fixed_hi: usize,
     /// The adapters whose hits trimmed or excised, for presence detection.
     pub(super) acted: Vec<usize>,
     /// Terminal trims above the `k_far` budget of their adapter, applied by
@@ -193,6 +203,11 @@ impl<'a> Keep<'a> {
             lo: 0,
             hi: n,
             interior: Vec::new(),
+            excised: Vec::new(),
+            five: Vec::new(),
+            three: Vec::new(),
+            fixed_lo: 0,
+            fixed_hi: n,
             acted: Vec::new(),
             deferred: Vec::new(),
         }
@@ -302,9 +317,73 @@ impl<'a> Keep<'a> {
         );
         self.acted.push(adapter_idx);
         match action {
-            HitAction::TrimFivePrime => self.lo = self.lo.max(end),
-            HitAction::TrimThreePrime => self.hi = self.hi.min(start),
-            HitAction::Excise => self.interior.push((start, end)),
+            HitAction::TrimFivePrime => {
+                self.lo = self.lo.max(end);
+                self.five.push((adapter_idx, start, end));
+            },
+            HitAction::TrimThreePrime => {
+                self.hi = self.hi.min(start);
+                self.three.push((adapter_idx, start, end));
+            },
+            HitAction::Excise => {
+                self.interior.push((start, end));
+                self.excised.push(adapter_idx);
+            },
+        }
+    }
+
+    /// Trims the 5' end to `end` at a boundary `refine` keeps as found, for
+    /// hits aligned against a masked copy of the window.
+    pub(super) fn trim_five_fixed(&mut self, end: usize) {
+        self.lo = self.lo.max(end);
+        self.fixed_lo = self.fixed_lo.max(end);
+    }
+
+    /// Trims the 3' end to `start` at a boundary `refine` keeps as found.
+    pub(super) fn trim_three_fixed(&mut self, start: usize) {
+        self.hi = self.hi.min(start);
+        self.fixed_hi = self.fixed_hi.min(start);
+    }
+
+    /// Moves every boundary to the inner end of the alignment that set it;
+    /// see `refine::refined_end`. `text` is the window the hits were found in.
+    /// A boundary never moves outward, and only the hits that could still set
+    /// a boundary are realigned: the 5' trims in decreasing end order until a
+    /// raw end falls at or below the best refined one, and the 3' trims
+    /// likewise.
+    pub(super) fn refine(&mut self, text: &[u8]) {
+        debug_assert_eq!(text.len(), self.n);
+        let adapters = self.adapters;
+        if !self.five.is_empty() {
+            self.five
+                .sort_unstable_by_key(|&(_, _, end)| std::cmp::Reverse(end));
+            let mut lo = self.fixed_lo;
+            for &(idx, start, end) in &self.five {
+                if end <= lo {
+                    break;
+                }
+                lo = lo.max(refine::refined_end(&adapters[idx].seq, text, start, end));
+            }
+            self.lo = lo;
+        }
+        if !self.three.is_empty() {
+            self.three.sort_unstable_by_key(|&(_, start, _)| start);
+            let mut hi = self.fixed_hi;
+            for &(idx, start, end) in &self.three {
+                if start >= hi {
+                    break;
+                }
+                hi = hi.min(refine::refined_start(&adapters[idx].seq, text, start, end));
+            }
+            self.hi = hi;
+        }
+        for (cut, &idx) in self.interior.iter_mut().zip(&self.excised) {
+            let (start, end) = *cut;
+            let seq = &adapters[idx].seq;
+            *cut = (
+                refine::refined_start(seq, text, start, end),
+                refine::refined_end(seq, text, start, end),
+            );
         }
     }
 
@@ -328,13 +407,18 @@ impl<'a> Keep<'a> {
         }
     }
 
-    /// Returns the keep boundaries and the excisions clipped to them, merged:
-    /// two excisions overlapping, touching, or separated by at most
-    /// `FLANK_SLACK` bases or fewer than `min_piece` bases become one, since
-    /// the bases between them are junction residue or a piece the length
-    /// filter would discard.
-    pub(super) fn into_cuts(mut self, min_piece: usize) -> (usize, usize, Vec<(usize, usize)>) {
+    /// Returns the keep boundaries and the excisions, refined against `text`
+    /// and clipped to the boundaries, merged: two excisions overlapping,
+    /// touching, or separated by at most `FLANK_SLACK` bases or fewer than
+    /// `min_piece` bases become one, since the bases between them are junction
+    /// residue or a piece the length filter would discard.
+    pub(super) fn into_cuts(
+        mut self,
+        text: &[u8],
+        min_piece: usize,
+    ) -> (usize, usize, Vec<(usize, usize)>) {
         self.settle();
+        self.refine(text);
         for d in &self.deferred {
             trace_hit(
                 &self.adapters[d.adapter_idx].name,

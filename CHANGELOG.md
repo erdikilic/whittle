@@ -68,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- An adapter trim ends at the last well-aligned base of the hit. A catalog
+  entry that shares its core with the sequence in the read and continues past
+  it, such as `PCS110_front` over a `PBC_rear` primer or `LSK109_front` over
+  `LSK114_front`, no longer trims the insert bases its extension was aligned
+  against.
 - FASTQ input with BAM output is refused before the run starts also when the
   input is a stream or a directory, with the same message as for a named file.
 - An empty BGZF stream, such as the output of `bgzip` on an empty file, is read
