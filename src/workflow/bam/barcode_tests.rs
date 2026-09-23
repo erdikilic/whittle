@@ -1,4 +1,3 @@
-
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::Flags;
 use noodles_sam::alignment::record::data::field::Tag;
