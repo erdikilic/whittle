@@ -726,7 +726,8 @@ const MAX_SEED_PREFIX_LEN: usize = 10;
 /// for the whole seed would.
 #[derive(Debug, Clone)]
 struct SeedTable {
-    /// Prefix length: the shortest seed, capped at `MAX_SEED_PREFIX_LEN`.
+    /// Prefix length: the shortest seed, capped at `MAX_SEED_PREFIX_LEN`,
+    /// and shortened until the distinct prefixes fit the `u16` slots.
     prefix: usize,
     /// Per prefix code, one plus the index into `lists`; zero for no seed.
     slots: Vec<u16>,
@@ -738,16 +739,33 @@ impl SeedTable {
     /// Builds the table over `seeds`, each mapped to the adapters owning it.
     /// `None` when there are no seeds.
     fn new(seeds: BTreeMap<Vec<u8>, Vec<usize>>) -> Option<Self> {
-        let prefix = seeds.keys().map(Vec::len).min()?.min(MAX_SEED_PREFIX_LEN);
+        let code_of = |seed: &[u8], prefix: usize| {
+            seed[..prefix].iter().fold(0usize, |code, &b| {
+                (code << 2) | usize::from(BASE_CODE[usize::from(b)])
+            })
+        };
+        // A prefix of `SLOT_PREFIX_FLOOR` bases has at most 4^7 codes, which
+        // always fit.
+        const SLOT_PREFIX_FLOOR: usize = 7;
+        let longest = seeds.keys().map(Vec::len).min()?.min(MAX_SEED_PREFIX_LEN);
+        let prefix = (SLOT_PREFIX_FLOOR.min(longest)..=longest)
+            .rev()
+            .find(|&prefix| {
+                let mut seen = vec![false; 1 << (2 * prefix)];
+                let distinct = seeds
+                    .keys()
+                    .filter(|seed| !std::mem::replace(&mut seen[code_of(seed, prefix)], true))
+                    .count();
+                distinct <= usize::from(u16::MAX)
+            })
+            .unwrap_or(longest.min(SLOT_PREFIX_FLOOR));
         let mut slots = vec![0u16; 1 << (2 * prefix)];
         let mut lists: Vec<Vec<(usize, Vec<u8>)>> = Vec::new();
         for (seed, owners) in seeds {
-            let code = seed[..prefix].iter().fold(0usize, |code, &b| {
-                (code << 2) | usize::from(BASE_CODE[usize::from(b)])
-            });
+            let code = code_of(&seed, prefix);
             if slots[code] == 0 {
                 lists.push(Vec::new());
-                slots[code] = u16::try_from(lists.len()).expect("Seed lists fit a u16 slot");
+                slots[code] = u16::try_from(lists.len()).expect("The prefix bounds the slot count");
             }
             let list = &mut lists[usize::from(slots[code]) - 1];
             list.extend(owners.into_iter().map(|adapter| (adapter, seed.clone())));
@@ -2262,6 +2280,27 @@ mod segment_tests {
     /// `edit_budget` does not round an integral product down through
     /// floating-point error, and `partial_budget` allows no edit at the
     /// shortest overlaps.
+    /// More distinct seed prefixes than a `u16` slot numbers shorten the
+    /// prefix instead of failing, and every seed is still found.
+    #[test]
+    fn seed_table_shortens_the_prefix_past_u16_slots() {
+        let mut seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+        for i in 0..70_000u64 {
+            let seed: Vec<u8> = (0..12)
+                .map(|j| b"ACGT"[((i >> (2 * j)) & 3) as usize])
+                .collect();
+            seeds.insert(seed, vec![0]);
+        }
+        let probe = seeds.keys().nth(69_999).unwrap().clone();
+        let table = SeedTable::new(seeds).expect("seeds are present");
+        assert!(table.prefix < MAX_SEED_PREFIX_LEN);
+        let mut text = splitmix_dna(4242, 40);
+        text.extend_from_slice(&probe);
+        let mut found = false;
+        table.scan(&text, |_, (start, _)| found |= start == 40);
+        assert!(found);
+    }
+
     /// The overhang discount is the cost the overhang searcher charged: each
     /// overhanging side is floored on its own, at the searcher's `f32` rate.
     #[test]
