@@ -235,6 +235,7 @@ impl ProgressHandle {
     /// or a spinner when `total` is `None` (stdin has no byte count). In
     /// `Mode::Line` the ticker emits a periodic INFO line every `log_interval`
     /// instead. In `Mode::Off` and `Mode::Silent` only the run clock starts.
+    /// A ticker left running by an earlier `start` is stopped first.
     pub fn start(&mut self, total: Option<u64>, counters: Arc<Counters>) {
         // The timer runs in every mode, including `Off`: `--quiet` silences the
         // human-readable summary, but `elapsed_seconds` in `--summary-json` is
@@ -244,10 +245,7 @@ impl ProgressHandle {
         if matches!(self.mode, Mode::Off | Mode::Silent) {
             return;
         }
-        debug_assert!(
-            self.ticker.is_none(),
-            "start() called twice without finish()"
-        );
+        self.stop_ticker();
         let bar = if matches!(self.mode, Mode::Bar) {
             let pb = match total {
                 Some(t) => {
@@ -813,6 +811,25 @@ mod tests {
         h.start(None, Arc::new(Counters::default()));
         assert!(h.ticker.is_some(), "start() spawns a ticker");
         drop(h); // joins the ticker thread and returns
+    }
+
+    /// A second `start` without `finish` stops the first ticker rather than
+    /// leaving its thread running.
+    #[test]
+    fn restarting_a_handle_stops_the_previous_ticker() {
+        let mut h = ProgressHandle {
+            multi: MultiProgress::new(),
+            mode: Mode::Line,
+            ticker: None,
+            bar: None,
+            start: Instant::now(),
+            log_interval: Duration::from_secs(30),
+        };
+        h.start(None, Arc::new(Counters::default()));
+        let first = Arc::clone(&h.ticker.as_ref().expect("a ticker runs").0);
+        h.start(None, Arc::new(Counters::default()));
+        assert!(first.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(h.ticker.is_some());
     }
 
     /// Dropping an active bar-mode handle joins its ticker and clears the bar.
