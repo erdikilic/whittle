@@ -64,16 +64,12 @@ pub(super) fn chance_cumulative(pattern: &[u8], max_edits: usize) -> Vec<f64> {
     cumulative
 }
 
-/// Returns budgets, at most `caps`, under which the distinct sequences among
-/// the entries flagged in `included` together admit at most `bound` expected
-/// chance hits per read over `positions` alignment start positions. A panel
-/// of interchangeable sequences multiplies the chance of a hit by its size,
-/// which a bound per pattern does not see. Exact matches are always
-/// admitted, so only the chance hits beyond them count. The largest
-/// contributors lose one edit at a time, and sequences contributing equally
-/// lose it together, so the members of a panel keep one budget. A sequence
-/// and its reverse complement, both searched on both strands, are one
-/// sequence. Entries not flagged keep their caps.
+/// Returns budgets, at most `caps`, under which the distinct sequences flagged
+/// in `included` together admit at most `bound` expected chance hits per read
+/// over `positions` start positions; a panel multiplies the chance rate by its
+/// size. Only chance hits beyond exact matches count. The largest contributors
+/// lose one edit at a time, equal ones together. A sequence and its reverse
+/// complement count once; unflagged entries keep their caps.
 pub(super) fn family_budgets(
     adapters: &[Adapter],
     included: &[bool],

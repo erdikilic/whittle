@@ -359,8 +359,7 @@ fn lex(text: &str) -> Result<Vec<Token>, String> {
 /// A recursive-descent parser over the token list.
 /// Deepest nesting of negations and parentheses an expression may use. The
 /// parser, the evaluator and the drop of the expression tree recurse once per
-/// level, so the bound keeps a pathological expression a parse error instead
-/// of a stack overflow; hand-written filters stay far below it.
+/// level, so deeper nesting is a parse error rather than a stack overflow.
 const MAX_NESTING: usize = 100;
 
 struct Parser {

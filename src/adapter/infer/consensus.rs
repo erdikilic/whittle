@@ -202,16 +202,11 @@ impl FollowingBases {
 
 /// Removes the insert-facing bases of `seq` that the supporting windows do
 /// not conserve. Cut points are tried from the outer edge of the last k-mer
-/// of `seq` inward toward the insert: the base that follows the bases kept
-/// is tallied (see `FollowingBases`), and the first tally that is not
-/// `conserved` against the `composition` of the windows marks the insert
-/// boundary. Every tested stretch therefore lies within the sequence the
-/// assembly supports. A cut point without a tally, as for a stretch with an IUPAC code or with
-/// too few supporting windows, is passed over.
-/// Assembly support cannot place this boundary for a layer about one k-mer
-/// long: erosion at the physical end removes the first bases of the layer
-/// from part of the reads, which depresses the k-mer spanning the whole layer
-/// toward the level of its insert continuations.
+/// inward; the first whose following base is not `conserved` against
+/// `composition` ends the sequence. Cut points without a tally (an IUPAC code
+/// or too few windows) are skipped. K-mer support cannot place this end for a
+/// layer about one k-mer long, because erosion at the physical end weakens the
+/// k-mer spanning the whole layer.
 pub(super) fn trim_unconserved_inner_end(
     seq: &[u8],
     following: &FollowingBases,

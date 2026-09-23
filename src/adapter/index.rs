@@ -95,9 +95,8 @@ impl CandidateIndex {
             budget.k_end = k_end;
             budget.k_far = k_far;
         }
-        // Interior hits split only for splitting roles, which are the set the
-        // interior chance bound covers, per read-length class. Budgets do not
-        // increase with the class.
+        // The interior chance bound covers the splitting roles, per
+        // read-length class; budgets do not increase with the class.
         let splitting: Vec<bool> = adapters
             .iter()
             .zip(&searchable)
