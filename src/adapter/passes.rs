@@ -226,23 +226,12 @@ pub(super) fn accept_batch_hits(
     site: Site,
     keep: &mut Keep<'_>,
 ) {
-    let accept = |pattern_idx: usize, start: usize, end: usize, cost: usize, reverse: bool| {
+    let accept = |pattern_idx: usize, hit: Hit| {
         let adapter_idx = batch.adapter_indices[pattern_idx];
-        if cost > keep.budgets[adapter_idx].k_end {
+        if hit.cost > keep.budgets[adapter_idx].k_end {
             return;
         }
-        keep.accept(
-            site,
-            adapter_idx,
-            Hit {
-                start: offset + start,
-                end: offset + end,
-                cost,
-                left_overhang: 0,
-                right_overhang: 0,
-                reverse,
-            },
-        );
+        keep.accept(site, adapter_idx, shifted(hit, offset));
     };
     encoded_pattern_hits(
         searcher,
@@ -586,7 +575,7 @@ pub(super) fn segments_with(
     // adapters that acted.
     keep.settle();
     tally(&keep);
-    let (lo, hi, cuts) = keep.into_cuts(ctx.read.window, cfg.min_piece);
+    let (lo, hi, cuts) = keep.into_cuts(cfg.min_piece);
     if lo >= hi {
         return vec![];
     }
@@ -607,7 +596,7 @@ pub(super) fn segments_with(
         }
         let mut keep = Keep::new(cfg, ctx.index, e - s, false);
         search_terminal(ctx, (s, e), engine, &mut keep);
-        keep.refine(&ctx.read.window[s..e]);
+        keep.refine();
         tally(&keep);
         if keep.lo < keep.hi {
             segs.push((s + keep.lo, s + keep.hi));

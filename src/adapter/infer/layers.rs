@@ -122,7 +122,7 @@ pub(super) fn advance_boundaries(
                     text,
                     &reversed,
                     k,
-                    |_, start, end, _, _| hits.push((start, end)),
+                    |_, h| hits.push((h.start, h.end)),
                 );
             }
             for (text, hits) in three_texts.iter().zip(&mut three_hits) {
@@ -133,7 +133,7 @@ pub(super) fn advance_boundaries(
                     text,
                     &reversed,
                     k,
-                    |_, start, end, _, _| hits.push((text.len() - end, text.len() - start)),
+                    |_, h| hits.push((text.len() - h.end, text.len() - h.start)),
                 );
             }
             continue;

@@ -121,8 +121,11 @@ pub struct Hit {
     pub left_overhang: usize,
     /// Pattern bases hanging off the text end.
     pub right_overhang: usize,
-    /// Whether the reverse complement of the pattern matched.
-    pub reverse: bool,
+    /// Text bases at the hit start that the alignment leaves to the text;
+    /// see `refine`.
+    pub clip_start: usize,
+    /// Text bases at the hit end that the alignment leaves to the text.
+    pub clip_end: usize,
 }
 
 impl Hit {
@@ -131,10 +134,9 @@ impl Hit {
     /// its pattern-side overhangs swap sides in text orientation.
     fn from_match(m: &sassy::Match, pattern_len: usize) -> Self {
         let (head, tail) = (m.pattern_start, pattern_len - m.pattern_end);
-        let (left_overhang, right_overhang) = match m.strand {
-            sassy::Strand::Fwd => (head, tail),
-            sassy::Strand::Rc => (tail, head),
-        };
+        let rc = m.strand == sassy::Strand::Rc;
+        let (left_overhang, right_overhang) = if rc { (tail, head) } else { (head, tail) };
+        let (clip_start, clip_end) = super::refine::clips(m, rc);
         Hit {
             start: m.text_start,
             end: m.text_end,
@@ -144,7 +146,8 @@ impl Hit {
             cost: m.cost as usize,
             left_overhang,
             right_overhang,
-            reverse: m.strand == sassy::Strand::Rc,
+            clip_start,
+            clip_end,
         }
     }
 }
@@ -195,8 +198,8 @@ pub fn encode_patterns(patterns: &[Vec<u8>]) -> EncodedAdapterBatch {
 }
 
 /// Searches a pre-encoded batch over both strands of `text`, one pattern per
-/// SIMD lane, and calls `accept` with each hit's pattern index, text span,
-/// cost, and whether the reverse complement matched. `reversed` is `text` reversed, which the caller keeps per read so the
+/// SIMD lane, and calls `accept` with each hit's pattern index and the hit.
+/// `reversed` is `text` reversed, which the caller keeps per read so the
 /// reverse strand needs no copy. Hits are the rightmost local minima within
 /// `k`, as `hits` returns them. The tiled search uses only the searcher's
 /// pattern-tiling state, which its single-pattern searches never touch, so
@@ -207,27 +210,35 @@ pub fn encoded_pattern_hits(
     text: &[u8],
     reversed: &[u8],
     k: usize,
-    mut accept: impl FnMut(usize, usize, usize, usize, bool),
+    mut accept: impl FnMut(usize, Hit),
 ) {
     debug_assert_eq!(text.len(), reversed.len());
+    let whole = |m: &sassy::Match, start: usize, end: usize, (clip_start, clip_end)| Hit {
+        start,
+        end,
+        // The cost is within the non-negative budget `k`; see `Hit::from_match`.
+        cost: m.cost as usize,
+        left_overhang: 0,
+        right_overhang: 0,
+        clip_start,
+        clip_end,
+    };
     for m in searcher.search_encoded_patterns(&encoded.forward, text, k) {
-        accept(
-            m.pattern_idx,
-            m.text_start,
-            m.text_end,
-            m.cost as usize,
-            false,
-        );
+        let hit = whole(m, m.text_start, m.text_end, super::refine::clips(m, false));
+        accept(m.pattern_idx, hit);
     }
     let n = text.len();
     for m in searcher.search_encoded_patterns(&encoded.complement, reversed, k) {
-        accept(
-            m.pattern_idx,
+        // A hit on the reversed text runs backwards over `text`, so its span
+        // and its clips swap ends.
+        let (on_reversed_start, on_reversed_end) = super::refine::clips(m, false);
+        let hit = whole(
+            m,
             n - m.text_end,
             n - m.text_start,
-            m.cost as usize,
-            true,
+            (on_reversed_end, on_reversed_start),
         );
+        accept(m.pattern_idx, hit);
     }
 }
 
