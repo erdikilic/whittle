@@ -104,9 +104,14 @@ pub(super) const CATALOG: &[Entry] = &[
     // Barcode flanks (dorado kit-14 constants). Trimming through a flank removes the
     // barcode regardless of its number. Flanks shorter than `MIN_PATTERN_LEN`
     // (dorado's NB_1st_REAR, BC_1st_FRONT, RBK_FRONT and RLB_FRONT, 7 to 8 bp)
-    // are omitted: a pattern that short is never searched standalone.
+    // are not searched standalone. NB_1st_REAR is the only one on the insert
+    // side of its barcode and is searched within the native barcode construct.
     // Native barcoding (NBD*) [dorado:barcode_kits.cpp(NB_1st_FRONT)]
     ("NB_front", Role::Barcode, &[Kit::Nbd114], b"ATTGCTAAGGTTAA"),
+    // Native barcode construct: NB_1st_FRONT, the 24 bp barcode as N, and the
+    // 8 bp NB_1st_REAR, so a hit trims through the inner flank.
+    // [dorado:barcode_kits.cpp(NB_1st_FRONT, NB_1st_REAR)]
+    ("NB_construct", Role::Barcode, &[Kit::Nbd114], b"ATTGCTAAGGTTAANNNNNNNNNNNNNNNNNNNNNNNNCAGCACCT"),
     // PCR barcoding (PBC/BC*) [dorado:barcode_kits.cpp(BC_1st_REAR)]
     ("PBC_rear", Role::Barcode, &[Kit::Pcb114, Kit::Rpb114], b"TTAACCTTTCTGTTGGTGCTGATATTGC"),
     // Rapid barcoding v4 / kit 14 (RBK*) and MAB114 [dorado:barcode_kits.cpp(RBK4_FRONT, MAB_FRONT)]

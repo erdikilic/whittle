@@ -68,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- The `nbd114` preset trims the 8 bp native barcode rear flank (`CAGCACCT`)
+  with the barcode. The catalog carries the native barcode construct with the
+  barcode written as `N`, so one hit spans both flanks.
 - An adapter trim ends at the last well-aligned base of the hit. A catalog
   entry that shares its core with the sequence in the read and continues past
   it, such as `PCS110_front` over a `PBC_rear` primer or `LSK109_front` over

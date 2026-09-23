@@ -769,9 +769,9 @@ fn assert_insert_kept(
 }
 
 /// The catalog holds longer entries that begin with `PCR1_front`
-/// (`cDNA_rear` adds `TTT`), so a fuzzy hit can carry the trim up to three
-/// bases into the insert. The same insert padded to 200 bp, where the end
-/// zones do not overlap, keeps the insert as well.
+/// (`cDNA_rear` adds `TTT`); their extra bases do not carry the trim into the
+/// insert. The same insert padded to 200 bp, where the end zones do not
+/// overlap, keeps the insert as well.
 #[test]
 fn short_read_with_front_adapter_keeps_insert_under_ont_preset() {
     let mut short = b"ACTTGCCTGTCGCTCTATCTTC".to_vec();
@@ -781,8 +781,8 @@ fn short_read_with_front_adapter_keeps_insert_under_ont_preset() {
     long.extend(splitmix_dna(5, 38));
     for split in [true, false] {
         let c = cfg_with(preset_ont(), 0.2, 150, split);
-        assert_insert_kept(&adapter_segments(&short, &c), 162, 22, 3, true);
-        assert_insert_kept(&adapter_segments(&long, &c), 200, 22, 3, true);
+        assert_insert_kept(&adapter_segments(&short, &c), 162, 22, 0, true);
+        assert_insert_kept(&adapter_segments(&long, &c), 200, 22, 0, true);
     }
 }
 
@@ -797,9 +797,32 @@ fn short_read_with_rear_adapter_keeps_insert_under_ont_preset() {
     long.extend_from_slice(&short);
     for split in [true, false] {
         let c = cfg_with(preset_ont(), 0.2, 150, split);
-        assert_insert_kept(&adapter_segments(&short, &c), 162, 22, 4, false);
-        assert_insert_kept(&adapter_segments(&long, &c), 200, 22, 4, false);
+        assert_insert_kept(&adapter_segments(&short, &c), 162, 22, 0, false);
+        assert_insert_kept(&adapter_segments(&long, &c), 200, 22, 0, false);
     }
+}
+
+/// A native-barcoded read end is trimmed through the 8 bp inner flank that
+/// follows the barcode, at either end.
+#[test]
+fn native_barcode_construct_is_trimmed_through_its_inner_flank() {
+    let mut construct = b"ATTGCTAAGGTTAA".to_vec();
+    construct.extend(reverse_complement(b"AAGAAAGTTGTCGGTGTCTTTGTG"));
+    construct.extend_from_slice(b"CAGCACCT");
+    let insert = splitmix_dna(3, 400);
+    let mut w = construct.clone();
+    w.extend_from_slice(&insert);
+    w.extend(reverse_complement(&construct));
+    let c = cfg_with(
+        super::preset::preset(&[super::preset::Kit::Nbd114]),
+        0.2,
+        150,
+        true,
+    );
+    assert_eq!(
+        adapter_segments(&w, &c),
+        vec![(construct.len(), construct.len() + insert.len())]
+    );
 }
 
 /// A minimal user FASTA: `f` and its reverse complement, with the adapter
