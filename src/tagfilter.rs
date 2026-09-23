@@ -525,9 +525,11 @@ fn compare(op: Op, a: &Expr, b: &Expr, rec: &impl TagSource) -> anyhow::Result<b
     let (right, rtag) = eval_value(b, rec)?;
     let ord = match (&left, &right) {
         (TagValue::Missing, _) | (_, TagValue::Missing) => return Ok(false),
+        // A NaN orders against nothing and equals nothing, so only `!=`
+        // holds, as in IEEE 754 comparison.
         (TagValue::Num(x), TagValue::Num(y)) => match x.partial_cmp(y) {
             Some(ord) => ord,
-            None => return Ok(false),
+            None => return Ok(op == Op::Ne),
         },
         (TagValue::Str(x), TagValue::Str(y)) => x.as_ref().cmp(y.as_ref()),
         _ => {
@@ -757,6 +759,21 @@ mod tests {
         let b = Rec::new(&[(*b"qs", TagValue::Num(10.0))]);
         assert!(keeps("[qs]>=10", &a) && keeps("[qs]>=10", &b));
         assert!(keeps("[qs]==10.0", &a));
+    }
+
+    #[test]
+    fn nan_is_unequal_to_everything_and_unordered() {
+        let rec = Rec::new(&[(*b"qs", TagValue::Num(f64::NAN))]);
+        assert!(keeps("[qs] != 1", &rec));
+        for expr in [
+            "[qs] == 1",
+            "[qs] < 1",
+            "[qs] <= 1",
+            "[qs] > 1",
+            "[qs] >= 1",
+        ] {
+            assert!(!keeps(expr, &rec), "{expr}");
+        }
     }
 
     #[test]
