@@ -7,10 +7,10 @@ fn rendered() -> String {
     clap_mangen::Man::new(whittle::cli::command())
         .render(&mut buf)
         .unwrap();
+    let version = env!("CARGO_PKG_VERSION");
     let page = String::from_utf8(buf)
         .unwrap()
-        .replace("\nv0.", "\n0.")
-        .replace("\nv1.", "\n1.");
+        .replace(&format!("\nv{version}"), &format!("\n{version}"));
     let mut out = String::new();
     for line in page.lines() {
         out.push_str(line.trim_end());

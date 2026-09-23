@@ -20,10 +20,10 @@ fn main() -> std::io::Result<()> {
     let mut buf = Vec::new();
     clap_mangen::Man::new(whittle::cli::command()).render(&mut buf)?;
     // clap_mangen prefixes the version with `v`; releases are bare numbers.
+    let version = env!("CARGO_PKG_VERSION");
     let page = String::from_utf8(buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-        .replace("\nv0.", "\n0.")
-        .replace("\nv1.", "\n1.");
+        .replace(&format!("\nv{version}"), &format!("\n{version}"));
     let mut file = std::fs::File::create(&path)?;
     for line in page.lines() {
         writeln!(file, "{}", line.trim_end())?;
