@@ -44,9 +44,6 @@ struct Processor {
     bases: u64,
 }
 
-/// Highest raw Phred score a Phred+33 quality byte encodes.
-const MAX_PHRED33: u8 = 126 - 33;
-
 /// Copies a parsed record into an owned record with raw Phred qualities.
 fn to_read_record<Rf: Record>(record: &Rf) -> anyhow::Result<ReadRecord> {
     let raw = record.qual().unwrap_or_default();
@@ -55,7 +52,7 @@ fn to_read_record<Rf: Record>(record: &Rf) -> anyhow::Result<ReadRecord> {
         .iter()
         .map(|&b| {
             let q = b.wrapping_sub(33);
-            out_of_range |= q > MAX_PHRED33;
+            out_of_range |= q > crate::io::fastq::MAX_PHRED33;
             q
         })
         .collect();

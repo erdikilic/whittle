@@ -9,7 +9,7 @@ pub struct ReadRecord {
     /// Nucleotide sequence as ASCII bytes.
     pub seq: Vec<u8>,
     /// Raw Phred scores. The FASTQ reader rejects quality bytes outside ASCII
-    /// 33..=126, so FASTQ-sourced values lie in 0..=93; ASCII emission adds 33
-    /// with saturation.
+    /// 33..=126, so FASTQ-sourced values lie in 0..=93; BAM-sourced values may
+    /// be higher and are clamped to 93 on FASTQ output.
     pub qual: Vec<u8>,
 }

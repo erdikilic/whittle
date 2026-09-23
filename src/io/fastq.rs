@@ -68,7 +68,7 @@ pub fn reader_from_bgzf(
 }
 
 /// Highest raw Phred score a Phred+33 quality byte encodes (`~`, ASCII 126).
-const MAX_PHRED33: u8 = 126 - 33;
+pub(crate) const MAX_PHRED33: u8 = 126 - 33;
 
 struct RecordIter<R: Read> {
     reader: Reader<R>,
@@ -211,7 +211,9 @@ pub(crate) fn push_record_body(out: &mut Vec<u8>, seq: &[u8], phred: &[u8]) {
 }
 
 /// Writes the rest of a record after its header line: the newline, the
-/// sequence, the `+` line and the Phred+33 qualities.
+/// sequence, the `+` line and the Phred+33 qualities. A quality above 93,
+/// which BAM records may carry, is written as 93 (`~`), the highest value
+/// Phred+33 FASTQ represents.
 pub(crate) fn write_body<W: Write>(w: &mut W, seq: &[u8], phred: &[u8]) -> io::Result<()> {
     w.write_all(b"\n")?;
     w.write_all(seq)?;
@@ -221,7 +223,7 @@ pub(crate) fn write_body<W: Write>(w: &mut W, seq: &[u8], phred: &[u8]) -> io::R
     let mut ascii = [0u8; 1024];
     for chunk in phred.chunks(ascii.len()) {
         for (dst, &q) in ascii.iter_mut().zip(chunk) {
-            *dst = q.saturating_add(33);
+            *dst = q.min(MAX_PHRED33) + 33;
         }
         w.write_all(&ascii[..chunk.len()])?;
     }
@@ -634,6 +636,13 @@ pub(crate) fn writer_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualities_above_the_fastq_range_are_clamped() {
+        let mut out = Vec::new();
+        write_body(&mut out, b"ACGT", &[0, 93, 94, 255]).unwrap();
+        assert_eq!(out, b"\nACGT\n+\n!~~~\n");
+    }
 
     #[test]
     fn writes_single_segment_verbatim_header() {
