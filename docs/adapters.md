@@ -54,20 +54,38 @@ these treatments:
   `--adapter-ends-only` disables splitting and searches only the two end zones.
 
 The edit budget of a hit is the error rate times the pattern length, rounded
-down, bounded by a chance-match null model. A pattern's terminal budget is
-the largest edit count whose expected chance matches over both end zones
-and both strands, under independent uniform DNA, stay within `0.1` per
-read; the model sums alignment paths and overstates real read ends by more
-than an order of magnitude, so at the default error rate the bound lowers
-only the budget of 11-, 12- and 15-base patterns by one edit. Interior hits
-use a stricter budget. For each adapter
-and read-length class (powers of two from 4 kb upward), the interior budget
-is the largest edit count whose expected number of chance matches in a read
-of that length stays within `1e-4`; it never exceeds the terminal budget, and
-exact matches are always accepted. Long, informative patterns keep most of
-their tolerance in long reads; short or IUPAC-rich patterns and very long
-reads receive fewer interior edits. This null model is a specificity guard,
-not a calibrated false-split probability for repetitive or composition-biased
+down, bounded by a chance-match null model under independent uniform DNA. The
+model sums alignment paths, so it overstates the chance rate and the bounds are
+conservative.
+
+A pattern's terminal budget is the largest edit count whose expected chance
+matches over both end zones and both strands stay within `0.1` per read; at the
+default error rate this lowers the budget of 11-, 12- and 15-base patterns by
+one edit. The same bound also holds for the search set as a whole: a panel of
+interchangeable sequences, such as 24 barcodes, multiplies the chance of a hit
+at a read end by its size, so the distinct sequences of the set together stay
+within `0.1` expected chance matches per read. The largest contributors lose an
+edit first, and the members of a panel lose it together. The bound is applied
+in two tiers. A hit anchored at the read end, or directly behind an accepted
+hit, starting within 11 bases of it, keeps the budget bounded over that small
+anchoring zone; a hit anywhere else in the end zone is held to the budget
+bounded over the whole zone. A sequence and its reverse complement count once.
+Every catalog entry keeps its per-pattern budget when anchored at the read end,
+and the catalog adapters and 24-base ONT barcodes keep it anywhere in the end
+zone.
+
+Interior hits use a stricter budget. For each adapter and read-length class
+(powers of two from 4 kb upward), the interior budget is the largest edit count
+whose expected number of chance matches in a read of that length stays within
+`1e-4`, for each splitting sequence alone and for the splitting sequences of
+the set together. It never exceeds the terminal budget, and exact matches are
+always accepted. Long, informative patterns keep most of their tolerance in
+long reads; short or IUPAC-rich patterns, large panels and very long reads
+receive fewer interior edits. Because exact matches are always accepted, a
+splitting entry of about 12 bases or fewer can split long reads at chance
+matches; give such entries the primer or barcode role in the FASTA header, or
+use `--adapter-ends-only`. This null model is a specificity guard, not a
+calibrated false-split probability for repetitive or composition-biased
 biological reads.
 Adapter trims pass through the same tag-rewrite path as
 every other trim, so `MM`/`ML`/`MN` and the per-base tags stay in register
@@ -145,9 +163,25 @@ Insert-facing termination is checked against both the original graph and
 continuing bases in these longer windows, so the assembly window itself does
 not supply evidence for an adapter boundary.
 
+The insert-facing end of each candidate is then placed by base conservation.
+For each cut point near that end, the read base that follows an exact match of
+the 11 candidate bases before it is tallied over the supporting windows, and
+the candidate ends at the first cut point whose tally is not conserved. A
+position is conserved when one base, or a pair of bases, holds at least the
+midpoint between its share of the base composition of the windows and one: a
+technical base is read at the platform's per-base accuracy and clears it, as
+does a two-fold degenerate primer base on its pair, while an insert position
+holds each base at its composition share. Judging against the composition keeps
+the rule valid for AT- or GC-rich inserts up to the most extreme sequenced
+genomes, around 80% AT. Assembly support alone cannot place this end for a
+layer about one k-mer long: erosion at the physical read end removes the first
+bases of the layer from part of the reads, which depresses the k-mer spanning
+the whole layer toward the level of its insert continuations. The same tally
+after the complete candidate counts as direct evidence of an insert boundary.
+
 A candidate must occur in at least 1% of the usable validation windows at one
-end and in at least 20 windows. At least 80% of its supporting alignments must
-lie within 35 bases of the current boundary. A candidate whose inner segment
+end and in at least 20 windows. At least 60% of its supporting alignments must
+lie within 50 bases of the current boundary. A candidate whose inner segment
 occurs as its reverse complement at the opposite physical read end at a
 different depth is cut back to its outer part, or dropped when fewer than 11
 bases remain: sequence that appears at the far end of the molecule without the
