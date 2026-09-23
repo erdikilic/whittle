@@ -243,6 +243,18 @@ const INTERIOR_CLASS_BITS: u32 = 12;
 /// Number of read-length classes. The last class holds every longer read.
 const INTERIOR_CLASSES: usize = 20;
 
+/// Returns the read-length class of a read of `read_len` bases.
+fn interior_class(read_len: usize) -> usize {
+    let bits = usize::BITS - read_len.leading_zeros();
+    (bits.saturating_sub(INTERIOR_CLASS_BITS) as usize).min(INTERIOR_CLASSES - 1)
+}
+
+/// Interior alignment start positions, over both strands, in a read at the
+/// ceiling of read-length class `class`.
+fn interior_positions(class: usize) -> f64 {
+    2.0 * 2f64.powi(INTERIOR_CLASS_BITS as i32 + class as i32)
+}
+
 /// Returns, for each edit count up to `max_edits`, the probability under the
 /// independent uniform DNA null model that `pattern` matches at one position
 /// within that many edits. The recurrence sums alignment-path probabilities,
@@ -267,26 +279,26 @@ fn chance_cumulative(pattern: &[u8], max_edits: usize) -> Vec<f64> {
     cumulative
 }
 
-/// Returns terminal budgets, at most `caps`, under which the distinct
-/// sequences of the set together admit at most `TERMINAL_CHANCE_HITS_PER_READ`
-/// expected chance hits per read over `positions` alignment start positions.
-/// A panel of interchangeable sequences multiplies the chance of a hit at a
-/// read end by its size, which a bound per pattern does not see. Exact
-/// matches are always admitted, so only the chance hits beyond them count.
-/// The largest contributors lose one edit at a time, and sequences
-/// contributing equally lose it together, so the members of a panel keep one
-/// budget. A sequence and its reverse complement, both searched on both
-/// strands, are one sequence. Entries that take part in no search keep their
-/// caps.
+/// Returns budgets, at most `caps`, under which the distinct sequences among
+/// the entries flagged in `included` together admit at most `bound` expected
+/// chance hits per read over `positions` alignment start positions. A panel
+/// of interchangeable sequences multiplies the chance of a hit by its size,
+/// which a bound per pattern does not see. Exact matches are always
+/// admitted, so only the chance hits beyond them count. The largest
+/// contributors lose one edit at a time, and sequences contributing equally
+/// lose it together, so the members of a panel keep one budget. A sequence
+/// and its reverse complement, both searched on both strands, are one
+/// sequence. Entries not flagged keep their caps.
 fn family_budgets(
     adapters: &[Adapter],
-    searchable: &[bool],
+    included: &[bool],
     caps: &[usize],
     positions: f64,
+    bound: f64,
 ) -> Vec<usize> {
     let mut groups: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
     for (adapter_idx, adapter) in adapters.iter().enumerate() {
-        if searchable[adapter_idx] {
+        if included[adapter_idx] {
             let forward = adapter.seq.to_ascii_uppercase();
             let reverse = reverse_complement(&forward);
             groups
@@ -313,7 +325,7 @@ fn family_budgets(
     let excess = |g: usize, k: usize| chance[g][k] - chance[g][0];
     loop {
         let total: f64 = (0..members.len()).map(|g| excess(g, edits[g])).sum();
-        if total <= TERMINAL_CHANCE_HITS_PER_READ {
+        if total <= bound {
             break;
         }
         let top = (0..members.len())
@@ -371,7 +383,7 @@ impl Budget {
         let k_end = edit_budget(error_rate, len);
         let cumulative = chance_cumulative(pattern, k_end);
         let k_mid = std::array::from_fn(|class| {
-            let positions = 2.0 * 2f64.powi(INTERIOR_CLASS_BITS as i32 + class as i32);
+            let positions = interior_positions(class);
             cumulative
                 .iter()
                 .take_while(|&&probability| {
@@ -397,9 +409,7 @@ impl Budget {
 
     /// Returns the interior edit budget for a read of `read_len` bases.
     fn interior(&self, read_len: usize) -> usize {
-        let bits = usize::BITS - read_len.leading_zeros();
-        let class = (bits.saturating_sub(INTERIOR_CLASS_BITS) as usize).min(INTERIOR_CLASSES - 1);
-        self.k_mid[class]
+        self.k_mid[interior_class(read_len)]
     }
 
     /// Returns the largest interior edit budget over all read lengths.
@@ -476,11 +486,45 @@ impl CandidateIndex {
         // its `end_size + 1` positions. Each count covers both strands and
         // both ends.
         let caps: Vec<usize> = budgets.iter().map(|b| b.k_end).collect();
-        let near = family_budgets(adapters, &searchable, &caps, 4.0 * (FLANK_SLACK + 1) as f64);
-        let far = family_budgets(adapters, &searchable, &near, 4.0 * (end_size + 1) as f64);
+        let near = family_budgets(
+            adapters,
+            &searchable,
+            &caps,
+            4.0 * (FLANK_SLACK + 1) as f64,
+            TERMINAL_CHANCE_HITS_PER_READ,
+        );
+        let far = family_budgets(
+            adapters,
+            &searchable,
+            &near,
+            4.0 * (end_size + 1) as f64,
+            TERMINAL_CHANCE_HITS_PER_READ,
+        );
         for ((budget, k_end), k_far) in budgets.iter_mut().zip(near).zip(far) {
             budget.k_end = k_end;
             budget.k_far = k_far;
+        }
+        // Interior hits split only for splitting roles, which are the set the
+        // interior chance bound covers, per read-length class. Budgets do not
+        // increase with the class.
+        let splitting: Vec<bool> = adapters
+            .iter()
+            .zip(&searchable)
+            .map(|(adapter, &searchable)| searchable && adapter.role.splits())
+            .collect();
+        for class in 0..INTERIOR_CLASSES {
+            let caps: Vec<usize> = budgets.iter().map(|b| b.k_mid[class]).collect();
+            let edits = family_budgets(
+                adapters,
+                &splitting,
+                &caps,
+                interior_positions(class),
+                INTERIOR_CHANCE_HITS_PER_READ,
+            );
+            for (budget, k) in budgets.iter_mut().zip(edits) {
+                let previous = class.checked_sub(1).map_or(usize::MAX, |c| budget.k_mid[c]);
+                budget.k_mid[class] = k.min(previous);
+            }
         }
         let plain: Vec<bool> = adapters
             .iter()
@@ -2976,5 +3020,28 @@ mod segment_tests {
         assert_eq!(segments.len(), 1);
         assert!((96..=97).contains(&segments[0].0), "{segments:?}");
         assert_eq!(segments[0].1, deep.len());
+    }
+
+    /// A 48-member panel of 24-base adapters shares one interior chance
+    /// bound: its members search the interior of a long read with fewer edits
+    /// than one of them alone, and a long adapter in the same set keeps its
+    /// budget.
+    #[test]
+    fn panel_members_share_one_interior_chance_bound() {
+        let panel: Vec<Adapter> = (1..=48)
+            .map(|i| ad(&format!("p{i}"), &splitmix_dna(900 + i, 24)))
+            .collect();
+        let alone = CandidateIndex::new(&panel[..1], 0.2, 150, true);
+        let mut set = panel.clone();
+        set.push(ad(
+            "long",
+            b"AATGTACTTCGTTCAGTTACGTATTGCTGGTTTTCGCATTTATCGTGAAACGCTTTC",
+        ));
+        let index = CandidateIndex::new(&set, 0.2, 150, true);
+        for budget in &index.budgets[..48] {
+            assert!(budget.interior(30_000) < alone.budgets[0].interior(30_000));
+        }
+        let own = Budget::new(&set[48].seq, 0.2, 150);
+        assert_eq!(index.budgets[48].interior(30_000), own.interior(30_000));
     }
 }

@@ -73,6 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panel of short barcodes no longer trims read ends at chance hits deep in
   the end zone. A hit anchored at the read end, or directly behind an
   accepted hit, keeps the per-sequence budget.
+- Interior adapter matching bounds the expected chance matches per read over
+  the whole set of splitting sequences rather than per sequence, so a large
+  panel searches the interior of a read with fewer edits. Longer exact seeds
+  then leave fewer candidate windows, which makes trimming with a large
+  panel of adapters up to about 2.5 times faster.
 - Inferred sequences end at the last base their supporting reads conserve,
   judged against the base composition of the reads, so a short layer eroded
   at the physical read end no longer gains insert bases at its inner end,
