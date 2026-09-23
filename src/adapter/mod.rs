@@ -228,14 +228,12 @@ pub(crate) fn edit_budget(rate: f64, len: usize) -> usize {
 /// interior edit budget may admit under an independent uniform base model.
 const INTERIOR_CHANCE_HITS_PER_READ: f64 = 1e-4;
 
-/// Expected chance terminal matches per read and pattern, over both strands
-/// and both end zones, that a terminal edit budget may admit under the same
-/// null model. The model sums alignment paths and overstates the rate on
-/// real read ends by more than an order of magnitude, so the bound guards
-/// only against budgets no read end could support: at the default error
-/// rate it lowers the budget of 11-, 12- and 15-base patterns by one edit
-/// and leaves catalog adapters, barcodes, flanks and degenerate primers at
-/// their configured budget.
+/// Expected chance terminal matches per read, over both strands and both end
+/// zones, that terminal edit budgets may admit under the same null model. The
+/// model sums alignment paths and overstates the chance rate, so the bound is
+/// conservative. It applies to each pattern alone, which at the default error
+/// rate lowers the budget of 11-, 12- and 15-base patterns by one edit, and to
+/// the distinct sequences of the set together; see `family_budgets`.
 const TERMINAL_CHANCE_HITS_PER_READ: f64 = 0.1;
 
 /// Read-length class `c` holds reads shorter than `2^(INTERIOR_CLASS_BITS + c)`
@@ -245,6 +243,98 @@ const INTERIOR_CLASS_BITS: u32 = 12;
 /// Number of read-length classes. The last class holds every longer read.
 const INTERIOR_CLASSES: usize = 20;
 
+/// Returns, for each edit count up to `max_edits`, the probability under the
+/// independent uniform DNA null model that `pattern` matches at one position
+/// within that many edits. The recurrence sums alignment-path probabilities,
+/// including substitutions, insertions and deletions, and therefore
+/// overcounts sequences admitting multiple alignments. IUPAC ambiguity
+/// increases the probability of a zero-cost match.
+fn chance_cumulative(pattern: &[u8], max_edits: usize) -> Vec<f64> {
+    let mut previous = vec![1.0; max_edits + 1];
+    for &base in pattern {
+        let p = search::iupac_degeneracy(base).unwrap_or(4) as f64 / 4.0;
+        let mut current = vec![0.0; max_edits + 1];
+        current[0] = p * previous[0];
+        for k in 1..=max_edits {
+            current[k] = p * previous[k] + (2.0 - p) * previous[k - 1] + current[k - 1];
+        }
+        previous = current;
+    }
+    let mut cumulative = previous;
+    for k in 1..=max_edits {
+        cumulative[k] += cumulative[k - 1];
+    }
+    cumulative
+}
+
+/// Returns terminal budgets, at most `caps`, under which the distinct
+/// sequences of the set together admit at most `TERMINAL_CHANCE_HITS_PER_READ`
+/// expected chance hits per read over `positions` alignment start positions.
+/// A panel of interchangeable sequences multiplies the chance of a hit at a
+/// read end by its size, which a bound per pattern does not see. Exact
+/// matches are always admitted, so only the chance hits beyond them count.
+/// The largest contributors lose one edit at a time, and sequences
+/// contributing equally lose it together, so the members of a panel keep one
+/// budget. A sequence and its reverse complement, both searched on both
+/// strands, are one sequence. Entries that take part in no search keep their
+/// caps.
+fn family_budgets(
+    adapters: &[Adapter],
+    searchable: &[bool],
+    caps: &[usize],
+    positions: f64,
+) -> Vec<usize> {
+    let mut groups: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+    for (adapter_idx, adapter) in adapters.iter().enumerate() {
+        if searchable[adapter_idx] {
+            let forward = adapter.seq.to_ascii_uppercase();
+            let reverse = reverse_complement(&forward);
+            groups
+                .entry(forward.min(reverse))
+                .or_default()
+                .push(adapter_idx);
+        }
+    }
+    let members: Vec<Vec<usize>> = groups.into_values().collect();
+    let mut edits: Vec<usize> = members
+        .iter()
+        .map(|group| group.iter().map(|&i| caps[i]).min().unwrap_or(0))
+        .collect();
+    let chance: Vec<Vec<f64>> = members
+        .iter()
+        .zip(&edits)
+        .map(|(group, &k)| {
+            chance_cumulative(&adapters[group[0]].seq, k)
+                .into_iter()
+                .map(|probability| probability * positions)
+                .collect()
+        })
+        .collect();
+    let excess = |g: usize, k: usize| chance[g][k] - chance[g][0];
+    loop {
+        let total: f64 = (0..members.len()).map(|g| excess(g, edits[g])).sum();
+        if total <= TERMINAL_CHANCE_HITS_PER_READ {
+            break;
+        }
+        let top = (0..members.len())
+            .filter(|&g| edits[g] > 0)
+            .map(|g| chance[g][edits[g]])
+            .fold(0.0, f64::max);
+        for g in 0..members.len() {
+            if edits[g] > 0 && chance[g][edits[g]] >= top * (1.0 - 1e-9) {
+                edits[g] -= 1;
+            }
+        }
+    }
+    let mut out = caps.to_vec();
+    for (group, &k) in members.iter().zip(&edits) {
+        for &adapter_idx in group {
+            out[adapter_idx] = k;
+        }
+    }
+    out
+}
+
 /// Edit budgets of one adapter: the configured terminal tolerance bounded by
 /// the chance-match rate over the end zones of the pattern set, and an
 /// interior tolerance bounded by the chance-match rate for each read length.
@@ -252,8 +342,12 @@ const INTERIOR_CLASSES: usize = 20;
 struct Budget {
     /// Pattern length in bases.
     len: usize,
-    /// Edit budget for terminal hits.
+    /// Edit budget of the terminal search, which a hit anchored at the read
+    /// end or at an accepted hit may use; see `Keep::settle`.
     k_end: usize,
+    /// Edit budget for a terminal hit anywhere in the end zone. At most
+    /// `k_end`.
+    k_far: usize,
     /// Edit budget for interior hits, per read-length class. Budgets do not
     /// increase with the class.
     k_mid: [usize; INTERIOR_CLASSES],
@@ -275,20 +369,7 @@ impl Budget {
     fn new(pattern: &[u8], error_rate: f64, end_size: usize) -> Self {
         let len = pattern.len();
         let k_end = edit_budget(error_rate, len);
-        let mut previous = vec![1.0; k_end + 1];
-        for &base in pattern {
-            let p = search::iupac_degeneracy(base).unwrap_or(4) as f64 / 4.0;
-            let mut current = vec![0.0; k_end + 1];
-            current[0] = p * previous[0];
-            for k in 1..=k_end {
-                current[k] = p * previous[k] + (2.0 - p) * previous[k - 1] + current[k - 1];
-            }
-            previous = current;
-        }
-        let mut cumulative = previous;
-        for k in 1..=k_end {
-            cumulative[k] += cumulative[k - 1];
-        }
+        let cumulative = chance_cumulative(pattern, k_end);
         let k_mid = std::array::from_fn(|class| {
             let positions = 2.0 * 2f64.powi(INTERIOR_CLASS_BITS as i32 + class as i32);
             cumulative
@@ -306,7 +387,12 @@ impl Budget {
             .count()
             .saturating_sub(1)
             .min(k_end);
-        Self { len, k_end, k_mid }
+        Self {
+            len,
+            k_end,
+            k_far: k_end,
+            k_mid,
+        }
     }
 
     /// Returns the interior edit budget for a read of `read_len` bases.
@@ -365,7 +451,8 @@ struct TerminalBatch {
     encoded: EncodedAdapterBatch,
     /// The shared pattern length.
     len: usize,
-    /// The shared terminal edit budget.
+    /// The largest terminal edit budget of the batch; a hit above the budget
+    /// of its own entry is discarded.
     k_end: usize,
 }
 
@@ -380,10 +467,21 @@ impl CandidateIndex {
             .iter()
             .map(|adapter| adapter.seq.len() >= MIN_PATTERN_LEN)
             .collect();
-        let budgets: Vec<Budget> = adapters
+        let mut budgets: Vec<Budget> = adapters
             .iter()
             .map(|adapter| Budget::new(&adapter.seq, error_rate, end_size))
             .collect();
+        // A hit anchored at the read end or at an accepted hit starts within
+        // `FLANK_SLACK` of it; a hit anywhere in the zone may start at any of
+        // its `end_size + 1` positions. Each count covers both strands and
+        // both ends.
+        let caps: Vec<usize> = budgets.iter().map(|b| b.k_end).collect();
+        let near = family_budgets(adapters, &searchable, &caps, 4.0 * (FLANK_SLACK + 1) as f64);
+        let far = family_budgets(adapters, &searchable, &near, 4.0 * (end_size + 1) as f64);
+        for ((budget, k_end), k_far) in budgets.iter_mut().zip(near).zip(far) {
+            budget.k_end = k_end;
+            budget.k_far = k_far;
+        }
         let plain: Vec<bool> = adapters
             .iter()
             .map(|adapter| is_plain_acgt(&adapter.seq))
@@ -443,7 +541,11 @@ impl CandidateIndex {
                     singletons[adapter_idx] = false;
                 }
                 terminal_batches.push(TerminalBatch {
-                    k_end: budgets[adapter_indices[0]].k_end,
+                    k_end: adapter_indices
+                        .iter()
+                        .map(|&idx| budgets[idx].k_end)
+                        .max()
+                        .unwrap_or(0),
                     adapter_indices,
                     encoded: encode_patterns(&patterns),
                     len,
@@ -948,6 +1050,8 @@ fn terminal_windows(n: usize, end_size: usize, len: usize, k_end: usize) -> (usi
 struct Keep<'a> {
     /// The configured adapters, for roles and names.
     adapters: &'a [Adapter],
+    /// Per-adapter edit budgets, for the anchoring of terminal hits.
+    budgets: &'a [Budget],
     /// The run's error rate, which scales the budget of a partial hit.
     error_rate: f64,
     /// Window length.
@@ -964,15 +1068,35 @@ struct Keep<'a> {
     interior: Vec<(usize, usize)>,
     /// The adapters whose hits trimmed or excised, for presence detection.
     acted: Vec<usize>,
+    /// Terminal trims above the `k_far` budget of their adapter, applied by
+    /// `settle` once anchored.
+    deferred: Vec<Deferred>,
+}
+
+/// A terminal trim held until it is anchored at the read end or at an
+/// accepted hit.
+#[derive(Debug, Clone, Copy)]
+struct Deferred {
+    /// Index into the configured adapters.
+    adapter_idx: usize,
+    /// Hit start in window coordinates.
+    start: usize,
+    /// Hit end in window coordinates.
+    end: usize,
+    /// Edit cost of the hit.
+    cost: usize,
+    /// `TrimFivePrime` or `TrimThreePrime`.
+    action: HitAction,
 }
 
 impl<'a> Keep<'a> {
     /// Creates an accumulator that keeps the whole `[0, n)` window. `split`
     /// selects the classification: with it, a hit covered by both end zones
     /// may excise; without it, every hit trims an end.
-    fn new(cfg: &'a AdapterConfig, n: usize, split: bool) -> Self {
+    fn new(cfg: &'a AdapterConfig, index: &'a CandidateIndex, n: usize, split: bool) -> Self {
         Self {
             adapters: &cfg.adapters,
+            budgets: &index.budgets,
             error_rate: cfg.error_rate,
             n,
             end_size: cfg.end_size.min(n),
@@ -981,6 +1105,7 @@ impl<'a> Keep<'a> {
             hi: n,
             interior: Vec::new(),
             acted: Vec::new(),
+            deferred: Vec::new(),
         }
     }
 
@@ -1051,7 +1176,38 @@ impl<'a> Keep<'a> {
             },
             _ => return,
         };
-        trace_hit(&adapter.name, start, end, cost, Some(action));
+        let whole = hit.left_overhang + hit.right_overhang == 0;
+        let terminal = matches!(site, Site::Head | Site::Tail { .. })
+            && matches!(action, HitAction::TrimFivePrime | HitAction::TrimThreePrime);
+        if whole && terminal && cost > self.budgets[adapter_idx].k_far {
+            self.deferred.push(Deferred {
+                adapter_idx,
+                start,
+                end,
+                cost,
+                action,
+            });
+            return;
+        }
+        self.apply(adapter_idx, start, end, cost, action);
+    }
+
+    /// Applies an accepted hit to the keep boundaries or the excisions.
+    fn apply(
+        &mut self,
+        adapter_idx: usize,
+        start: usize,
+        end: usize,
+        cost: usize,
+        action: HitAction,
+    ) {
+        trace_hit(
+            &self.adapters[adapter_idx].name,
+            start,
+            end,
+            cost,
+            Some(action),
+        );
         self.acted.push(adapter_idx);
         match action {
             HitAction::TrimFivePrime => self.lo = self.lo.max(end),
@@ -1060,12 +1216,42 @@ impl<'a> Keep<'a> {
         }
     }
 
+    /// Applies each deferred trim that is anchored: a 5' hit starting within
+    /// `FLANK_SLACK` of the 5' keep boundary, or a 3' hit ending within
+    /// `FLANK_SLACK` of the 3' boundary. An applied trim moves the boundary,
+    /// which may anchor further deferred trims behind it.
+    fn settle(&mut self) {
+        loop {
+            let (lo, hi) = (self.lo, self.hi);
+            let anchored = self.deferred.iter().position(|d| match d.action {
+                HitAction::TrimFivePrime => d.start <= lo + FLANK_SLACK && d.end > lo,
+                HitAction::TrimThreePrime => d.end + FLANK_SLACK >= hi && d.start < hi,
+                HitAction::Excise => false,
+            });
+            let Some(i) = anchored else {
+                return;
+            };
+            let d = self.deferred.swap_remove(i);
+            self.apply(d.adapter_idx, d.start, d.end, d.cost, d.action);
+        }
+    }
+
     /// Returns the keep boundaries and the excisions clipped to them, merged:
     /// two excisions overlapping, touching, or separated by at most
     /// `FLANK_SLACK` bases or fewer than `min_piece` bases become one, since
     /// the bases between them are junction residue or a piece the length
     /// filter would discard.
-    fn into_cuts(self, min_piece: usize) -> (usize, usize, Vec<(usize, usize)>) {
+    fn into_cuts(mut self, min_piece: usize) -> (usize, usize, Vec<(usize, usize)>) {
+        self.settle();
+        for d in &self.deferred {
+            trace_hit(
+                &self.adapters[d.adapter_idx].name,
+                d.start,
+                d.end,
+                d.cost,
+                None,
+            );
+        }
         let Keep {
             lo, hi, interior, ..
         } = self;
@@ -1193,9 +1379,13 @@ fn accept_batch_hits(
     keep: &mut Keep<'_>,
 ) {
     let accept = |pattern_idx: usize, start: usize, end: usize, cost: usize| {
+        let adapter_idx = batch.adapter_indices[pattern_idx];
+        if cost > keep.budgets[adapter_idx].k_end {
+            return;
+        }
         keep.accept(
             site,
-            batch.adapter_indices[pattern_idx],
+            adapter_idx,
             Hit {
                 start: offset + start,
                 end: offset + end,
@@ -1424,6 +1614,7 @@ fn search_terminal(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: 
         search_batched(ctx, span, engine.ambiguous, keep);
     }
     search_singletons(ctx, span, engine, keep);
+    keep.settle();
     let (ws, we) = span;
     if keep.lo != 0 && keep.hi != we - ws {
         return;
@@ -1438,6 +1629,7 @@ fn search_terminal(ctx: Context<'_>, span: Span, engine: &mut Engine<'_>, keep: 
     );
     search_partial(ctx, span, engine, keep);
     search_residue(ctx, span, engine, keep);
+    keep.settle();
 }
 
 /// Computes the adapter keep segments for `window`: terminal hits within
@@ -1540,7 +1732,7 @@ fn segments_with(
             }
         }
     };
-    let mut keep = Keep::new(cfg, n, cfg.split);
+    let mut keep = Keep::new(cfg, ctx.index, n, cfg.split);
     search_terminal(ctx, (0, n), engine, &mut keep);
     if cfg.split {
         search_interior(ctx, engine, &mut keep);
@@ -1565,7 +1757,7 @@ fn segments_with(
         if s >= e {
             return;
         }
-        let mut keep = Keep::new(cfg, e - s, false);
+        let mut keep = Keep::new(cfg, ctx.index, e - s, false);
         search_terminal(ctx, (s, e), engine, &mut keep);
         tally(&keep);
         if keep.lo < keep.hi {
@@ -2656,5 +2848,133 @@ mod segment_tests {
         w.extend_from_slice(a3);
         let c = cfg_with(vec![ad("a5", a5), ad("a3", a3)], 0.2, 150, true);
         assert_eq!(adapter_segments(&w, &c), vec![(20, 60)]);
+    }
+
+    /// Returns a panel of `size` random barcodes of `len` bases.
+    fn barcode_panel(size: u64, len: usize) -> Vec<Adapter> {
+        (1..=size)
+            .map(|i| entry(&format!("bc{i}"), &splitmix_dna(i, len), Role::Barcode))
+            .collect()
+    }
+
+    /// Returns `seq` with a different base at each of `positions`.
+    fn substituted(seq: &[u8], positions: &[usize]) -> Vec<u8> {
+        let mut out = seq.to_vec();
+        for &i in positions {
+            out[i] = if out[i] == b'A' { b'C' } else { b'A' };
+        }
+        out
+    }
+
+    /// A 24-member panel of 16-base barcodes shares one chance bound: a hit
+    /// deep in the end zone is held to two edits, while a hit anchored at
+    /// the read end keeps the three edits a lone barcode of that length has.
+    #[test]
+    fn panel_members_share_one_terminal_chance_bound() {
+        let panel = barcode_panel(24, 16);
+        let index = CandidateIndex::new(&panel, 0.2, 150, true);
+        for budget in &index.budgets {
+            assert_eq!(budget.k_end, 3);
+            assert_eq!(budget.k_far, 2);
+        }
+        let lone = CandidateIndex::new(&panel[..1], 0.2, 150, true);
+        assert_eq!(lone.budgets[0].k_end, 3);
+        assert_eq!(lone.budgets[0].k_far, 3);
+    }
+
+    /// Identical entries, and entries that are reverse complements of each
+    /// other, are one sequence to the chance bound.
+    #[test]
+    fn duplicate_entries_count_once_toward_the_chance_bound() {
+        let panel = barcode_panel(24, 16);
+        let mut doubled = panel.clone();
+        doubled.extend(panel.iter().map(|a| {
+            entry(
+                &format!("{}_rc", a.name),
+                &reverse_complement(&a.seq),
+                a.role,
+            )
+        }));
+        let single = CandidateIndex::new(&panel, 0.2, 150, true);
+        let double = CandidateIndex::new(&doubled, 0.2, 150, true);
+        for (a, b) in single.budgets.iter().zip(&double.budgets) {
+            assert_eq!((a.k_end, a.k_far), (b.k_end, b.k_far));
+        }
+    }
+
+    /// The whole catalog keeps the per-pattern terminal budget of every
+    /// adapter and primer at the read end, and deep in the end zone for every
+    /// entry of 24 bases or more.
+    #[test]
+    fn catalog_budgets_keep_their_per_pattern_tolerance() {
+        let catalog = super::preset::preset(super::preset::Kit::ALL);
+        let index = CandidateIndex::new(&catalog, 0.2, 150, true);
+        for (adapter, budget) in catalog.iter().zip(&index.budgets) {
+            let own = Budget::new(&adapter.seq, 0.2, 150);
+            assert_eq!(budget.k_end, own.k_end, "{}", adapter.name);
+            if adapter.seq.len() >= 24 {
+                assert_eq!(budget.k_far, own.k_end, "{}", adapter.name);
+            }
+        }
+    }
+
+    /// A panel barcode with three substitutions trims at the read end, and
+    /// directly behind an adapter hit, but not 80 bases into the read, where
+    /// the panel admits two edits.
+    #[test]
+    fn marginal_panel_hit_trims_only_when_anchored() {
+        let panel = barcode_panel(24, 16);
+        let adapter = b"AATGTACTTCGTTCAGTTACGTATTGCT";
+        let mut set = panel.clone();
+        set.push(ad("lsk", adapter));
+        let c = cfg_with(set, 0.2, 150, true);
+        let insert = splitmix_dna(9001, 2000);
+        let marginal = substituted(&panel[4].seq, &[3, 8, 13]);
+        let n = insert.len() + marginal.len();
+
+        assert_eq!(adapter_segments(&insert, &c), vec![(0, insert.len())]);
+
+        let mut at_end = marginal.clone();
+        at_end.extend_from_slice(&insert);
+        assert_eq!(adapter_segments(&at_end, &c), vec![(16, n)]);
+
+        let mut behind_adapter = adapter.to_vec();
+        behind_adapter.extend_from_slice(&marginal);
+        behind_adapter.extend_from_slice(&insert);
+        assert_eq!(
+            adapter_segments(&behind_adapter, &c),
+            vec![(44, n + adapter.len())]
+        );
+
+        let mut deep = insert[..80].to_vec();
+        deep.extend_from_slice(&marginal);
+        deep.extend_from_slice(&insert[80..]);
+        assert_eq!(adapter_segments(&deep, &c), vec![(0, n)]);
+
+        let mut tail = insert.clone();
+        tail.extend_from_slice(&reverse_complement(&marginal));
+        assert_eq!(adapter_segments(&tail, &c), vec![(0, insert.len())]);
+
+        let mut tail_deep = insert[..insert.len() - 80].to_vec();
+        tail_deep.extend_from_slice(&reverse_complement(&marginal));
+        tail_deep.extend_from_slice(&insert[insert.len() - 80..]);
+        assert_eq!(adapter_segments(&tail_deep, &c), vec![(0, n)]);
+    }
+
+    /// A panel barcode within two edits trims wherever it lies in the end zone.
+    /// The alignment may absorb one insert base at equal cost.
+    #[test]
+    fn confident_panel_hit_trims_anywhere_in_the_end_zone() {
+        let panel = barcode_panel(24, 16);
+        let c = cfg_with(panel.clone(), 0.2, 150, true);
+        let insert = splitmix_dna(9001, 2000);
+        let confident = substituted(&panel[4].seq, &[3, 13]);
+        let mut deep = insert[..80].to_vec();
+        deep.extend_from_slice(&confident);
+        deep.extend_from_slice(&insert[80..]);
+        let segments = adapter_segments(&deep, &c);
+        assert_eq!(segments.len(), 1);
+        assert!((96..=97).contains(&segments[0].0), "{segments:?}");
+        assert_eq!(segments[0].1, deep.len());
     }
 }
