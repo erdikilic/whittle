@@ -1827,7 +1827,10 @@ fn with_variable_layer(
 
 /// Clusters the sequence between the boundary and the best `anchor` hit of
 /// each window into supported families. Each family is a candidate with
-/// its member count as support and weight.
+/// its member count as support and weight. `windows` is every window of the
+/// layer rather than the `RECOUNT_WINDOWS` validation sample: a member held
+/// by `VARIABLE_MEMBER_SUPPORT` of the reads reaches the `MIN_SUPPORT_WINDOWS`
+/// floor only in the complete sample.
 fn variable_layer(
     searcher: &mut AmbiguousSearcher,
     anchor: &[u8],
