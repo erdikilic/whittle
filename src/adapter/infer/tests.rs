@@ -160,7 +160,7 @@ fn variable_conserved_inserts_extend_beyond_assembly_windows() {
             read.extend_from_slice(suffix);
             let mutations = random_bases(54371 + i as u64, read.len() * 5);
             let mut mutated = Vec::new();
-            for (&base, event) in read.iter().zip(mutations.chunks_exact(5)) {
+            for (&base, event) in read.iter().zip(mutations.as_chunks::<5>().0) {
                 match encode_kmer(&event[..4]).unwrap() {
                     0..=4 => mutated.push(event[4]),
                     5..=6 => {},

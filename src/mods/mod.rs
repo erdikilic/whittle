@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn n_counts_every_base() {
-        for b in [b'A', b'C', b'G', b'T', b'N'] {
+        for b in *b"ACGTN" {
             assert!(counts(b, b'N'), "N must count {}", b as char);
         }
         assert!(counts(b'C', b'C'));

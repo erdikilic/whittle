@@ -186,10 +186,10 @@ pub(super) fn slice_rle_coverage(
     }
     let mut out: Vec<i64> = Vec::new();
     let mut pos = 0usize;
-    for run in runs.chunks_exact(2) {
+    for &[len, coverage] in runs.as_chunks::<2>().0 {
         // `rle_runs_len` has checked that every length is a non-negative
         // `usize` and that the sum fits.
-        let (len, coverage) = (run[0] as usize, run[1]);
+        let len = len as usize;
         let run_start = pos;
         pos += len;
         let kept = run_start.max(start)..pos.min(end);

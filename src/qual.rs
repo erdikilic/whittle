@@ -49,14 +49,14 @@ pub fn mean_prob_q(phred: &[u8]) -> f64 {
 /// interleave, beyond the length of any record.
 fn histogram_prob_sum(phred: &[u8]) -> f64 {
     let mut hist = [[0u32; 256]; 4];
-    let mut chunks = phred.chunks_exact(4);
-    for chunk in &mut chunks {
-        hist[0][usize::from(chunk[0])] += 1;
-        hist[1][usize::from(chunk[1])] += 1;
-        hist[2][usize::from(chunk[2])] += 1;
-        hist[3][usize::from(chunk[3])] += 1;
+    let (chunks, remainder) = phred.as_chunks::<4>();
+    for &[q0, q1, q2, q3] in chunks {
+        hist[0][usize::from(q0)] += 1;
+        hist[1][usize::from(q1)] += 1;
+        hist[2][usize::from(q2)] += 1;
+        hist[3][usize::from(q3)] += 1;
     }
-    for &q in chunks.remainder() {
+    for &q in remainder {
         hist[0][usize::from(q)] += 1;
     }
     let [h0, h1, h2, h3] = &hist;

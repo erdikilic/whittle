@@ -123,9 +123,11 @@ pub(super) fn normalize_base(b: u8) -> u8 {
 /// scan vectorize; it runs over every base of every read.
 pub(super) fn is_upper_acgt(seq: &[u8]) -> bool {
     let upper_acgt = |b: u8| (b == b'A') | (b == b'C') | (b == b'G') | (b == b'T');
-    let mut chunks = seq.chunks_exact(32);
-    let body = chunks.all(|chunk| chunk.iter().fold(true, |ok, &b| ok & upper_acgt(b)));
-    body && chunks.remainder().iter().all(|&b| upper_acgt(b))
+    let (chunks, remainder) = seq.as_chunks::<32>();
+    let body = chunks
+        .iter()
+        .all(|chunk| chunk.iter().fold(true, |ok, &b| ok & upper_acgt(b)));
+    body && remainder.iter().all(|&b| upper_acgt(b))
 }
 
 /// A normalized read and its reversal, borrowed from per-thread buffers so

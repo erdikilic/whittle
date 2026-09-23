@@ -2,6 +2,6 @@
 # An exact stable pin so contributors and CI build identically. A pin bump goes
 # in its own PR, since it brings new clippy lints. The MSRV is `rust-version` in
 # Cargo.toml (1.91), checked by the `msrv` CI job.
-channel = "1.96.0"
+channel = "1.98.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]

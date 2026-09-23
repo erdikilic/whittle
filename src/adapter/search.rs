@@ -325,7 +325,7 @@ mod tests {
             assert_eq!(iupac_bases(code), Some(expected), "Code {}", code as char);
             assert_eq!(iupac_degeneracy(code), Some(expected.len() as u8));
         }
-        for code in [b'U', b'X', b'.', b'-', b'0'] {
+        for code in *b"UX.-0" {
             assert_eq!(
                 iupac_bases(code),
                 None,

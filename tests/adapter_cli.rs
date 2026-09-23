@@ -1373,7 +1373,7 @@ fn ambiguity_codes_in_reads_do_not_abort_adapter_trimming() {
     // 5' end where terminal search looks, then a random insert.
     let adapter = b"CCTGTACTTCGTTCAGTTACGTATTGC";
     let mut fq = String::new();
-    for (i, code) in [b'N', b'Y', b'R', b'H'].into_iter().enumerate() {
+    for (i, code) in b"NYRH".iter().copied().enumerate() {
         let mut a = adapter.to_vec();
         a[3] = code;
         let body: String = (0..300)
