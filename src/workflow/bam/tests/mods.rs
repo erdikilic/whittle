@@ -401,9 +401,10 @@ fn raw_full_window_removes_malformed_block_and_adds_missing_mn() {
         &counters,
     )
     .unwrap();
-    let Some(BamOutputRecord::Decoded(rec)) = out else {
+    let Some(BamOutputRecord::Built(bytes)) = out else {
         panic!("A malformed block forces a rebuild");
     };
+    let rec = decode_built(&bytes);
     for t in MOD_TAGS {
         assert!(rec.data().get(&t).is_none(), "{t:?} must be removed");
     }
@@ -412,9 +413,10 @@ fn raw_full_window_removes_malformed_block_and_adds_missing_mn() {
 
     let missing = ubam_with_mods(b"CCCA", vec![40; 4], b"C+m,0,0,0;", vec![5, 6, 7]);
     let out = process_raw_full_window(raw_record(&missing), &cfg, &counters).unwrap();
-    let Some(BamOutputRecord::Decoded(rec)) = out else {
+    let Some(BamOutputRecord::Built(bytes)) = out else {
         panic!("A missing MN forces a rebuild");
     };
+    let rec = decode_built(&bytes);
     assert_eq!(
         rec.data().get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH),
         Some(&Value::Int32(4))

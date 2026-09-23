@@ -7,9 +7,7 @@ use std::path::Path;
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::JoinHandle;
 
-use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::data::field::Tag;
-use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::{self as sam};
 
 use crate::filter::DropReason;
@@ -47,12 +45,6 @@ impl Reason {
     }
 }
 
-/// Sets the reason tag on a rejected BAM record.
-pub(crate) fn tag_record(rec: &mut RecordBuf, reason: Reason) {
-    rec.data_mut()
-        .insert(REASON_TAG, Value::String(reason.label().into()));
-}
-
 /// Appends the reason tag as a tagged FASTQ header field.
 pub(crate) fn push_fastq_tag(out: &mut Vec<u8>, reason: Reason) {
     out.extend_from_slice(b"\twr:Z:");
@@ -61,8 +53,9 @@ pub(crate) fn push_fastq_tag(out: &mut Vec<u8>, reason: Reason) {
 
 /// One rejected record, rendered for the output format family.
 pub(crate) enum RejectItem {
-    /// A BAM record carrying the reason tag.
-    Bam(RecordBuf),
+    /// An encoded BAM record carrying the reason tag, without its
+    /// `block_size` prefix.
+    Bam(Vec<u8>),
     /// A complete FASTQ record, reason tag included.
     Fastq(Vec<u8>),
     /// The last item; the writer finishes its file.
@@ -110,7 +103,7 @@ impl RejectWriter {
                     .spawn(move || {
                         for item in rx.iter() {
                             match item {
-                                RejectItem::Bam(rec) => sink.write_record(&header, &rec)?,
+                                RejectItem::Bam(rec) => sink.write_record_bytes(&header, &rec)?,
                                 RejectItem::Fastq(_) => {
                                     anyhow::bail!("a FASTQ record reached the BAM rejected output")
                                 },
@@ -195,13 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn tags_name_the_reason_in_both_families() {
-        let mut rec = RecordBuf::default();
-        tag_record(&mut rec, Reason::Dropped(DropReason::LowQuality));
-        assert_eq!(
-            rec.data().get(&REASON_TAG),
-            Some(&Value::String(b"low_quality".as_slice().into()))
-        );
+    fn fastq_tag_names_the_reason() {
         let mut out = b"@r1".to_vec();
         push_fastq_tag(&mut out, Reason::TagFilter);
         assert_eq!(out, b"@r1\twr:Z:tag_filter");

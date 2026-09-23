@@ -23,6 +23,7 @@ use crate::mods::reconstruct::IndexedMods;
 use crate::{mods, trim};
 
 mod barcode;
+mod build;
 mod modblock;
 mod naming;
 mod raw;
@@ -31,6 +32,7 @@ mod signal;
 mod tags;
 mod to_fastq;
 pub(crate) use barcode::*;
+use build::*;
 pub(crate) use modblock::*;
 pub(crate) use naming::*;
 use raw::*;
@@ -45,11 +47,15 @@ pub(crate) use to_fastq::*;
 /// `signal_tag_updates`, not the per-base pass.
 pub(crate) use crate::config::SIGNAL_TAGS;
 
-/// Renders a raw record rejected by the tag filter for BAM output.
+/// Renders a raw record rejected by the tag filter for BAM output: the whole
+/// record with the reason tag.
 pub(crate) fn tag_filtered_bam(record: &bam::Record) -> anyhow::Result<RejectItem> {
-    let mut rec = decode_raw_record(record)?;
-    reject::tag_record(&mut rec, Reason::TagFilter);
-    Ok(RejectItem::Bam(rec))
+    let keep = TagRemoval::default();
+    let edit = RecordEdit {
+        reason: Some(Reason::TagFilter),
+        ..RecordEdit::unchanged(record.sequence().len(), &keep)
+    };
+    Ok(RejectItem::Bam(build_record(record, edit)?))
 }
 
 /// Renders a raw record rejected by the tag filter for FASTQ output: the whole
@@ -90,22 +96,24 @@ fn run_bam_seq(
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
-    for rec in records {
-        let rec = decode_raw_record(&rec?)?;
+    for raw in records {
+        let raw = raw?;
+        let rec = decode_raw_record(&raw)?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
             .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
-        render_bam_read(header, &rec, cfg, counters, |out| {
-            sink.write_record(header, out.as_ref().unwrap_or(&rec))
+        render_bam_read(header, &raw, &rec, cfg, counters, |out| match out {
+            Some(bytes) => sink.write_record_bytes(header, &bytes),
+            None => sink.write_raw_record(header, &raw),
         })?;
     }
     Ok(counters.snapshot())
 }
 
 /// Runs `workflow::run_parallel` for BAM input: decodes each raw record on the
-/// pool and hands the decoded record to `render`, which appends output items
-/// to the batch buffer. The per-segment filter and counters are updated inside
+/// pool and hands the raw record and its decoded form to `render`, which
+/// appends output items to the batch buffer. The per-segment filter and counters are updated inside
 /// `render` by `process_read_segments`.
 fn run_bam_parallel<T, P, S, Render, Pack, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
@@ -120,7 +128,7 @@ where
     T: Send,
     P: Send,
     S: Send,
-    Render: Fn(&bam::Record, &RecordBuf, &Config, &mut Vec<T>) -> anyhow::Result<()> + Sync,
+    Render: Fn(bam::Record, &RecordBuf, &Config, &mut Vec<T>) -> anyhow::Result<()> + Sync,
     Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
     WriteOne: Fn(&mut S, &P) -> std::io::Result<()> + Send,
 {
@@ -130,7 +138,10 @@ where
         |record: &bam::Record| record.sequence().len(),
         cfg,
         sink,
-        |rec, cfg, out| render(&rec, &decode_raw_record(&rec)?, cfg, out),
+        |rec, cfg, out| {
+            let decoded = decode_raw_record(&rec)?;
+            render(rec, &decoded, cfg, out)
+        },
         pack,
         write_one,
         counters,
@@ -143,12 +154,13 @@ fn pack_bam_blocks(
     level: u8,
     records: Vec<BamOutputRecord>,
 ) -> std::io::Result<Vec<u8>> {
-    use noodles_sam::alignment::io::Write as _;
     let mut w = bam::io::Writer::from(Vec::new());
     for rec in &records {
         match rec {
             BamOutputRecord::Raw(record) => w.write_record(header, record)?,
-            BamOutputRecord::Decoded(record) => w.write_alignment_record(header, record)?,
+            BamOutputRecord::Built(bytes) => {
+                crate::io::bam::write_record_bytes(w.get_mut(), header, bytes)?
+            },
         }
     }
     let mut blocks = Vec::new();
@@ -206,15 +218,21 @@ pub(crate) fn run_bam(
         cfg,
         sink,
         // Render: the survivors of one record. An untouched record is
-        // written from its raw input without re-encoding.
+        // written from its raw input without re-encoding; it is the read's
+        // only window, so the record is moved in once rendering ends.
         |raw, rec, cfg, items| {
-            render_bam_read(header, rec, cfg, counters, |out| {
-                items.push(match out {
-                    Some(out) => BamOutputRecord::Decoded(out),
-                    None => BamOutputRecord::Raw(raw.clone()),
-                });
+            let mut unchanged = false;
+            render_bam_read(header, &raw, rec, cfg, counters, |out| {
+                match out {
+                    Some(bytes) => items.push(BamOutputRecord::Built(bytes)),
+                    None => unchanged = true,
+                }
                 Ok(())
-            })
+            })?;
+            if unchanged {
+                items.push(BamOutputRecord::Raw(raw));
+            }
+            Ok(())
         },
         // Pack: encode and compress the batch on the pool.
         |records| pack_bam_blocks(header, level, records),

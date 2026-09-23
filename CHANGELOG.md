@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the budget instead of adding them to the render pool.
 - BGZF blocks are compressed with one libdeflate compressor per thread,
   reused across blocks, on every compressed output path.
+- Trimmed BAM records are assembled from the input record's bytes: the
+  sequence window, qualities and per-base arrays are sliced and only the
+  rewritten tags are re-encoded. A single-threaded run writes an unchanged
+  record as its input bytes, as a multithreaded run does.
 - Terminal edit budgets are bounded by a chance-match null model that
   lowers the budget of the shortest patterns by one edit; catalog adapters,
   barcodes, flanks and primers keep their configured budget.

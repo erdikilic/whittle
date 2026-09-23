@@ -8,6 +8,7 @@ use super::*;
 use crate::config::FastqTags;
 use crate::trim::{QualityOp, TrimPlan};
 
+mod build;
 mod drivers;
 mod mods;
 mod naming;
@@ -17,7 +18,7 @@ mod to_fastq;
 
 /// Builds one output record for interval `[start, end)`, segment `idx` of
 /// `total`, with the modification block classified from `src` and no tag
-/// removal.
+/// removal: the record is encoded, rebuilt from its raw bytes and decoded.
 pub(super) fn reconstruct_record(
     src: &RecordBuf,
     start: usize,
@@ -34,18 +35,22 @@ pub(super) fn reconstruct_record(
         idx,
         total,
     };
-    reconstruct_window_record(
-        src,
-        window,
-        mod_block,
-        None,
-        update_moves
-            .then(|| MoveIndex::new(src, false))
-            .flatten()
-            .as_ref(),
-        &TagRemoval::default(),
-    )
-    .unwrap_or_else(|| src.clone())
+    let keep = TagRemoval::default();
+    let moves = update_moves.then(|| MoveIndex::new(src, false)).flatten();
+    match window_edit(src, window, mod_block, None, moves.as_ref(), &keep) {
+        Some(edit) => decode_built(&build_record(&raw_record(src), edit).unwrap()),
+        None => src.clone(),
+    }
+}
+
+/// Decodes a record `build_record` produced.
+pub(super) fn decode_built(bytes: &[u8]) -> RecordBuf {
+    let mut framed = u32::try_from(bytes.len()).unwrap().to_le_bytes().to_vec();
+    framed.extend_from_slice(bytes);
+    let mut reader = bam::io::Reader::from(framed.as_slice());
+    let mut raw = bam::Record::default();
+    assert_ne!(reader.read_record(&mut raw).unwrap(), 0);
+    decode_raw_record(&raw).unwrap()
 }
 
 fn ubam_with_mods(seq: &[u8], quals: Vec<u8>, mm: &[u8], ml: Vec<u8>) -> RecordBuf {

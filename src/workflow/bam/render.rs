@@ -48,27 +48,28 @@ pub(crate) struct Window {
     pub total: usize,
 }
 
-/// Builds one output uBAM record for `window`: SEQ/QUAL sliced, `MM`/`ML`/`MN`
-/// rebuilt, per-base kinetics sliced, stale signal-space tags rewritten or
-/// dropped, and the name updated for splits and PacBio interval crops. The record
-/// is assembled field by field: aux tags are copied in source order with the
-/// rewritten ones replaced in place, removed ones skipped and added ones
-/// appended. A `Malformed` block is removed. An untrimmed, unsplit record with
-/// an `Absent` or `Consistent` block and nothing to remove is returned as
-/// `None`: its output is its input.
+/// Computes the edit that builds output record `window` of `src`: SEQ/QUAL
+/// cut to the window, `MM`/`ML`/`MN` rebuilt, `sa` coverage runs re-encoded,
+/// stale signal-space tags rewritten or dropped, and the name updated for
+/// splits and PacBio interval crops. `build_record` applies it to the raw
+/// record: aux tags are copied in source order with the rewritten ones
+/// replaced in place, per-base arrays cut to the window, removed ones skipped
+/// and added ones appended. A `Malformed` block is removed. An untrimmed,
+/// unsplit record with an `Absent` or `Consistent` block and nothing to remove
+/// yields `None`: its output is its input.
 ///
 /// `remove` names the tags `--remove-tag` drops. Removal
 /// is applied last, to the rewritten tag set, so a removed tag whittle
 /// maintains (`MM`, the move table, a per-base array) is absent from the
 /// output rather than left stale.
-pub(super) fn reconstruct_window_record(
+pub(super) fn window_edit<'a>(
     src: &RecordBuf,
     window: Window,
     mod_block: ModBlock,
     indexed: Option<&IndexedMods>,
     moves: Option<&MoveIndex<'_>>,
-    remove: &TagRemoval,
-) -> Option<RecordBuf> {
+    remove: &'a TagRemoval,
+) -> Option<RecordEdit<'a>> {
     let Window {
         start, end, total, ..
     } = window;
@@ -86,28 +87,15 @@ pub(super) fn reconstruct_window_record(
     }
 
     let platform = platform(src);
-    let mut out = RecordBuf::default();
-    *out.name_mut() = if trimmed || split {
+    let name = (trimmed || split).then(|| {
         let name: &[u8] = src.name().map(AsRef::as_ref).unwrap_or_default();
         let coords = query_span(src).map(|(qs0, _)| window_coords(qs0, start, end));
-        Some(segment_name(platform, name, window, coords).into())
-    } else {
-        src.name().map(Into::into)
-    };
-    *out.flags_mut() = src.flags();
-    *out.reference_sequence_id_mut() = src.reference_sequence_id();
-    *out.alignment_start_mut() = src.alignment_start();
-    *out.mapping_quality_mut() = src.mapping_quality();
-    *out.cigar_mut() = src.cigar().clone();
-    *out.mate_reference_sequence_id_mut() = src.mate_reference_sequence_id();
-    *out.mate_alignment_start_mut() = src.mate_alignment_start();
-    *out.template_length_mut() = src.template_length();
-    *out.sequence_mut() = seq[start..end].to_vec().into();
-    *out.quality_scores_mut() = qual[start..end].to_vec().into();
+        segment_name(platform, name, window, coords)
+    });
 
     // Tags with dedicated handling: `Some` replaces the source value in place,
     // or is appended when the source lacks the tag; `None` removes it.
-    let mut updates: Vec<(Tag, Option<Value>)> = Vec::new();
+    let mut updates: TagUpdates = Vec::new();
     match mod_block {
         ModBlock::Absent => {},
         ModBlock::Malformed => updates.extend(MOD_TAGS.map(|t| (t, None))),
@@ -127,38 +115,24 @@ pub(super) fn reconstruct_window_record(
         },
     }
     updates.extend(window_tag_updates(src, qual, window, platform, moves));
-    // A removed tag is dropped from the rewrite list as well, so neither the
-    // copy loop below nor the append loop after it can put it back.
-    if !remove.is_empty() {
-        updates.retain(|(t, _)| !remove.contains(&<[u8; 2]>::from(*t)));
+    // The `sa` coverage runs are re-encoded for the window; runs that do not
+    // cover the read leave the tag unchanged.
+    let sa = Tag::new(RLE_COVERAGE_TAG[0], RLE_COVERAGE_TAG[1]);
+    if trimmed
+        && let Some(value) = src.data().get(&sa)
+        && let Some(sliced) = windowed_value(RLE_COVERAGE_TAG, value, orig_len, start, end)
+    {
+        updates.push((sa, Some(sliced)));
     }
 
-    let data = out.data_mut();
-    for (tag, value) in src.data().iter() {
-        if remove.contains(&<[u8; 2]>::from(tag)) {
-            continue;
-        }
-        if let Some(i) = updates.iter().position(|(t, _)| *t == tag) {
-            if let (_, Some(v)) = updates.remove(i) {
-                data.insert(tag, v);
-            }
-            continue;
-        }
-        let t = <[u8; 2]>::from(tag);
-        let sliced = if trimmed && !has_dedicated_rule(t) {
-            windowed_value(t, value, orig_len, start, end)
-        } else {
-            None
-        };
-        data.insert(tag, sliced.unwrap_or_else(|| value.clone()));
-    }
-    for (tag, value) in updates {
-        if let Some(v) = value {
-            data.insert(tag, v);
-        }
-    }
-
-    Some(out)
+    Some(RecordEdit {
+        start,
+        end,
+        name,
+        updates,
+        remove,
+        reason: None,
+    })
 }
 
 /// The per-read state the decoded BAM workflows share.
@@ -320,17 +294,18 @@ pub(super) fn render_windows(
     Ok(())
 }
 
-/// Renders one decoded record for BAM output: every surviving window is
-/// rebuilt into an output record and handed to `emit`. Shared by the
-/// sequential and parallel drivers.
-/// `emit` receives `None` for a window whose output record is the input
-/// record.
+/// Renders one record for BAM output: every surviving window is built from
+/// the raw record `raw` with the edit its decoded form `rec` determines and
+/// handed to `emit`, and every rejected window is sent to the rejected output.
+/// Shared by the sequential and parallel drivers. `emit` receives `None` for
+/// a window whose output record is the input record.
 pub(super) fn render_bam_read(
     header: &sam::Header,
+    raw: &bam::Record,
     rec: &RecordBuf,
     cfg: &Config,
     counters: &Counters,
-    mut emit: impl FnMut(Option<RecordBuf>) -> io::Result<()>,
+    mut emit: impl FnMut(Option<Vec<u8>>) -> io::Result<()>,
 ) -> anyhow::Result<()> {
     let direction = if cfg.update_moves {
         signal_reversed(header, rec)
@@ -359,14 +334,15 @@ pub(super) fn render_bam_read(
         } else {
             None
         };
-        let out =
-            reconstruct_window_record(rec, window, mod_block, indexed, moves, &cfg.remove_tags);
-        match reason {
-            None => Ok(emit(out)?),
-            Some(reason) => {
-                let mut rejected = out.unwrap_or_else(|| rec.clone());
-                reject::tag_record(&mut rejected, reason);
-                counters.reject(RejectItem::Bam(rejected))
+        let edit = window_edit(rec, window, mod_block, indexed, moves, &cfg.remove_tags);
+        match (edit, reason) {
+            (None, None) => Ok(emit(None)?),
+            (Some(edit), None) => Ok(emit(Some(build_record(raw, edit)?))?),
+            (edit, Some(reason)) => {
+                let mut edit =
+                    edit.unwrap_or_else(|| RecordEdit::unchanged(seq.len(), &cfg.remove_tags));
+                edit.reason = Some(reason);
+                counters.reject(RejectItem::Bam(build_record(raw, edit)?))
             },
         }
     })

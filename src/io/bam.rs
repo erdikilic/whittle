@@ -222,11 +222,42 @@ pub fn encode_blocks<'a>(
     Ok(blocks)
 }
 
+/// Writes one encoded BAM record, given without its `block_size` prefix, to
+/// `dst` under `header`: the prefix, then the record bytes. A reference
+/// sequence ID or mate reference sequence ID that names no `@SQ` entry of
+/// `header` is refused, as the noodles encoder refuses it.
+pub(crate) fn write_record_bytes(
+    dst: &mut impl Write,
+    header: &sam::Header,
+    record: &[u8],
+) -> io::Result<()> {
+    const REFERENCE_ID: usize = 0;
+    const MATE_REFERENCE_ID: usize = 20;
+    let references = header.reference_sequences().len();
+    for at in [REFERENCE_ID, MATE_REFERENCE_ID] {
+        let id = record
+            .get(at..at + 4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "truncated BAM record"))?;
+        if id != -1 && usize::try_from(id).is_ok_and(|id| id >= references) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("reference sequence ID {id} has no @SQ entry in the header"),
+            ));
+        }
+    }
+    let block_size =
+        u32::try_from(record.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    dst.write_all(&block_size.to_le_bytes())?;
+    dst.write_all(record)
+}
+
 impl BamSink {
-    /// Writes one decoded record under `header`; `Single` only.
-    pub fn write_record(&mut self, header: &sam::Header, rec: &RecordBuf) -> io::Result<()> {
+    /// Writes one encoded record under `header` (`write_record_bytes`);
+    /// `Single` only.
+    pub fn write_record_bytes(&mut self, header: &sam::Header, record: &[u8]) -> io::Result<()> {
         match self {
-            BamSink::Single(w) => w.write_alignment_record(header, rec),
+            BamSink::Single(w) => write_record_bytes(w.get_mut(), header, record),
             BamSink::Blocks { .. } => Err(io::Error::other(
                 "a block sink takes compressed blocks, not records",
             )),

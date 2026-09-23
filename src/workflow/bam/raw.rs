@@ -3,12 +3,12 @@
 
 use super::*;
 
-/// A record ready to write: the untouched raw input or a rebuilt decoded record.
+/// A record ready to write: the untouched raw input or a rebuilt record.
 pub(super) enum BamOutputRecord {
     /// The raw input record, written without decoding.
     Raw(bam::Record),
-    /// A rebuilt record.
-    Decoded(RecordBuf),
+    /// A rebuilt record's bytes, without the `block_size` prefix.
+    Built(Vec<u8>),
 }
 
 pub(super) fn raw_array_len(
@@ -154,8 +154,8 @@ pub(super) fn raw_gc_fraction(record: &bam::Record) -> f64 {
 }
 
 /// Filters one raw record over its full window and decides its output: the raw
-/// record itself when nothing changes, a decoded rebuild when `MN` is missing
-/// or the modification block is malformed, nothing when the filter drops it.
+/// record itself when nothing changes, a rebuild when `MN` is missing or the
+/// modification block is malformed, nothing when the filter drops it.
 /// A malformed modification block or per-base tag is counted.
 ///
 /// Tag removal never reaches here: `run_raw_bam` excludes it from the
@@ -205,9 +205,11 @@ pub(super) fn process_raw_full_window(
     };
     if let Some(reason) = rejected {
         if counters.wants_rejects() {
-            let mut rec = decode_raw_record(&record)?;
-            reject::tag_record(&mut rec, reason);
-            counters.reject(RejectItem::Bam(rec))?;
+            let edit = RecordEdit {
+                reason: Some(reason),
+                ..RecordEdit::unchanged(seq_len, &cfg.remove_tags)
+            };
+            counters.reject(RejectItem::Bam(build_record(&record, edit)?))?;
         }
         return Ok(None);
     }
@@ -229,15 +231,8 @@ pub(super) fn process_raw_full_window(
                 idx: 0,
                 total: 1,
             };
-            match reconstruct_window_record(
-                &decoded,
-                window,
-                mod_block,
-                None,
-                None,
-                &cfg.remove_tags,
-            ) {
-                Some(rebuilt) => BamOutputRecord::Decoded(rebuilt),
+            match window_edit(&decoded, window, mod_block, None, None, &cfg.remove_tags) {
+                Some(edit) => BamOutputRecord::Built(build_record(&record, edit)?),
                 None => BamOutputRecord::Raw(record),
             }
         },
@@ -262,7 +257,7 @@ pub(super) fn run_raw_bam_full_window_seq(
             .fetch_add(seq_len as u64, Ordering::Relaxed);
         match process_raw_full_window(record, cfg, counters)? {
             Some(BamOutputRecord::Raw(record)) => sink.write_raw_record(header, &record)?,
-            Some(BamOutputRecord::Decoded(record)) => sink.write_record(header, &record)?,
+            Some(BamOutputRecord::Built(bytes)) => sink.write_record_bytes(header, &bytes)?,
             None => {},
         }
     }
