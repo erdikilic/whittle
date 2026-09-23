@@ -883,6 +883,14 @@ pub const MIN_OVERLAP: usize = 10;
 /// spares the overhang search on most read ends without an adapter.
 const END_SEED_LEN: usize = 9;
 
+/// Returns the overhang cost the overhang searcher charges a hit at per-base
+/// rate `alpha`: `floor(alpha * bases)` for each overhanging side, at the
+/// searcher's `f32` precision.
+fn overhang_cost(alpha: f32, left: usize, right: usize) -> usize {
+    let side = |bases: usize| (bases as f32 * alpha).floor() as usize;
+    side(left) + side(right)
+}
+
 /// Returns the edit budget of a partial hit whose `overlap` bases aligned
 /// inside the read. The first `MIN_OVERLAP` bases must match exactly and the
 /// rate applies to the remainder, so the shortest accepted overlaps carry no
@@ -1172,9 +1180,12 @@ impl<'a> Keep<'a> {
     /// the partial budget of that overlap, once the cost of the pattern bases
     /// beyond the text end is discounted.
     fn residue_within_budget(&self, hit: Hit, overlap: usize) -> bool {
-        let overhang = hit.left_overhang + hit.right_overhang;
-        let overhang_cost = (self.error_rate * overhang as f64).floor() as usize;
-        hit.cost.saturating_sub(overhang_cost) <= partial_budget(self.error_rate, overlap)
+        let charged = overhang_cost(
+            self.error_rate as f32,
+            hit.left_overhang,
+            hit.right_overhang,
+        );
+        hit.cost.saturating_sub(charged) <= partial_budget(self.error_rate, overlap)
     }
 
     /// Classifies one hit and applies it when `site` owns the outcome.
@@ -2251,6 +2262,16 @@ mod segment_tests {
     /// `edit_budget` does not round an integral product down through
     /// floating-point error, and `partial_budget` allows no edit at the
     /// shortest overlaps.
+    /// The overhang discount is the cost the overhang searcher charged: each
+    /// overhanging side is floored on its own, at the searcher's `f32` rate.
+    #[test]
+    fn overhang_discount_matches_the_charged_cost() {
+        assert_eq!(overhang_cost(0.2, 3, 3), 0);
+        assert_eq!(overhang_cost(0.2, 5, 0), 1);
+        assert_eq!(overhang_cost(0.2, 5, 5), 2);
+        assert_eq!(overhang_cost(0.2, 4, 6), 1);
+    }
+
     #[test]
     fn budgets_are_integral_and_partial_budget_is_strict() {
         assert_eq!(edit_budget(0.29, 100), 29);
