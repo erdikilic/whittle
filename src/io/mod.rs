@@ -210,13 +210,17 @@ pub fn probe_gz(source: &mut Box<dyn Read + Send>) -> anyhow::Result<Format> {
 }
 
 /// Identifies the payload carried by one complete BGZF block. BAM begins with
-/// `BAM\x01`; FASTQ begins with `@`. The caller replays the original compressed
-/// block into the selected reader after this probe.
+/// `BAM\x01`; FASTQ begins with `@`. A block without payload, as in the
+/// end-of-file marker that is all an empty `bgzip` output holds, is an empty
+/// BGZF FASTQ: a BAM stream always opens with its header. The caller replays
+/// the original compressed block into the selected reader after this probe.
 pub(crate) fn detect_bgzf_block(block: &[u8]) -> anyhow::Result<Format> {
     let mut reader = noodles_bgzf::io::Reader::new(std::io::Cursor::new(block));
     let mut probe = [0u8; 4];
-    reader.read_exact(&mut probe)?;
-    if probe.starts_with(b"BAM\x01") {
+    let n = fill(&mut reader, &mut probe)?;
+    if n == 0 {
+        Ok(Format::FastqBgzf)
+    } else if probe[..n].starts_with(b"BAM\x01") {
         Ok(Format::Bam)
     } else if probe.first() == Some(&b'@') {
         Ok(Format::FastqBgzf)

@@ -693,6 +693,19 @@ fn all_dropped_run_warns() {
 /// Zero input reads is not an error, and the empty-input guardrail WARN still
 /// fires.
 #[test]
+fn empty_bgzf_stream_is_empty_input() {
+    let eof_block: &[u8] = &[
+        0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02,
+        0x00, 0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    whittle()
+        .write_stdin(eof_block)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Input contained no reads"));
+}
+
+#[test]
 fn empty_input_warns() {
     whittle()
         .args(["--input-format", "fastq"])
