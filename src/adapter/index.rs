@@ -22,7 +22,9 @@ pub(crate) struct CandidateIndex {
     pub(super) budgets: Vec<Budget>,
     /// Per-adapter `is_plain_acgt`, which selects the search profile.
     pub(super) plain: Vec<bool>,
-    /// Adapters with no usable seeds (see `MAX_SEED_EXPANSIONS`).
+    /// Adapters searched over the whole read: those with no usable seeds (see
+    /// `MAX_SEED_EXPANSIONS`) or whose seeds open windows over more than
+    /// `MAX_WINDOW_COVERAGE` of a read.
     pub(super) unfiltered: Vec<bool>,
     /// Equal-length adapter groups searched together over the end windows.
     pub(super) terminal_batches: Vec<TerminalBatch>,
@@ -132,7 +134,10 @@ impl CandidateIndex {
                 let forward = partition_seeds(&pattern, k_mid);
                 let reverse = partition_seeds(&reverse_complement(&pattern), k_mid);
                 match (forward, reverse) {
-                    (Some(forward), Some(reverse)) => {
+                    (Some(forward), Some(reverse))
+                        if window_coverage(&forward, &reverse, &budgets[adapter_idx])
+                            <= MAX_WINDOW_COVERAGE =>
+                    {
                         for seed in forward.into_iter().chain(reverse) {
                             let owners = seeds.entry(seed).or_default();
                             if owners.last() != Some(&adapter_idx) {
@@ -303,6 +308,24 @@ impl CandidateIndex {
         }
         windows.truncate(merged);
     }
+}
+
+/// Expected window coverage above which an adapter is searched over the whole
+/// read. One whole-read search costs less than the per-call setup of windows
+/// that cover more than about a quarter of the read.
+pub(super) const MAX_WINDOW_COVERAGE: f64 = 0.25;
+
+/// Returns the expected share of read bases inside the candidate windows of
+/// one adapter: the chance rate of its seeds on uniform DNA times the width of
+/// the window each seed occurrence opens. The share counts overlapping windows
+/// once each, so it exceeds one when the windows cover the read several times.
+fn window_coverage(forward: &[Vec<u8>], reverse: &[Vec<u8>], budget: &Budget) -> f64 {
+    let rate: f64 = forward
+        .iter()
+        .chain(reverse)
+        .map(|seed| 0.25f64.powi(seed.len() as i32))
+        .sum();
+    rate * (2 * (budget.len + budget.k_end)) as f64
 }
 
 /// Longest prefix the seed table indexes. Its table holds `4^len` entries of

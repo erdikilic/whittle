@@ -1298,3 +1298,14 @@ fn panel_members_share_one_interior_chance_bound() {
     let own = Budget::new(&set[48].seq, 0.2, 150);
     assert_eq!(index.budgets[48].interior(30_000), own.interior(30_000));
 }
+
+/// An adapter whose seeds would open windows over most of a read is searched
+/// over the whole read; an adapter with rare seeds keeps its windows.
+#[test]
+fn dense_seeds_select_the_whole_read_search() {
+    let adapters = preset_ont();
+    let index = CandidateIndex::new(&adapters, 0.2, 150, true);
+    let position = |name: &str| adapters.iter().position(|a| a.name == name).unwrap();
+    assert!(index.unfiltered[position("RAD")]);
+    assert!(!index.unfiltered[position("LSK114_rear")]);
+}

@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- The interior adapter search covers the whole read for an adapter whose
+  exact seeds would open candidate windows over more than a quarter of it,
+  such as `RAD`, `SMRTbell` and the ligation front adapters. Output is
+  unchanged; adapter trimming with the `ont` preset takes about 30% less CPU.
 - `--update-signal-tags` is renamed `--update-moves`, after the ONT move
   table it maintains. The old spelling is not accepted.
 - `--remove-kinetics` is folded into `--remove-tag`, which now takes
