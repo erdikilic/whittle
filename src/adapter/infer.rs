@@ -619,87 +619,160 @@ fn polish_consensus(seq: &[u8], windows: &[&[u8]]) -> Vec<u8> {
         .collect()
 }
 
-/// Returns the counts of A, C, G and T in the read base that follows the
-/// inner edge of the best `core` alignment of each window, among alignments
-/// within `edits` that start within `ANCHOR_SLACK` of the physical `end`, or
-/// `None` when fewer than `MIN_SUPPORT_WINDOWS` windows have that base. The
-/// base lies outside the alignment, so gap placement at the alignment edge
-/// does not bias it toward the consensus.
-fn following_base_counts(
-    core: &[u8],
-    windows: &[&[u8]],
-    end: End,
-    edits: usize,
-) -> Option<[usize; 4]> {
-    let mut searcher = crate::adapter::search::new_searcher_fwd();
-    let mut best: Vec<Option<(i32, usize, usize)>> = vec![None; windows.len()];
-    for hit in searcher.search_texts(core, windows, edits) {
-        let len = windows[hit.text_idx].len();
-        let distance = match end {
-            End::Five => hit.text_start,
-            End::Three => len - hit.text_end,
-        };
-        if distance > ANCHOR_SLACK {
-            continue;
-        }
-        let entry = &mut best[hit.text_idx];
-        if entry.is_none_or(|(cost, old, _)| (hit.cost, distance) < (cost, old)) {
-            let edge = match end {
-                End::Five => hit.text_end,
-                End::Three => hit.text_start,
-            };
-            *entry = Some((hit.cost, distance, edge));
-        }
-    }
+/// Returns the fraction of A, C, G and T among the bases of `windows`, or a
+/// uniform composition when they hold none.
+fn base_composition(windows: &[&[u8]]) -> [f64; 4] {
     let mut counts = [0usize; 4];
-    for (window, hit) in windows.iter().zip(best) {
-        let Some((_, _, edge)) = hit else { continue };
-        let base = match end {
-            End::Five => window.get(edge),
-            End::Three => edge.checked_sub(1).and_then(|i| window.get(i)),
-        };
-        if let Some(code) = base.and_then(|b| encode_kmer(std::slice::from_ref(b))) {
-            counts[code as usize] += 1;
+    for window in windows {
+        for base in window.iter() {
+            if let Some(code) = encode_kmer(std::slice::from_ref(base)) {
+                counts[code as usize] += 1;
+            }
         }
     }
-    (counts.iter().sum::<usize>() >= MIN_SUPPORT_WINDOWS).then_some(counts)
+    let total: usize = counts.iter().sum();
+    if total == 0 {
+        return [0.25; 4];
+    }
+    counts.map(|count| count as f64 / total as f64)
+}
+
+/// Returns whether a tally of read bases at one position is conserved: one
+/// base, or a pair of bases, holds at least the midpoint between its share of
+/// the `composition` and one. A technical base is read at the per-base
+/// accuracy of the platform and clears the midpoint, and so does a two-fold
+/// degenerate primer base on its pair; an insert position holds any base or
+/// pair at its composition share, which the midpoint exceeds for any
+/// composition.
+fn conserved(counts: [usize; 4], composition: [f64; 4]) -> bool {
+    let total = counts.iter().sum::<usize>() as f64;
+    if total == 0.0 {
+        return false;
+    }
+    let clears = |count: usize, share: f64| 2.0 * count as f64 >= (1.0 + share) * total;
+    (0..4).any(|i| {
+        clears(counts[i], composition[i])
+            || (i + 1..4).any(|j| clears(counts[i] + counts[j], composition[i] + composition[j]))
+    })
+}
+
+/// The occurrences of every `MIN_PATTERN_LEN`-mer in the windows of one read
+/// end, each with the base that follows it inward, for the conservation
+/// tallies of `trim_unconserved_inner_end` and of the insert boundary. An
+/// exact match does not collect windows that carry a similar sequence, such as
+/// another member of a barcode panel, and the base after it lies outside the
+/// match, so gap placement cannot bias it toward the consensus.
+struct FollowingBases {
+    /// Every occurrence as the packed k-mer, the window, the distance of the
+    /// k-mer's outer edge from the physical end, and the code of the
+    /// following base, sorted.
+    occurrences: Vec<(u32, u32, u16, u8)>,
+}
+
+impl FollowingBases {
+    /// Indexes the k-mers of `windows` whose outer edge lies within
+    /// `ANCHOR_SLACK + LMAX` of the physical `end`.
+    fn new(windows: &[&[u8]], end: End) -> Self {
+        let mut occurrences = Vec::new();
+        for (idx, window) in windows.iter().enumerate() {
+            let n = window.len();
+            for distance in 0..n
+                .saturating_sub(MIN_PATTERN_LEN)
+                .min(ANCHOR_SLACK + LMAX + 1)
+            {
+                let (kmer, next) = match end {
+                    End::Five => (
+                        &window[distance..distance + MIN_PATTERN_LEN],
+                        window[distance + MIN_PATTERN_LEN],
+                    ),
+                    End::Three => {
+                        let stop = n - distance;
+                        (
+                            &window[stop - MIN_PATTERN_LEN..stop],
+                            window[stop - MIN_PATTERN_LEN - 1],
+                        )
+                    },
+                };
+                if let (Some(code), Some(next)) =
+                    (encode_kmer(kmer), encode_kmer(std::slice::from_ref(&next)))
+                {
+                    occurrences.push((code as u32, idx as u32, distance as u16, next as u8));
+                }
+            }
+        }
+        occurrences.sort_unstable();
+        Self { occurrences }
+    }
+
+    /// Returns the counts of A, C, G and T in the base that follows `inner`,
+    /// a `MIN_PATTERN_LEN`-base sequence with `outboard` further bases between
+    /// it and the physical end, or `None` when fewer than
+    /// `MIN_SUPPORT_WINDOWS` windows hold it. Each window contributes its
+    /// occurrence nearest the end, when the sequence as a whole then starts
+    /// within `ANCHOR_SLACK` of it.
+    fn counts(&self, inner: &[u8], outboard: usize) -> Option<[usize; 4]> {
+        let code = encode_kmer(inner)? as u32;
+        let first = self.occurrences.partition_point(|o| o.0 < code);
+        let last = self.occurrences.partition_point(|o| o.0 <= code);
+        let mut counts = [0usize; 4];
+        let mut previous = None;
+        // Sorted by window, then distance: the first occurrence of each
+        // window is its nearest.
+        for &(_, window, distance, next) in &self.occurrences[first..last] {
+            if previous == Some(window) {
+                continue;
+            }
+            previous = Some(window);
+            if (distance as usize).saturating_sub(outboard) <= ANCHOR_SLACK {
+                counts[next as usize] += 1;
+            }
+        }
+        (counts.iter().sum::<usize>() >= MIN_SUPPORT_WINDOWS).then_some(counts)
+    }
+
+    /// Returns the counts of the base that follows the first `keep` bases of
+    /// `seq` counted from the physical end; see `counts`.
+    fn after(&self, seq: &[u8], keep: usize, end: End) -> Option<[usize; 4]> {
+        let outboard = keep.checked_sub(MIN_PATTERN_LEN)?;
+        let inner = match end {
+            End::Five => &seq[outboard..keep],
+            End::Three => &seq[seq.len() - keep..seq.len() - outboard],
+        };
+        self.counts(inner, outboard)
+    }
 }
 
 /// Removes the insert-facing bases of `seq` that the supporting windows do
-/// not conserve. Each round aligns `seq` without its inner base and tallies
-/// the read base that follows the alignment (see `following_base_counts`).
-/// A technical base is read at the per-base accuracy of the platform, above
-/// one half; an insert base agrees across reads only as often as the most
-/// frequent base of the insert composition, below one half outside
-/// low-complexity sequence. An inner base whose most frequent read base holds
-/// less than half of the tally is therefore insert and is removed. Assembly
-/// support cannot place this boundary for a layer about one k-mer long:
-/// erosion at the physical end removes the first bases of the layer from part
-/// of the reads, which depresses the k-mer spanning the whole layer toward the
-/// level of its insert continuations. At least `MIN_PATTERN_LEN` bases are
-/// kept.
-fn trim_unconserved_inner_end(seq: &[u8], windows: &[&[u8]], end: End, error_rate: f64) -> Vec<u8> {
-    let (mut lo, mut hi) = (0, seq.len());
-    while hi - lo > MIN_PATTERN_LEN {
-        let core = match end {
-            End::Five => &seq[lo..hi - 1],
-            End::Three => &seq[lo + 1..hi],
-        };
-        let edits = edit_budget(error_rate, core.len());
-        let Some(counts) = following_base_counts(core, windows, end, edits) else {
-            break;
-        };
-        let total: usize = counts.iter().sum();
-        let best = counts.iter().copied().max().unwrap_or(0);
-        if best * 2 >= total {
-            break;
-        }
-        match end {
-            End::Five => hi -= 1,
-            End::Three => lo += 1,
+/// not conserve. Cut points are tried from the outer edge of the last k-mer
+/// of `seq` inward toward the insert: the base that follows the bases kept
+/// is tallied (see `FollowingBases`), and the first tally that is not
+/// `conserved` against the `composition` of the windows marks the insert
+/// boundary. Every tested stretch therefore lies within the sequence the
+/// assembly supports. A cut point without a tally, as for a stretch with an IUPAC code or with
+/// too few supporting windows, is passed over.
+/// Assembly support cannot place this boundary for a layer about one k-mer
+/// long: erosion at the physical end removes the first bases of the layer
+/// from part of the reads, which depresses the k-mer spanning the whole layer
+/// toward the level of its insert continuations.
+fn trim_unconserved_inner_end(
+    seq: &[u8],
+    following: &FollowingBases,
+    end: End,
+    composition: [f64; 4],
+) -> Vec<u8> {
+    let len = seq.len();
+    for keep in MIN_PATTERN_LEN.max(len.saturating_sub(KMER_K))..len {
+        match following.after(seq, keep, end) {
+            Some(counts) if !conserved(counts, composition) => {
+                return match end {
+                    End::Five => seq[..keep].to_vec(),
+                    End::Three => seq[len - keep..].to_vec(),
+                };
+            },
+            _ => {},
         }
     }
-    seq[lo..hi].to_vec()
+    seq.to_vec()
 }
 
 /// Extends a conserved insert anchor toward the physical read end. Each round
@@ -1087,6 +1160,8 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End, contrast: bool) -
     // Validation uses windows distributed across the complete sample.
     let recount = stride_sample(windows, RECOUNT_WINDOWS);
     let n_recount = recount.len();
+    let composition = base_composition(&recount);
+    let following = FollowingBases::new(&recount, end);
 
     let original_weights: std::collections::HashMap<u64, u32> = exact.iter().copied().collect();
     let weighted = exact;
@@ -1158,7 +1233,7 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End, contrast: bool) -
         } else {
             trimmed
         };
-        let trimmed = trim_unconserved_inner_end(&trimmed, &recount, end, base.error_rate);
+        let trimmed = trim_unconserved_inner_end(&trimmed, &following, end, composition);
         let contrast = contrast
             .then(|| contrast_boundary(&cons, &oriented, end))
             .flatten();
@@ -1218,7 +1293,14 @@ fn assemble(windows: &[&[u8]], base: &AdapterConfig, end: End, contrast: bool) -
                     );
                     downstream as usize >= 2 * present
                 });
-            let terminated = drop && supported_termination(word, &recount, end);
+            // The read base after the candidate marks an insert boundary
+            // directly when it is not conserved (see `FollowingBases`);
+            // erosion at the physical end depresses the boundary k-mer and can
+            // hide the drop in k-mer support.
+            let follows_insert = following
+                .after(&trimmed, trimmed.len(), end)
+                .is_some_and(|counts| !conserved(counts, composition));
+            let terminated = (drop && supported_termination(word, &recount, end)) || follows_insert;
             let bounded = (observed_boundary || cons.len() < LMAX) && (rise || terminated);
             if !bounded {
                 tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), observed_boundary,
@@ -3098,6 +3180,68 @@ mod tests {
                 let barcode = &barcodes[i % 12];
                 let mut read = barcode[(i / 12) % 2..].to_vec();
                 read.extend(random_bases(12000 + i as u64, 400));
+                read
+            })
+            .collect();
+        let found = infer_owned(&reads);
+        for d in &found {
+            assert!(
+                barcodes.iter().any(|b| contains(b, &d.adapter.seq)),
+                "{:?}",
+                String::from_utf8_lossy(&d.adapter.seq)
+            );
+        }
+        let recovered = barcodes
+            .iter()
+            .filter(|b| found.iter().any(|d| contains(&d.adapter.seq, &b[1..])))
+            .count();
+        assert!(recovered >= 10, "{recovered} barcodes recovered: {found:?}");
+    }
+
+    #[test]
+    fn conservation_is_judged_against_the_background_composition() {
+        let uniform = [0.25; 4];
+        let at_rich = [0.4, 0.1, 0.1, 0.4];
+        assert!(conserved([97, 1, 1, 1], uniform));
+        assert!(conserved([3, 90, 3, 4], at_rich));
+        assert!(
+            conserved([1, 48, 1, 50], uniform),
+            "two-fold degenerate base"
+        );
+        assert!(
+            conserved([1, 48, 1, 50], at_rich),
+            "two-fold degenerate base"
+        );
+        assert!(!conserved([25, 25, 25, 25], uniform));
+        assert!(!conserved([30, 20, 20, 30], uniform));
+        assert!(!conserved([40, 10, 10, 40], at_rich));
+        assert!(!conserved([47, 8, 5, 40], at_rich));
+    }
+
+    /// Returns `len` bases of which about 78% are A or T, the composition of
+    /// the most AT-rich sequenced genomes.
+    fn at_rich_bases(seed: u64, len: usize) -> Vec<u8> {
+        let first = random_bases(seed ^ 0x5555, len);
+        let second = random_bases(seed ^ 0xAAAA, len);
+        random_bases(seed, len)
+            .into_iter()
+            .zip(first.into_iter().zip(second))
+            .map(|(base, draws)| match (base, draws) {
+                (b'C' | b'G', (b'A' | b'G' | b'T', b'A' | b'G')) => b'A',
+                (b'C' | b'G', (b'A' | b'G' | b'T', b'T')) => b'T',
+                _ => base,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn eroded_short_barcodes_end_at_an_at_rich_insert_boundary() {
+        let barcodes: Vec<Vec<u8>> = (0..12).map(|i| random_bases(8300 + i, 16)).collect();
+        let reads: Vec<Vec<u8>> = (0..2400)
+            .map(|i| {
+                let barcode = &barcodes[i % 12];
+                let mut read = barcode[(i / 12) % 2..].to_vec();
+                read.extend(at_rich_bases(14000 + i as u64, 400));
                 read
             })
             .collect();

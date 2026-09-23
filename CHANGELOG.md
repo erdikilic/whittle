@@ -73,9 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panel of short barcodes no longer trims read ends at chance hits deep in
   the end zone. A hit anchored at the read end, or directly behind an
   accepted hit, keeps the per-sequence budget.
-- Inferred sequences end at the last base their supporting reads conserve.
-  A short layer eroded at the physical read end no longer gains an insert
-  base at its inner end, which cost every match an edit.
+- Inferred sequences end at the last base their supporting reads conserve,
+  judged against the base composition of the reads, so a short layer eroded
+  at the physical read end no longer gains insert bases at its inner end,
+  AT-rich inserts no longer hide its boundary, and a two-fold degenerate
+  primer base still counts as conserved.
 - Minority adapter discovery continues past weak graph fragments and validates
   read-end enrichment against interior sequence. Repeated k-mers count once
   per window; short tandem repeats and primer-adjacent insert fragments are
