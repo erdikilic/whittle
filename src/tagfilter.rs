@@ -563,22 +563,20 @@ fn describe(v: &TagValue<'_>) -> String {
     }
 }
 
-/// Converts a borrowed BAM aux value. Strings are copied, since the borrowed
-/// value does not outlive the lookup.
-pub fn value_of_raw<'a>(
-    value: &noodles_sam::alignment::record::data::field::Value<'_>,
-) -> TagValue<'a> {
+/// Converts a BAM aux value borrowed from its record. String and hex values
+/// borrow the record's buffer; a character is copied.
+pub fn value_of_raw(value: noodles_sam::alignment::record::data::field::Value<'_>) -> TagValue<'_> {
     use noodles_sam::alignment::record::data::field::Value as V;
     match value {
-        V::Character(c) => TagValue::Str(Cow::Owned(vec![*c])),
-        V::Int8(n) => TagValue::Num(f64::from(*n)),
-        V::UInt8(n) => TagValue::Num(f64::from(*n)),
-        V::Int16(n) => TagValue::Num(f64::from(*n)),
-        V::UInt16(n) => TagValue::Num(f64::from(*n)),
-        V::Int32(n) => TagValue::Num(f64::from(*n)),
-        V::UInt32(n) => TagValue::Num(f64::from(*n)),
-        V::Float(x) => TagValue::Num(f64::from(*x)),
-        V::String(s) | V::Hex(s) => TagValue::Str(Cow::Owned(s.to_vec())),
+        V::Character(c) => TagValue::Str(Cow::Owned(vec![c])),
+        V::Int8(n) => TagValue::Num(f64::from(n)),
+        V::UInt8(n) => TagValue::Num(f64::from(n)),
+        V::Int16(n) => TagValue::Num(f64::from(n)),
+        V::UInt16(n) => TagValue::Num(f64::from(n)),
+        V::Int32(n) => TagValue::Num(f64::from(n)),
+        V::UInt32(n) => TagValue::Num(f64::from(n)),
+        V::Float(x) => TagValue::Num(f64::from(x)),
+        V::String(s) | V::Hex(s) => TagValue::Str(Cow::Borrowed(s.as_ref())),
         V::Array(_) => TagValue::Array,
     }
 }
@@ -616,7 +614,7 @@ impl TagSource for noodles_bam::Record {
         use noodles_sam::alignment::record::data::field::Tag;
         match self.data().get(&Tag::from(tag)) {
             None => Ok(TagValue::Missing),
-            Some(Ok(value)) => Ok(value_of_raw(&value)),
+            Some(Ok(value)) => Ok(value_of_raw(value)),
             Some(Err(e)) => Err(anyhow::anyhow!(
                 "tag {} could not be read: {e}",
                 String::from_utf8_lossy(&tag)
