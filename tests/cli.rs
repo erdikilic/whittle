@@ -851,6 +851,19 @@ fn fastq_to_bam_is_rejected_before_the_run() {
 }
 
 #[test]
+fn piped_fastq_to_bam_is_rejected_before_the_run() {
+    whittle()
+        .args(["-o", "out.bam"])
+        .write_stdin("@r1\nACGTACGTAC\n+\nIIIIIIIIII\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "FASTQ-to-BAM conversion is not supported (a FASTQ read carries no header",
+        ))
+        .stderr(predicates::str::contains("Input:").not());
+}
+
+#[test]
 fn update_moves_requires_bam_input() {
     whittle()
         .args(["-i", "reads.fastq", "--update-moves"])

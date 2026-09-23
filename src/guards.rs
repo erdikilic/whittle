@@ -46,6 +46,21 @@ pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::
     Ok(())
 }
 
+/// Rejects FASTQ input with BAM output: a FASTQ read carries no header from
+/// which a BAM record could be built. `cli::parse` applies this to the formats
+/// an explicit flag or a known extension names, and `run` applies it again
+/// once detection has classified a stream or a directory, before any output is
+/// announced or created.
+pub(crate) fn guard_fastq_to_bam(in_fmt: io::Format, out_fmt: io::Format) -> anyhow::Result<()> {
+    if in_fmt != io::Format::Bam && out_fmt == io::Format::Bam {
+        anyhow::bail!(
+            "FASTQ-to-BAM conversion is not supported (a FASTQ read carries no header for a BAM \
+             record); write FASTQ output, or import with samtools import"
+        );
+    }
+    Ok(())
+}
+
 /// Rejects `--update-moves` on any input format other than BAM: the ONT
 /// signal tags are rewritten only on BAM-to-BAM output, so elsewhere the flag
 /// would be accepted and silently do nothing. `cli::parse` applies this to the

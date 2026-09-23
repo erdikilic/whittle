@@ -150,8 +150,9 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     // bytes are refused on an interactive terminal.
     guards::guard_stdout_binary(cfg, out_fmt)?;
     // Detection has classified the stream, so a piped or extensionless FASTQ
-    // reaches the same refusal `cli::parse` applies to a named one.
+    // reaches the same refusals `cli::parse` applies to a named one.
     guards::guard_bam_only_flags(cfg, in_fmt)?;
+    guards::guard_fastq_to_bam(in_fmt, out_fmt)?;
 
     tracing::debug!(
         stage = "setup",
@@ -222,6 +223,7 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
     guards::guard_stdout_binary(cfg, out_fmt)?;
     guards::guard_bam_only_flags(cfg, family_fmt)?;
+    guards::guard_fastq_to_bam(family_fmt, out_fmt)?;
 
     // A `.gz` member is BGZF when its first block header says so.
     let bgzf_input = family_fmt == Format::Bam

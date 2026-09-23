@@ -425,11 +425,8 @@ pub fn parse() -> anyhow::Result<Config> {
         .io
         .out_format
         .or_else(|| cfg.io.output.as_deref().and_then(crate::io::from_extension));
-    if in_fmt.is_some_and(|f| f != Format::Bam) && out_fmt == Some(Format::Bam) {
-        anyhow::bail!(
-            "FASTQ-to-BAM conversion is not supported (a FASTQ read carries no header for a BAM \
-             record); write FASTQ output, or import with samtools import"
-        );
+    if let (Some(in_fmt), Some(out_fmt)) = (in_fmt, out_fmt) {
+        crate::guards::guard_fastq_to_bam(in_fmt, out_fmt)?;
     }
     Ok(cfg)
 }
