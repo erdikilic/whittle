@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn random_bases(mut state: u64, len: usize) -> Vec<u8> {
