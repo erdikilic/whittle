@@ -53,6 +53,16 @@ these treatments:
   fewer bases than `--min-length`, or by at most 11 bases, merge into one.
   `--adapter-ends-only` disables splitting and searches only the two end zones.
 
+A trim or excision boundary lies at the last well-aligned base of its hit.
+Each end of the alignment is scored `+1` per match and `-2` per mismatch or
+gap, and a run of end columns scoring below zero is left to the read. A catalog
+entry that continues past the sequence in the read, its extra bases aligned as
+edits against the insert, therefore trims where the shared sequence ends.
+
+The native barcode kits carry a barcode construct, `NB_1st_FRONT`, the barcode
+as 24 `N`, and the 8-base `NB_1st_REAR`, so a hit trims the barcode together
+with the short flank on its insert side.
+
 The edit budget of a hit is the error rate times the pattern length, rounded
 down, bounded by a chance-match null model under independent uniform DNA. The
 model sums alignment paths, so it overstates the chance rate and the bounds are
