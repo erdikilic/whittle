@@ -5,8 +5,9 @@ use super::*;
 
 /// Converts a raw record to a `RecordBuf` on the render worker without routing
 /// sequence, quality and every aux value through the generic SAM trait
-/// iterators. The concrete noodles views have bulk conversions for these large
-/// fields and reduce conversion overhead on long reads.
+/// iterators: bases are unpacked through a byte-pair table and aux arrays are
+/// decoded in bulk (`decode_data`), which reduces conversion overhead on long
+/// reads.
 ///
 /// BAM's `CG:B:I` overflow representation of a CIGAR longer than 65535
 /// operations is not expanded: the workflows accept unaligned records only,
@@ -28,10 +29,77 @@ pub(crate) fn decode_raw_record(src: &bam::Record) -> std::io::Result<RecordBuf>
     *dst.mate_reference_sequence_id_mut() = src.mate_reference_sequence_id().transpose()?;
     *dst.mate_alignment_start_mut() = src.mate_alignment_start().transpose()?;
     *dst.template_length_mut() = src.template_length();
-    *dst.sequence_mut() = src.sequence().into();
+    let sequence = src.sequence();
+    *dst.sequence_mut() = unpack_bases(sequence.as_bytes(), sequence.len()).into();
     *dst.quality_scores_mut() = src.quality_scores().into();
-    *dst.data_mut() = src.data().try_into()?;
+    *dst.data_mut() = decode_data(src.data().as_bytes())?;
     Ok(dst)
+}
+
+/// Unpacks the first `len` bases of a 4-bit packed sequence into their SAM
+/// base letters (`=ACMGRSVTWYHKDBN`), one table lookup per byte.
+fn unpack_bases(packed: &[u8], len: usize) -> Vec<u8> {
+    const PAIRS: [[u8; 2]; 256] = {
+        const BASES: &[u8; 16] = b"=ACMGRSVTWYHKDBN";
+        let mut pairs = [[0; 2]; 256];
+        let mut i = 0;
+        while i < 256 {
+            pairs[i] = [BASES[i >> 4], BASES[i & 0x0f]];
+            i += 1;
+        }
+        pairs
+    };
+    let mut bases: Vec<u8> = packed.iter().flat_map(|&b| PAIRS[usize::from(b)]).collect();
+    bases.truncate(len);
+    bases
+}
+
+/// Decodes a raw aux block into owned values, as the noodles record decoder
+/// does, with arrays converted in bulk. A duplicated tag or a malformed field
+/// (`next_field`) is refused.
+fn decode_data(aux: &[u8]) -> io::Result<noodles_sam::alignment::record_buf::Data> {
+    fn values<const N: usize, T>(bytes: &[u8], f: impl Fn([u8; N]) -> T) -> Vec<T> {
+        bytes.as_chunks::<N>().0.iter().map(|&c| f(c)).collect()
+    }
+
+    let mut data = noodles_sam::alignment::record_buf::Data::default();
+    let mut pos = 0;
+    while pos < aux.len() {
+        let field = next_field(aux, pos)?;
+        pos = field.bytes.end;
+        let raw = &aux[field.bytes.start + 3..field.bytes.end];
+        let value = match field.ty {
+            b'A' => Value::Character(raw[0]),
+            b'c' => Value::Int8(raw[0] as i8),
+            b'C' => Value::UInt8(raw[0]),
+            b's' => Value::Int16(i16::from_le_bytes([raw[0], raw[1]])),
+            b'S' => Value::UInt16(u16::from_le_bytes([raw[0], raw[1]])),
+            b'i' => Value::Int32(i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])),
+            b'I' => Value::UInt32(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])),
+            b'f' => Value::Float(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])),
+            b'Z' => Value::String(raw[..raw.len() - 1].into()),
+            b'H' => Value::Hex(raw[..raw.len() - 1].into()),
+            // `next_field` accepts only the array subtypes below; the elements
+            // follow the subtype and the 4-byte count.
+            _ => Value::Array(match raw[0] {
+                b'c' => Array::Int8(raw[5..].iter().map(|&b| b as i8).collect()),
+                b'C' => Array::UInt8(raw[5..].to_vec()),
+                b's' => Array::Int16(values(&raw[5..], i16::from_le_bytes)),
+                b'S' => Array::UInt16(values(&raw[5..], u16::from_le_bytes)),
+                b'i' => Array::Int32(values(&raw[5..], i32::from_le_bytes)),
+                b'I' => Array::UInt32(values(&raw[5..], u32::from_le_bytes)),
+                _ => Array::Float(values(&raw[5..], f32::from_le_bytes)),
+            }),
+        };
+        let tag = Tag::new(field.tag[0], field.tag[1]);
+        if data.insert(tag, value).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate tag: {tag:?}"),
+            ));
+        }
+    }
+    Ok(data)
 }
 
 /// One output window of a read: bases `[start, end)`, segment `idx` (0-based)

@@ -75,16 +75,16 @@ enum FieldBytes {
     Encoded(Range<usize>),
 }
 
-/// One aux field of the input aux block.
-struct RawField {
+/// One aux field of a raw aux block.
+pub(super) struct RawField {
     /// The field's tag.
-    tag: [u8; 2],
+    pub(super) tag: [u8; 2],
     /// The field's type code.
-    ty: u8,
+    pub(super) ty: u8,
     /// The whole field, tag included.
-    bytes: Range<usize>,
+    pub(super) bytes: Range<usize>,
     /// The element size and count of a `B` array.
-    array: Option<(usize, usize)>,
+    pub(super) array: Option<(usize, usize)>,
 }
 
 fn invalid_input(message: &str) -> io::Error {
@@ -98,7 +98,7 @@ fn invalid_data(message: &str) -> io::Error {
 /// Locates the aux field that starts at byte `pos` of `aux`. A truncated
 /// field, an unknown type or array subtype, or a string without its NUL is
 /// refused, as the noodles record decoder refuses it.
-fn next_field(aux: &[u8], pos: usize) -> io::Result<RawField> {
+pub(super) fn next_field(aux: &[u8], pos: usize) -> io::Result<RawField> {
     let &[t0, t1, ty, ..] = &aux[pos..] else {
         return Err(invalid_data("truncated aux field"));
     };

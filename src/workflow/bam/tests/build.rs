@@ -1,5 +1,6 @@
-//! The raw record builder: packed-sequence windows, aux copying, per-base
-//! array slicing, tag replacement and the encoder-equivalent validation.
+//! The raw record builder and decoder: packed-sequence windows, aux copying,
+//! per-base array slicing, tag replacement, the encoder-equivalent validation
+//! and the bulk decode.
 
 use super::*;
 
@@ -345,4 +346,33 @@ fn written_record_bytes_read_back_and_unknown_references_are_refused() {
     let mut mate = bytes;
     mate[20..24].copy_from_slice(&3i32.to_le_bytes());
     assert!(crate::io::bam::write_record_bytes(&mut Vec::new(), &header, &mate).is_err());
+}
+
+/// The bulk decode of a raw record equals the noodles conversion of its
+/// sequence and aux fields, for every base code and aux type, and refuses a
+/// duplicated tag as noodles does.
+#[test]
+fn bulk_decode_matches_the_noodles_conversions() {
+    let mut src = record_with_every_type();
+    src.data_mut().insert(
+        Tag::BASE_MODIFICATIONS,
+        Value::String(b"C+m?,0;".as_slice().into()),
+    );
+    for bases in [b"=ACMGRSVTWYHKDBNA".as_slice(), b"=ACMGRSVTWYHKDBN"] {
+        *src.sequence_mut() = bases.to_vec().into();
+        *src.quality_scores_mut() = vec![20; bases.len()].into();
+        let raw = raw_record(&src);
+        let decoded = decode_raw_record(&raw).unwrap();
+        let mut reference = decoded.clone();
+        *reference.sequence_mut() = raw.sequence().into();
+        *reference.data_mut() = raw.data().try_into().unwrap();
+        assert_eq!(decoded, reference);
+        assert_eq!(decoded, src);
+    }
+
+    let mut bytes = noodles_bytes(&src);
+    bytes.extend_from_slice(b"xCC\x07");
+    let raw = raw_from_bytes(&bytes);
+    assert!(decode_raw_record(&raw).is_err());
+    assert!(noodles_sam::alignment::record_buf::Data::try_from(raw.data()).is_err());
 }

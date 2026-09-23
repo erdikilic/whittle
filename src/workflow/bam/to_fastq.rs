@@ -22,6 +22,11 @@ pub(super) fn push_fastq_tags(
     platform: Platform,
     remove: &TagRemoval,
 ) {
+    // A run that carries no tags writes a plain header, so the rewrites are
+    // not computed.
+    if matches!(sel, FastqTags::None) {
+        return;
+    }
     let Window { start, end, .. } = window;
     let orig_len = seq.len();
     let trimmed = start != 0 || end != orig_len;
