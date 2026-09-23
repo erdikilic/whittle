@@ -42,11 +42,14 @@ pub fn gc_fraction(seq: &[u8]) -> f64 {
     if seq.is_empty() {
         return 0.0;
     }
-    let gc = seq
-        .iter()
-        .filter(|&&b| matches!(b, b'G' | b'g' | b'C' | b'c'))
-        .count();
+    let gc = seq.iter().filter(|&&b| is_gc(b)).count();
     gc as f64 / seq.len() as f64
+}
+
+/// Whether `base` is G or C in either case; the base rule of every GC
+/// fraction.
+pub(crate) fn is_gc(base: u8) -> bool {
+    matches!(base, b'G' | b'g' | b'C' | b'c')
 }
 
 /// The reason `check` dropped a segment. Both GC bounds collapse into `Gc`:

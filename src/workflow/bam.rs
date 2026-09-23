@@ -1769,15 +1769,15 @@ fn ensure_raw_trimmable(record: &bam::Record) -> anyhow::Result<()> {
     })
 }
 
+/// Returns the GC fraction of a raw record's sequence, counted over its packed
+/// bases without decoding them into a buffer, by the rule of
+/// `filter::gc_fraction`.
 fn raw_gc_fraction(record: &bam::Record) -> f64 {
     let sequence = record.sequence();
     if sequence.is_empty() {
         return 0.0;
     }
-    let gc = sequence
-        .iter()
-        .filter(|&b| matches!(b, b'G' | b'g' | b'C' | b'c'))
-        .count();
+    let gc = sequence.iter().filter(|&b| crate::filter::is_gc(b)).count();
     gc as f64 / sequence.len() as f64
 }
 
