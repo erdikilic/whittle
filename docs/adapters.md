@@ -42,9 +42,9 @@ these treatments:
 
 - **Terminal trimming.** A hit within `--adapter-end-search` bases of an end
   (default 150) trims that end together with everything outboard of it.
-- **Partial adapters.** An adapter cut short by the read end (a truncated rear
-  adapter, a front adapter missing its first bases) is trimmed when at least
-  10 of its bases align flush with the end. Those 10 bases must match exactly;
+- **Partial adapters.** An adapter, primer or barcode cut short by the read
+  end (a truncated rear adapter, a front adapter or barcode missing its first
+  bases) is trimmed when at least 10 of its bases align flush with the end. Those 10 bases must match exactly;
   the error rate applies to the remainder.
 - **Chimera splitting.** An interior adapter marks a junction. The read is split
   there, the adapter is excised, and both sides are kept. Each side is searched

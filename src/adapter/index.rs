@@ -183,15 +183,16 @@ impl CandidateIndex {
         };
 
         // Sassy packs equal-length patterns across SIMD lanes, one pattern per
-        // 64-bit limb. Only the roles without overhang alignment are batched:
-        // the tiled search is a whole-pattern search, and the barcode sets are
-        // where equal lengths occur in numbers. Singletons stay on the
+        // 64-bit limb. Only barcodes are batched: the barcode sets are where
+        // equal lengths occur in numbers. Singletons stay on the
         // ordinary search path: a batch of one has no pattern-level
         // parallelism and is slower over these terminal windows.
         let mut by_len: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (adapter_idx, adapter) in adapters.iter().enumerate() {
             let len = adapter.seq.len();
-            if searchable[adapter_idx] && len <= MAX_TILED_PATTERN_LEN && !adapter.role.overhangs()
+            if searchable[adapter_idx]
+                && len <= MAX_TILED_PATTERN_LEN
+                && adapter.role == Role::Barcode
             {
                 by_len.entry(len).or_default().push(adapter_idx);
             }
@@ -221,14 +222,15 @@ impl CandidateIndex {
         }
 
         // End seeds: every k-mer of every partial-matching entry on both
-        // strands. A partial hit within its budget keeps at least one intact
+        // strands. Every entry matches partially except a barcode construct,
+        // whose `N` block would align a truncated construct at no cost. A partial hit within its budget keeps at least one intact
         // k-mer (see `END_SEED_LEN`), so an end window without a seed of an
         // entry cannot hold a partial hit of it and skips the overhang search.
         let mut end_seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
         let mut end_reach = 0;
         for (adapter_idx, adapter) in adapters.iter().enumerate() {
             let Budget { len, k_end, .. } = budgets[adapter_idx];
-            if !searchable[adapter_idx] || !adapter.role.overhangs() {
+            if !searchable[adapter_idx] || is_construct(adapter) {
                 continue;
             }
             end_reach = end_reach.max(len + k_end);

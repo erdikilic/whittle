@@ -60,13 +60,6 @@ impl Role {
         matches!(self, Role::Adapter)
     }
 
-    /// Whether a partial hit hanging off a read end is accepted for this role.
-    /// A barcode sits between its flanks, so a partial barcode at a read end is
-    /// flank residue that the flank hit already trims.
-    fn overhangs(self) -> bool {
-        !matches!(self, Role::Barcode)
-    }
-
     /// Display label.
     pub fn label(self) -> &'static str {
         match self {

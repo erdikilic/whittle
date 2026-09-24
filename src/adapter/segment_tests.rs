@@ -1379,3 +1379,23 @@ fn terminal_hit_is_found_across_the_window_split() {
         );
     }
 }
+
+/// A barcode cut short by the read end is trimmed like a truncated adapter
+/// when enough of it aligns flush with the end; a barcode construct, whose `N`
+/// block aligns at no cost, is not matched partially.
+#[test]
+fn truncated_barcode_at_the_read_start_is_trimmed() {
+    let barcode = b"TCCGCCATACCTCCATAGGT";
+    let mut w = barcode[6..].to_vec();
+    w.extend(splitmix_dna(13, 400));
+    let c = cfg_with(vec![entry("bc", barcode, Role::Barcode)], 0.1, 150, true);
+    assert_eq!(adapter_segments(&w, &c), vec![(barcode.len() - 6, w.len())]);
+
+    let construct = entry(
+        "construct",
+        b"ATTGCTAAGGTTAANNNNNNNNNNNNNNNNNNNNNNNNCAGCACCT",
+        Role::Barcode,
+    );
+    let index = CandidateIndex::new(&[construct], 0.1, 150, true);
+    assert!(index.end_seeds.is_none());
+}

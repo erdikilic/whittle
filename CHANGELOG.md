@@ -95,6 +95,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- A barcode cut short by the read end is trimmed when at least 10 of its
+  bases align flush with the end, as a truncated adapter or primer is. Barcode
+  panels without flanks, such as PacBio barcodes, left eroded barcodes behind.
 - A crop keeps `sp` and `pi` without `--update-moves`: they place the read's
   unchanged raw signal in its parent read. With `--update-moves`, a crop that
   shortens `ns` scales `du` with it, so a later split derives the right sample
