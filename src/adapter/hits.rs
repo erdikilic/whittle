@@ -455,10 +455,10 @@ impl<'a> Keep<'a> {
     }
 
     /// Returns the keep boundaries and the excisions, refined and clipped to
-    /// the boundaries, merged: two excisions overlapping,
-    /// touching, or separated by at most `FLANK_SLACK` bases or fewer than
-    /// `min_piece` bases become one, since the bases between them are junction
-    /// residue or a piece the length filter would discard.
+    /// the boundaries, merged: two excisions overlapping, touching, or
+    /// separated by at most `FLANK_SLACK` bases or fewer than `min_piece` bases
+    /// become one, since the bases between them are junction residue or a
+    /// piece the length filter would discard.
     pub(super) fn into_cuts(mut self, min_piece: usize) -> (usize, usize, Vec<(usize, usize)>) {
         self.settle();
         self.refine();
