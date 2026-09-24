@@ -1309,3 +1309,54 @@ fn dense_seeds_select_the_whole_read_search() {
     assert!(index.unfiltered[position("RAD")]);
     assert!(!index.unfiltered[position("LSK114_rear")]);
 }
+
+/// Constructs and insert-side flanks bound their barcode on either strand;
+/// outer flanks and ligation adapters do not.
+#[test]
+fn barcode_bounding_entries_are_constructs_and_insert_side_flanks() {
+    let adapters = preset_ont();
+    let bounded = |name: &str| bounds_barcode(adapters.iter().find(|a| a.name == name).unwrap());
+    for name in [
+        "NB_construct",
+        "PBC_rear",
+        "RAD",
+        "RLB_rear",
+        "MAB_rear",
+        "PCR1_front",
+    ] {
+        assert!(bounded(name), "{name}");
+    }
+    for name in [
+        "NB_front",
+        "RBK4_front",
+        "LSK114_front",
+        "PCR2_front",
+        "BC01",
+    ] {
+        assert!(!bounded(name), "{name}");
+    }
+    let rear = entry(
+        "rc",
+        &reverse_complement(b"CCATATCCGTGTCGCCCTT"),
+        Role::Barcode,
+    );
+    assert!(bounds_barcode(&rear));
+}
+
+/// Presence detection tallies a panel barcode at an end that a construct
+/// trims, although the trimming pass skips the panel search there.
+#[test]
+fn presence_detection_tallies_the_barcode_behind_a_construct() {
+    let adapters = super::preset::preset(&[super::preset::Kit::Nbd114]);
+    let mut construct = b"ATTGCTAAGGTTAA".to_vec();
+    construct.extend(reverse_complement(b"AAGAAAGTTGTCGGTGTCTTTGTG"));
+    construct.extend_from_slice(b"CAGCACCT");
+    let mut w = construct.clone();
+    w.extend(splitmix_dna(9, 400));
+    let c = cfg_with(adapters.clone(), 0.2, 150, true);
+    let mut acted = vec![false; adapters.len()];
+    let tallied = adapter_segments_tallied(&w, &c, &mut acted);
+    assert_eq!(tallied, adapter_segments(&w, &c));
+    let bc01 = adapters.iter().position(|a| a.name == "BC01").unwrap();
+    assert!(acted[bc01]);
+}

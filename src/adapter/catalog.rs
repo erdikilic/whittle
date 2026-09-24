@@ -41,6 +41,20 @@ const KIT14: &[Kit] = &[
 /// Kits that attach the rapid adapter by transposase or rapid attachment.
 const RAPID: &[Kit] = &[Kit::Rad114, Kit::Rbk114, Kit::Rpb114, Kit::Mab114];
 
+/// The catalog sequences that lie between a barcode and the insert in their
+/// kit's read layout: the inner flanks of the PCR, rapid PCR, rapid and
+/// amplicon barcodes (`BC_1st_REAR`, the `PCR1_front` end of `BC_2nd_REAR`,
+/// `RLB_REAR`, `RBK4_REAR` as `RAD`, `MAB_REAR`). A read end trimmed through
+/// one of them holds its barcode outboard of the trim.
+/// [dorado:barcode_kits.cpp]
+pub(super) const INSERT_SIDE_FLANKS: &[&[u8]] = &[
+    b"TTAACCTTTCTGTTGGTGCTGATATTGC",
+    b"ACTTGCCTGTCGCTCTATCTTC",
+    b"CGTTTTTCGTGCGCCGCTTC",
+    b"GTTTTCGCATTTATCGTGAAACGCTTTCGCGTTTTTCGTGCGCCGCTTCA",
+    b"CCATATCCGTGTCGCCCTT",
+];
+
 /// Every catalog entry in display order. `preset::build` collapses duplicate
 /// sequences.
 #[rustfmt::skip]
@@ -109,7 +123,7 @@ pub(super) const CATALOG: &[Entry] = &[
     // Native barcoding (NBD*) [dorado:barcode_kits.cpp(NB_1st_FRONT)]
     ("NB_front", Role::Barcode, &[Kit::Nbd114], b"ATTGCTAAGGTTAA"),
     // Native barcode construct: NB_1st_FRONT, the 24 bp barcode as N, and the
-    // 8 bp NB_1st_REAR, so a hit trims through the inner flank.
+    // 8 bp NB_1st_REAR, which is searched only within it.
     // [dorado:barcode_kits.cpp(NB_1st_FRONT, NB_1st_REAR)]
     ("NB_construct", Role::Barcode, &[Kit::Nbd114], b"ATTGCTAAGGTTAANNNNNNNNNNNNNNNNNNNNNNNNCAGCACCT"),
     // PCR barcoding (PBC/BC*) [dorado:barcode_kits.cpp(BC_1st_REAR)]

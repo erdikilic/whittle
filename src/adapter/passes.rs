@@ -190,8 +190,9 @@ pub(super) type Span = (usize, usize);
 /// Searches every equal-length batch over the two end windows of the span.
 /// All adapters in a batch share a length and budget, so the windows are
 /// shared too; this collapses a kit's equal-length barcode searches into one
-/// SIMD pattern search per end. Hits are passed to `keep` in span
-/// coordinates.
+/// SIMD pattern search per end. An end trimmed through an entry that bounds
+/// its barcode (see `bounds_barcode`) is not searched. Hits are passed to
+/// `keep` in span coordinates.
 pub(super) fn search_batched(
     ctx: Context<'_>,
     span: Span,
@@ -202,17 +203,21 @@ pub(super) fn search_batched(
     let n = we - ws;
     for batch in &ctx.index.terminal_batches {
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, batch.len, batch.k_end);
-        let head = ctx.read.strands(ws, ws + head_end);
-        let tail = ctx.read.strands(ws + tail_start, we);
-        accept_batch_hits(batch, searcher, head, 0, Site::Head, keep);
-        accept_batch_hits(
-            batch,
-            searcher,
-            tail,
-            tail_start,
-            Site::Tail { head_end },
-            keep,
-        );
+        if !(keep.gate_panels && keep.five_bounded) {
+            let head = ctx.read.strands(ws, ws + head_end);
+            accept_batch_hits(batch, searcher, head, 0, Site::Head, keep);
+        }
+        if !(keep.gate_panels && keep.three_bounded) {
+            let tail = ctx.read.strands(ws + tail_start, we);
+            accept_batch_hits(
+                batch,
+                searcher,
+                tail,
+                tail_start,
+                Site::Tail { head_end },
+                keep,
+            );
+        }
     }
 }
 
@@ -468,11 +473,12 @@ pub(super) fn search_terminal(
     engine: &mut Engine<'_>,
     keep: &mut Keep<'_>,
 ) {
-    if !ctx.index.terminal_batches.is_empty() {
-        search_batched(ctx, span, engine.ambiguous, keep);
-    }
     search_singletons(ctx, span, engine, keep);
     keep.settle();
+    if !ctx.index.terminal_batches.is_empty() {
+        search_batched(ctx, span, engine.ambiguous, keep);
+        keep.settle();
+    }
     let (ws, we) = span;
     if keep.lo != 0 && keep.hi != we - ws {
         return;
@@ -558,6 +564,7 @@ pub(super) fn segments_with(
 ) -> Vec<(usize, usize)> {
     let cfg = ctx.cfg;
     let n = ctx.read.window.len();
+    let gate_panels = acted.is_none();
     let mut tally = |keep: &Keep<'_>| {
         if let Some(acted) = acted.as_deref_mut() {
             for &adapter_idx in &keep.acted {
@@ -566,6 +573,7 @@ pub(super) fn segments_with(
         }
     };
     let mut keep = Keep::new(cfg, ctx.index, n, cfg.split);
+    keep.gate_panels = gate_panels;
     search_terminal(ctx, (0, n), engine, &mut keep);
     if cfg.split {
         search_interior(ctx, engine, &mut keep);
@@ -595,6 +603,7 @@ pub(super) fn segments_with(
             return;
         }
         let mut keep = Keep::new(cfg, ctx.index, e - s, false);
+        keep.gate_panels = gate_panels;
         search_terminal(ctx, (s, e), engine, &mut keep);
         keep.refine();
         tally(&keep);

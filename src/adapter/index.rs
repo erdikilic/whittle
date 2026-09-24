@@ -37,6 +37,34 @@ pub(crate) struct CandidateIndex {
     pub(super) end_seeds: Option<SeedTable>,
     /// The longest end-window reach over the partial-matching entries.
     pub(super) end_reach: usize,
+    /// Per-adapter `bounds_barcode`.
+    pub(super) panel_gates: Vec<bool>,
+}
+
+/// Shortest run of `N` that marks a barcode construct: a barcode entry that
+/// spans a barcode position between its flanks.
+pub(super) const CONSTRUCT_BARCODE_LEN: usize = 16;
+
+/// Returns whether a trim through `adapter` leaves no barcode further inside
+/// the read: a barcode construct spans its barcode, and an insert-side flank
+/// (`catalog::INSERT_SIDE_FLANKS`, either strand) lies inboard of it. The
+/// barcode panel search is skipped at an end such an entry trimmed.
+pub(super) fn bounds_barcode(adapter: &Adapter) -> bool {
+    let seq = adapter.seq.to_ascii_uppercase();
+    is_construct(adapter)
+        || super::catalog::INSERT_SIDE_FLANKS
+            .iter()
+            .any(|flank| seq == *flank || seq == reverse_complement(flank))
+}
+
+/// Returns whether `adapter` is a barcode construct: a barcode entry with a
+/// run of at least `CONSTRUCT_BARCODE_LEN` `N` standing for the barcode.
+pub(super) fn is_construct(adapter: &Adapter) -> bool {
+    adapter.role == Role::Barcode
+        && adapter
+            .seq
+            .split(|&b| !b.eq_ignore_ascii_case(&b'N'))
+            .any(|run| run.len() >= CONSTRUCT_BARCODE_LEN)
 }
 
 /// Equal-length adapters searched together through sassy's pattern-parallel
@@ -230,6 +258,7 @@ impl CandidateIndex {
             singletons,
             end_seeds,
             end_reach,
+            panel_gates: adapters.iter().map(bounds_barcode).collect(),
         }
     }
 

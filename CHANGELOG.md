@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- The barcode panel is not searched at a read end already trimmed through a
+  sequence that lies between the barcode and the insert: the native barcode
+  construct, or the insert-side flank of the PCR, rapid and amplicon
+  barcodes. Barcoded reads take 25 to 40% less CPU under the `ont` preset.
 - The interior adapter search covers the whole read for an adapter whose
   exact seeds would open candidate windows over more than a quarter of it,
   such as `RAD`, `SMRTbell` and the ligation front adapters. Output is

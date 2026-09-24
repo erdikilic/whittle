@@ -136,6 +136,15 @@ pub(super) struct Keep<'a> {
     pub(super) adapters: &'a [Adapter],
     /// Per-adapter edit budgets, for the anchoring of terminal hits.
     pub(super) budgets: &'a [Budget],
+    /// Per-adapter `bounds_barcode`.
+    panel_gates: &'a [bool],
+    /// Whether a `bounds_barcode` entry trimmed the 5' end.
+    pub(super) five_bounded: bool,
+    /// Whether a `bounds_barcode` entry trimmed the 3' end.
+    pub(super) three_bounded: bool,
+    /// Whether a bounded end skips the barcode panel search. Presence
+    /// detection turns it off so every panel member is tallied.
+    pub(super) gate_panels: bool,
     /// The run's error rate, which scales the budget of a partial hit.
     pub(super) error_rate: f64,
     /// Window length.
@@ -214,6 +223,10 @@ impl<'a> Keep<'a> {
         Self {
             adapters: &cfg.adapters,
             budgets: &index.budgets,
+            panel_gates: &index.panel_gates,
+            five_bounded: false,
+            three_bounded: false,
+            gate_panels: true,
             error_rate: cfg.error_rate,
             n,
             end_size: cfg.end_size.min(n),
@@ -354,10 +367,12 @@ impl<'a> Keep<'a> {
             HitAction::TrimFivePrime => {
                 self.lo = self.lo.max(end);
                 self.five.push(applied);
+                self.five_bounded |= self.panel_gates[adapter_idx];
             },
             HitAction::TrimThreePrime => {
                 self.hi = self.hi.min(start);
                 self.three.push(applied);
+                self.three_bounded |= self.panel_gates[adapter_idx];
             },
             HitAction::Excise => {
                 self.interior.push((start, end));
