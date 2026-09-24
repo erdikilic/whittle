@@ -175,7 +175,7 @@ fn update_moves_split_emits_subread_tags() {
 }
 
 #[test]
-fn default_drops_all_signal_tags_on_trim() {
+fn default_drops_the_move_tags_and_keeps_the_parent_link_on_a_crop() {
     let mut src = ubam_with_moves();
     src.data_mut().insert(Tag::new(b's', b'p'), Value::Int32(5));
     src.data_mut().insert(
@@ -183,15 +183,24 @@ fn default_drops_all_signal_tags_on_trim() {
         Value::String(b"parent".as_slice().into()),
     );
 
-    // `update_moves` off and trimmed: mv/ts/ns/sp/pi are all removed.
+    // `update_moves` off and cropped: mv/ts/ns are removed, and sp/pi, which
+    // place the unchanged raw signal in its parent, are kept.
     let out = reconstruct_record(&src, 2, 6, 1, 0, false);
-    for t in [b"mv", b"ts", b"ns", b"sp", b"pi"] {
+    for t in [b"mv", b"ts", b"ns"] {
         assert!(
             out.data().get(&Tag::new(t[0], t[1])).is_none(),
             "{} must be dropped by default on trim",
             std::str::from_utf8(t).unwrap()
         );
     }
+    assert_eq!(
+        out.data().get(&Tag::new(b's', b'p')),
+        Some(&Value::Int32(5))
+    );
+    assert_eq!(
+        out.data().get(&Tag::new(b'p', b'i')),
+        Some(&Value::String(b"parent".as_slice().into()))
+    );
 }
 
 #[test]
@@ -567,4 +576,17 @@ fn update_moves_split_leaves_st_and_du_when_the_rate_is_unknown() {
         assert_eq!(tag(&out, *b"st"), tag(&r, *b"st"), "{t:?}");
         assert_eq!(tag(&out, *b"du"), tag(&r, *b"du"), "{t:?}");
     }
+}
+
+/// A tail crop under `update_moves` shortens `ns` and scales `du` with it, so
+/// `ns` over `du` stays the sample rate; `st` is kept.
+#[test]
+fn update_moves_tail_crop_scales_du_with_ns() {
+    let out = reconstruct_record(&ont_record(), 0, 4, 1, 0, true);
+    assert_eq!(tag(&out, *b"ns"), Some(Value::Int32(22)));
+    let Some(Value::Float(du)) = tag(&out, *b"du") else {
+        panic!("du missing");
+    };
+    assert!((f64::from(du) - 5.0 * 22.0 / 26.0).abs() < 1e-6, "{du}");
+    assert_eq!(tag(&out, *b"st"), string_value(b"2024-06-21T10:00:00Z"));
 }

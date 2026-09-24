@@ -80,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- A crop keeps `sp` and `pi` without `--update-moves`: they place the read's
+  unchanged raw signal in its parent read. With `--update-moves`, a crop that
+  shortens `ns` scales `du` with it, so a later split derives the right sample
+  rate from `ns` over `du`.
 - The `nbd114` preset trims the 8 bp native barcode rear flank (`CAGCACCT`)
   with the barcode. The catalog carries the native barcode construct with the
   barcode written as `N`, so one hit spans both flanks.

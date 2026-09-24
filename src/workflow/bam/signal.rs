@@ -193,7 +193,9 @@ pub(super) struct SignalWindow {
 /// Returns `(tag, Some(value))` to set or `(tag, None)` to remove, with the
 /// kept signal window when the tags were rewritten; empty when the read is not
 /// trimmed. With `update_moves` off, or a missing or malformed move table, the
-/// five signal tags and both poly-A tags are removed. With it on, `mv` is
+/// signal tags and both poly-A tags are removed; a crop keeps `sp` and `pi`,
+/// which place the read's raw signal in its parent and stay valid when only
+/// bases are removed. With it on, `mv` is
 /// sliced by block range (stride-aligned, following dorado
 /// `splitter::subread`) and:
 ///   - crop (`total == 1`, name kept): `ts += block_first*stride`; `ns` is the
@@ -219,6 +221,7 @@ pub(super) fn signal_tag_updates(
     }
     let dropped = SIGNAL_TAGS
         .iter()
+        .filter(|t| total > 1 || !matches!(*t, b"sp" | b"pi"))
         .chain(POLYA_TAGS.iter())
         .map(|t| (Tag::new(t[0], t[1]), None))
         .collect();
@@ -333,6 +336,23 @@ pub(super) fn split_time_updates(src: &RecordBuf, window: SignalWindow) -> TagUp
         updates.push((st_tag, Some(Value::String(shifted.into()))));
     }
     updates
+}
+
+/// Rescales `du` for a crop whose signal window is known, so that `ns` over
+/// `du` stays the sample rate: a tail crop shortens `ns`, and dorado's own
+/// trimming writes `du` as `ns` over the sample rate. Empty when the crop keeps
+/// the source `ns`, or `du` or `ns` is missing or not positive.
+pub(super) fn crop_time_updates(src: &RecordBuf, window: SignalWindow) -> TagUpdates {
+    let du_tag = Tag::new(b'd', b'u');
+    let (Some(Value::Float(du0)), Some(ns0)) = (src.data().get(&du_tag), signal_int(src, b"ns"))
+    else {
+        return Vec::new();
+    };
+    if ns0 <= 0 || !du0.is_finite() || *du0 <= 0.0 || window.kept_end == ns0 {
+        return Vec::new();
+    }
+    let du = f64::from(*du0) * window.kept_end as f64 / ns0 as f64;
+    vec![(du_tag, Some(Value::Float(du as f32)))]
 }
 
 /// Returns an RFC 3339 `st` value advanced by `seconds`, at millisecond

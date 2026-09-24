@@ -59,8 +59,9 @@ pub(crate) const DROP_ON_TRIM_TAGS: [[u8; 2]; 3] = [*b"bi", *b"ds", *b"ls"];
 
 /// Tags that describe the whole parent read, not a split subread: `st` (read
 /// start time) and `du` (duration). A head/tail crop keeps the same read
-/// identity, so they stay valid there. On a split they are recomputed from the
-/// sample rate when `--update-moves` resolves the subread's signal window
+/// identity and start time; under `--update-moves` its `du` follows the
+/// rewritten `ns` (`crop_time_updates`). On a split they are recomputed from
+/// the sample rate when `--update-moves` resolves the subread's signal window
 /// (`split_time_updates`) and dropped otherwise. A non-float `du` (pbmarkdup's
 /// `du:Z`) is not a duration and is copied.
 pub(crate) const DROP_ON_SPLIT_TAGS: [[u8; 2]; 2] = [*b"st", *b"du"];
@@ -341,6 +342,8 @@ pub(super) fn window_tag_updates(
                 }
             },
         }
+    } else if let Some(window) = signal {
+        updates.extend(crop_time_updates(src, window));
     }
     if split && platform == Platform::Ont {
         // Dorado's subread convention (`splitter_utils.cpp`): read number -1,
