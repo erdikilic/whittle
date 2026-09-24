@@ -21,6 +21,7 @@ pub(super) fn push_fastq_tags(
     sel: &FastqTags,
     platform: Platform,
     remove: &TagRemoval,
+    trim_classes: [bool; 3],
 ) {
     // A run that carries no tags writes a plain header, so the rewrites are
     // not computed.
@@ -53,6 +54,15 @@ pub(super) fn push_fastq_tags(
         let value: Cow<Value> = match rewritten {
             Some(None) => continue,
             Some(Some(v)) => Cow::Owned(v),
+            // Dorado's per-read trim mode names the run's trimming; see
+            // `merged_trim_mode`.
+            None if &t == b"tm" => match value {
+                Value::String(mode) => crate::io::bam::merged_trim_mode(Some(mode), trim_classes)
+                    .map_or(Cow::Borrowed(value), |m| {
+                        Cow::Owned(Value::String(m.into()))
+                    }),
+                _ => Cow::Borrowed(value),
+            },
             None => match trimmed
                 .then(|| windowed_value(t, value, orig_len, start, end))
                 .flatten()
@@ -97,6 +107,7 @@ pub(super) fn render_fastq_window(
     platform: Platform,
     sel: &FastqTags,
     remove: &TagRemoval,
+    trim_classes: [bool; 3],
     reason: Option<Reason>,
 ) {
     let Window { start, end, .. } = window;
@@ -112,7 +123,16 @@ pub(super) fn render_fastq_window(
     }
     out.extend_from_slice(description);
     push_fastq_tags(
-        out, rec, seq, window, mod_block, indexed, sel, platform, remove,
+        out,
+        rec,
+        seq,
+        window,
+        mod_block,
+        indexed,
+        sel,
+        platform,
+        remove,
+        trim_classes,
     );
     if let Some(reason) = reason {
         reject::push_fastq_tag(out, reason);
@@ -147,6 +167,7 @@ pub(super) fn render_bam_fastq_read(
             platform,
             &cfg.fastq_tags,
             &cfg.remove_tags,
+            cfg.trim_classes,
             reason,
         );
         if reason.is_some() {

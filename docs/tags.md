@@ -61,7 +61,7 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 | `st`/`du` (start time, duration) | Kept on a crop; with `--update-moves`, a crop that shortens `ns` scales `du` with it, so `ns` over `du` stays the sample rate. On a split, recomputed with `--update-moves`, otherwise removed; pbmarkdup's `du:Z` is not a duration and is copied |
 | `me`/`er` (MinKNOW event count, end reason) | On an ONT split, `me` is 0 on every segment and `er` is `unknown` except on the segment retaining the parent signal end when moves are rewritten, or the last sequence segment otherwise; only when the source carries them |
 | `RG`, `ch`, `mx`, `sd`/`sv`, and other scalar tags | Copied verbatim |
-| `@RG` `tm` (dorado trim mode, BAM header) | The adapter, primer and barcode classes of the resolved adapter set are merged in, in dorado's `adapter,primer,barcode` order; a read group without it gains it; a value outside that grammar is left unchanged; quality trimming and crops alone leave it unchanged |
+| `tm` (dorado trim mode: `@RG` field in BAM, per-read tag in tagged FASTQ) | The adapter, primer and barcode classes of the resolved adapter set are merged in, in dorado's `adapter,primer,barcode` order, on every read group and every read that carries it; a BAM read group without it gains it; a value outside that grammar is left unchanged; quality trimming and crops alone leave it unchanged |
 
 ## Filtering by aux tag
 

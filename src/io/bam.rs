@@ -360,47 +360,61 @@ pub(crate) fn provenance_header(
 /// `adapter`, `primer`, `barcode`.
 const TRIM_MODE_TOKENS: [&[u8]; 3] = [b"adapter", b"primer", b"barcode"];
 
-/// Adds the sequence classes whittle trims to the `tm` field of every `@RG`
-/// record, in dorado's grammar (`hts_types.h` `AdapterTrimMode`): the
-/// comma-joined tokens `adapter`, `primer` and `barcode` in that order, or
-/// `none` alone. `trimmed` flags each token in `TRIM_MODE_TOKENS` order. The
-/// field names the trimming applied to the reads, so an existing value is
-/// merged with `trimmed`, and a read group without it gains it. A value outside
-/// the grammar is left unchanged. Nothing changes when `trimmed` is empty.
+/// Returns a dorado trim-mode value (`hts_types.h` `AdapterTrimMode`) with
+/// the classes flagged in `trimmed` added: the comma-joined tokens `adapter`,
+/// `primer` and `barcode` in that order, or `none` alone. `trimmed` flags each
+/// token in `TRIM_MODE_TOKENS` order; `value` is the existing field, if any.
+/// `None` when `trimmed` flags nothing or `value` is outside the grammar, which
+/// leaves the field unchanged.
+pub(crate) fn merged_trim_mode(value: Option<&[u8]>, trimmed: [bool; 3]) -> Option<Vec<u8>> {
+    if !trimmed.contains(&true) {
+        return None;
+    }
+    let mut modes = trimmed;
+    if let Some(value) = value {
+        let tokens: Vec<&[u8]> = value.split(|&b| b == b',').collect();
+        let known = tokens.iter().all(|t| TRIM_MODE_TOKENS.contains(t))
+            || tokens.as_slice() == [b"none".as_slice()];
+        if !known {
+            return None;
+        }
+        for (mode, token) in modes.iter_mut().zip(TRIM_MODE_TOKENS) {
+            *mode |= tokens.contains(&token);
+        }
+    }
+    let merged: Vec<&[u8]> = TRIM_MODE_TOKENS
+        .iter()
+        .zip(modes)
+        .filter_map(|(&token, on)| on.then_some(token))
+        .collect();
+    Some(merged.join(&b","[..]))
+}
+
+/// Merges the classes flagged in `trimmed` into the `tm` field of every `@RG`
+/// record (`merged_trim_mode`). The field names the trimming applied to the
+/// reads, so a read group without it gains it; a value outside dorado's
+/// grammar is left unchanged with a warning.
 pub(crate) fn merge_trim_mode(header: &mut sam::Header, trimmed: [bool; 3]) {
     use sam::header::record::value::map::tag::Other;
 
-    if !trimmed.contains(&true) {
-        return;
-    }
     let Ok(tm) = Other::try_from(*b"tm") else {
         return;
     };
     for (id, group) in header.read_groups_mut() {
         let fields = group.other_fields_mut();
-        let mut modes = trimmed;
-        if let Some(value) = fields.get(&tm) {
-            let tokens: Vec<&[u8]> = value.split(|&b| b == b',').collect();
-            let known = tokens.iter().all(|t| TRIM_MODE_TOKENS.contains(t))
-                || tokens.as_slice() == [b"none".as_slice()];
-            if !known {
+        let value = fields.get(&tm).map(|v| v.as_slice());
+        match merged_trim_mode(value, trimmed) {
+            Some(merged) => {
+                fields.insert(tm, merged.into());
+            },
+            None if trimmed.contains(&true) => {
                 tracing::warn!(
                     read_group = %id,
-                    tm = %value,
                     "The @RG tm field is not in dorado's grammar and is left unchanged"
                 );
-                continue;
-            }
-            for (mode, token) in modes.iter_mut().zip(TRIM_MODE_TOKENS) {
-                *mode |= tokens.contains(&token);
-            }
+            },
+            None => {},
         }
-        let merged: Vec<&[u8]> = TRIM_MODE_TOKENS
-            .iter()
-            .zip(modes)
-            .filter_map(|(&token, on)| on.then_some(token))
-            .collect();
-        fields.insert(tm, merged.join(&b","[..]).into());
     }
 }
 

@@ -426,7 +426,7 @@ impl Session {
                 else {
                     return Ok(());
                 };
-                io::bam::merge_trim_mode(&mut out_header, trim_classes(cfg));
+                io::bam::merge_trim_mode(&mut out_header, cfg.trim_classes);
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
                     &out_header,
@@ -763,6 +763,7 @@ where
     // the summary reports it alongside what resolution settled on.
     cfg.adapters_configured = cfg.adapters.as_ref().map(|a| a.adapters.len());
     cfg.adapters = resolved.adapters;
+    cfg.trim_classes = trim_classes(cfg);
     cfg.render_workers = budget.render;
     Ok(Some(resolved.records))
 }

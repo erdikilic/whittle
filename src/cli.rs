@@ -407,6 +407,7 @@ pub fn parse() -> anyhow::Result<Config> {
         progress: c.progress,
         adapter_fasta: c.adapter_fasta,
         adapters_configured: None,
+        trim_classes: [false; 3],
         remove_tags,
         tag_filters,
     };

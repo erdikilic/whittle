@@ -338,3 +338,38 @@ fn pacbio_interval_names_follow_repeated_crops() {
     assert!(second.starts_with("@movie/1/101_105\tqs:i:101\tqe:i:105\n"));
     assert!(second.contains("@movie/2/ccs/101_105\t"));
 }
+
+/// Dorado's per-read `tm` trim mode gains the classes the adapter set trims,
+/// on every read, and is copied when only quality trimming runs or when the
+/// value is outside dorado's grammar.
+#[test]
+fn trim_mode_tag_records_adapter_trimming() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("tm.fastq");
+    let body = "ACGTTGCAAGCTTGACCTAGGATCCAGTACGGTCAAGT";
+    let quals = "I".repeat(body.len());
+    let text: String = ["tm:Z:none", "tm:Z:barcode", "tm:Z:quality"]
+        .iter()
+        .enumerate()
+        .map(|(i, tm)| format!("@r{i}\t{tm}\n{body}\n+\n{quals}\n"))
+        .collect();
+    std::fs::write(&input, text).unwrap();
+    let fasta = dir.path().join("adapters.fa");
+    std::fs::write(&fasta, ">a\nGGCCTTAAGGCCTTAAGG\n").unwrap();
+
+    let trimmed = run(
+        &["-a", fasta.to_str().unwrap()],
+        &input,
+        dir.path(),
+        "a.fastq",
+    );
+    for tm in [
+        "@r0\ttm:Z:adapter\n",
+        "@r1\ttm:Z:adapter,barcode\n",
+        "@r2\ttm:Z:quality\n",
+    ] {
+        assert!(trimmed.contains(tm), "{tm}: {trimmed}");
+    }
+    let quality = run(&["--trim-quality", "10"], &input, dir.path(), "q.fastq");
+    assert!(quality.contains("@r0\ttm:Z:none\n"), "{quality}");
+}

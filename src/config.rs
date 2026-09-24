@@ -295,6 +295,10 @@ pub struct Config {
     /// adapter trimming is off, and `0` under inference, where the set is
     /// discovered rather than configured.
     pub adapters_configured: Option<usize>,
+    /// Whether the resolved adapter set trims adapters, primers and barcodes,
+    /// in dorado's `tm` token order. Recorded by `settle` and merged into the
+    /// `@RG` and per-read `tm` fields.
+    pub trim_classes: [bool; 3],
 }
 
 impl Default for Config {
@@ -327,6 +331,7 @@ impl Default for Config {
             progress: ProgressMode::Auto,
             adapter_fasta: None,
             adapters_configured: None,
+            trim_classes: [false; 3],
         }
     }
 }

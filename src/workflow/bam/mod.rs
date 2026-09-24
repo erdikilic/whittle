@@ -82,6 +82,8 @@ pub(crate) fn tag_filtered_bam_fastq(
         platform(&rec),
         &cfg.fastq_tags,
         &cfg.remove_tags,
+        // A read the tag filter rejects is not trimmed; its `tm` is copied.
+        [false; 3],
         Some(Reason::TagFilter),
     );
     Ok(RejectItem::Fastq(out))
