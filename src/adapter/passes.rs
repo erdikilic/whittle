@@ -409,7 +409,7 @@ pub(super) fn search_residue(
     for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
         let retry_head = retry_head && engine.head_flags[adapter_idx];
         let retry_tail = retry_tail && engine.tail_flags[adapter_idx];
-        if !adapter.role.splits() || (!retry_head && !retry_tail) {
+        if adapter.role != Role::Adapter || (!retry_head && !retry_tail) {
             continue;
         }
         let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
@@ -477,10 +477,25 @@ pub(super) fn shifted(hit: Hit, offset: usize) -> Hit {
 /// below `MIN_PATTERN_LEN` or without a splitting role has no seeds and no
 /// windows.
 pub(super) fn search_interior(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
+    let n = ctx.read.window.len();
     ctx.index.candidate_windows(ctx.read.window, engine.windows);
     for i in 0..engine.windows.len() {
         let (adapter_idx, start, end) = engine.windows[i];
-        let k_mid = ctx.index.budgets[adapter_idx].interior(ctx.read.window.len());
+        if !keep.splits(adapter_idx) {
+            continue;
+        }
+        let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
+        // An interior hit acts only outside both end zones, where the terminal
+        // search does not reach: it starts after `end_size` and ends before
+        // `n - end_size`. The window keeps `len + k_end` bases of context past
+        // that region, as `candidate_windows` does around a seed.
+        let reach = len + k_end;
+        let start = start.max((keep.end_size + 1).saturating_sub(reach));
+        let end = end.min(n.saturating_sub(keep.end_size + 1) + reach);
+        if end <= start || end - start < len.saturating_sub(k_end) {
+            continue;
+        }
+        let k_mid = ctx.index.budgets[adapter_idx].interior(n);
         search(
             engine,
             ctx.index,

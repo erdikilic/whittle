@@ -25,14 +25,22 @@ Ambiguity codes in a read are mismatches, not free matches: an uncalled base
 costs error budget. A single `N` inside an adapter still matches within
 `--adapter-error-rate`; a run of them does not.
 
-Every sequence has a role. An **adapter** is trimmed at the read ends and
-excised in the interior. A **primer** or **barcode** is trimmed at the ends
-only, since a primer or barcode inside a read is as often part of the molecule
-as a chimera signal. Catalog entries carry their role. A FASTA entry is an
-adapter unless the word `primer` or `barcode` appears in its header description
-(`>27F primer`). A preset made only of amplicon kits (`mab114`) promotes its
-primers to adapters, since an amplicon library has no molecule with a primer
-inside it.
+Every sequence has a role: **adapter**, **primer** or **barcode**. Catalog
+entries carry their role. A FASTA entry is an adapter unless the word `primer`
+or `barcode` appears in its header description (`>27F primer`). Every role is
+trimmed at the read ends and splits a read at an interior hit, with three
+exceptions:
+
+- The barcodes of a panel (equal-length barcode entries) do not split when the
+  set carries barcode flanks or a barcode construct: the flanks at a barcode
+  junction split it.
+- The universal marker-gene primers (16S 27F and 1492R, ITS1F, ITS4) do not
+  split in a selection that includes a genomic kit, since their sites lie
+  inside every genomic read through an rRNA operon. A preset made only of
+  amplicon kits (`mab114`) promotes them to adapters, which split.
+- A primer or barcode splits only reads short enough that its exact matches
+  stay within the interior chance bound below; a short flank such as
+  `NB_front` (14 bases) splits reads up to a few kilobases.
 
 ## Search
 
@@ -46,8 +54,9 @@ these treatments:
   end (a truncated rear adapter, a front adapter or barcode missing its first
   bases) is trimmed when at least 10 of its bases align flush with the end. Those 10 bases must match exactly;
   the error rate applies to the remainder.
-- **Chimera splitting.** An interior adapter marks a junction. The read is split
-  there, the adapter is excised, and both sides are kept. Each side is searched
+- **Chimera splitting.** An interior adapter, primer or barcode marks a
+  junction. The read is split there, the sequence is excised, and both sides
+  are kept. Each side is searched
   again at its new end, so a primer, barcode, or truncated adapter adjacent to
   the junction is trimmed as at a physical read end. Two excisions separated by
   fewer bases than `--min-length`, or by at most 11 bases, merge into one.

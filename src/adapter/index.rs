@@ -39,6 +39,18 @@ pub(crate) struct CandidateIndex {
     pub(super) end_reach: usize,
     /// Per-adapter `bounds_barcode`.
     pub(super) panel_gates: Vec<bool>,
+    /// The number of read-length classes, from class 0, in which an interior
+    /// hit of each adapter excises and splits the read. Every searchable
+    /// entry splits except the members of a barcode panel in a set that
+    /// carries a `bounds_barcode` entry: a barcode junction of such a set
+    /// holds the flanks, which split it, and the panel's short interior seeds
+    /// would open candidate windows over most of every read. A marker-gene
+    /// primer (`catalog::MARKER_PRIMERS`) in the primer role does not split:
+    /// its site is part of every genomic read through an rRNA operon, and an
+    /// amplicon-only preset gives it the adapter role instead. An adapter
+    /// splits in every class; a primer or barcode only in the classes where
+    /// its exact matches stay within `INTERIOR_CHANCE_HITS_PER_READ`.
+    pub(super) split_classes: Vec<usize>,
 }
 
 /// Shortest run of `N` that marks a barcode construct: a barcode entry that
@@ -55,6 +67,29 @@ pub(super) fn bounds_barcode(adapter: &Adapter) -> bool {
         || super::catalog::INSERT_SIDE_FLANKS
             .iter()
             .any(|flank| seq == *flank || seq == reverse_complement(flank))
+}
+
+/// Returns whether `adapter` is a marker-gene primer in the primer role, on
+/// either strand.
+fn is_marker_primer(adapter: &Adapter) -> bool {
+    let seq = adapter.seq.to_ascii_uppercase();
+    adapter.role == Role::Primer
+        && super::catalog::MARKER_PRIMERS
+            .iter()
+            .any(|primer| seq == *primer || seq == reverse_complement(primer))
+}
+
+/// Returns whether `adapter` is a member of a barcode panel: a barcode that is
+/// neither a construct nor an insert-side flank and shares its length with
+/// another such barcode of `adapters`.
+fn is_panel_barcode(adapter: &Adapter, adapters: &[Adapter]) -> bool {
+    let member = |a: &Adapter| a.role == Role::Barcode && !bounds_barcode(a);
+    member(adapter)
+        && adapters
+            .iter()
+            .filter(|other| member(other) && other.seq.len() == adapter.seq.len())
+            .nth(1)
+            .is_some()
 }
 
 /// Returns whether `adapter` is a barcode construct: a barcode entry with a
@@ -125,18 +160,37 @@ impl CandidateIndex {
             budget.k_end = k_end;
             budget.k_far = k_far;
         }
-        // The interior chance bound covers the splitting roles, per
+        // The interior chance bound covers the splitting entries, per
         // read-length class; budgets do not increase with the class.
-        let splitting: Vec<bool> = adapters
+        let flanked = adapters.iter().any(bounds_barcode);
+        let split_classes: Vec<usize> = adapters
             .iter()
             .zip(&searchable)
-            .map(|(adapter, &searchable)| searchable && adapter.role.splits())
+            .map(|(adapter, &searchable)| {
+                if !searchable
+                    || (flanked && is_panel_barcode(adapter, adapters))
+                    || is_marker_primer(adapter)
+                {
+                    0
+                } else if adapter.role == Role::Adapter {
+                    INTERIOR_CLASSES
+                } else {
+                    let exact = chance_cumulative(&adapter.seq, 0)[0];
+                    (0..INTERIOR_CLASSES)
+                        .take_while(|&class| {
+                            exact * interior_positions(class) <= INTERIOR_CHANCE_HITS_PER_READ
+                        })
+                        .count()
+                }
+            })
             .collect();
+        let splitting: Vec<bool> = split_classes.iter().map(|&c| c > 0).collect();
         for class in 0..INTERIOR_CLASSES {
             let caps: Vec<usize> = budgets.iter().map(|b| b.k_mid[class]).collect();
+            let splitting_here: Vec<bool> = split_classes.iter().map(|&c| c > class).collect();
             let edits = family_budgets(
                 adapters,
-                &splitting,
+                &splitting_here,
                 &caps,
                 interior_positions(class),
                 INTERIOR_CHANCE_HITS_PER_READ,
@@ -155,7 +209,7 @@ impl CandidateIndex {
             let mut seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
             for (adapter_idx, adapter) in adapters.iter().enumerate() {
                 let k_mid = budgets[adapter_idx].interior_max();
-                if !searchable[adapter_idx] || !adapter.role.splits() {
+                if !splitting[adapter_idx] {
                     continue;
                 }
                 let pattern = adapter.seq.to_ascii_uppercase();
@@ -261,6 +315,7 @@ impl CandidateIndex {
             end_seeds,
             end_reach,
             panel_gates: adapters.iter().map(bounds_barcode).collect(),
+            split_classes,
         }
     }
 

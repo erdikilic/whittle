@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- Primers and barcodes split a read at an interior hit, as adapters do. The
+  barcodes of a panel leave the split to the barcode flanks when the set
+  carries them; the universal 16S and ITS primers split only under an
+  amplicon-only preset; and a primer or barcode splits only reads short
+  enough for its exact matches to stay within the interior chance bound.
+- The interior adapter search skips both end zones, where the terminal search
+  applies.
 - Plain gzip FASTQ input is inflated on its own thread, one of the `-t`
   workers, ahead of the parser. Multithreaded runs over gzip input finish
   about 10% sooner.

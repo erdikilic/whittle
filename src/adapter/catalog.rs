@@ -55,6 +55,16 @@ pub(super) const INSERT_SIDE_FLANKS: &[&[u8]] = &[
     b"CCATATCCGTGTCGCCCTT",
 ];
 
+/// The universal marker-gene primers of the amplicon kit: 16S 27F and 1492R,
+/// ITS1F and ITS4. They bind conserved sites of the rRNA operon, so they also
+/// occur inside genomic reads.
+pub(super) const MARKER_PRIMERS: &[&[u8]] = &[
+    b"AGAGTTTGATYMTGGCTCAG",
+    b"TACGGYTACCTTGTTACGACTT",
+    b"CTTGGTCATTTAGAGGAAGTAA",
+    b"TCCTCCGCTTATTGATATGC",
+];
+
 /// Every catalog entry in display order. `preset::build` collapses duplicate
 /// sequences.
 #[rustfmt::skip]

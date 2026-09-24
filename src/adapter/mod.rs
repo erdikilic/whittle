@@ -40,26 +40,21 @@ thread_local! {
     static STATE: RefCell<ThreadState> = RefCell::new(ThreadState::new());
 }
 
-/// What a catalog sequence is, which decides what a hit may do. Every role is
-/// trimmed at the read ends; only an adapter splits a read at an interior hit,
-/// since a primer or barcode inside a read is part of the molecule as often as
-/// it is a chimera signal.
+/// What a catalog sequence is. Every role is trimmed at the read ends and
+/// splits a read at an interior hit, except a panel barcode of a set that
+/// carries its flanks (see `CandidateIndex::splits`); only an adapter is
+/// searched again with its end bases masked (`search_residue`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    /// A sequencing adapter: trimmed at the ends and excised in the interior.
+    /// A sequencing adapter.
     Adapter,
-    /// A PCR or sequencing primer: trimmed at the ends only.
+    /// A PCR or sequencing primer.
     Primer,
-    /// A barcode or barcode flank: trimmed at the ends only.
+    /// A barcode, barcode flank or barcode construct.
     Barcode,
 }
 
 impl Role {
-    /// Whether an interior hit of this role excises and splits the read.
-    pub fn splits(self) -> bool {
-        matches!(self, Role::Adapter)
-    }
-
     /// Display label.
     pub fn label(self) -> &'static str {
         match self {

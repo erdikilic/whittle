@@ -132,7 +132,7 @@ fn build(entries: &[Entry]) -> Vec<Adapter> {
     for &(name, role, _, seq) in entries {
         match idx.get(seq) {
             Some(&i) => {
-                if role.splits() {
+                if role == Role::Adapter {
                     out[i].role = role;
                 }
             },

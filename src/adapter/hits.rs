@@ -138,6 +138,10 @@ pub(super) struct Keep<'a> {
     pub(super) budgets: &'a [Budget],
     /// Per-adapter `bounds_barcode`.
     panel_gates: &'a [bool],
+    /// Per-adapter `CandidateIndex::split_classes`.
+    split_classes: &'a [usize],
+    /// The read-length class of the window (`interior_class`).
+    class: usize,
     /// Whether a `bounds_barcode` entry trimmed the 5' end.
     pub(super) five_bounded: bool,
     /// Whether a `bounds_barcode` entry trimmed the 3' end.
@@ -224,6 +228,8 @@ impl<'a> Keep<'a> {
             adapters: &cfg.adapters,
             budgets: &index.budgets,
             panel_gates: &index.panel_gates,
+            split_classes: &index.split_classes,
+            class: interior_class(n),
             five_bounded: false,
             three_bounded: false,
             gate_panels: true,
@@ -287,7 +293,7 @@ impl<'a> Keep<'a> {
         };
         let action = match (site, terminal) {
             (Site::Head, Terminal::Five) => HitAction::TrimFivePrime,
-            (Site::Head, Terminal::Excise) if adapter.role.splits() => HitAction::Excise,
+            (Site::Head, Terminal::Excise) if self.splits(adapter_idx) => HitAction::Excise,
             (Site::Head, Terminal::Excise) => match nearer_end(start, end, self.n) {
                 Terminal::Five => HitAction::TrimFivePrime,
                 _ => HitAction::TrimThreePrime,
@@ -297,7 +303,7 @@ impl<'a> Keep<'a> {
             // that end rather than a junction.
             (Site::Interior, _) if start <= FLANK_SLACK => HitAction::TrimFivePrime,
             (Site::Interior, _) if self.n - end <= FLANK_SLACK => HitAction::TrimThreePrime,
-            (Site::Interior, Terminal::None) if adapter.role.splits() => HitAction::Excise,
+            (Site::Interior, Terminal::None) if self.splits(adapter_idx) => HitAction::Excise,
             (Site::Interior, Terminal::None) => {
                 trace_hit(&adapter.name, start, end, cost, None);
                 return;
@@ -379,6 +385,11 @@ impl<'a> Keep<'a> {
                 self.excised.push(applied);
             },
         }
+    }
+
+    /// Whether an interior hit of `adapter_idx` splits this window.
+    pub(super) fn splits(&self, adapter_idx: usize) -> bool {
+        self.split_classes[adapter_idx] > self.class
     }
 
     /// Trims the 5' end to `end` at a boundary `refine` keeps as found, for

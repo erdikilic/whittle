@@ -20,7 +20,7 @@ whittle filters, trims, and splits Oxford Nanopore and PacBio reads in FASTQ, co
 
 - **Base-modification tags.** `MM`, `ML`, and `MN` are reconstructed for every trimmed or split uBAM read. The test suite checks the result against an independent `htslib` decoder.
 - **Kinetics and signal tags.** Per-base arrays (`ip`, `pw`, and related) are sliced with the sequence. ONT signal tags (`mv`, `ts`, `ns`, and related) are removed by default or rewritten with `--update-moves`.
-- **Adapter and primer trimming.** Terminal adapters, adapters truncated by the read end, and interior adapters (chimera splitting with junction cleanup). Sequences come from built-in kit presets (ONT kit 14 ligation, rapid, barcoding, cDNA, and amplicon kits; RNA004; PacBio SMRTbell), a user FASTA with IUPAC codes, or de novo discovery. Presence detection restricts a preset to the sequences a library carries.
+- **Adapter and primer trimming.** Terminal adapters, primers and barcodes, those truncated by the read end, and interior ones (chimera splitting with junction cleanup). Sequences come from built-in kit presets (ONT kit 14 ligation, rapid, barcoding, cDNA, and amplicon kits; RNA004; PacBio SMRTbell), a user FASTA with IUPAC codes, or de novo discovery. Presence detection restricts a preset to the sequences a library carries.
 - **Read selection by tag.** `--tag-filter` keeps reads by an expression over their aux tags (end reason, duplex state, dorado Q-score, barcode call, HiFi accuracy and passes) before discovery and trimming.
 - **Rejected output.** `--rejected-output` writes every dropped read and segment to a second file with a `wr:Z` tag naming the reason.
 - **Quality trimming.** End trimming to a threshold, best-segment extraction, or splitting at consecutive low-quality bases. Every segment is filtered on its own.
@@ -82,7 +82,7 @@ whittle -i reads.bam -o trimmed.bam --adapter-preset lsk114 -l 500
 whittle -i reads.fastq.gz -o trimmed.fastq.gz --adapter-preset nbd114 -t 16
 ```
 
-Trim amplicon primers with the `mab114` preset (degenerate 16S 27F/1492R and ITS1F/ITS4 primers) or a custom FASTA. IUPAC codes are accepted; `primer` in a header restricts the entry to the read ends.
+Trim amplicon primers with the `mab114` preset (degenerate 16S 27F/1492R and ITS1F/ITS4 primers) or a custom FASTA. IUPAC codes are accepted; `primer` or `barcode` in a header sets the entry's role.
 
 ```bash
 whittle -i 16s.fastq.gz -o trimmed.fastq.gz --adapter-preset mab114
@@ -169,7 +169,7 @@ Adapter preparation loads a FASTA or preset, or discovers adapters from sampled
 original reads. Sampled reads remain in the processing stream. Processing then
 follows this order:
 
-1. **Adapters.** Search the original read, trim terminal adapters and primers, and split at interior adapters. Clean each new end. Reads without a match continue as one segment.
+1. **Adapters.** Search the original read, trim terminal adapters, primers and barcodes, and split at interior ones. Clean each new end. Reads without a match continue as one segment.
 2. **Barcodes.** Barcode spans recorded in the `bi` tag are removed where a barcode sequence is found at them.
 3. **Fixed crop.** `--trim-front` and `--trim-tail` crop each retained adapter-derived segment once.
 4. **Quality.** Apply `--trim-quality`, `--best-quality-segment`, or `--split-quality` to each cropped segment. Quality splitting can produce further segments; these are not cropped again.

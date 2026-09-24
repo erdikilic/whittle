@@ -118,9 +118,8 @@ fn windows_by_adapter(index: &CandidateIndex, text: &[u8]) -> Vec<Vec<(usize, us
 fn reference_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
     let mut index = CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.end_size, cfg.split);
     index.seeds = None;
-    for (adapter_idx, adapter) in cfg.adapters.iter().enumerate() {
-        index.unfiltered[adapter_idx] =
-            cfg.split && adapter.role.splits() && adapter.seq.len() >= MIN_PATTERN_LEN;
+    for adapter_idx in 0..cfg.adapters.len() {
+        index.unfiltered[adapter_idx] = cfg.split && index.split_classes[adapter_idx] > 0;
     }
     let exhaustive = AdapterConfig {
         candidate_index: std::sync::OnceLock::from(index),
@@ -640,22 +639,41 @@ fn interior_adapter_prefix_is_not_a_partial_hit() {
     assert_eq!(adapter_segments(&w, &c), vec![(0, w.len())]);
 }
 
-/// A primer or barcode entry trims the read ends and never splits; an
-/// adapter entry of the same sequence does.
+/// Every role trims the read ends and splits at an interior hit.
 #[test]
-fn terminal_only_roles_trim_ends_and_do_not_split() {
+fn every_role_trims_ends_and_splits() {
     let seq = b"GGGGTTTTGGGGTTTTGGGG";
     let mut w = seq.to_vec();
     w.extend_from_slice(&[b'A'; 60]);
     w.extend_from_slice(seq);
     w.extend_from_slice(&[b'C'; 60]);
     w.extend_from_slice(seq);
-    for role in [Role::Primer, Role::Barcode] {
+    for role in [Role::Adapter, Role::Primer, Role::Barcode] {
         let c = cfg_with(vec![entry("p", seq, role)], 0.2, 30, true);
-        assert_eq!(adapter_segments(&w, &c), vec![(20, 160)], "{role:?}");
+        assert_eq!(
+            adapter_segments(&w, &c),
+            vec![(20, 80), (100, 160)],
+            "{role:?}"
+        );
     }
-    let c = cfg_with(vec![ad("a", seq)], 0.2, 30, true);
-    assert_eq!(adapter_segments(&w, &c), vec![(20, 80), (100, 160)]);
+}
+
+/// A panel barcode splits a read when the set has no barcode flanks, and
+/// leaves the split to the flanks when the set carries them.
+#[test]
+fn panel_barcodes_split_only_without_flanks() {
+    let panel = [
+        entry("bc1", b"AAGAAAGTTGTCGGTGTCTTTGTG", Role::Barcode),
+        entry("bc2", b"TCGATTCCGTTTGTAGTCGTCTGT", Role::Barcode),
+    ];
+    let flank = entry("rear", b"TTAACCTTTCTGTTGGTGCTGATATTGC", Role::Barcode);
+    let bare = CandidateIndex::new(&panel, 0.2, 150, true);
+    assert!(bare.split_classes.iter().all(|&c| c > 0));
+    let mut flanked = panel.to_vec();
+    flanked.push(flank);
+    let index = CandidateIndex::new(&flanked, 0.2, 150, true);
+    assert_eq!(index.split_classes[..2], [0, 0]);
+    assert!(index.split_classes[2] > 0);
 }
 
 /// The piece on each side of an excision is trimmed at its new end: a
@@ -1398,4 +1416,23 @@ fn truncated_barcode_at_the_read_start_is_trimmed() {
     );
     let index = CandidateIndex::new(&[construct], 0.1, 150, true);
     assert!(index.end_seeds.is_none());
+}
+
+/// A marker-gene primer splits only where an amplicon-only preset makes it an
+/// adapter; in a selection with a genomic kit it trims the ends only.
+#[test]
+fn marker_primers_split_only_in_amplicon_selections() {
+    use super::preset::{Kit, preset};
+    let split_of = |kits: &[Kit]| {
+        let adapters = preset(kits);
+        let index = CandidateIndex::new(&adapters, 0.2, 150, true);
+        let i = adapters.iter().position(|a| a.name == "16S_27F").unwrap();
+        index.split_classes[i]
+    };
+    assert!(split_of(&[Kit::Mab114]) > 0);
+    assert_eq!(split_of(&[Kit::Mab114, Kit::Lsk114]), 0);
+    let pcr = preset(&[Kit::Pcb114]);
+    let index = CandidateIndex::new(&pcr, 0.2, 150, true);
+    let i = pcr.iter().position(|a| a.name == "PCR2_front").unwrap();
+    assert!(index.split_classes[i] > 0);
 }
