@@ -34,10 +34,15 @@ exceptions:
 - The barcodes of a panel (equal-length barcode entries) do not split when the
   set carries barcode flanks or a barcode construct: the flanks at a barcode
   junction split it.
-- The universal marker-gene primers (16S 27F and 1492R, ITS1F, ITS4) do not
-  split in a selection that includes a genomic kit, since their sites lie
-  inside every genomic read through an rRNA operon. A preset made only of
-  amplicon kits (`mab114`) promotes them to adapters, which split.
+- The universal marker-gene primers (16S 27F and 1492R, ITS1F, ITS4) split
+  only beside the rest of a junction stack in a selection that includes a
+  genomic kit, since their sites lie inside every genomic read through an rRNA
+  operon: another excision within 11 bases, or the other end's primer within
+  the end zone, across the barcodes between them. A preset made only of
+  amplicon kits (`mab114`) promotes them to adapters, which split alone.
+- An interior hit splits only when the whole sequence aligns: a hit whose
+  alignment leaves 10 or more bases to clip at its ends is dropped, as at a
+  genomic primer site matched by an adapter assembled with its primer.
 - A primer or barcode splits only reads short enough that its exact matches
   stay within the interior chance bound below; a short flank such as
   `NB_front` (14 bases) splits reads up to a few kilobases.

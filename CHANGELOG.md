@@ -114,9 +114,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   known sequence, whose `N` block matched novel read ends and moved the
   discovery boundary into the read; the construct also no longer names
   inferred sequences.
-- A 16S or ITS primer that discovery resolves from degenerate reads is
-  recognized as a marker-gene primer and does not split reads, as the catalog
-  primer does outside amplicon-only presets.
+- A 16S or ITS primer that discovery resolves from degenerate reads, whole or
+  cut short at either end, is recognized as a marker-gene primer and takes the
+  primer's ambiguity codes at its degenerate positions, so every variant of
+  the primer matches.
+- A marker-gene primer outside amplicon-only presets splits a read only beside
+  another excision or the other end's primer, as at a chimera junction, and
+  not at its sites inside genomic inserts.
+- An interior hit whose alignment leaves 10 or more bases to clip no longer
+  splits the read: an adapter assembled together with a primer split reads at
+  the primer's genomic sites.
 - A barcode cut short by the read end is trimmed when at least 10 of its
   bases align flush with the end, as a truncated adapter or primer is. Barcode
   panels without flanks, such as PacBio barcodes, left eroded barcodes behind.

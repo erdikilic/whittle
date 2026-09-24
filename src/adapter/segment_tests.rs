@@ -1418,35 +1418,68 @@ fn truncated_barcode_at_the_read_start_is_trimmed() {
     assert!(index.end_seeds.is_none());
 }
 
-/// A marker-gene primer splits only where an amplicon-only preset makes it an
-/// adapter; in a selection with a genomic kit it trims the ends only.
+/// A marker-gene primer splits freely where an amplicon-only preset makes it
+/// an adapter; in a selection with a genomic kit it splits only beside the
+/// rest of a junction stack.
 #[test]
-fn marker_primers_split_only_in_amplicon_selections() {
+fn marker_primers_pair_outside_amplicon_selections() {
     use super::preset::{Kit, preset};
-    let split_of = |kits: &[Kit]| {
+    let paired_of = |kits: &[Kit]| {
         let adapters = preset(kits);
         let index = CandidateIndex::new(&adapters, 0.2, 150, true);
         let i = adapters.iter().position(|a| a.name == "16S_27F").unwrap();
-        index.split_classes[i]
+        assert!(index.split_classes[i] > 0);
+        index.paired[i]
     };
-    assert!(split_of(&[Kit::Mab114]) > 0);
-    assert_eq!(split_of(&[Kit::Mab114, Kit::Lsk114]), 0);
+    assert!(!paired_of(&[Kit::Mab114]));
+    assert!(paired_of(&[Kit::Mab114, Kit::Lsk114]));
     let pcr = preset(&[Kit::Pcb114]);
     let index = CandidateIndex::new(&pcr, 0.2, 150, true);
     let i = pcr.iter().position(|a| a.name == "PCR2_front").unwrap();
-    assert!(index.split_classes[i] > 0);
+    assert!(index.split_classes[i] > 0 && !index.paired[i]);
 }
 
 /// A 16S primer resolved from degenerate reads, as discovery assembles it,
-/// counts as a marker primer and does not split in the primer role; an
-/// unrelated primer does.
+/// counts as a marker primer and splits only in pairs in the primer role; an
+/// unrelated primer splits alone.
 #[test]
-fn resolved_marker_primer_variants_do_not_split() {
+fn resolved_marker_primer_variants_split_in_pairs() {
     let resolved = entry("variant", b"AGAGTTTGATCCTGGCTCAG", Role::Primer);
     let pcr = entry("pcr", b"TTTCTGTTGGTGCTGATATTGC", Role::Primer);
     let index = CandidateIndex::new(&[resolved, pcr], 0.15, 150, true);
-    assert_eq!(index.split_classes[0], 0);
-    assert!(index.split_classes[1] > 0);
+    assert_eq!(index.paired, [true, false]);
+}
+
+/// A marker primer inside a read is a genomic site and stays; beside the
+/// other end's primer it is a junction and splits the read.
+#[test]
+fn marker_primer_splits_only_beside_a_junction_partner() {
+    let forward = b"AGAGTTTGATCCTGGCTCAG";
+    let reverse = b"TACGGTTACCTTGTTACGACTT";
+    let c = cfg_with(
+        vec![
+            entry("27F", forward, Role::Primer),
+            entry("1492R", reverse, Role::Primer),
+        ],
+        0.1,
+        150,
+        true,
+    );
+    let (left, right) = (splitmix_dna(21, 700), splitmix_dna(22, 700));
+    let mut site = left.clone();
+    site.extend_from_slice(forward);
+    site.extend_from_slice(&right);
+    assert_eq!(adapter_segments(&site, &c), vec![(0, site.len())]);
+
+    let mut junction = left.clone();
+    junction.extend(reverse_complement(reverse));
+    junction.extend_from_slice(forward);
+    junction.extend_from_slice(&right);
+    let cut = left.len() + reverse.len() + forward.len();
+    assert_eq!(
+        adapter_segments(&junction, &c),
+        vec![(0, left.len()), (cut, junction.len())]
+    );
 }
 
 /// A resolved 16S primer, alone or with a few bases of its neighbour, is a
@@ -1461,4 +1494,60 @@ fn marker_primer_match_requires_the_sequence_to_be_the_primer() {
     assert!(!matches_marker_primer(&with_adapter, 0.15));
     assert!(!matches_marker_primer(b"TTTCTGTTGGTGCTGATATTGC", 0.15));
     assert!(!matches_marker_primer(b"TGGTCCAGGATCAACA", 0.2));
+}
+
+/// A primer cut short at either end, as erosion or a layer boundary leaves
+/// it, is a marker primer; a stretch from inside a primer is not.
+#[test]
+fn eroded_marker_primers_match() {
+    assert!(matches_marker_primer(b"GAGTTTGATCATGGCTCAG", 0.2));
+    assert!(matches_marker_primer(b"AAGTCGTAACAAGGTAAC", 0.2));
+    assert!(matches_marker_primer(b"AGTCGTAACAAGGTAACCGTA", 0.2));
+    assert!(!matches_marker_primer(b"GTTTGATCATGGCTC", 0.0));
+}
+
+/// A resolved marker primer takes the primer's ambiguity codes at the bases
+/// they align to, on either strand; other sequences are unchanged.
+#[test]
+fn marker_codes_restore_degenerate_positions() {
+    assert_eq!(
+        with_marker_codes(b"AGAGTTTGATCCTGGCTCAG", 0.2),
+        b"AGAGTTTGATYMTGGCTCAG"
+    );
+    assert_eq!(
+        with_marker_codes(b"AAGTCGTAACAAGGTAAC", 0.2),
+        b"AAGTCGTAACAAGGTARC"
+    );
+    assert_eq!(
+        with_marker_codes(b"TTTCTGTTGGTGCTGATATTGC", 0.2),
+        b"TTTCTGTTGGTGCTGATATTGC"
+    );
+}
+
+/// An interior hit splits only when the whole adapter aligns: a site that
+/// holds the inner part of an adapter and pays for the rest in edits, as a
+/// genomic primer site does for an adapter assembled with its primer, stays.
+#[test]
+fn interior_split_needs_the_whole_adapter() {
+    let primer = b"AAGTCGTAACAAGGTAGCCGTA";
+    let flank = b"CGGTCCGAACGTG";
+    let mut adapter = primer.to_vec();
+    adapter.extend_from_slice(flank);
+    let c = cfg_with(vec![entry("ad", &adapter, Role::Adapter)], 0.2, 150, true);
+    let (left, right) = (splitmix_dna(31, 700), splitmix_dna(32, 700));
+    let mut junction = left.clone();
+    junction.extend_from_slice(&adapter);
+    junction.extend_from_slice(&right);
+    assert_eq!(
+        adapter_segments(&junction, &c),
+        vec![
+            (0, left.len()),
+            (left.len() + adapter.len(), junction.len())
+        ]
+    );
+    let mut site = left.clone();
+    site.extend_from_slice(primer);
+    site.extend_from_slice(b"AGCTCAGTAGCTG");
+    site.extend_from_slice(&right);
+    assert_eq!(adapter_segments(&site, &c), vec![(0, site.len())]);
 }

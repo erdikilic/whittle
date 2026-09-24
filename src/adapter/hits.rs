@@ -140,6 +140,8 @@ pub(super) struct Keep<'a> {
     panel_gates: &'a [bool],
     /// Per-adapter `CandidateIndex::split_classes`.
     split_classes: &'a [usize],
+    /// Per-adapter `CandidateIndex::paired`.
+    paired: &'a [bool],
     /// The read-length class of the window (`interior_class`).
     class: usize,
     /// Whether a `bounds_barcode` entry trimmed the 5' end.
@@ -184,6 +186,8 @@ pub(super) struct Keep<'a> {
 /// alignment ends.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Applied {
+    /// Index into the configured adapters.
+    adapter_idx: usize,
     /// Hit start in window coordinates.
     start: usize,
     /// Hit end in window coordinates.
@@ -229,6 +233,7 @@ impl<'a> Keep<'a> {
             budgets: &index.budgets,
             panel_gates: &index.panel_gates,
             split_classes: &index.split_classes,
+            paired: &index.paired,
             class: interior_class(n),
             five_bounded: false,
             three_bounded: false,
@@ -320,6 +325,13 @@ impl<'a> Keep<'a> {
             },
             _ => return,
         };
+        // A junction holds the whole adapter. An excision whose alignment
+        // leaves `MIN_OVERLAP` or more bases to clip matched only part of the
+        // pattern, as a genomic site of a primer inside a longer layer does.
+        if action == HitAction::Excise && hit.clip_start + hit.clip_end >= MIN_OVERLAP {
+            trace_hit(&adapter.name, start, end, cost, None);
+            return;
+        }
         let whole = hit.left_overhang + hit.right_overhang == 0;
         let terminal = matches!(site, Site::Head | Site::Tail { .. })
             && matches!(action, HitAction::TrimFivePrime | HitAction::TrimThreePrime);
@@ -364,6 +376,7 @@ impl<'a> Keep<'a> {
         );
         self.acted.push(adapter_idx);
         let applied = Applied {
+            adapter_idx,
             start,
             end,
             clip_start,
@@ -465,6 +478,26 @@ impl<'a> Keep<'a> {
         }
     }
 
+    /// Whether the rest of a junction stack lies beside the
+    /// `CandidateIndex::paired` excision `(s, e)`: an excision of another
+    /// adapter that extends it by at least `MIN_OVERLAP` bases, within
+    /// `FLANK_SLACK` of it, or within `end_size` for another paired entry. A
+    /// junction holds the primers of both ends across the layers between
+    /// them, where a genome holds no two such sites.
+    fn backs(&self, (s, e): (usize, usize), adapter_idx: usize) -> bool {
+        self.interior.iter().zip(&self.excised).any(|(&(t, u), b)| {
+            let reach = if self.paired[b.adapter_idx] {
+                self.end_size.max(FLANK_SLACK)
+            } else {
+                FLANK_SLACK
+            };
+            b.adapter_idx != adapter_idx
+                && t <= e + reach
+                && u + reach >= s
+                && s.saturating_sub(t) + u.saturating_sub(e) >= MIN_OVERLAP
+        })
+    }
+
     /// Returns the keep boundaries and the excisions, refined and clipped to
     /// the boundaries, merged: two excisions overlapping, touching, or
     /// separated by at most `FLANK_SLACK` bases or fewer than `min_piece` bases
@@ -482,6 +515,12 @@ impl<'a> Keep<'a> {
                 None,
             );
         }
+        let backed: Vec<bool> = self
+            .interior
+            .iter()
+            .zip(&self.excised)
+            .map(|(&cut, a)| !self.paired[a.adapter_idx] || self.backs(cut, a.adapter_idx))
+            .collect();
         let Keep {
             lo, hi, interior, ..
         } = self;
@@ -490,7 +529,9 @@ impl<'a> Keep<'a> {
         }
         let mut cuts: Vec<(usize, usize)> = interior
             .into_iter()
-            .filter_map(|(s, e)| {
+            .zip(backed)
+            .filter(|&(_, backed)| backed)
+            .filter_map(|((s, e), _)| {
                 let s = s.max(lo);
                 let e = e.min(hi);
                 (s < e).then_some((s, e))

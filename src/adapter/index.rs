@@ -44,13 +44,16 @@ pub(crate) struct CandidateIndex {
     /// entry splits except the members of a barcode panel in a set that
     /// carries a `bounds_barcode` entry: a barcode junction of such a set
     /// holds the flanks, which split it, and the panel's short interior seeds
-    /// would open candidate windows over most of every read. A marker-gene
-    /// primer (`catalog::MARKER_PRIMERS`) in the primer role does not split:
-    /// its site is part of every genomic read through an rRNA operon, and an
-    /// amplicon-only preset gives it the adapter role instead. An adapter
+    /// would open candidate windows over most of every read. An adapter
     /// splits in every class; a primer or barcode only in the classes where
     /// its exact matches stay within `INTERIOR_CHANCE_HITS_PER_READ`.
     pub(super) split_classes: Vec<usize>,
+    /// Per-adapter: an interior hit splits only next to another excision. A
+    /// marker-gene primer (`catalog::MARKER_PRIMERS`) in the primer role is
+    /// one: its site is part of every genomic read through an rRNA operon,
+    /// while a junction holds it beside the other end's primer or a barcode.
+    /// An amplicon-only preset gives it the adapter role instead.
+    pub(super) paired: Vec<bool>,
 }
 
 /// Shortest run of `N` that marks a barcode construct: a barcode entry that
@@ -75,25 +78,91 @@ fn is_marker_primer(adapter: &Adapter, error_rate: f64) -> bool {
     adapter.role == Role::Primer && matches_marker_primer(&adapter.seq, error_rate)
 }
 
-/// Returns whether `seq` is a marker-gene primer: a `catalog::MARKER_PRIMERS`
-/// entry aligns within `seq`, on either strand, within the primer's edit
-/// budget at `error_rate`, and `seq` extends it by fewer than `MIN_OVERLAP`
-/// bases. A primer resolved from degenerate reads, as discovery assembles it,
-/// is one of them; an adapter assembled together with the primer behind it,
-/// or a shorter sequence that aligns within a primer by chance, is not.
+/// Returns whether `seq` is a marker-gene primer: it and a
+/// `catalog::MARKER_PRIMERS` entry differ in length by fewer than
+/// `MIN_OVERLAP` bases, and the shorter aligns within the longer, on either
+/// strand, within its edit budget at `error_rate`. A shorter `seq` must reach
+/// an end of the primer. A primer resolved from degenerate reads, or cut short
+/// by erosion or the boundary of its layer, as discovery assembles it, is one
+/// of them; an adapter assembled together with the primer behind it, or a
+/// shorter sequence that aligns inside a primer by chance, is not.
 pub(crate) fn matches_marker_primer(seq: &[u8], error_rate: f64) -> bool {
     let seq = seq.to_ascii_uppercase();
     let mut searcher = new_ambiguous_searcher();
     super::catalog::MARKER_PRIMERS.iter().any(|&primer| {
-        (primer.len()..primer.len() + MIN_OVERLAP).contains(&seq.len())
-            && !search::hits(
-                &mut searcher,
-                primer,
-                &seq,
-                edit_budget(error_rate, primer.len()),
-            )
-            .is_empty()
+        if seq.len() >= primer.len() {
+            seq.len() < primer.len() + MIN_OVERLAP
+                && !search::hits(
+                    &mut searcher,
+                    primer,
+                    &seq,
+                    edit_budget(error_rate, primer.len()),
+                )
+                .is_empty()
+        } else {
+            seq.len() + MIN_OVERLAP > primer.len()
+                && search::hits(
+                    &mut searcher,
+                    &seq,
+                    primer,
+                    edit_budget(error_rate, seq.len()),
+                )
+                .iter()
+                .any(|hit| hit.start == 0 || hit.end == primer.len())
+        }
     })
+}
+
+/// Returns `seq` with the ambiguity codes of the marker-gene primer it
+/// matches (`matches_marker_primer`) at the bases they align to, or `seq`
+/// unchanged when it matches none. A consensus assembled from the reads of a
+/// degenerate primer holds one variant at each ambiguous position, and every
+/// other variant would cost an edit per position.
+pub(crate) fn with_marker_codes(seq: &[u8], error_rate: f64) -> Vec<u8> {
+    let mut out = seq.to_ascii_uppercase();
+    if !matches_marker_primer(&out, error_rate) {
+        return out;
+    }
+    let mut searcher = search::new_searcher_fwd();
+    let mut best: Option<(sassy::Match, Vec<u8>)> = None;
+    for primer in super::catalog::MARKER_PRIMERS
+        .iter()
+        .flat_map(|&primer| [primer.to_vec(), reverse_complement(primer)])
+    {
+        let (pattern, text) = if out.len() <= primer.len() {
+            (&out, &primer)
+        } else {
+            (&primer, &out)
+        };
+        for m in searcher.search(pattern, text, edit_budget(error_rate, pattern.len())) {
+            if best.as_ref().is_none_or(|(b, _)| m.cost < b.cost) {
+                best = Some((m, primer.clone()));
+            }
+        }
+    }
+    let Some((m, primer)) = best else {
+        return out;
+    };
+    let seq_is_pattern = out.len() <= primer.len();
+    let (mut p, mut t) = (m.pattern_start, m.text_start);
+    for e in &m.cigar.ops {
+        let op = e.op.to_char();
+        for _ in 0..e.cnt {
+            match op {
+                '=' | 'X' => {
+                    let (i, j) = if seq_is_pattern { (p, t) } else { (t, p) };
+                    if op == '=' && !b"ACGT".contains(&primer[j]) {
+                        out[i] = primer[j];
+                    }
+                    p += 1;
+                    t += 1;
+                },
+                'I' => p += 1,
+                _ => t += 1,
+            }
+        }
+    }
+    out
 }
 
 /// Returns whether `adapter` is a member of a barcode panel: a barcode that is
@@ -184,10 +253,7 @@ impl CandidateIndex {
             .iter()
             .zip(&searchable)
             .map(|(adapter, &searchable)| {
-                if !searchable
-                    || (flanked && is_panel_barcode(adapter, adapters))
-                    || is_marker_primer(adapter, error_rate)
-                {
+                if !searchable || (flanked && is_panel_barcode(adapter, adapters)) {
                     0
                 } else if adapter.role == Role::Adapter {
                     INTERIOR_CLASSES
@@ -333,6 +399,10 @@ impl CandidateIndex {
             end_reach,
             panel_gates: adapters.iter().map(bounds_barcode).collect(),
             split_classes,
+            paired: adapters
+                .iter()
+                .map(|adapter| is_marker_primer(adapter, error_rate))
+                .collect(),
         }
     }
 

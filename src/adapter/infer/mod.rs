@@ -474,7 +474,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             InferredAdapter {
                 adapter: Adapter {
                     name: format!("inferred_{}", i + 1),
-                    seq: seq.clone(),
+                    seq: crate::adapter::with_marker_codes(&seq, base.error_rate),
                     role,
                 },
                 assembled_seq: seq,
