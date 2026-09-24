@@ -115,8 +115,8 @@ fn run_bam_seq(
 
 /// Runs `workflow::run_parallel` for BAM input: decodes each raw record on the
 /// pool and hands the raw record and its decoded form to `render`, which
-/// appends output items to the batch buffer. The per-segment filter and counters are updated inside
-/// `render` by `process_read_segments`.
+/// appends output items to the batch buffer. The per-segment filter and
+/// counters are updated inside `render` by `process_read_segments`.
 fn run_bam_parallel<T, P, S, Render, Pack, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
     cfg: &Config,

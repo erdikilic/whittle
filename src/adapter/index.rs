@@ -360,9 +360,10 @@ impl CandidateIndex {
 
         // End seeds: every k-mer of every partial-matching entry on both
         // strands. Every entry matches partially except a barcode construct,
-        // whose `N` block would align a truncated construct at no cost. A partial hit within its budget keeps at least one intact
-        // k-mer (see `END_SEED_LEN`), so an end window without a seed of an
-        // entry cannot hold a partial hit of it and skips the overhang search.
+        // whose `N` block would align a truncated construct at no cost. A
+        // partial hit within its budget keeps at least one intact k-mer (see
+        // `END_SEED_LEN`), so an end window without a seed of an entry cannot
+        // hold a partial hit of it and skips the overhang search.
         let mut end_seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
         let mut end_reach = 0;
         for (adapter_idx, adapter) in adapters.iter().enumerate() {

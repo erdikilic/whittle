@@ -164,11 +164,11 @@ impl InferredAdapter {
 /// its end, and its path weight.
 type Ranked = (Vec<u8>, f64, Vec<bool>, usize, bool, End, u64);
 
-/// Discovers supported technical sequences in layers from each read end.
-/// Known sequences in `base` explain the outermost layers first; each
-/// accepted layer moves the boundary inward and the next layer is assembled
-/// from the unexplained sequence. A barcode construct is not a known
-/// sequence: its `N` block would explain any read end. Equivalent assemblies share one trimming
+/// Discovers supported technical sequences in layers from each read end. Known
+/// sequences in `base` explain the outermost layers first; each accepted layer
+/// moves the boundary inward and the next layer is assembled from the
+/// unexplained sequence. A barcode construct is not a known sequence: its `N`
+/// block would explain any read end. Equivalent assemblies share one trimming
 /// pattern. Catalog and supplied FASTA entries provide names only after the
 /// inferred boundaries are fixed.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {

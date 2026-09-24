@@ -266,10 +266,10 @@ pub(super) fn search_singletons(
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, len, k_end);
         // An end window of at least four alignment lengths is cut into two
         // texts at a split point: the first owns the hits ending at or before
-        // it, the second those ending after it. An alignment spans at most `reach` bases, so each text
-        // extends `reach` bases past its owned ends, and every owned end sees
-        // the costs the whole window gives it. The four texts fill sassy's four
-        // lanes.
+        // it, the second those ending after it. An alignment spans at most
+        // `reach` bases, so each text extends `reach` bases past its owned
+        // ends, and every owned end sees the costs the whole window gives it.
+        // The four texts fill sassy's four lanes.
         let reach = len + k_end;
         let empty = ctx.read.strands(ws, ws);
         let mut windows = [empty; 4];
