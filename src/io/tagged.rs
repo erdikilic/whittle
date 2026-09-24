@@ -88,10 +88,8 @@ fn parse_aux_field(field: &[u8]) -> anyhow::Result<(Tag, Value)> {
             _ => anyhow::bail!("type A takes one printable character"),
         },
         b'i' => {
-            let n: i64 = std::str::from_utf8(raw)
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("type i takes an integer"))?;
+            let n: i64 =
+                parse_int(raw, true).ok_or_else(|| anyhow::anyhow!("type i takes an integer"))?;
             Value::try_from(n).map_err(|_| anyhow::anyhow!("integer {n} exceeds 32 bits"))?
         },
         b'f' => {
@@ -126,32 +124,43 @@ fn parse_array(raw: &[u8]) -> anyhow::Result<Array> {
         [b',', items @ ..] => items,
         _ => anyhow::bail!("type B takes a subtype followed by comma-separated values"),
     };
-    fn ints<T: std::str::FromStr>(items: &[u8]) -> anyhow::Result<Vec<T>> {
+    /// Parses the comma-separated elements of an integer array; `signed`
+    /// admits a leading `-`.
+    fn ints<T: TryFrom<i64>>(items: &[u8], signed: bool) -> anyhow::Result<Vec<T>> {
         if items.is_empty() {
             return Ok(Vec::new());
         }
-        items
-            .split(|&b| b == b',')
-            .map(|s| {
-                std::str::from_utf8(s)
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "array value {:?} does not fit the subtype",
-                            String::from_utf8_lossy(s)
-                        )
-                    })
-            })
-            .collect()
+        let mut out = Vec::with_capacity(items.iter().filter(|&&b| b == b',').count() + 1);
+        let mut rest = items;
+        loop {
+            // A one-byte element, the form of every move-table entry, is split
+            // off without a search for its comma.
+            let (item, tail) = match rest {
+                [b, b',', tail @ ..] if *b != b',' => (&rest[..1], Some(tail)),
+                _ => match rest.iter().position(|&b| b == b',') {
+                    Some(i) => (&rest[..i], Some(&rest[i + 1..])),
+                    None => (rest, None),
+                },
+            };
+            out.push(parse_int(item, signed).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "array value {:?} does not fit the subtype",
+                    String::from_utf8_lossy(item)
+                )
+            })?);
+            match tail {
+                Some(tail) => rest = tail,
+                None => return Ok(out),
+            }
+        }
     }
     Ok(match subtype {
-        b'c' => Array::Int8(ints(items)?),
-        b'C' => Array::UInt8(ints(items)?),
-        b's' => Array::Int16(ints(items)?),
-        b'S' => Array::UInt16(ints(items)?),
-        b'i' => Array::Int32(ints(items)?),
-        b'I' => Array::UInt32(ints(items)?),
+        b'c' => Array::Int8(ints(items, true)?),
+        b'C' => Array::UInt8(ints(items, false)?),
+        b's' => Array::Int16(ints(items, true)?),
+        b'S' => Array::UInt16(ints(items, false)?),
+        b'i' => Array::Int32(ints(items, true)?),
+        b'I' => Array::UInt32(ints(items, false)?),
         b'f' => {
             if items.is_empty() {
                 Array::Float(Vec::new())
@@ -173,6 +182,33 @@ fn parse_array(raw: &[u8]) -> anyhow::Result<Array> {
         },
         other => anyhow::bail!("unknown array subtype {:?}", char::from(other)),
     })
+}
+
+/// Parses a decimal integer that fits `T`, accepting what `str::parse` accepts:
+/// an optional `+`, or `-` when `signed`, then one or more ASCII digits.
+fn parse_int<T: TryFrom<i64>>(raw: &[u8], signed: bool) -> Option<T> {
+    let (negative, digits) = match raw {
+        [b'+', rest @ ..] => (false, rest),
+        [b'-', rest @ ..] if signed => (true, rest),
+        _ => (false, raw),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut magnitude = 0u64;
+    for &b in digits {
+        let digit = b.wrapping_sub(b'0');
+        if digit > 9 {
+            return None;
+        }
+        magnitude = magnitude.checked_mul(10)?.checked_add(u64::from(digit))?;
+    }
+    let value = if negative {
+        0i64.checked_sub_unsigned(magnitude)?
+    } else {
+        i64::try_from(magnitude).ok()?
+    };
+    T::try_from(value).ok()
 }
 
 /// Parses a SAM float: a decimal or exponent form, `nan`, `inf`, `-inf`.
@@ -266,6 +302,76 @@ mod tests {
         assert_eq!(out.name().map(|n| n.as_ref()), Some(&b"r1"[..]));
     }
 
+    /// The byte-level integer parser accepts and rejects exactly what
+    /// `str::parse` does for every integer width the arrays and `i` fields use.
+    #[test]
+    fn integer_parser_matches_str_parse() {
+        fn check<T: TryFrom<i64> + std::str::FromStr + PartialEq + std::fmt::Debug>(signed: bool) {
+            for text in [
+                "",
+                "+",
+                "-",
+                "0",
+                "-0",
+                "+0",
+                "7",
+                "+7",
+                "-7",
+                "007",
+                "-007",
+                "127",
+                "128",
+                "-128",
+                "-129",
+                "255",
+                "256",
+                "32767",
+                "32768",
+                "-32768",
+                "-32769",
+                "65535",
+                "65536",
+                "2147483647",
+                "2147483648",
+                "-2147483648",
+                "-2147483649",
+                "4294967295",
+                "4294967296",
+                "9223372036854775807",
+                "9223372036854775808",
+                "-9223372036854775808",
+                "-9223372036854775809",
+                "18446744073709551615",
+                "18446744073709551616",
+                "000000000000000000000000000001",
+                "1 ",
+                " 1",
+                "1a",
+                "0x10",
+                "--1",
+                "+-1",
+                "-+1",
+                "1.0",
+                "1e3",
+                "\u{661}",
+            ] {
+                assert_eq!(
+                    parse_int::<T>(text.as_bytes(), signed),
+                    text.parse::<T>().ok(),
+                    "{text:?} as {}",
+                    std::any::type_name::<T>()
+                );
+            }
+        }
+        check::<i8>(true);
+        check::<u8>(false);
+        check::<i16>(true);
+        check::<u16>(false);
+        check::<i32>(true);
+        check::<u32>(false);
+        check::<i64>(true);
+    }
+
     #[test]
     fn malformed_fields_name_the_read_and_the_field() {
         for (fields, msg) in [
@@ -275,6 +381,11 @@ mod tests {
             ("XX:i:99999999999", "exceeds 32 bits"),
             ("XX:Q:1", "unknown type"),
             ("XX:B:C,300", "does not fit the subtype"),
+            ("XX:B:C,1,-0", "does not fit the subtype"),
+            ("XX:B:c,1,", "does not fit the subtype"),
+            ("XX:B:c,1,,2", "does not fit the subtype"),
+            ("XX:B:c,,", "does not fit the subtype"),
+            ("XX:i:+", "type i takes an integer"),
             ("XX:B:x,1", "unknown array subtype"),
             ("XX:B:C;1", "comma-separated"),
             ("XX:H:ABC", "even number of hex digits"),
