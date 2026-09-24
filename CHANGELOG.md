@@ -102,6 +102,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Discovery learns the primer at each end of a library whose two ends share
+  an adapter but carry different primers, such as a SMRTbell library with
+  16S primers. A layer candidate counts a read window as its own only where
+  it aligns without a clipped end, so the adapter assembled with one end's
+  primer no longer claims the other end's windows.
 - Discovery with a preset no longer treats the native barcode construct as a
   known sequence, whose `N` block matched novel read ends and moved the
   discovery boundary into the read; the construct also no longer names

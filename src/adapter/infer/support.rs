@@ -72,6 +72,31 @@ pub(super) fn windows_with(
     seen
 }
 
+/// Marks the windows that `pattern` covers: a hit within `max_edits` whose
+/// alignment leaves fewer than `MIN_OVERLAP` bases to clip (`refine`). A hit
+/// that aligns part of the pattern and pays for the rest in edits, as a
+/// candidate sharing only an adapter with another layer does, covers nothing.
+pub(super) fn windows_covered(
+    searcher: &mut AmbiguousSearcher,
+    pattern: &[u8],
+    windows: &[&[u8]],
+    max_edits: usize,
+) -> Vec<bool> {
+    let mut seen = vec![false; windows.len()];
+    crate::adapter::search::for_each_hit_in_texts(
+        searcher,
+        pattern,
+        windows,
+        max_edits,
+        |index, hit| {
+            if hit.clip_start + hit.clip_end < crate::adapter::MIN_OVERLAP {
+                seen[index] = true;
+            }
+        },
+    );
+    seen
+}
+
 /// Returns whether `a` and `b` are the same adapter within `error_rate`: an
 /// approximate occurrence of the shorter in the longer on either strand (the
 /// both-strand searcher covers the reverse-complement case).

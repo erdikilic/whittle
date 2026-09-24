@@ -94,7 +94,10 @@ pub(super) fn advance_boundaries(
     let three_texts: Vec<&[u8]> = three_w.iter().map(|(_, w)| *w).collect();
     let mut five_next = bounds.five.clone();
     let mut three_next = bounds.three.clone();
-    // Hit spans per window, measured inward from the boundary.
+    // Hit spans per window, measured inward from the boundary. The inner edge
+    // of each span drops the clipped bases of its alignment (`refine`), as a
+    // trim does, so a layer the pattern does not truly cover is left for the
+    // next layer's assembly.
     let mut five_hits: Vec<Vec<(usize, usize)>> = vec![Vec::new(); five_texts.len()];
     let mut three_hits: Vec<Vec<(usize, usize)>> = vec![Vec::new(); three_texts.len()];
     let mut searcher = crate::adapter::search::new_searcher_fwd();
@@ -122,7 +125,7 @@ pub(super) fn advance_boundaries(
                     text,
                     &reversed,
                     k,
-                    |_, h| hits.push((h.start, h.end)),
+                    |_, h| hits.push((h.start, h.end - h.clip_end)),
                 );
             }
             for (text, hits) in three_texts.iter().zip(&mut three_hits) {
@@ -133,7 +136,7 @@ pub(super) fn advance_boundaries(
                     text,
                     &reversed,
                     k,
-                    |_, h| hits.push((text.len() - h.end, text.len() - h.start)),
+                    |_, h| hits.push((text.len() - h.end, text.len() - h.start - h.clip_start)),
                 );
             }
             continue;
@@ -144,11 +147,14 @@ pub(super) fn advance_boundaries(
                 crate::adapter::reverse_complement(&pattern),
             ] {
                 for hit in searcher.search_texts(&strand, &five_texts, k) {
-                    five_hits[hit.text_idx].push((hit.text_start, hit.text_end));
+                    let (_, clip_end) = crate::adapter::refine::clips(&hit, false);
+                    five_hits[hit.text_idx].push((hit.text_start, hit.text_end - clip_end));
                 }
                 for hit in searcher.search_texts(&strand, &three_texts, k) {
                     let len = three_texts[hit.text_idx].len();
-                    three_hits[hit.text_idx].push((len - hit.text_end, len - hit.text_start));
+                    let (clip_start, _) = crate::adapter::refine::clips(&hit, false);
+                    three_hits[hit.text_idx]
+                        .push((len - hit.text_end, len - hit.text_start - clip_start));
                 }
             }
             singletons.push(pattern);
@@ -167,14 +173,19 @@ pub(super) fn advance_boundaries(
             let k = edit_budget(error_rate, pattern.len());
             for hit in partial.search_texts(pattern, &five_subset, k) {
                 if hit.text_end - hit.text_start >= crate::adapter::MIN_OVERLAP {
-                    five_hits[five_missing[hit.text_idx]].push((hit.text_start, hit.text_end));
+                    let rc = hit.strand == sassy::Strand::Rc;
+                    let (_, clip_end) = crate::adapter::refine::clips(&hit, rc);
+                    five_hits[five_missing[hit.text_idx]]
+                        .push((hit.text_start, hit.text_end - clip_end));
                 }
             }
             for hit in partial.search_texts(pattern, &three_subset, k) {
                 let len = three_subset[hit.text_idx].len();
                 if hit.text_end - hit.text_start >= crate::adapter::MIN_OVERLAP {
+                    let rc = hit.strand == sassy::Strand::Rc;
+                    let (clip_start, _) = crate::adapter::refine::clips(&hit, rc);
                     three_hits[three_missing[hit.text_idx]]
-                        .push((len - hit.text_end, len - hit.text_start));
+                        .push((len - hit.text_end, len - hit.text_start - clip_start));
                 }
             }
         }

@@ -360,12 +360,12 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             .into_iter()
             .map(|(seq, support, matched, boundary, end)| {
                 let k = edit_budget(base.error_rate, seq.len());
-                let mut windows = windows_with(&mut searcher, &seq, &layer_texts, k);
+                let mut windows = windows_covered(&mut searcher, &seq, &layer_texts, k);
                 let mirror = crate::adapter::reverse_complement(&seq);
                 for (window, hit) in
                     windows
                         .iter_mut()
-                        .zip(windows_with(&mut searcher, &mirror, &layer_texts, k))
+                        .zip(windows_covered(&mut searcher, &mirror, &layer_texts, k))
                 {
                     *window |= hit;
                 }

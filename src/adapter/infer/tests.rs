@@ -1064,3 +1064,21 @@ fn barcode_construct_names_no_inferred_sequence() {
     };
     assert!(name_against(b"TGACTCCTCGCTTTCGA", &[construct], 0.15).is_empty());
 }
+
+/// A pattern that shares its outer part with a window and pays for a
+/// different inner part in edits does not cover the window; the same pattern
+/// covers a window holding all of it.
+#[test]
+fn windows_covered_requires_the_whole_pattern() {
+    let shared = b"ATCTCTCTCAACAACAACAACGGAGGAGGAGGAAAAGAGAGAGAT";
+    let mut pattern = shared.to_vec();
+    pattern.extend_from_slice(b"TACGGCTACCTTGTTACGACTT");
+    let mut other = shared.to_vec();
+    other.extend_from_slice(b"AGAGTTTGATCCTGGCTCAGTTACCGATGG");
+    let mut own = pattern.clone();
+    own.extend_from_slice(b"GGATCCATTAC");
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let k = crate::adapter::edit_budget(0.2, pattern.len());
+    let covered = windows_covered(&mut searcher, &pattern, &[&other, &own], k);
+    assert_eq!(covered, [false, true]);
+}
