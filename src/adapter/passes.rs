@@ -264,21 +264,50 @@ pub(super) fn search_singletons(
         }
         let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, len, k_end);
-        let windows = [
-            ctx.read.strands(ws, ws + head_end),
-            ctx.read.strands(ws + tail_start, we),
-        ];
-        let accept = |text_idx: usize, h: Hit| {
-            if text_idx == 0 {
-                keep.accept(Site::Head, adapter_idx, h);
+        // An end window of at least four alignment lengths is cut into two
+        // texts at a split point: the first owns the hits ending at or before
+        // it, the second those ending after it. An alignment spans at most `reach` bases, so each text
+        // extends `reach` bases past its owned ends, and every owned end sees
+        // the costs the whole window gives it. The four texts fill sassy's four
+        // lanes.
+        let reach = len + k_end;
+        let empty = ctx.read.strands(ws, ws);
+        let mut windows = [empty; 4];
+        let mut owned = [(0, Site::Head, 0, 0); 4];
+        let mut count = 0;
+        for (start, end, site) in [
+            (0, head_end, Site::Head),
+            (tail_start, n, Site::Tail { head_end }),
+        ] {
+            let parts = if end - start >= 4 * reach {
+                let split = start + (end - start) / 2;
+                [
+                    (start, split + reach + 1, start, split + 1),
+                    (split - reach, end, split + 1, end + 1),
+                ]
             } else {
-                keep.accept(Site::Tail { head_end }, adapter_idx, shifted(h, tail_start));
+                [(start, end, start, end + 1), (0, 0, 0, 0)]
+            };
+            for (text_start, text_end, first_end, last_end) in parts {
+                if text_end > text_start {
+                    windows[count] = ctx.read.strands(ws + text_start, ws + text_end);
+                    owned[count] = (text_start, site, first_end, last_end);
+                    count += 1;
+                }
+            }
+        }
+        let accept = |text_idx: usize, h: Hit| {
+            let (offset, site, first_end, last_end) = owned[text_idx];
+            let h = shifted(h, offset);
+            if (first_end..last_end).contains(&h.end) {
+                keep.accept(site, adapter_idx, h);
             }
         };
+        let windows = &windows[..count];
         if engine.plain_read && ctx.index.plain[adapter_idx] {
-            for_each_hit_in_texts(engine.plain, &adapter.seq, &windows, k_end, accept);
+            for_each_hit_in_texts(engine.plain, &adapter.seq, windows, k_end, accept);
         } else {
-            for_each_hit_in_texts(engine.ambiguous, &adapter.seq, &windows, k_end, accept);
+            for_each_hit_in_texts(engine.ambiguous, &adapter.seq, windows, k_end, accept);
         }
     }
 }

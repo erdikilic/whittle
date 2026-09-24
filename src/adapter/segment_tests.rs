@@ -1360,3 +1360,22 @@ fn presence_detection_tallies_the_barcode_behind_a_construct() {
     let bc01 = adapters.iter().position(|a| a.name == "BC01").unwrap();
     assert!(acted[bc01]);
 }
+
+/// A terminal hit is found wherever it lies in the end zone, including across
+/// the point where the singleton search cuts an end window in two.
+#[test]
+fn terminal_hit_is_found_across_the_window_split() {
+    let adapter = b"GATCGGAAGAGCACACGTCTGAACTCCAGTC";
+    let c = cfg_with(vec![ad("a", adapter)], 0.1, 150, false);
+    for pos in (0..140).step_by(3) {
+        let mut w = splitmix_dna(11, pos);
+        w.extend_from_slice(adapter);
+        w.extend(splitmix_dna(12, 600));
+        let segs = adapter_segments(&w, &c);
+        assert_eq!(
+            segs,
+            vec![(pos + adapter.len(), w.len())],
+            "adapter at {pos}"
+        );
+    }
+}
