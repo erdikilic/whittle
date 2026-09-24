@@ -299,13 +299,13 @@ mod tests {
 
     #[test]
     fn threads_banner_line_names_the_pool_and_the_decoders() {
-        let b = config::thread_budget(8, true);
+        let b = config::thread_budget(8, config::Decode::Blocks);
         assert_eq!(
             threads_banner_line(8, b),
             "Threads: 8 (trim and compress 6, decode 2)"
         );
         // A single-threaded run collapses to a plain `sequential` label.
-        let b = config::thread_budget(1, true);
+        let b = config::thread_budget(1, config::Decode::Blocks);
         assert_eq!(threads_banner_line(1, b), "Threads: 1 (sequential)");
     }
 

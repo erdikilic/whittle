@@ -137,10 +137,12 @@ fn trim_leading_zeros(run: &[u8]) -> &[u8] {
 /// folders).
 /// A file-open error surfaces as an `Err` item rather than aborting construction.
 /// A `.gz` member is probed for BGZF framing so a bgzip-compressed file takes
-/// the block-parallel reader.
+/// the block-parallel reader; a plain gzip member inflates on its own thread
+/// when `inflate_thread` is set.
 pub fn fastq_records(
     paths: &[PathBuf],
     bgzf_workers: usize,
+    inflate_thread: bool,
     counters: Arc<Counters>,
 ) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
     let paths = paths.to_vec();
@@ -165,8 +167,10 @@ pub fn fastq_records(
                 };
                 match format {
                     Format::FastqBgzf => crate::io::fastq::reader_from_bgzf(inner, bgzf_workers),
-                    Format::FastqGz => Ok(crate::io::fastq::reader_from(inner, true)),
-                    Format::Fastq => Ok(crate::io::fastq::reader_from(inner, false)),
+                    Format::FastqGz => {
+                        Ok(crate::io::fastq::reader_from(inner, true, inflate_thread))
+                    },
+                    Format::Fastq => Ok(crate::io::fastq::reader_from(inner, false, false)),
                     Format::Bam => unreachable!("`classify` admits no BAM into a FASTQ folder"),
                 }
             });

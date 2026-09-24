@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- Plain gzip FASTQ input is inflated on its own thread, one of the `-t`
+  workers, ahead of the parser. Multithreaded runs over gzip input finish
+  about 10% sooner.
 - The barcode panel is not searched at a read end already trimmed through a
   sequence that lies between the barcode and the insert: the native barcode
   construct, or the insert-side flank of the PCR, rapid and amplicon

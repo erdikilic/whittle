@@ -353,7 +353,8 @@ impl Config {
 
 /// How a `-t` total worker budget is spent. The render pool trims, rebuilds
 /// tags and compresses the output blocks; BGZF input takes decode workers out
-/// of the budget, which block whenever the pool is behind.
+/// of the budget, and plain gzip input takes one for its inflate thread, which
+/// block whenever the pool is behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadBudget {
     /// Workers for input decoding.
@@ -362,23 +363,35 @@ pub struct ThreadBudget {
     pub render: usize,
 }
 
-/// Returns the budget for `total` workers, which the two stages share.
-/// `parallel_decode` names BGZF input, whose blocks inflate in parallel: a
-/// quarter of the budget, at least one, decodes ahead of the pool and the rest
-/// renders. Other input decodes on the pool, which then holds the whole budget.
-pub fn thread_budget(total: usize, parallel_decode: bool) -> ThreadBudget {
+/// How the input is decompressed, which decides its share of the budget.
+/// Ordered by the share, so a folder of mixed members plans for the largest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Decode {
+    /// Uncompressed input, parsed on the render pool.
+    Inline,
+    /// A single gzip stream, inflated on one thread ahead of the pool when
+    /// the budget has more than one worker.
+    Stream,
+    /// BGZF input, whose blocks inflate in parallel.
+    Blocks,
+}
+
+/// Returns the budget for `total` workers, which the two stages share. BGZF
+/// input decodes on a quarter of the budget, at least one, and plain gzip on
+/// one inflate thread; the rest renders. Uncompressed input decodes on the
+/// pool, which then holds the whole budget, as does a single worker.
+pub fn thread_budget(total: usize, decode: Decode) -> ThreadBudget {
     let total = total.max(1);
-    if parallel_decode && total > 1 {
-        let decode = (total / 4).max(1);
-        ThreadBudget {
-            decode,
-            render: total - decode,
-        }
-    } else {
-        ThreadBudget {
-            decode: 1,
-            render: total,
-        }
+    let taken = match decode {
+        Decode::Inline => 0,
+        _ if total == 1 => 0,
+        Decode::Stream => 1,
+        Decode::Blocks => (total / 4).max(1),
+    };
+    // Decoding on the pool or in a sequential run counts as one decoder.
+    ThreadBudget {
+        decode: taken.max(1),
+        render: total - taken,
     }
 }
 
@@ -421,45 +434,21 @@ mod tests {
     use super::*;
 
     /// The stages share the budget: BGZF input takes a quarter of it, at least
-    /// one, for decoding and the rest renders; other input renders on every
-    /// worker, and a single worker stays sequential.
+    /// one, for decoding, plain gzip takes one inflate thread, and the rest
+    /// renders; uncompressed input renders on every worker, and a single worker
+    /// stays sequential.
     #[test]
     fn thread_budget_shares_the_workers_between_stages() {
-        assert_eq!(
-            thread_budget(8, true),
-            ThreadBudget {
-                decode: 2,
-                render: 6
-            }
-        );
-        assert_eq!(
-            thread_budget(32, true),
-            ThreadBudget {
-                decode: 8,
-                render: 24
-            }
-        );
-        assert_eq!(
-            thread_budget(8, false),
-            ThreadBudget {
-                decode: 1,
-                render: 8
-            }
-        );
-        assert_eq!(
-            thread_budget(2, true),
-            ThreadBudget {
-                decode: 1,
-                render: 1
-            }
-        );
-        assert_eq!(
-            thread_budget(1, true),
-            ThreadBudget {
-                decode: 1,
-                render: 1
-            }
-        );
+        let budget = |decode, render| ThreadBudget { decode, render };
+        assert_eq!(thread_budget(8, Decode::Blocks), budget(2, 6));
+        assert_eq!(thread_budget(32, Decode::Blocks), budget(8, 24));
+        assert_eq!(thread_budget(2, Decode::Blocks), budget(1, 1));
+        assert_eq!(thread_budget(8, Decode::Stream), budget(1, 7));
+        assert_eq!(thread_budget(2, Decode::Stream), budget(1, 1));
+        assert_eq!(thread_budget(8, Decode::Inline), budget(1, 8));
+        for decode in [Decode::Inline, Decode::Stream, Decode::Blocks] {
+            assert_eq!(thread_budget(1, decode), budget(1, 1));
+        }
     }
 
     /// The `kinetics` group folds in exactly the nine per-base arrays the BAM

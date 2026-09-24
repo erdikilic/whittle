@@ -23,26 +23,154 @@ use crate::record::ReadRecord;
 const INPUT_BUFFER_CAPACITY: usize = 1 << 20;
 
 /// Builds a streaming FASTQ record iterator over an already-open source (e.g. a
-/// peeked-and-chained stdin stream), decompressing gzip when `gz` is true.
+/// peeked-and-chained stdin stream), decompressing gzip when `gz` is true, on
+/// a dedicated thread when `inflate_thread` is true (see `byte_stream`).
 pub fn reader_from(
     inner: Box<dyn Read + Send>,
     gz: bool,
+    inflate_thread: bool,
 ) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
-    Box::new(RecordIter::new(byte_stream(inner, gz)))
+    Box::new(RecordIter::new(byte_stream(inner, gz, inflate_thread)))
 }
 
 /// Returns the decoded byte stream of a FASTQ source, inflating gzip when
-/// `gz` is true.
-pub fn byte_stream(inner: Box<dyn Read + Send>, gz: bool) -> Box<dyn Read + Send> {
-    if gz {
-        // `bufread::MultiGzDecoder` over an explicit buffer; the `read` variant
-        // wraps its source in an 8 KiB `BufReader`.
-        Box::new(MultiGzDecoder::new(BufReader::with_capacity(
-            INPUT_BUFFER_CAPACITY,
-            inner,
-        )))
+/// `gz` is true. With `inflate_thread`, the gzip stream inflates on a
+/// dedicated thread ahead of the parser (`InflateThread`), so decompression
+/// of the single DEFLATE stream overlaps with parsing.
+pub fn byte_stream(
+    inner: Box<dyn Read + Send>,
+    gz: bool,
+    inflate_thread: bool,
+) -> Box<dyn Read + Send> {
+    if !gz {
+        return inner;
+    }
+    // `bufread::MultiGzDecoder` over an explicit buffer; the `read` variant
+    // wraps its source in an 8 KiB `BufReader`.
+    let decoder = MultiGzDecoder::new(BufReader::with_capacity(INPUT_BUFFER_CAPACITY, inner));
+    if inflate_thread {
+        Box::new(InflateThread::spawn(decoder))
     } else {
-        inner
+        Box::new(decoder)
+    }
+}
+
+/// Size of one decompressed chunk the inflate thread hands to the parser.
+const INFLATE_CHUNK: usize = 1 << 20;
+
+/// Decompressed chunks queued between the inflate thread and the parser. With
+/// the chunk being filled and the chunk being parsed, at most four chunks are
+/// allocated.
+const INFLATE_QUEUE: usize = 2;
+
+/// A reader over a decoder that runs on its own thread. The thread fills
+/// fixed-size chunks and sends them through a bounded channel; the reader
+/// returns each consumed chunk for reuse. A decoder error is delivered after
+/// the bytes decoded before it, and a thread that stops without reaching the
+/// end of the stream is reported as an error rather than as end of input.
+struct InflateThread {
+    /// Filled chunks, then an empty chunk marking the end of the stream.
+    chunks: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    /// Consumed chunks returned to the thread.
+    recycle: std::sync::mpsc::Sender<Vec<u8>>,
+    /// The chunk being read.
+    current: Vec<u8>,
+    /// Read position in `current`.
+    pos: usize,
+    /// Whether the end marker has been received.
+    ended: bool,
+    /// Whether an error has been returned; later reads fail as well.
+    failed: bool,
+}
+
+impl InflateThread {
+    /// Starts the thread over `decoder`. The thread exits at the end of the
+    /// stream, after a decoder error, or once the reader is dropped.
+    fn spawn<D: Read + Send + 'static>(mut decoder: D) -> Self {
+        let (tx, chunks) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(INFLATE_QUEUE);
+        let (recycle, reuse) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            loop {
+                let mut chunk = reuse
+                    .try_recv()
+                    .unwrap_or_else(|_| Vec::with_capacity(INFLATE_CHUNK));
+                chunk.resize(INFLATE_CHUNK, 0);
+                let mut filled = 0;
+                let mut failure = None;
+                while filled < chunk.len() {
+                    match decoder.read(&mut chunk[filled..]) {
+                        Ok(0) => break,
+                        Ok(n) => filled += n,
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {},
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        },
+                    }
+                }
+                chunk.truncate(filled);
+                let end = filled == 0;
+                if (filled > 0 || failure.is_none()) && tx.send(Ok(chunk)).is_err() {
+                    return;
+                }
+                if let Some(e) = failure {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+                if end {
+                    return;
+                }
+            }
+        });
+        InflateThread {
+            chunks,
+            recycle,
+            current: Vec::new(),
+            pos: 0,
+            ended: false,
+            failed: false,
+        }
+    }
+}
+
+impl Read for InflateThread {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        while self.pos == self.current.len() {
+            if self.failed {
+                return Err(io::Error::other("the gzip stream failed to decode"));
+            }
+            if self.ended {
+                return Ok(0);
+            }
+            let used = std::mem::take(&mut self.current);
+            if used.capacity() > 0 {
+                // The thread is gone once the stream has ended; the chunk is
+                // then dropped.
+                let _ = self.recycle.send(used);
+            }
+            self.pos = 0;
+            match self.chunks.recv() {
+                Ok(Ok(chunk)) if chunk.is_empty() => self.ended = true,
+                Ok(Ok(chunk)) => self.current = chunk,
+                Ok(Err(e)) => {
+                    self.failed = true;
+                    return Err(e);
+                },
+                Err(_) => {
+                    self.failed = true;
+                    return Err(io::Error::other(
+                        "the gzip decoder thread stopped before the end of the stream",
+                    ));
+                },
+            }
+        }
+        let n = buf.len().min(self.current.len() - self.pos);
+        buf[..n].copy_from_slice(&self.current[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
     }
 }
 
@@ -762,6 +890,82 @@ mod tests {
         });
         let err = it.next().unwrap().unwrap_err();
         assert_eq!(format!("{err:#}"), "reading the first FASTQ record: boom");
+    }
+
+    /// `text` as a single-member gzip stream.
+    fn gzip(text: &[u8]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(text).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// `n` FASTQ records named from `prefix`, spanning several inflate chunks
+    /// for large `n`.
+    fn fastq_records(prefix: &str, n: usize) -> Vec<u8> {
+        let mut text = Vec::new();
+        for i in 0..n {
+            text.extend_from_slice(format!("@{prefix}{i}\nACGTACGTAC\n+\nIIIIIIIIII\n").as_bytes());
+        }
+        text
+    }
+
+    /// Record names from a gzip byte stream, inflated on the calling thread or
+    /// on the inflate thread.
+    fn gz_names(gz: Vec<u8>, inflate_thread: bool) -> anyhow::Result<Vec<Vec<u8>>> {
+        reader_from(Box::new(io::Cursor::new(gz)), true, inflate_thread)
+            .map(|r| r.map(|r| r.name))
+            .collect()
+    }
+
+    /// Every member of a multi-member stream is read, across chunk boundaries,
+    /// and the inflate thread yields what inline inflation yields.
+    #[test]
+    fn inflate_thread_reads_every_gzip_member() {
+        let mut gz = gzip(&fastq_records("a", 60_000));
+        gz.extend(gzip(b""));
+        gz.extend(gzip(&fastq_records("b", 3)));
+        let names = gz_names(gz.clone(), true).unwrap();
+        assert_eq!(names.len(), 60_003);
+        assert_eq!(names[60_000], b"b0");
+        assert_eq!(names, gz_names(gz, false).unwrap());
+    }
+
+    /// A damaged stream fails on the inflate thread as it does inline: the
+    /// records before the damage are yielded, then the decoder's error rather
+    /// than the end of the stream.
+    #[test]
+    fn inflate_thread_reports_damaged_gzip() {
+        let gz = gzip(&fastq_records("r", 60_000));
+        let truncated = gz[..gz.len() / 2].to_vec();
+        for inflate_thread in [false, true] {
+            let mut it = reader_from(
+                Box::new(io::Cursor::new(truncated.clone())),
+                true,
+                inflate_thread,
+            );
+            let mut read = 0;
+            let err = loop {
+                match it.next().expect("The stream ends with an error") {
+                    Ok(_) => read += 1,
+                    Err(e) => break e,
+                }
+            };
+            assert!(read > 0);
+            assert!(
+                format!("{err:#}").starts_with("reading FASTQ record after r"),
+                "{err:#}"
+            );
+        }
+
+        let mut corrupt = gzip(&fastq_records("r", 10));
+        corrupt[12..20].copy_from_slice(b"\xff\xff\xff\xff\xff\xff\xff\xff");
+        let inline = gz_names(corrupt.clone(), false).unwrap_err();
+        let threaded = gz_names(corrupt, true).unwrap_err();
+        assert_eq!(format!("{threaded:#}"), format!("{inline:#}"));
+        assert!(
+            format!("{threaded:#}").starts_with("reading the first FASTQ record: "),
+            "{threaded:#}"
+        );
     }
 
     #[test]

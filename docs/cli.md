@@ -41,8 +41,9 @@ tab-delimited text is not in this form is copied verbatim.
 the threads that do work. Trimming, record serialization, and output
 compression run on a pool; BGZF input (BAM and FASTQ.bgz) is decompressed by one
 quarter of the workers, at least one, and the pool takes the rest. Plain gzip
-input is a single DEFLATE stream and is decompressed by one thread, so a gzip
-FASTQ run stops gaining from more workers once that thread is saturated; BGZF
+input is a single DEFLATE stream and is decompressed by one of the workers on
+its own thread, ahead of the parser, so a gzip FASTQ run stops gaining from
+more workers once that thread is saturated; BGZF
 FASTQ input (`bgzip`, or whittle's own `.gz` output) has no such limit. The
 startup banner reports the split.
 

@@ -161,7 +161,14 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
         "Input format detected"
     );
 
-    let budget = plan_budget(cfg, matches!(in_fmt, Format::FastqBgzf | Format::Bam));
+    let budget = plan_budget(
+        cfg,
+        match in_fmt {
+            Format::FastqBgzf | Format::Bam => config::Decode::Blocks,
+            Format::FastqGz => config::Decode::Stream,
+            Format::Fastq => config::Decode::Inline,
+        },
+    );
 
     let mut warnings: Vec<String> = Vec::new();
     warnings.extend(mismatch_warn);
@@ -225,14 +232,24 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
     guards::guard_bam_only_flags(cfg, family_fmt)?;
     guards::guard_fastq_to_bam(family_fmt, out_fmt)?;
 
-    // A `.gz` member is BGZF when its first block header says so.
-    let bgzf_input = family_fmt == Format::Bam
-        || paths.iter().any(|p| match io::from_extension(p) {
-            Some(Format::FastqBgzf) => true,
-            Some(Format::FastqGz) => io::is_bgzf_file(p),
-            _ => false,
-        });
-    let budget = plan_budget(cfg, bgzf_input);
+    // A `.gz` member is BGZF when its first block header says so. Members are
+    // read one at a time, so a plain gzip member inflates on one of the
+    // decode workers BGZF members take.
+    let decode = if family_fmt == Format::Bam {
+        config::Decode::Blocks
+    } else {
+        paths
+            .iter()
+            .map(|p| match io::from_extension(p) {
+                Some(Format::FastqBgzf) => config::Decode::Blocks,
+                Some(Format::FastqGz) if io::is_bgzf_file(p) => config::Decode::Blocks,
+                Some(Format::FastqGz) => config::Decode::Stream,
+                _ => config::Decode::Inline,
+            })
+            .max()
+            .unwrap_or(config::Decode::Inline)
+    };
+    let budget = plan_budget(cfg, decode);
     let counters = Arc::new(workflow::Counters::default());
 
     // Summed unconditionally, not only when the banner prints: it also drives
@@ -331,10 +348,10 @@ fn detect_format(
     ))
 }
 
-/// Returns the thread budget of a run: the render pool takes the whole `-t`
-/// budget, and BGZF input adds decode workers ahead of it.
-fn plan_budget(cfg: &Config, bgzf_input: bool) -> config::ThreadBudget {
-    config::thread_budget(cfg.threads, bgzf_input)
+/// Returns the thread budget of a run: compressed input takes its decode
+/// workers out of the `-t` budget and the render pool takes the rest.
+fn plan_budget(cfg: &Config, decode: config::Decode) -> config::ThreadBudget {
+    config::thread_budget(cfg.threads, decode)
 }
 
 /// Where the records come from: one stream (a file or stdin, with any sniffed
@@ -487,7 +504,7 @@ impl Session {
                 if let (true, Source::Stream(src)) = (paraseq, &mut source) {
                     let src = std::mem::replace(src, Box::new(std::io::empty()));
                     cfg.render_workers = self.budget.render;
-                    let stream = io::fastq::byte_stream(src, in_fmt == Format::FastqGz);
+                    let stream = io::fastq::byte_stream(src, in_fmt == Format::FastqGz, true);
                     let mut writer = io::fastq::writer(cfg, out_fmt, true)?;
                     let stats =
                         workflow::run_fastq_paraseq(stream, &mut writer, cfg, &self.counters)?;
@@ -503,7 +520,7 @@ impl Session {
                     }
                     return self.finish(obs, &stats, cfg);
                 }
-                let records = self.fastq_reader(source, in_fmt)?;
+                let records = self.fastq_reader(source, in_fmt, cfg.threads > 1)?;
                 let records = self.tag_filtered_fastq(cfg, records);
                 let Some(records) = settle(
                     records,
@@ -677,22 +694,25 @@ impl Session {
         )
     }
 
-    /// Opens the FASTQ-family record stream for `in_fmt`.
+    /// Opens the FASTQ-family record stream for `in_fmt`. Plain gzip inflates
+    /// on its own thread when `threaded`, the thread the budget set aside.
     fn fastq_reader(
         &self,
         source: Source,
         in_fmt: Format,
+        threaded: bool,
     ) -> anyhow::Result<Box<dyn Iterator<Item = anyhow::Result<record::ReadRecord>> + Send>> {
         match source {
             Source::Stream(src) => match in_fmt {
-                Format::Fastq => Ok(io::fastq::reader_from(src, false)),
-                Format::FastqGz => Ok(io::fastq::reader_from(src, true)),
+                Format::Fastq => Ok(io::fastq::reader_from(src, false, false)),
+                Format::FastqGz => Ok(io::fastq::reader_from(src, true, threaded)),
                 Format::FastqBgzf => io::fastq::reader_from_bgzf(src, self.budget.decode),
                 Format::Bam => unreachable!("BAM input is dispatched to bam_reader"),
             },
             Source::Folder(paths) => Ok(io::dir::fastq_records(
                 &paths,
                 self.budget.decode,
+                threaded,
                 self.counters.clone(),
             )),
         }
