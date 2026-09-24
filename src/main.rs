@@ -1,6 +1,13 @@
 //! Binary entry point: parses the CLI, initializes observability, runs the
 //! workflow, and maps failure to exit status 1 (2 for a CLI parse error).
 
+/// musl's allocator takes a process-wide lock, which the render workers
+/// contend; mimalloc serves each thread from its own heap. glibc builds keep
+/// the system allocator, whose peak memory is lower.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     // On x86-64 builds compiled for AVX2 (the crate's target-cpu=x86-64-v3
     // default), the running CPU is checked for AVX2 before any SIMD code
