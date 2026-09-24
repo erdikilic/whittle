@@ -14,8 +14,12 @@ use super::{BatchSink, Counters, FirstError, Stats};
 use crate::config::Config;
 use crate::record::ReadRecord;
 
-/// Records per set handed to one worker.
+/// Most records per set handed to one worker.
 const RECORDS_PER_SET: usize = 128;
+
+/// Bases per set the record count is sized for, from the first record's
+/// length, so a set of long reads stays near the seq_io path's batch weight.
+const BASES_PER_SET: usize = super::FASTQ_BATCH.target_weight;
 
 /// Sets queued to the writer per worker.
 const QUEUE_PER_WORKER: usize = 2;
@@ -118,7 +122,9 @@ pub(crate) fn run_fastq_paraseq<W: BatchSink>(
     let (tx, rx) = sync_channel::<Vec<u8>>(queue);
     let aborted = Arc::new(AtomicBool::new(false));
     let write_err: FirstError<std::io::Error> = FirstError::new();
-    let reader = paraseq::fastq::Reader::with_batch_size(input, RECORDS_PER_SET)?;
+    let mut reader = paraseq::fastq::Reader::with_batch_size(input, RECORDS_PER_SET)?;
+    reader.update_batch_size_in_bp(BASES_PER_SET)?;
+    reader.set_batch_size(reader.batch_size().min(RECORDS_PER_SET))?;
     let mut processor = Processor {
         cfg: Arc::new(cfg.clone()),
         counters: Arc::clone(counters),

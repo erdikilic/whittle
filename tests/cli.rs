@@ -898,3 +898,32 @@ fn zero_threads_names_the_floor() {
         .stderr(predicates::str::contains("must be at least 1"))
         .stderr(predicates::str::contains("18446744073709551615").not());
 }
+
+/// The paraseq parser writes what the seq_io parser writes over reads long
+/// enough that a record set holds only a few of them.
+#[cfg(feature = "paraseq")]
+#[test]
+fn paraseq_parser_matches_seq_io_on_long_reads() {
+    let mut fastq = String::new();
+    for i in 0..40usize {
+        let seq: String = (0..200_000)
+            .map(|j| ['A', 'C', 'G', 'T'][(i * 7 + j * j) % 4])
+            .collect();
+        fastq.push_str(&format!("@long{i}\n{seq}\n+\n{}\n", "I".repeat(seq.len())));
+    }
+    let run = |parser: &str| {
+        whittle()
+            .env("WHITTLE_FASTQ_PARSER", parser)
+            .args(["-t", "4", "--preserve-order", "--quiet", "-H", "5"])
+            .args(["--input-format", "fastq"])
+            .write_stdin(fastq.clone())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    };
+    let paraseq = run("paraseq");
+    assert_eq!(paraseq.iter().filter(|&&b| b == b'@').count(), 40);
+    assert!(paraseq == run("seq_io"), "The parsers disagree");
+}
