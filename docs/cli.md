@@ -48,8 +48,8 @@ FASTQ input (`bgzip`, or whittle's own `.gz` output) has no such limit. The
 startup banner reports the split.
 
 Records are written in completion order under `-t > 1`. `--preserve-order` restores
-the input order using bounded groups of batches. A slow batch limits read-ahead
-until its group completes.
+the input order using a bounded window of batches. A slow batch limits read-ahead
+until it is written.
 
 ## Directory input
 

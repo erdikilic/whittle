@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integer tags and `B` arrays in tagged FASTQ headers are parsed from the
   bytes directly. Tagged FASTQ carrying a move table takes 20 to 40% less
   CPU.
+- `--preserve-order` reorders batches through a sliding window instead of
+  waiting for each group of batches to complete. Ordered multithreaded runs
+  finish up to 10% sooner.
 - The barcode panel is not searched at a read end already trimmed through a
   sequence that lies between the barcode and the insert: the native barcode
   construct, or the insert-side flank of the PCR, rapid and amplicon

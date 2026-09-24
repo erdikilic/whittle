@@ -9,7 +9,7 @@ pub(crate) mod reject;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use rayon::prelude::*;
 
@@ -217,6 +217,49 @@ impl<E> FirstError<E> {
     }
 }
 
+/// Bounds how far batch hand-out runs ahead of the ordered writer: batch `idx`
+/// is handed out only once fewer than `size` batches before it are unwritten,
+/// so a slow batch holds back at most `size` batches behind it.
+struct ReorderWindow {
+    /// Batches written so far.
+    written: Mutex<usize>,
+    /// Signaled when `written` advances or the run aborts.
+    advanced: Condvar,
+    /// Batches allowed in flight.
+    size: usize,
+}
+
+impl ReorderWindow {
+    fn new(size: usize) -> Self {
+        Self {
+            written: Mutex::new(0),
+            advanced: Condvar::new(),
+            size,
+        }
+    }
+
+    /// Blocks until batch `idx` fits in the window or the run has aborted.
+    fn wait_for(&self, idx: usize, aborted: &AtomicBool) {
+        let mut written = self.written.lock().unwrap();
+        while idx >= *written + self.size && !aborted.load(Ordering::Relaxed) {
+            written = self.advanced.wait(written).unwrap();
+        }
+    }
+
+    /// Records that `written` batches have been written.
+    fn advance(&self, written: usize) {
+        *self.written.lock().unwrap() = written;
+        self.advanced.notify_all();
+    }
+
+    /// Wakes every waiter after the abort flag is raised. The lock orders the
+    /// flag before a waiter's next check.
+    fn release(&self) {
+        let _written = self.written.lock().unwrap();
+        self.advanced.notify_all();
+    }
+}
+
 /// A record stream that ends after its first `Err` (which is still delivered)
 /// or once the run's abort flag is raised. The source is checked before every
 /// poll, so it is never polled again after either event.
@@ -248,7 +291,8 @@ where
 /// `Err` and stops being read once any render or write error is recorded, so a
 /// failing run neither re-polls a reader after an I/O error nor processes the
 /// rest of the input. With `cfg.ordered` the writer emits batches in input
-/// order with bounded groups of in-flight batches; otherwise in completion order.
+/// order, and a batch is handed out only while a bounded window of batches
+/// separates it from the next one to write; otherwise in completion order.
 ///
 /// `render` appends each record's output to the batch accumulator; `pack`
 /// turns the accumulator into the unit the writer takes, on
@@ -287,8 +331,10 @@ where
     let aborted = AtomicBool::new(false);
     let render_err: FirstError<anyhow::Error> = FirstError::new();
     let write_err: FirstError<std::io::Error> = FirstError::new();
+    let window = ReorderWindow::new(queue + render_workers);
 
     let aborted_ref = &aborted;
+    let window_ref = &window;
     let records = FuseOnError {
         inner: records,
         done: false,
@@ -308,6 +354,7 @@ where
             let mut write_batch = |batch: &P| -> bool {
                 if let Err(e) = write_one(sink, batch) {
                     write_err.record(e, aborted_ref);
+                    window_ref.release();
                     return false;
                 }
                 true
@@ -318,12 +365,16 @@ where
                 }
                 if ordered {
                     pending.insert(idx, batch);
+                    let written = next;
                     while let Some(batch) = pending.remove(&next) {
                         if !write_batch(&batch) {
                             errored = true;
                             break;
                         }
                         next += 1;
+                    }
+                    if next > written {
+                        window_ref.advance(next);
                     }
                 } else if !write_batch(&batch) {
                     errored = true;
@@ -333,9 +384,18 @@ where
 
         pool.install(|| {
             let weight_of = |rec: &anyhow::Result<R>| rec.as_ref().map_or(0, &weight);
-            let mut batches = Batches::new(records, weight_of, policy)
-                .enumerate()
-                .peekable();
+            let mut batches = Batches::new(records, weight_of, policy);
+            let mut handed_out = 0usize;
+            // Under `ordered`, the next batch is read only once it fits in the
+            // reorder window, which bounds the reordered output in memory.
+            let batches = std::iter::from_fn(move || {
+                if ordered {
+                    window_ref.wait_for(handed_out, aborted_ref);
+                }
+                let batch = batches.next()?;
+                handed_out += 1;
+                Some((handed_out - 1, batch))
+            });
             let render_batch = |(idx, batch): (usize, Vec<anyhow::Result<R>>)| {
                 let mut out = T::default();
                 let mut input_reads = 0u64;
@@ -358,6 +418,9 @@ where
                         break;
                     }
                 }
+                if aborted.load(Ordering::Relaxed) {
+                    window.release();
+                }
                 counters
                     .input_reads
                     .fetch_add(input_reads, Ordering::Relaxed);
@@ -368,6 +431,7 @@ where
                     Ok(packed) => packed,
                     Err(e) => {
                         render_err.record(e.into(), &aborted);
+                        window.release();
                         return;
                     },
                 };
@@ -376,20 +440,10 @@ where
                 // writer is gone; nothing more can be written.
                 if tx.send((idx, packed)).is_err() {
                     aborted.store(true, Ordering::Relaxed);
+                    window.release();
                 }
             };
-            if ordered {
-                // Each group completes before another is read, bounding reordered output.
-                while batches.peek().is_some() {
-                    batches
-                        .by_ref()
-                        .take(queue + render_workers)
-                        .par_bridge()
-                        .for_each(render_batch);
-                }
-            } else {
-                batches.par_bridge().for_each(render_batch);
-            }
+            batches.par_bridge().for_each(render_batch);
         });
         drop(tx);
     });
@@ -1019,6 +1073,42 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.to_string(), "sink failed");
+    }
+
+    /// A batch that fails to pack is never written, so the ordered writer
+    /// cannot advance past it; the run still ends with the error rather than
+    /// waiting on the reorder window.
+    #[test]
+    fn ordered_driver_ends_on_a_pack_error() {
+        let cfg = driver_cfg(4, true);
+        let error = run_parallel(
+            (0..1000usize).map(Ok),
+            BatchPolicy {
+                target_weight: 1,
+                max_items: 1,
+                queue_per_worker: 1,
+            },
+            |_| 1,
+            &cfg,
+            &mut Vec::new(),
+            |n, _, out: &mut Vec<usize>| {
+                out.push(n);
+                Ok(())
+            },
+            |batch: Vec<usize>| {
+                if batch == [3] {
+                    return Err(std::io::Error::other("pack failed"));
+                }
+                Ok(batch)
+            },
+            |out: &mut Vec<usize>, batch: &Vec<usize>| {
+                out.extend_from_slice(batch);
+                Ok(())
+            },
+            &Counters::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "pack failed");
     }
 
     #[test]
