@@ -69,14 +69,31 @@ pub(super) fn bounds_barcode(adapter: &Adapter) -> bool {
             .any(|flank| seq == *flank || seq == reverse_complement(flank))
 }
 
-/// Returns whether `adapter` is a marker-gene primer in the primer role, on
-/// either strand.
-fn is_marker_primer(adapter: &Adapter) -> bool {
+/// Returns whether `adapter` is a marker-gene primer in the primer role: the
+/// shorter of it and a `catalog::MARKER_PRIMERS` entry aligns within the
+/// other, on either strand, within the edit budget at `error_rate`. A primer
+/// resolved from degenerate reads, as discovery assembles it, is one of them.
+fn is_marker_primer(adapter: &Adapter, error_rate: f64) -> bool {
+    if adapter.role != Role::Primer {
+        return false;
+    }
     let seq = adapter.seq.to_ascii_uppercase();
-    adapter.role == Role::Primer
-        && super::catalog::MARKER_PRIMERS
-            .iter()
-            .any(|primer| seq == *primer || seq == reverse_complement(primer))
+    let mut searcher = new_ambiguous_searcher();
+    super::catalog::MARKER_PRIMERS.iter().any(|&primer| {
+        let (short, long) = if seq.len() <= primer.len() {
+            (seq.as_slice(), primer)
+        } else {
+            (primer, seq.as_slice())
+        };
+        short.len() >= MIN_PATTERN_LEN
+            && !search::hits(
+                &mut searcher,
+                short,
+                long,
+                edit_budget(error_rate, short.len()),
+            )
+            .is_empty()
+    })
 }
 
 /// Returns whether `adapter` is a member of a barcode panel: a barcode that is
@@ -169,7 +186,7 @@ impl CandidateIndex {
             .map(|(adapter, &searchable)| {
                 if !searchable
                     || (flanked && is_panel_barcode(adapter, adapters))
-                    || is_marker_primer(adapter)
+                    || is_marker_primer(adapter, error_rate)
                 {
                     0
                 } else if adapter.role == Role::Adapter {

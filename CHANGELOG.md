@@ -102,6 +102,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- A 16S or ITS primer that discovery resolves from degenerate reads is
+  recognized as a marker-gene primer and does not split reads, as the catalog
+  primer does outside amplicon-only presets.
 - A barcode cut short by the read end is trimmed when at least 10 of its
   bases align flush with the end, as a truncated adapter or primer is. Barcode
   panels without flanks, such as PacBio barcodes, left eroded barcodes behind.

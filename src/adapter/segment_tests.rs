@@ -1436,3 +1436,15 @@ fn marker_primers_split_only_in_amplicon_selections() {
     let i = pcr.iter().position(|a| a.name == "PCR2_front").unwrap();
     assert!(index.split_classes[i] > 0);
 }
+
+/// A 16S primer resolved from degenerate reads, as discovery assembles it,
+/// counts as a marker primer and does not split in the primer role; an
+/// unrelated primer does.
+#[test]
+fn resolved_marker_primer_variants_do_not_split() {
+    let resolved = entry("variant", b"AGAGTTTGATCCTGGCTCAG", Role::Primer);
+    let pcr = entry("pcr", b"TTTCTGTTGGTGCTGATATTGC", Role::Primer);
+    let index = CandidateIndex::new(&[resolved, pcr], 0.15, 150, true);
+    assert_eq!(index.split_classes[0], 0);
+    assert!(index.split_classes[1] > 0);
+}
