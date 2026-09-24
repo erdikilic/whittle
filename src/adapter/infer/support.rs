@@ -92,7 +92,8 @@ pub(super) fn same_adapter(a: &[u8], b: &[u8], error_rate: f64) -> bool {
 pub(super) fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f32)> {
     let mut s = new_ambiguous_searcher();
     let mut named: Vec<(String, f32)> = Vec::new();
-    for r in refs {
+    // A barcode construct's `N` block matches any sequence and names nothing.
+    for r in refs.iter().filter(|r| !crate::adapter::is_construct(r)) {
         let (short, long) = if seq.len() <= r.seq.len() {
             (seq, r.seq.as_slice())
         } else {

@@ -1052,3 +1052,15 @@ fn conserved_insert_mirrored_at_truncated_read_ends_is_excluded() {
         "{found:?}"
     );
 }
+
+/// A barcode construct names no inferred sequence: its `N` block would match
+/// any sequence at full identity.
+#[test]
+fn barcode_construct_names_no_inferred_sequence() {
+    let construct = Adapter {
+        name: "NB_construct".into(),
+        seq: b"ATTGCTAAGGTTAANNNNNNNNNNNNNNNNNNNNNNNNCAGCACCT".to_vec(),
+        role: Role::Barcode,
+    };
+    assert!(name_against(b"TGACTCCTCGCTTTCGA", &[construct], 0.15).is_empty());
+}

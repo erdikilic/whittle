@@ -102,6 +102,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Discovery with a preset no longer treats the native barcode construct as a
+  known sequence, whose `N` block matched novel read ends and moved the
+  discovery boundary into the read; the construct also no longer names
+  inferred sequences.
 - A 16S or ITS primer that discovery resolves from degenerate reads is
   recognized as a marker-gene primer and does not split reads, as the catalog
   primer does outside amplicon-only presets.
