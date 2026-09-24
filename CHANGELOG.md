@@ -102,6 +102,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- A discovered sequence flush with the read end that is a 16S or ITS primer
+  takes the primer role instead of the adapter role, so it does not split
+  reads at the primer's sites inside genomic inserts.
 - Discovery learns the primer at each end of a library whose two ends share
   an adapter but carry different primers, such as a SMRTbell library with
   16S primers. A layer candidate counts a read window as its own only where

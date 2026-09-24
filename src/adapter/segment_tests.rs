@@ -1448,3 +1448,17 @@ fn resolved_marker_primer_variants_do_not_split() {
     assert_eq!(index.split_classes[0], 0);
     assert!(index.split_classes[1] > 0);
 }
+
+/// A resolved 16S primer, alone or with a few bases of its neighbour, is a
+/// marker primer; an adapter assembled together with the primer behind it,
+/// or an unrelated primer, is not.
+#[test]
+fn marker_primer_match_requires_the_sequence_to_be_the_primer() {
+    assert!(matches_marker_primer(b"AGAGTTTGATCCTGGCTCAG", 0.15));
+    assert!(matches_marker_primer(b"AGATAGAGTTTGATTCTGGCTCAG", 0.15));
+    let mut with_adapter = b"ATCTCTCTCAACAACAACAACGGAGGAGGAGGAAAAGAGAGAGAT".to_vec();
+    with_adapter.extend_from_slice(b"AGAGTTTGATCCTGGCTCAG");
+    assert!(!matches_marker_primer(&with_adapter, 0.15));
+    assert!(!matches_marker_primer(b"TTTCTGTTGGTGCTGATATTGC", 0.15));
+    assert!(!matches_marker_primer(b"TGGTCCAGGATCAACA", 0.2));
+}

@@ -69,28 +69,28 @@ pub(super) fn bounds_barcode(adapter: &Adapter) -> bool {
             .any(|flank| seq == *flank || seq == reverse_complement(flank))
 }
 
-/// Returns whether `adapter` is a marker-gene primer in the primer role: the
-/// shorter of it and a `catalog::MARKER_PRIMERS` entry aligns within the
-/// other, on either strand, within the edit budget at `error_rate`. A primer
-/// resolved from degenerate reads, as discovery assembles it, is one of them.
+/// Returns whether `adapter` is a marker-gene primer in the primer role; see
+/// `matches_marker_primer`.
 fn is_marker_primer(adapter: &Adapter, error_rate: f64) -> bool {
-    if adapter.role != Role::Primer {
-        return false;
-    }
-    let seq = adapter.seq.to_ascii_uppercase();
+    adapter.role == Role::Primer && matches_marker_primer(&adapter.seq, error_rate)
+}
+
+/// Returns whether `seq` is a marker-gene primer: a `catalog::MARKER_PRIMERS`
+/// entry aligns within `seq`, on either strand, within the primer's edit
+/// budget at `error_rate`, and `seq` extends it by fewer than `MIN_OVERLAP`
+/// bases. A primer resolved from degenerate reads, as discovery assembles it,
+/// is one of them; an adapter assembled together with the primer behind it,
+/// or a shorter sequence that aligns within a primer by chance, is not.
+pub(crate) fn matches_marker_primer(seq: &[u8], error_rate: f64) -> bool {
+    let seq = seq.to_ascii_uppercase();
     let mut searcher = new_ambiguous_searcher();
     super::catalog::MARKER_PRIMERS.iter().any(|&primer| {
-        let (short, long) = if seq.len() <= primer.len() {
-            (seq.as_slice(), primer)
-        } else {
-            (primer, seq.as_slice())
-        };
-        short.len() >= MIN_PATTERN_LEN
+        (primer.len()..primer.len() + MIN_OVERLAP).contains(&seq.len())
             && !search::hits(
                 &mut searcher,
-                short,
-                long,
-                edit_budget(error_rate, short.len()),
+                primer,
+                &seq,
+                edit_budget(error_rate, primer.len()),
             )
             .is_empty()
     })

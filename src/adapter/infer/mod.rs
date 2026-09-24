@@ -462,7 +462,9 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         .enumerate()
         .map(|(i, (seq, support, layer, flush, member))| {
             let name_hits = name_against(&seq, &name_refs, base.error_rate);
-            let role = if flush {
+            // A flush layer is an adapter unless it is a marker-gene primer,
+            // whose site also lies inside genomic reads.
+            let role = if flush && !crate::adapter::matches_marker_primer(&seq, base.error_rate) {
                 Role::Adapter
             } else if member {
                 Role::Barcode
