@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- BAM output records adapter trimming in the `tm` field of each `@RG` line,
+  merged with dorado's value in its `adapter,primer,barcode` grammar.
 - `--tag-filter <EXPR>` keeps only reads whose aux tags satisfy a
   samtools-style expression (`[er]!="data_service_unblock_mux_change"`,
   `[dx]==1 || ([dx]==0 && [qs]>=15)`, `[rq]>=0.99 && [np]>=3`). Rejected

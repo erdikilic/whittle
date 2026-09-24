@@ -356,6 +356,54 @@ pub(crate) fn provenance_header(
     header
 }
 
+/// The trimming classes of dorado's `@RG` `tm` field, in its token order:
+/// `adapter`, `primer`, `barcode`.
+const TRIM_MODE_TOKENS: [&[u8]; 3] = [b"adapter", b"primer", b"barcode"];
+
+/// Adds the sequence classes whittle trims to the `tm` field of every `@RG`
+/// record, in dorado's grammar (`hts_types.h` `AdapterTrimMode`): the
+/// comma-joined tokens `adapter`, `primer` and `barcode` in that order, or
+/// `none` alone. `trimmed` flags each token in `TRIM_MODE_TOKENS` order. The
+/// field names the trimming applied to the reads, so an existing value is
+/// merged with `trimmed`, and a read group without it gains it. A value outside
+/// the grammar is left unchanged. Nothing changes when `trimmed` is empty.
+pub(crate) fn merge_trim_mode(header: &mut sam::Header, trimmed: [bool; 3]) {
+    use sam::header::record::value::map::tag::Other;
+
+    if !trimmed.contains(&true) {
+        return;
+    }
+    let Ok(tm) = Other::try_from(*b"tm") else {
+        return;
+    };
+    for (id, group) in header.read_groups_mut() {
+        let fields = group.other_fields_mut();
+        let mut modes = trimmed;
+        if let Some(value) = fields.get(&tm) {
+            let tokens: Vec<&[u8]> = value.split(|&b| b == b',').collect();
+            let known = tokens.iter().all(|t| TRIM_MODE_TOKENS.contains(t))
+                || tokens.as_slice() == [b"none".as_slice()];
+            if !known {
+                tracing::warn!(
+                    read_group = %id,
+                    tm = %value,
+                    "The @RG tm field is not in dorado's grammar and is left unchanged"
+                );
+                continue;
+            }
+            for (mode, token) in modes.iter_mut().zip(TRIM_MODE_TOKENS) {
+                *mode |= tokens.contains(&token);
+            }
+        }
+        let merged: Vec<&[u8]> = TRIM_MODE_TOKENS
+            .iter()
+            .zip(modes)
+            .filter_map(|(&token, on)| on.then_some(token))
+            .collect();
+        fields.insert(tm, merged.join(&b","[..]).into());
+    }
+}
+
 /// Returns true if the header's `@PG` chain is one `Programs::add` cannot walk
 /// safely.
 ///
@@ -397,6 +445,45 @@ mod tests {
 
     /// A dangling `@PG PP:` reference leaves the header unchanged because
     /// noodles requires every parent program ID to exist.
+    /// Parses `text` as a SAM header and returns the `tm` field of each `@RG`.
+    fn trim_modes(text: &str, trimmed: [bool; 3]) -> Vec<Option<String>> {
+        use sam::header::record::value::map::tag::Other;
+        let mut header: sam::Header = text.parse().unwrap();
+        merge_trim_mode(&mut header, trimmed);
+        let tm = Other::try_from(*b"tm").unwrap();
+        header
+            .read_groups()
+            .values()
+            .map(|g| g.other_fields().get(&tm).map(|v| v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn trim_mode_merges_into_dorado_grammar() {
+        let adapter = [true, false, false];
+        assert_eq!(
+            trim_modes("@RG\tID:a\ttm:none\n", adapter),
+            [Some("adapter".into())]
+        );
+        assert_eq!(
+            trim_modes("@RG\tID:a\ttm:barcode\n", [true, true, false]),
+            [Some("adapter,primer,barcode".into())]
+        );
+        assert_eq!(trim_modes("@RG\tID:a\n", adapter), [Some("adapter".into())]);
+        assert_eq!(
+            trim_modes("@RG\tID:a\ttm:quality\n", adapter),
+            [Some("quality".into())]
+        );
+        assert_eq!(
+            trim_modes("@RG\tID:a\ttm:none\n", [false; 3]),
+            [Some("none".into())]
+        );
+        assert_eq!(
+            trim_modes("@RG\tID:a\ttm:adapter\n@RG\tID:b\n", [false, false, true]),
+            [Some("adapter,barcode".into()), Some("barcode".into())]
+        );
+    }
+
     #[test]
     fn provenance_header_does_not_panic_on_dangling_pp_chain() {
         // `pg1` references a parent that is absent from the header.

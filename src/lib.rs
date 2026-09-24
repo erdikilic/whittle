@@ -409,7 +409,7 @@ impl Session {
             (Format::Bam, Format::Bam) => {
                 note_tags_ignored(cfg, in_fmt, out_fmt);
                 let (header, records) = self.bam_reader(source, true)?;
-                let out_header = io::bam::provenance_header(
+                let mut out_header = io::bam::provenance_header(
                     header,
                     cfg.threads <= 1 || cfg.ordered,
                     &command_line(std::env::args_os()),
@@ -426,6 +426,7 @@ impl Session {
                 else {
                     return Ok(());
                 };
+                io::bam::merge_trim_mode(&mut out_header, trim_classes(cfg));
                 let mut sink = io::bam::writer(
                     cfg.io.output.as_deref(),
                     &out_header,
@@ -764,6 +765,21 @@ where
     cfg.adapters = resolved.adapters;
     cfg.render_workers = budget.render;
     Ok(Some(resolved.records))
+}
+
+/// Returns which sequence classes the resolved adapter set trims, as the
+/// `adapter`, `primer` and `barcode` flags of `io::bam::merge_trim_mode`.
+fn trim_classes(cfg: &Config) -> [bool; 3] {
+    let mut classes = [false; 3];
+    for adapter in cfg.adapters.iter().flat_map(|a| &a.adapters) {
+        let class = match adapter.role {
+            adapter::Role::Adapter => 0,
+            adapter::Role::Primer => 1,
+            adapter::Role::Barcode => 2,
+        };
+        classes[class] = true;
+    }
+    classes
 }
 
 /// Warns for every artifact flag that report-only inference leaves unwritten;
