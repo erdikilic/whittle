@@ -1082,3 +1082,149 @@ fn windows_covered_requires_the_whole_pattern() {
     let covered = windows_covered(&mut searcher, &pattern, &[&other, &own], k);
     assert_eq!(covered, [false, true]);
 }
+
+/// Returns a splitmix64 draw from `state`, advanced in place.
+fn draw(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// Copies `seq` with `per_mille` errors per thousand bases, a third each
+/// substitutions, deletions and insertions.
+fn with_errors(seq: &[u8], seed: u64, per_mille: u64) -> Vec<u8> {
+    let mut state = seed;
+    let mut out = Vec::with_capacity(seq.len() + 8);
+    for &base in seq {
+        let roll = draw(&mut state) % 3000;
+        let pick = b"ACGT"[(draw(&mut state) % 4) as usize];
+        if roll < per_mille {
+            out.push(if pick == base {
+                b"ACGT"[(pick as usize + 1) % 4]
+            } else {
+                pick
+            });
+        } else if roll < 2 * per_mille {
+        } else if roll < 3 * per_mille {
+            out.extend_from_slice(&[base, pick]);
+        } else {
+            out.push(base);
+        }
+    }
+    out
+}
+
+/// Reads of both strands of a cDNA library with 3% errors: the outer
+/// adapter, noisier and eroded by a geometric number of bases, a shared core,
+/// then one strand primer at the 5' end and the other, reverse complemented,
+/// at the 3' end, where less outer adapter remains. The reverse strand primer
+/// is followed by a poly(T) run of varying length.
+fn strand_primer_reads() -> (Vec<Vec<u8>>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let outer = random_bases(8101, 45);
+    let core = random_bases(8111, 40);
+    let forward = random_bases(8121, 25);
+    let reverse = random_bases(8131, 30);
+    let reads = (0..1500u64)
+        .map(|i| {
+            let mut state = 30_000 + i;
+            let mut erosion = 0;
+            while erosion < 30 && !draw(&mut state).is_multiple_of(5) {
+                erosion += 1;
+            }
+            let mut read = with_errors(&outer[erosion..], 40_000 + i, 120);
+            let mut rest = core.clone();
+            rest.extend_from_slice(&forward);
+            rest.extend(random_bases(20_000 + i, 400));
+            rest.extend(std::iter::repeat_n(b'A', 12 + (i % 9) as usize));
+            rest.extend(rc(&reverse));
+            rest.extend(rc(&core));
+            read.extend(with_errors(&rest, 50_000 + i, 30));
+            read.extend(with_errors(
+                &rc(&outer)[..5 + (i % 7) as usize],
+                60_000 + i,
+                120,
+            ));
+            if i % 2 == 1 { rc(&read) } else { read }
+        })
+        .collect();
+    (reads, core, forward, reverse)
+}
+
+/// A shared adapter core that divides into the primers of the two strands
+/// is one layer, and each primer is the next; the poly(T) behind the reverse
+/// primer is left to the insert. The core lies deeper at the 5' end than its
+/// mirror at the 3' end, which keeps less outer adapter.
+#[test]
+fn shared_core_divides_into_strand_primers() {
+    let (reads, core, forward, reverse) = strand_primer_reads();
+    let found = infer_owned(&reads);
+    let seqs: Vec<Vec<u8>> = found.iter().map(|d| d.adapter.seq.clone()).collect();
+    let overlap = |part: &[u8], seq: &[u8]| {
+        longest_common_substring(part, seq).max(longest_common_substring(part, &rc(seq)))
+    };
+    for (part, least) in [(&core, 30), (&forward, 22), (&reverse, 25)] {
+        assert!(
+            seqs.iter().any(|s| overlap(part, s) >= least),
+            "{:?}",
+            String::from_utf8_lossy(part)
+        );
+    }
+    for s in &seqs {
+        assert!(
+            !contains(s, b"TTTTTTTT") && !contains(s, b"AAAAAAAA"),
+            "{:?}",
+            String::from_utf8_lossy(s)
+        );
+    }
+}
+
+/// A path divides where two continuations keep their support; a degenerate
+/// base opens a bubble that rejoins the path and does not divide it.
+#[test]
+fn division_needs_continuations_that_do_not_rejoin() {
+    let shared = random_bases(8201, 30);
+    let left = random_bases(8211, 40);
+    let right = random_bases(8221, 40);
+    let tail = random_bases(8231, 40);
+    let mut windows: Vec<Vec<u8>> = Vec::new();
+    for i in 0..200 {
+        let mut divided = shared.clone();
+        divided.extend_from_slice(if i % 2 == 0 { &left } else { &right });
+        windows.push(divided);
+        let mut bubble = shared.clone();
+        bubble.push(if i % 2 == 0 { b'A' } else { b'C' });
+        bubble.extend_from_slice(&tail);
+        windows.push(bubble);
+    }
+    let (divided, bubbled): (Vec<&[u8]>, Vec<&[u8]>) = (
+        windows.iter().step_by(2).map(Vec::as_slice).collect(),
+        windows
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(Vec::as_slice)
+            .collect(),
+    );
+    let mut cons = shared.clone();
+    cons.extend_from_slice(&left);
+    let counts = kmer_counts(&divided);
+    let edge = division_point(&cons, &counts, divided.len(), 0, cons.len(), End::Five);
+    assert_eq!(edge.map(|(edge, _)| edge), Some(shared.len()));
+
+    let mut cons = shared.clone();
+    cons.push(b'A');
+    cons.extend_from_slice(&tail);
+    let counts = kmer_counts(&bubbled);
+    assert!(division_point(&cons, &counts, bubbled.len(), 0, cons.len(), End::Five).is_none());
+}
+
+/// The homopolymer run on the insert-facing side of a sequence is measured
+/// from the inner end.
+#[test]
+fn inner_run_measures_the_insert_facing_homopolymer() {
+    assert_eq!(inner_run(b"ACGTTTTTT", End::Five), 6);
+    assert_eq!(inner_run(b"AAAAACGT", End::Three), 5);
+    assert_eq!(inner_run(b"ACGT", End::Five), 1);
+}

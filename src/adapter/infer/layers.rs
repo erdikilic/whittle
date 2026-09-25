@@ -477,7 +477,7 @@ pub(super) fn variable_layer(
         .map(|(seq, members)| {
             let support = members as f64 / windows.len() as f64;
             let weight = members as u64 * (seq.len().saturating_sub(KMER_K) + 1) as u64;
-            (seq, support, false, weight, false)
+            (seq, support, false, weight, false, Vec::new())
         })
         .collect()
 }

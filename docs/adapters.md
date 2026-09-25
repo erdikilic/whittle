@@ -154,7 +154,17 @@ the next layer is assembled from the unexplained sequence, so an adapter
 remnant, a barcode flank and the barcodes of a rapid barcoding library are
 found in turn. A layer ends where the support of adjacent k-mers changes
 fourfold, such as where a barcode joins its shared flank, and the sequence
-past that point belongs to the next layer. A variable layer is resolved from
+past that point belongs to the next layer. A layer also ends where its path
+divides into two continuations that each keep at least a quarter of its
+support for 24 k-mers, when each continuation recurs reverse complemented at
+the other read end: a cDNA adapter core shared by both strands divides into
+the strand-switching primer on one strand and the oligo(dT) primer on the
+other, and each primer is found at the other end of the opposite strand. A
+degenerate primer base opens a branch that rejoins the path within 16
+k-mers, and variants of a conserved insert do not recur at the other end, so
+neither divides a layer. A homopolymer run of at least 8 bases at the inner
+end of a candidate, such as the poly(A) tail behind an oligo(dT) primer,
+varies in length between reads and is left to the insert. A variable layer is resolved from
 the reads rather than the graph: when the best supported candidate lies at
 least 12 bases past the boundary and every candidate at the boundary is
 fourfold rarer, the stretch before it holds one member per read, and those
@@ -213,7 +223,10 @@ different depth is cut back to its outer part, or dropped when fewer than 11
 bases remain: sequence that appears at the far end of the molecule without the
 technical layers around it is insert, such as a conserved gene end that reads
 reach from the other side. A mirror at the same depth, or none, is neutral, so
-one-sided rapid libraries are unaffected. A candidate that occupies the same
+one-sided rapid libraries are unaffected. A layer that divides into strand
+primers, and the primer layers behind it, are exempt: their mirrors lie at a
+depth set by how much outer adapter each end keeps, which differs between
+the 5' and 3' ends of nanopore reads. A candidate that occupies the same
 reads as a stronger candidate of its layer is a sequencing variant and is
 dropped. Candidates dominated by short
 approximate repeats are rejected; candidate prevalence must exceed that in

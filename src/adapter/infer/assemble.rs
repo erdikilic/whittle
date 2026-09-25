@@ -5,16 +5,19 @@ use super::*;
 
 /// An assembled end candidate: sequence, support, whether an independent
 /// insert boundary was found, the summed original k-mer support of the
-/// retained span, and whether the assembly window could not bound the
-/// insert-facing side.
-pub(super) type Candidate = (Vec<u8>, f64, bool, u64, bool);
+/// retained span, whether the assembly window could not bound the
+/// insert-facing side, and the opening k-mers of the strand-specific layers
+/// it divides into, empty unless it ends at a division (`division_point`).
+pub(super) type Candidate = (Vec<u8>, f64, bool, u64, bool, Vec<Vec<u8>>);
 
 /// Assembles one end's candidates and validates support and insert boundaries.
 /// `contrast` enables primer reconstruction from recurrent unprimed window
 /// starts, which describe an insert boundary only in the first discovery
-/// layer.
+/// layer. `opposite` holds physical windows of the other read end, where
+/// the continuations of a division into strand-specific layers recur.
 pub(super) fn assemble(
     windows: &[&[u8]],
+    opposite: &[&[u8]],
     base: &AdapterConfig,
     end: End,
     contrast: bool,
@@ -69,6 +72,7 @@ pub(super) fn assemble(
     } else {
         reversed.iter().map(Vec::as_slice).collect()
     };
+    let mut deep = None;
     for (cons, _) in peel_paths(weighted, KMER_K, end) {
         tracing::debug!(sequence = %String::from_utf8_lossy(&cons), "Assembled end candidate");
         // Original weights show the support of every k-mer of the path,
@@ -81,7 +85,45 @@ pub(super) fn assemble(
                     .unwrap_or(0)
             })
             .collect();
-        let (lo, hi, rises) = supported_span(&weights, end);
+        let (mut lo, mut hi, mut rises) = supported_span(&weights, end);
+        // A shared layer ends where its path divides into the layers behind
+        // it, a boundary like a rise in support. The division holds when both
+        // continuations recur reverse complemented at the other read end, as
+        // the primers of the two strands do; variants of a conserved insert
+        // do not.
+        let deep = deep.get_or_insert_with(|| kmer_counts(&recount));
+        let mut divided = Vec::new();
+        if let Some((edge, continuations)) = division_point(&cons, deep, recount.len(), lo, hi, end)
+            && continuations.iter().all(|word| {
+                let mirrored = windows_containing(
+                    &mut primer_searcher,
+                    &crate::adapter::reverse_complement(word),
+                    opposite,
+                    edit_budget(MIRROR_ERROR_RATE * base.error_rate, KMER_K),
+                ) as usize;
+                mirrored >= MIN_SUPPORT_WINDOWS
+                    && mirrored * MIRROR_SUPPORT_DIVISOR >= opposite.len()
+            })
+        {
+            tracing::debug!(sequence = %String::from_utf8_lossy(&cons), edge, "Path divides");
+            match end {
+                End::Five => hi = edge,
+                End::Three => lo = edge,
+            }
+            rises = true;
+            divided = continuations.to_vec();
+        }
+        // A homopolymer run at the inner end, such as the poly(A) tail of a
+        // transcript behind a cDNA primer, varies in length between reads
+        // and belongs to the insert; the layer ends where the run starts.
+        let run = inner_run(&cons[lo..hi], end);
+        if run >= PLATEAU && hi - lo >= run + KMER_K.max(MIN_PATTERN_LEN) {
+            match end {
+                End::Five => hi -= run,
+                End::Three => lo += run,
+            }
+            rises = true;
+        }
         let span = &weights[lo..=hi - KMER_K];
         let peak = span.iter().copied().max().unwrap_or(0);
         // The path weight measures completeness: a fragment running into
@@ -96,7 +138,7 @@ pub(super) fn assemble(
         }
         // A variant or fragment of a stronger validated candidate merges
         // into it and needs no validation of its own.
-        if out.iter().any(|(seq, _, _, other, _): &Candidate| {
+        if out.iter().any(|(seq, _, _, other, _, _): &Candidate| {
             *other >= weight && same_adapter(&trimmed, seq, base.error_rate)
         }) {
             continue;
@@ -220,11 +262,18 @@ pub(super) fn assemble(
                         primer_edges[hit.text_idx] = Some((edge, trimmed.len() / 2));
                     }
                 }
-                out.push((trimmed, support, has_insert_boundary, weight, unbounded));
+                out.push((
+                    trimmed,
+                    support,
+                    has_insert_boundary,
+                    weight,
+                    unbounded,
+                    divided.clone(),
+                ));
             }
         }
     }
-    out.retain(|(seq, _, boundary, _, _)| {
+    out.retain(|(seq, _, boundary, _, _, _)| {
         *boundary
             || !insert_starts
                 .iter()
@@ -232,7 +281,7 @@ pub(super) fn assemble(
     });
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     if primer_edges.iter().any(Option::is_some) {
-        out.retain(|(seq, _, boundary, _, _)| {
+        out.retain(|(seq, _, boundary, _, _, _)| {
             if *boundary {
                 return true;
             }

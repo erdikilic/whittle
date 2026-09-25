@@ -102,6 +102,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Discovery learns cDNA libraries whose adapter core is shared by both
+  strands and followed by a different primer on each: a layer ends where its
+  path divides into two continuations that recur reverse complemented at the
+  other read end, the primers behind the core are layers of their own, and a
+  poly(A) run behind a primer is left to the insert. On SQK-PCS114 reads,
+  discovery found no complete layer and left the core and both primers in
+  most reads. A random UMI after the primer is not learned; the `pcs114`
+  preset trims it.
 - The `pcb114` (`pcs114`) preset trims the SQK-PCS114 UMI, `(VVVVTT)x4 T`,
   that follows the strand-switching primer, as dorado does; it was left at
   one end of most reads. The UMI trims read ends and does not split reads.

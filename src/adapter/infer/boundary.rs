@@ -307,3 +307,159 @@ pub(super) fn supported_span(weights: &[u32], end: End) -> (usize, usize, bool) 
         (lo, hi, rises)
     }
 }
+
+/// Returns the inner edge of the shared part of a consensus whose path
+/// divides into two supported continuations, as a shared adapter divides
+/// into the strand-specific primers behind it, with the first `KMER_K`
+/// bases of each continuation; `None` without a division. The edge is the
+/// end of the last shared k-mer for the 5' end and its start for the 3' end.
+///
+/// Scanning inward over the k-mers of `[lo, hi)`, a k-mer divides when it
+/// lies at the support level of the path (within `RUN_JUMP` of the peak of
+/// the span, and in at least `1 / RUN_JUMP` of the `windows` counted), the
+/// path's own successor and another successor each hold at least
+/// `1 / RUN_JUMP` of its support and together at most twice it, and both
+/// open paths that keep their support for `RUN_PERSIST` k-mers, the other
+/// one off the consensus. A degenerate primer base opens a branch that
+/// rejoins the consensus within `KMER_K` k-mers and does not divide it. The
+/// shared part keeps at least `MIN_PATTERN_LEN` bases. `weights` counts
+/// k-mers over windows that reach past the assembly windows (`kmer_counts`),
+/// so a division near the inner end of the assembly windows still shows its
+/// continuations.
+pub(super) fn division_point(
+    cons: &[u8],
+    weights: &KmerMap<u32>,
+    windows: usize,
+    lo: usize,
+    hi: usize,
+    end: End,
+) -> Option<(usize, [Vec<u8>; 2])> {
+    if hi < lo + KMER_K + 1 {
+        return None;
+    }
+    let codes: Vec<u64> = cons
+        .windows(KMER_K)
+        .map(|w| encode_kmer(w).unwrap_or(u64::MAX))
+        .collect();
+    let on_path: std::collections::HashSet<u64> = codes.iter().copied().collect();
+    let weight = |code: u64| weights.get(&code).copied().unwrap_or(0);
+    let mask = (1u64 << (2 * KMER_K)) - 1;
+    let step = |code: u64, base: u64| match end {
+        End::Five => ((code << 2) | base) & mask,
+        End::Three => (code >> 2) | (base << (2 * (KMER_K - 1))),
+    };
+    // Starts of the k-mers of the span, inward from the read end.
+    let starts: Vec<usize> = match end {
+        End::Five => (lo..hi - KMER_K).collect(),
+        End::Three => (lo + 1..=hi - KMER_K).rev().collect(),
+    };
+    let peak = starts.iter().map(|&j| weight(codes[j])).max().unwrap_or(0);
+    for j in starts {
+        let shared = match end {
+            End::Five => j + KMER_K - lo,
+            End::Three => hi - j,
+        };
+        if shared < MIN_PATTERN_LEN {
+            continue;
+        }
+        let here = weight(codes[j]);
+        let next = match end {
+            End::Five => codes[j + 1],
+            End::Three => codes[j - 1],
+        };
+        if here < MIN_SUPPORT_WINDOWS as u32
+            || (here as usize).saturating_mul(RUN_JUMP as usize) < windows
+            || here.saturating_mul(RUN_JUMP) < peak
+            || weight(next).saturating_mul(RUN_JUMP) < here
+        {
+            continue;
+        }
+        // A continuation persists when its heaviest path keeps at least half
+        // of its opening support for `RUN_PERSIST` k-mers; a barcode panel
+        // behind a flank spreads its support over the members instead.
+        let persists = |start: u64, off_path: bool| {
+            let floor = weight(start).div_ceil(2).max(MIN_SUPPORT_WINDOWS as u32);
+            let mut code = start;
+            (0..RUN_PERSIST).all(|_| {
+                let kept = weight(code) >= floor && !(off_path && on_path.contains(&code));
+                code = (0..4)
+                    .map(|base| step(code, base))
+                    .max_by_key(|&c| weight(c))
+                    .unwrap_or(code);
+                kept
+            })
+        };
+        if !persists(next, false) {
+            continue;
+        }
+        let alt = (0..4).map(|base| step(codes[j], base)).find(|&alt| {
+            alt != next
+                && weight(alt).saturating_mul(RUN_JUMP) >= here
+                && weight(alt) + weight(next) <= here.saturating_mul(2)
+                && persists(alt, true)
+        });
+        if let Some(alt) = alt {
+            // The first k-mer lying wholly in each continuation.
+            let own = |start: u64| {
+                let mut code = start;
+                for _ in 1..KMER_K {
+                    code = (0..4)
+                        .map(|base| step(code, base))
+                        .max_by_key(|&c| weight(c))
+                        .unwrap_or(code);
+                }
+                decode_kmer(code, KMER_K)
+            };
+            let edge = match end {
+                End::Five => j + KMER_K,
+                End::Three => j,
+            };
+            return Some((edge, [own(next), own(alt)]));
+        }
+    }
+    None
+}
+
+/// Returns the number of `windows` holding each k-mer of `KMER_K` plain
+/// bases, as `top_kmers` counts them, without its ranking cut.
+pub(super) fn kmer_counts(windows: &[&[u8]]) -> KmerMap<u32> {
+    let mut counts: KmerMap<(u32, usize)> =
+        KmerMap::with_capacity_and_hasher(windows.len() * 64, Default::default());
+    let mask = u64::MAX >> (64 - 2 * KMER_K);
+    for (window_index, window) in windows.iter().enumerate() {
+        let (mut code, mut valid) = (0, 0);
+        for &base in *window {
+            if let Some(bits) = encode_kmer(&[base]) {
+                code = ((code << 2) | bits) & mask;
+                valid += 1;
+                if valid >= KMER_K {
+                    let entry = counts.entry(code).or_insert((0, usize::MAX));
+                    if entry.1 != window_index {
+                        entry.0 += 1;
+                        entry.1 = window_index;
+                    }
+                }
+            } else {
+                (code, valid) = (0, 0);
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(code, (count, _))| (code, count))
+        .collect()
+}
+
+/// Returns the length of the homopolymer run that ends `seq` on its
+/// insert-facing side: the last bases for the 5' end, the first for the 3'
+/// end.
+pub(super) fn inner_run(seq: &[u8], end: End) -> usize {
+    let mut bases: Box<dyn Iterator<Item = &u8>> = match end {
+        End::Five => Box::new(seq.iter().rev()),
+        End::Three => Box::new(seq.iter()),
+    };
+    let Some(&first) = bases.next() else {
+        return 0;
+    };
+    1 + bases.take_while(|&&b| b == first).count()
+}

@@ -208,10 +208,14 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     );
 
     let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let mut strand_searcher = crate::adapter::search::new_searcher_fwd();
     let mut distinct: Vec<(Vec<u8>, f64, usize, bool, bool)> = Vec::new();
     // An accepted primer marks the insert boundary at its end; no layer lies
     // beyond it.
     let mut open = [true, true];
+    // Opening k-mers of the strand-specific layers behind the divisions of
+    // earlier layers.
+    let mut strand_words: Vec<Vec<u8>> = Vec::new();
     for layer in 0..MAX_LAYERS {
         let (mut five_w, mut three_w) = layer_windows(sample, &bounds, 2 * WINDOW_LEN);
         if !open[0] {
@@ -225,8 +229,8 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         // Ranking statistics use windows distributed across the sample.
         let five_sample = stride_sample(&five_texts, RECOUNT_WINDOWS);
         let three_sample = stride_sample(&three_texts, RECOUNT_WINDOWS);
-        let mut five = assemble(&five_texts, base, End::Five, layer == 0);
-        let mut three = assemble(&three_texts, base, End::Three, layer == 0);
+        let mut five = assemble(&five_texts, &three_phys, base, End::Five, layer == 0);
+        let mut three = assemble(&three_texts, &five_phys, base, End::Three, layer == 0);
         strip_shared_ends(&mut five, base.error_rate);
         strip_shared_ends(&mut three, base.error_rate);
         let (five, five_variable) = with_variable_layer(
@@ -252,32 +256,53 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         // Insert stretches identified by their mirror also reject the graph
         // fragments that reconstruct part of them.
         let mut inserts: Vec<Vec<u8>> = Vec::new();
+        let mut next_words: Vec<Vec<u8>> = Vec::new();
         let cut: Vec<(Vec<u8>, f64, bool, u64, End)> = five
             .into_iter()
             .map(|c| (c, End::Five))
             .chain(three.into_iter().map(|c| (c, End::Three)))
-            .filter(|((seq, support, _, _, _), _)| {
+            .filter(|((seq, support, _, _, _, _), _)| {
                 seq.len() >= MIN_PATTERN_LEN && (*support >= KEEP_SUPPORT || variable.contains(seq))
             })
-            .filter_map(|((seq, support, boundary, weight, unbounded), end)| {
-                let (own, opposite) = match end {
-                    End::Five => (&five_phys, &three_phys),
-                    End::Three => (&three_phys, &five_phys),
-                };
-                // A mirror at the opposite end is the only insert evidence
-                // for a candidate the assembly window could not bound.
-                let (cut, insert) = symmetry_cut(&seq, end, own, opposite, base.error_rate);
-                if insert.len() >= MIN_PATTERN_LEN {
-                    inserts.push(crate::adapter::reverse_complement(&insert));
-                    inserts.push(insert);
-                }
-                let cut = cut?;
-                if unbounded && cut.len() == seq.len() {
-                    return None;
-                }
-                Some((cut, support, boundary, weight, end))
-            })
+            .filter_map(
+                |((seq, support, boundary, weight, unbounded, divided), end)| {
+                    // A division into strand-specific layers marks the
+                    // candidate and the layers it divides into technical;
+                    // their mirrors lie at a depth that depends on how much
+                    // outer adapter each end keeps.
+                    let strand = strand_words.iter().any(|word| {
+                        !hits(
+                            &mut strand_searcher,
+                            word,
+                            &seq,
+                            edit_budget(base.error_rate, word.len()),
+                        )
+                        .is_empty()
+                    });
+                    if !divided.is_empty() || strand {
+                        next_words.extend(divided);
+                        return Some((seq, support, boundary, weight, end));
+                    }
+                    let (own, opposite) = match end {
+                        End::Five => (&five_phys, &three_phys),
+                        End::Three => (&three_phys, &five_phys),
+                    };
+                    // A mirror at the opposite end is the only insert evidence
+                    // for a candidate the assembly window could not bound.
+                    let (cut, insert) = symmetry_cut(&seq, end, own, opposite, base.error_rate);
+                    if insert.len() >= MIN_PATTERN_LEN {
+                        inserts.push(crate::adapter::reverse_complement(&insert));
+                        inserts.push(insert);
+                    }
+                    let cut = cut?;
+                    if unbounded && cut.len() == seq.len() {
+                        return None;
+                    }
+                    Some((cut, support, boundary, weight, end))
+                },
+            )
             .collect();
+        strand_words.extend(next_words);
         let mut candidates: Vec<(Vec<u8>, f64, u32, bool, u64, End)> = cut
             .into_iter()
             .filter(|(seq, _, _, _, _)| {
