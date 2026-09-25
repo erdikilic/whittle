@@ -28,7 +28,7 @@ costs error budget. A single `N` inside an adapter still matches within
 Every sequence has a role: **adapter**, **primer** or **barcode**. Catalog
 entries carry their role. A FASTA entry is an adapter unless the word `primer`
 or `barcode` appears in its header description (`>27F primer`). Every role is
-trimmed at the read ends and splits a read at an interior hit, with three
+trimmed at the read ends and splits a read at an interior hit, with these
 exceptions:
 
 - The barcodes of a panel (equal-length barcode entries) do not split when the
@@ -43,6 +43,8 @@ exceptions:
 - An interior hit splits only when the whole sequence aligns: a hit whose
   alignment leaves 10 or more bases to clip at its ends is dropped, as at a
   genomic primer site matched by an adapter assembled with its primer.
+- The PCS114 UMI does not split: the SSP beside it splits a junction. It
+  trims an end where it follows the SSP.
 - A primer or barcode splits only reads short enough that its exact matches
   stay within the interior chance bound below; a short flank such as
   `NB_front` (14 bases) splits reads up to a few kilobases.
@@ -266,7 +268,7 @@ a comma-separated list of tokens:
 | `rad114`, `ulk114` | Rapid and ultra-long kits V14 | Rapid adapter, ligation adapter |
 | `rbk114` | Rapid barcoding kit V14 | Rapid adapter, rapid flank, 96 barcodes |
 | `nbd114` | Native barcoding kit V14 | Ligation adapter, native flank, 96 barcodes |
-| `pcb114`, `pcs114` | cDNA-PCR sequencing and barcoding kits V14 | Ligation adapter, PCS primers, PCR flanks, 24 barcodes |
+| `pcb114`, `pcs114` | cDNA-PCR sequencing and barcoding kits V14 | Ligation adapter, PCS primers, PCS114 UMI, PCR flanks, 24 barcodes |
 | `rpb114` | Rapid PCR barcoding kit V14 | Rapid adapter, PCR primers, rapid ligation flank, 24 barcodes |
 | `mab114` | Microbial amplicon barcoding kit V14 | Ligation and rapid adapters, degenerate 16S 27F/1492R and ITS1F/ITS4 primers, MAB flanks, 24 barcodes |
 | `rna004` | Direct RNA sequencing kit | RNA adapter |

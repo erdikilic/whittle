@@ -44,9 +44,11 @@ pub(crate) struct CandidateIndex {
     /// entry splits except the members of a barcode panel in a set that
     /// carries a `bounds_barcode` entry: a barcode junction of such a set
     /// holds the flanks, which split it, and the panel's short interior seeds
-    /// would open candidate windows over most of every read. An adapter
-    /// splits in every class; a primer or barcode only in the classes where
-    /// its exact matches stay within `INTERIOR_CHANCE_HITS_PER_READ`.
+    /// would open candidate windows over most of every read. A UMI
+    /// (`catalog::UMIS`) does not split either: the primer beside it splits
+    /// its junction, and its pattern would be searched over every read. An
+    /// adapter splits in every class; a primer or barcode only in the classes
+    /// where its exact matches stay within `INTERIOR_CHANCE_HITS_PER_READ`.
     pub(super) split_classes: Vec<usize>,
     /// Per-adapter: an interior hit splits only next to another excision. A
     /// marker-gene primer (`catalog::MARKER_PRIMERS`) in the primer role is
@@ -165,6 +167,15 @@ pub(crate) fn with_marker_codes(seq: &[u8], error_rate: f64) -> Vec<u8> {
     out
 }
 
+/// Returns whether `adapter` is a UMI pattern (`catalog::UMIS`, either
+/// strand).
+fn is_umi(adapter: &Adapter) -> bool {
+    let seq = adapter.seq.to_ascii_uppercase();
+    super::catalog::UMIS
+        .iter()
+        .any(|umi| seq == *umi || seq == reverse_complement(umi))
+}
+
 /// Returns whether `adapter` is a member of a barcode panel: a barcode that is
 /// neither a construct nor an insert-side flank and shares its length with
 /// another such barcode of `adapters`.
@@ -253,7 +264,10 @@ impl CandidateIndex {
             .iter()
             .zip(&searchable)
             .map(|(adapter, &searchable)| {
-                if !searchable || (flanked && is_panel_barcode(adapter, adapters)) {
+                if !searchable
+                    || (flanked && is_panel_barcode(adapter, adapters))
+                    || is_umi(adapter)
+                {
                     0
                 } else if adapter.role == Role::Adapter {
                     INTERIOR_CLASSES

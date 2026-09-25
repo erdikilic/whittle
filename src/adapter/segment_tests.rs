@@ -1551,3 +1551,47 @@ fn interior_split_needs_the_whole_adapter() {
     site.extend_from_slice(&right);
     assert_eq!(adapter_segments(&site, &c), vec![(0, site.len())]);
 }
+
+/// A PCS114 read end is trimmed through the UMI that follows the SSP, at
+/// either end, and the `GGG` after it stays, also where the UMI pattern
+/// aligns one repeat unit further at a higher cost; an end without a UMI is
+/// trimmed at the end of the SSP.
+#[test]
+fn pcs114_ssp_is_trimmed_through_its_umi() {
+    let ssp = b"TTTCTGTTGGTGCTGATATTGCTTT";
+    let umi = b"ACGGTTCAGCTTGGAATTAGCCTTT";
+    let insert = splitmix_dna(7, 400);
+    let c = cfg_with(
+        super::preset::preset(&[super::preset::Kit::Pcb114]),
+        0.2,
+        150,
+        true,
+    );
+    let mut tagged = ssp.to_vec();
+    tagged.extend_from_slice(umi);
+    let mut forward = tagged.clone();
+    forward.extend_from_slice(b"GGG");
+    forward.extend_from_slice(&insert);
+    assert_eq!(
+        adapter_segments(&forward, &c),
+        vec![(tagged.len(), forward.len())]
+    );
+
+    let mut reverse = insert.clone();
+    reverse.extend_from_slice(b"CCC");
+    reverse.extend(reverse_complement(&tagged));
+    assert_eq!(adapter_segments(&reverse, &c), vec![(0, insert.len() + 3)]);
+
+    let mut shifted = tagged.clone();
+    shifted.extend_from_slice(b"GGGATTT");
+    shifted.extend_from_slice(&insert);
+    assert_eq!(
+        adapter_segments(&shifted, &c),
+        vec![(tagged.len(), shifted.len())]
+    );
+
+    let mut bare = ssp.to_vec();
+    bare.extend_from_slice(b"GGG");
+    bare.extend_from_slice(&insert);
+    assert_eq!(adapter_segments(&bare, &c), vec![(ssp.len(), bare.len())]);
+}

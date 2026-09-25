@@ -102,6 +102,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- The `pcb114` (`pcs114`) preset trims the SQK-PCS114 UMI, `(VVVVTT)x4 T`,
+  that follows the strand-switching primer, as dorado does; it was left at
+  one end of most reads. The UMI trims read ends and does not split reads.
+- Overlapping terminal hits of one sequence are placements of one occurrence,
+  and only the cheapest applies; a pattern with a repeating unit, such as the
+  UMI, no longer trims one unit past its end.
 - A discovered sequence flush with the read end that is a 16S or ITS primer
   takes the primer role instead of the adapter role, so it does not split
   reads at the primer's sites inside genomic inserts.

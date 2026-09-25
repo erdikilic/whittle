@@ -296,11 +296,12 @@ pub(super) fn search_singletons(
                 }
             }
         }
+        let mut found: Vec<(Site, Hit)> = Vec::new();
         let accept = |text_idx: usize, h: Hit| {
             let (offset, site, first_end, last_end) = owned[text_idx];
             let h = shifted(h, offset);
             if (first_end..last_end).contains(&h.end) {
-                keep.accept(site, adapter_idx, h);
+                found.push((site, h));
             }
         };
         let windows = &windows[..count];
@@ -308,6 +309,17 @@ pub(super) fn search_singletons(
             for_each_hit_in_texts(engine.plain, &adapter.seq, windows, k_end, accept);
         } else {
             for_each_hit_in_texts(engine.ambiguous, &adapter.seq, windows, k_end, accept);
+        }
+        // Overlapping hits of one pattern are placements of one occurrence,
+        // as a pattern with a repeating unit aligns one unit apart; the
+        // cheapest applies.
+        for &(site, h) in &found {
+            let dominated = found
+                .iter()
+                .any(|(_, g)| g.cost < h.cost && g.start < h.end && h.start < g.end);
+            if !dominated {
+                keep.accept(site, adapter_idx, h);
+            }
         }
     }
 }

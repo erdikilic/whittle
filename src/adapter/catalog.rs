@@ -65,6 +65,10 @@ pub(super) const MARKER_PRIMERS: &[&[u8]] = &[
     b"TCCTCCGCTTATTGATATGC",
 ];
 
+/// UMI patterns of the catalog: SQK-PCS114's UMI after the SSP. A UMI holds
+/// no fixed sequence beyond the primer bases that open it.
+pub(super) const UMIS: &[&[u8]] = &[b"TTTVVVVTTVVVVTTVVVVTTVVVVTTT"];
+
 /// Every catalog entry in display order. `preset::build` collapses duplicate
 /// sequences.
 #[rustfmt::skip]
@@ -103,6 +107,9 @@ pub(super) const CATALOG: &[Entry] = &[
     ("PCS110_front", Role::Primer, &[Kit::Pcb114], b"TTTCTGTTGGTGCTGATATTGCTTT"),
     // [dorado:adapter_primer_kits.cpp(PCS110)]
     ("PCS110_rear", Role::Primer, &[Kit::Pcb114], b"ACTTGCCTGTCGCTCTATCTTCAGAGGAGAGTCCGCCGCCCGCAAGTTTT"),
+    // SQK-PCS114, PCB114 UMI, `(VVVVTT)x4 T` after the SSP, whose last three
+    // bases open the pattern [dorado:AdapterDetector.cpp(umi_search_pattern)]
+    ("PCS114_UMI", Role::Primer, &[Kit::Pcb114], b"TTTVVVVTTVVVVTTVVVVTTVVVVTTT"),
     // SQK-LSK114 (10X) [dorado:adapter_primer_kits.cpp(GEN10X)]
     ("GEN10X_front", Role::Primer, &[Kit::Lsk114], b"CTACACGACGCTCTTCCGATCT"),
     // [dorado:adapter_primer_kits.cpp(GEN10X)]
