@@ -117,6 +117,7 @@ mod tests {
             split: true,
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
+            amplicon: false,
         }
     }
 
@@ -294,6 +295,7 @@ mod tests {
             split: false,
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
+            amplicon: false,
         };
         assert_eq!(apply(&seq, &phred, &plan, Some(&ac), None), vec![(15, 23)]);
     }

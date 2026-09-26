@@ -299,6 +299,7 @@ fn interior_adapter_split_reconstructs_mods_per_segment() {
         split: true,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     });
 
     let mut out = Vec::new();

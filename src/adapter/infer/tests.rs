@@ -28,6 +28,7 @@ fn infer_with_known(reads: &[Vec<u8>], known: Vec<Adapter>) -> Vec<InferredAdapt
             split: true,
             min_piece: 20,
             candidate_index: std::sync::OnceLock::new(),
+            amplicon: false,
         },
     )
 }
@@ -465,6 +466,7 @@ fn discovered_adapters_are_named_by_order_with_catalog_annotation() {
         split: true,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     let found = discover(&sample, &base);
     assert!(!found.is_empty(), "The planted adapter is discovered");
@@ -505,6 +507,7 @@ fn discover_finds_nothing_in_ambiguity_runs() {
         split: true,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     let found = discover(&sample, &base);
     assert!(
@@ -551,6 +554,7 @@ fn discover_recovers_planted_adapter_under_error() {
         split: true,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     let found = discover(&sample, &base);
     assert!(!found.is_empty(), "At least one adapter discovered");
@@ -621,6 +625,7 @@ fn discover_dual_end_adapter_gets_max_support() {
         split: true,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     let found = discover(&sample, &base);
 
@@ -679,6 +684,7 @@ fn discover_finds_nothing_in_clean_reads() {
         split: true,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     let found = discover(&sample, &base);
     assert!(
@@ -761,6 +767,7 @@ fn discover_is_not_order_biased_by_recount_window_cap() {
         split: true,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     let found = discover(&sample, &base);
     assert!(
@@ -808,6 +815,7 @@ fn discover_recovers_planted_adapter_from_lowercase_reads() {
         split: true,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     let found = discover(&sample, &base);
     assert!(
@@ -926,6 +934,7 @@ fn discovers_barcode_layer_between_flanks() {
         split: true,
         min_piece: 20,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     for read in reads.iter().take(16) {
         let segments = crate::adapter::adapter_segments(read, &cfg);
@@ -1323,6 +1332,7 @@ fn discovery_trims_a_random_tag_behind_a_primer() {
         split: true,
         min_piece: 20,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     for i in 0..16u64 {
         let mut read = head.clone();
@@ -1429,6 +1439,7 @@ fn trimming_with(found: Vec<InferredAdapter>) -> AdapterConfig {
         split: true,
         min_piece: 20,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     }
 }
 

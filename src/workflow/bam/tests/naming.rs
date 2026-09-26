@@ -242,6 +242,7 @@ fn adapter_and_quality_splits_retain_original_barcode_and_pacbio_coordinates() {
         split: true,
         min_piece: 20,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     });
     let (stats, recs) = bam2bam(vec![src.clone()], &cfg);
     assert_eq!(stats.output_reads, 3);

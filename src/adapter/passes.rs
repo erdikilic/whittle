@@ -508,16 +508,72 @@ pub(super) fn search_interior(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &
             continue;
         }
         let k_mid = ctx.index.budgets[adapter_idx].interior(n);
-        search(
-            engine,
-            ctx.index,
-            adapter_idx,
-            &ctx.cfg.adapters[adapter_idx].seq,
-            ctx.read.strands(start, end),
-            k_mid,
-            |h| keep.accept(Site::Interior, adapter_idx, shifted(h, start)),
-        );
+        let pattern = &ctx.cfg.adapters[adapter_idx].seq;
+        let text = ctx.read.strands(start, end);
+        let Some(whole) = &ctx.index.whole_primers[adapter_idx] else {
+            search(engine, ctx.index, adapter_idx, pattern, text, k_mid, |h| {
+                keep.accept(Site::Interior, adapter_idx, shifted(h, start))
+            });
+            continue;
+        };
+        let mut found: Vec<Hit> = Vec::new();
+        search(engine, ctx.index, adapter_idx, pattern, text, k_mid, |h| {
+            found.push(shifted(h, start))
+        });
+        for hit in found {
+            match whole_primer_over(ctx, engine, whole, hit) {
+                Some(spanned) => keep.accept_standalone(adapter_idx, spanned),
+                None => keep.accept(Site::Interior, adapter_idx, hit),
+            }
+        }
     }
+}
+
+/// Returns `hit` widened to the whole marker primer `whole` where that primer
+/// aligns over it on the same strand within its interior budget for the
+/// read, leaving fewer than `MIN_OVERLAP` bases to clip, or `None` where it
+/// does not. The cheapest such alignment applies. A primer cut short by the
+/// read end or by the search window does not align whole.
+fn whole_primer_over(
+    ctx: Context<'_>,
+    engine: &mut Engine<'_>,
+    whole: &WholePrimer,
+    hit: Hit,
+) -> Option<Hit> {
+    let n = ctx.read.window.len();
+    let k = whole.k_mid[interior_class(n)];
+    let reach = whole.seq.len() + k;
+    let start = hit.start.saturating_sub(reach);
+    let end = (hit.end + reach).min(n);
+    let mut best: Option<Hit> = None;
+    for_each_hit(
+        engine.ambiguous,
+        &whole.seq,
+        &ctx.read.strands(start, end),
+        k,
+        |g| {
+            let g = shifted(g, start);
+            if g.rc == hit.rc
+                && g.start < hit.end
+                && hit.start < g.end
+                && g.clip_start + g.clip_end < MIN_OVERLAP
+                && best.is_none_or(|b| g.cost < b.cost)
+            {
+                best = Some(g);
+            }
+        },
+    );
+    let g = best?;
+    let (lo, hi) = (hit.start.min(g.start), hit.end.max(g.end));
+    let inner_start = (hit.start + hit.clip_start).min(g.start + g.clip_start);
+    let inner_end = (hit.end - hit.clip_end).max(g.end - g.clip_end);
+    Some(Hit {
+        start: lo,
+        end: hi,
+        clip_start: inner_start - lo,
+        clip_end: hi - inner_end,
+        ..hit
+    })
 }
 
 /// Searches the `CandidateIndex::paired` entries over the interior of the
@@ -628,9 +684,9 @@ pub(super) fn segments_tallied(
     if cfg.adapters.is_empty() {
         return vec![(0, n)];
     }
-    let index = cfg.candidate_index.get_or_init(|| {
-        CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.end_size, cfg.split)
-    });
+    let index = cfg
+        .candidate_index
+        .get_or_init(|| CandidateIndex::for_config(cfg));
     // The overhang cost per base of the terminal search is the error rate, so
     // a partial adapter costs what its missing part would have been allowed
     // in edits.

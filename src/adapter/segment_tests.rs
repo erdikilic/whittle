@@ -47,6 +47,7 @@ fn cfg(adapters: Vec<Adapter>, split: bool) -> AdapterConfig {
         split,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     }
 }
 
@@ -64,6 +65,7 @@ fn cfg_with(
         split,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     }
 }
 
@@ -116,7 +118,7 @@ fn windows_by_adapter(index: &CandidateIndex, text: &[u8]) -> Vec<Vec<(usize, us
 /// whole window instead of its candidate windows, as the reference for the
 /// seed filter. Every other pass is shared with `adapter_segments`.
 fn reference_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
-    let mut index = CandidateIndex::new(&cfg.adapters, cfg.error_rate, cfg.end_size, cfg.split);
+    let mut index = CandidateIndex::for_config(cfg);
     index.seeds = None;
     for adapter_idx in 0..cfg.adapters.len() {
         index.unfiltered[adapter_idx] = cfg.split && index.split_classes[adapter_idx] > 0;
@@ -224,6 +226,7 @@ fn check_candidate_search_randomized(seed: u64, degenerate: bool) {
             split: true,
             min_piece: 1 + rng.below(60),
             candidate_index: std::sync::OnceLock::new(),
+            amplicon: false,
         };
         assert_eq!(
             adapter_segments(&window, &cfg),
@@ -1596,6 +1599,71 @@ fn eroded_marker_primer_forms_pair_across_the_bases_they_lack() {
         adapter_segments(&junction, &c),
         vec![(0, left.len()), (cut, n)]
     );
+}
+
+/// Builds the marker primers of a 16S library in the primer role, as a set
+/// of `entries`, at error rate 0.2 and end zone 150, for an amplicon library
+/// when `amplicon`.
+fn marker_set(entries: Vec<Adapter>, amplicon: bool) -> AdapterConfig {
+    let mut c = cfg_with(entries, 0.2, 150, true);
+    c.amplicon = amplicon;
+    c
+}
+
+/// In an amplicon library one marker primer inside a read is a chimera
+/// junction and splits the read, on either strand; outside one it is a
+/// genomic site and the read stays whole.
+#[test]
+fn amplicon_library_splits_at_a_single_marker_primer() {
+    let forward = b"AGAGTTTGATCCTGGCTCAG";
+    let reverse = b"TACGGTTACCTTGTTACGACTT";
+    let entries = || {
+        vec![
+            entry("27F", forward, Role::Primer),
+            entry("1492R", reverse, Role::Primer),
+        ]
+    };
+    let (left, right) = (splitmix_dna(51, 900), splitmix_dna(52, 900));
+    for primer in [
+        substituted(forward, &[9]),
+        reverse_complement(reverse),
+        reverse.to_vec(),
+    ] {
+        let read = joined(&left, &[&primer], &right);
+        let cut = left.len() + primer.len();
+        assert_eq!(
+            adapter_segments(&read, &marker_set(entries(), true)),
+            vec![(0, left.len()), (cut, read.len())]
+        );
+        assert_eq!(
+            adapter_segments(&read, &marker_set(entries(), false)),
+            vec![(0, read.len())]
+        );
+    }
+}
+
+/// A marker primer form cut short on its outer side, as discovery assembles
+/// it, splits an amplicon library where the whole primer lies inside the
+/// read, and the excision covers the whole primer; where only the bases of
+/// the form are present the primer is not whole and the read stays.
+#[test]
+fn amplicon_splits_need_the_whole_marker_primer() {
+    let forward = b"AGAGTTTGATCCTGGCTCAG";
+    let c = marker_set(vec![entry("five", &forward[4..], Role::Primer)], true);
+    let (left, right) = (splitmix_dna(53, 900), splitmix_dna(54, 900));
+    let whole = joined(&left, &[forward], &right);
+    let cut = left.len() + forward.len();
+    assert_eq!(
+        adapter_segments(&whole, &c),
+        vec![(0, left.len()), (cut, whole.len())]
+    );
+    let mut lead = left.clone();
+    let tail = lead.len() - 4;
+    for (base, primer_base) in lead[tail..].iter_mut().zip(&forward[..4]) {
+        *base = complement(*primer_base);
+    }
+    let partial = joined(&lead, &[&forward[4..]], &right);
+    assert_eq!(adapter_segments(&partial, &c), vec![(0, partial.len())]);
 }
 
 /// The pair budget of a marker primer never exceeds its terminal budget,

@@ -291,6 +291,7 @@ pub(super) fn untrimmed_other_end(
         split: false,
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     };
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     candidates

@@ -362,6 +362,7 @@ mod tests {
             split: true,
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
+            amplicon: false,
         });
         let recs = vec![Ok(rec("r1", &seq, phred))];
         let mut out = Vec::new();

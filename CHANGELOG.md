@@ -31,8 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Primers and barcodes split a read at an interior hit, as adapters do. The
   barcodes of a panel leave the split to the barcode flanks when the set
-  carries them; the universal 16S and ITS primers split only under an
-  amplicon-only preset; and a primer or barcode splits only reads short
+  carries them; the universal 16S and ITS primers split alone only under an
+  amplicon-only preset or in an amplicon library; and a primer or barcode
+  splits only reads short
   enough for its exact matches to stay within the interior chance bound.
 - The interior adapter search skips both end zones, where the terminal search
   applies.
@@ -102,6 +103,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- In an amplicon library, a marker-gene primer in the primer role (from
+  discovery, a FASTA, or a preset that joins `mab114` to a genomic kit)
+  splits a read at an interior hit by itself, as under the `mab114` preset
+  alone, where the whole catalog primer aligns over the hit within its
+  interior budget. The library counts as an amplicon library when the
+  primers of the library, the catalog marker primers and any discovered or
+  supplied primer families outside the catalog taken together, open at least
+  60% of the sampled reads behind the other sequences of the set, and the
+  reads share a few lengths. A primer outside the catalog counts only where
+  the inserts behind it start alike. Both shares are logged. Chimeras joined
+  by a single primer and foldback reads now split in amplicon libraries of
+  one or several primer pairs; genomic and cDNA libraries keep the partner
+  requirement.
 - With `--adapter-discover`, the barcode constructs and barcode flanks of a
   preset that the sampled reads do not carry are dropped from the set trimmed
   against, and with them the absent barcodes once no flank or construct

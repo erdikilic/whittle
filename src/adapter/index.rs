@@ -62,6 +62,13 @@ pub(crate) struct CandidateIndex {
     /// into the insert, as its primer is synthesized (`marker_primer_opens`).
     /// A hit on the other strand reads out of the insert.
     pub(super) opens: Vec<bool>,
+    /// Per-adapter, for a `paired` entry of an amplicon library
+    /// (`AdapterConfig::amplicon`): the whole marker primer it matches. An
+    /// interior hit of the entry splits the read by itself where that primer
+    /// aligns whole over it, within its own interior budget; see
+    /// `search_interior`. `None` for every other entry and outside an
+    /// amplicon library.
+    pub(super) whole_primers: Vec<Option<WholePrimer>>,
 }
 
 /// Shortest run of `N` that marks a barcode construct: a barcode entry that
@@ -99,12 +106,20 @@ pub(crate) fn matches_marker_primer(seq: &[u8], error_rate: f64) -> bool {
 /// primer's own strand; its reverse complement, as the 3' end of a read holds
 /// the primer, reads out of the insert. The cheapest alignment decides.
 pub(crate) fn marker_primer_opens(seq: &[u8], error_rate: f64) -> Option<bool> {
+    marker_primer_of(seq, error_rate).map(|(_, opens)| opens)
+}
+
+/// Returns the `catalog::MARKER_PRIMERS` entry that `seq` matches
+/// (`matches_marker_primer`) and whether `seq` reads as that primer is
+/// synthesized (`marker_primer_opens`), or `None` when `seq` is no marker
+/// primer. The cheapest alignment decides.
+pub(crate) fn marker_primer_of(seq: &[u8], error_rate: f64) -> Option<(&'static [u8], bool)> {
     let seq = seq.to_ascii_uppercase();
     let mut searcher = new_ambiguous_searcher();
     super::catalog::MARKER_PRIMERS
         .iter()
         .filter_map(|&primer| {
-            if seq.len() >= primer.len() {
+            let best = if seq.len() >= primer.len() {
                 if seq.len() >= primer.len() + MIN_OVERLAP {
                     return None;
                 }
@@ -129,10 +144,24 @@ pub(crate) fn marker_primer_opens(seq: &[u8], error_rate: f64) -> Option<bool> {
                 .into_iter()
                 .filter(|hit| hit.start == 0 || hit.end == primer.len())
                 .min_by_key(|hit| hit.cost)
-            }
+            };
+            best.map(|hit| (primer, hit))
         })
-        .min_by_key(|hit| hit.cost)
-        .map(|hit| !hit.rc)
+        .min_by_key(|(_, hit)| hit.cost)
+        .map(|(primer, hit)| (primer, !hit.rc))
+}
+
+/// The whole marker-gene primer behind a `CandidateIndex::paired` entry of an
+/// amplicon library, searched where an interior hit of the entry splits the
+/// read by itself.
+#[derive(Debug, Clone)]
+pub(super) struct WholePrimer {
+    /// The `catalog::MARKER_PRIMERS` entry in the orientation of the entry:
+    /// reverse complemented when the entry reads out of the insert.
+    pub(super) seq: Vec<u8>,
+    /// The interior edit budget of `seq` alone, per read-length class; see
+    /// `Budget::k_mid`.
+    pub(super) k_mid: [usize; INTERIOR_CLASSES],
 }
 
 /// Returns `seq` with the ambiguity codes of the marker-gene primer it
@@ -189,7 +218,7 @@ pub(crate) fn with_marker_codes(seq: &[u8], error_rate: f64) -> Vec<u8> {
 
 /// Returns whether `adapter` is a UMI pattern (`catalog::UMIS`, either
 /// strand).
-fn is_umi(adapter: &Adapter) -> bool {
+pub(super) fn is_umi(adapter: &Adapter) -> bool {
     let seq = adapter.seq.to_ascii_uppercase();
     super::catalog::UMIS
         .iter()
@@ -465,8 +494,34 @@ impl CandidateIndex {
             panel_gates: adapters.iter().map(bounds_barcode).collect(),
             split_classes,
             opens: senses.iter().map(|sense| sense == &Some(true)).collect(),
+            whole_primers: vec![None; adapters.len()],
             paired,
         }
+    }
+
+    /// Builds the index for the adapter set and search settings of `cfg`,
+    /// with the whole marker primers of its `paired` entries when `cfg` is
+    /// an amplicon library.
+    pub(super) fn for_config(cfg: &AdapterConfig) -> Self {
+        let mut index = Self::new(&cfg.adapters, cfg.error_rate, cfg.end_size, cfg.split);
+        if cfg.amplicon {
+            for (adapter_idx, adapter) in cfg.adapters.iter().enumerate() {
+                if !index.paired[adapter_idx] {
+                    continue;
+                }
+                index.whole_primers[adapter_idx] = marker_primer_of(&adapter.seq, cfg.error_rate)
+                    .map(|(primer, opens)| {
+                        let seq = if opens {
+                            primer.to_vec()
+                        } else {
+                            reverse_complement(primer)
+                        };
+                        let k_mid = Budget::new(&seq, cfg.error_rate, cfg.end_size).k_mid;
+                        WholePrimer { seq, k_mid }
+                    });
+            }
+        }
+        index
     }
 
     /// Marks in `head` and `tail` the entries with an exact end seed inside

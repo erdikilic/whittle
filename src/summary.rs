@@ -416,6 +416,7 @@ mod tests {
             split: true,
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
+            amplicon: false,
         });
         c.adapter_sample = 5_000;
         c.adapters_configured = Some(124);

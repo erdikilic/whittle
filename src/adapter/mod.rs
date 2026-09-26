@@ -97,6 +97,13 @@ pub struct AdapterConfig {
     /// Exact-seed index for lossless whole-read candidate filtering, built
     /// lazily once presence detection or inference has finalized `adapters`.
     pub(crate) candidate_index: OnceLock<CandidateIndex>,
+    /// Whether the reads come from an amplicon library, as resolution judges
+    /// from a sample (`detect::primer_share`). An amplicon holds no
+    /// marker-gene primer inside it, so an interior hit of a marker primer in
+    /// the primer role (`CandidateIndex::paired`) then splits the read by
+    /// itself where the whole primer aligns, as a junction partner otherwise
+    /// requires. Resolution sets it; `false` keeps the partner requirement.
+    pub amplicon: bool,
 }
 
 impl AdapterConfig {
@@ -104,6 +111,12 @@ impl AdapterConfig {
     /// previous set.
     pub(crate) fn replace_adapters(&mut self, adapters: Vec<Adapter>) {
         self.adapters = adapters;
+        self.candidate_index = OnceLock::new();
+    }
+
+    /// Sets `amplicon` and discards the candidate index built without it.
+    pub(crate) fn set_amplicon(&mut self, amplicon: bool) {
+        self.amplicon = amplicon;
         self.candidate_index = OnceLock::new();
     }
 

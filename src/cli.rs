@@ -605,6 +605,7 @@ fn resolve_adapters(
         split: !c.adapter_ends_only,
         min_piece: c.min_length,
         candidate_index: std::sync::OnceLock::new(),
+        amplicon: false,
     }))
 }
 

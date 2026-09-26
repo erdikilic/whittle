@@ -196,9 +196,10 @@ pub(super) struct Applied {
     clip_start: usize,
     /// See `Hit::clip_end`.
     clip_end: usize,
-    /// Whether the hit is one of a junction pair (`Keep::accept_pair`), which
-    /// backs a `CandidateIndex::paired` excision by itself.
-    joined: bool,
+    /// Whether the hit backs a `CandidateIndex::paired` excision by itself:
+    /// it is one of a junction pair (`Keep::accept_pair`), or the whole
+    /// marker primer of an amplicon library (`Keep::accept_standalone`).
+    standalone: bool,
 }
 
 /// A terminal trim held until it is anchored at the read end or at an
@@ -384,7 +385,7 @@ impl<'a> Keep<'a> {
             end,
             clip_start,
             clip_end,
-            joined: false,
+            standalone: false,
         };
         match action {
             HitAction::TrimFivePrime => {
@@ -434,8 +435,23 @@ impl<'a> Keep<'a> {
                 HitAction::Excise,
             );
             if let Some(applied) = self.excised.last_mut() {
-                applied.joined = true;
+                applied.standalone = true;
             }
+        }
+    }
+
+    /// Classifies an interior hit of the `CandidateIndex::paired` entry at
+    /// `adapter_idx` over which the whole marker primer of an amplicon
+    /// library aligns (`CandidateIndex::whole_primers`), as `accept` does,
+    /// and lets an excision it makes split the window without a junction
+    /// partner.
+    pub(super) fn accept_standalone(&mut self, adapter_idx: usize, hit: Hit) {
+        let excisions = self.excised.len();
+        self.accept(Site::Interior, adapter_idx, hit);
+        if self.excised.len() > excisions
+            && let Some(applied) = self.excised.last_mut()
+        {
+            applied.standalone = true;
         }
     }
 
@@ -559,7 +575,7 @@ impl<'a> Keep<'a> {
             .iter()
             .zip(&self.excised)
             .map(|(&cut, a)| {
-                !self.paired[a.adapter_idx] || a.joined || self.backs(cut, a.adapter_idx)
+                !self.paired[a.adapter_idx] || a.standalone || self.backs(cut, a.adapter_idx)
             })
             .collect();
         let Keep {

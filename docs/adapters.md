@@ -40,6 +40,10 @@ exceptions:
   operon: another excision within 11 bases, or the other end's primer within
   the end zone, across the barcodes between them. A preset made only of
   amplicon kits (`mab114`) promotes them to adapters, which split alone.
+  In an amplicon library, as the sampled reads show it (see
+  [Amplicon libraries](#amplicon-libraries)), a marker primer in the primer
+  role splits alone too, from a mixed preset, a FASTA or discovery, where
+  the whole catalog primer aligns over its interior hit.
   Two of these primers also split a read where they lie side by side in the
   orientation of a chimera junction, whether they come from a preset, a
   FASTA or discovery: the first reverse complemented, as the end of one
@@ -165,6 +169,59 @@ preset are kept. A FASTA disables this narrowing as well.
 Adapter samples are bounded by 256 MiB of retained payload and 64 Mi bases as
 well as `--adapter-sample-reads`. The last sampled record is retained whole;
 the actual sample size is reported, and all sampled reads are processed.
+
+### Amplicon libraries
+
+When the set trimmed against holds a marker-gene primer in the primer role
+(a preset that joins `mab114` to a genomic kit such as `mab114,lsk114`, `ont`
+or `all`, a FASTA primer, or a discovered primer), the sample that presence
+detection or discovery reads also decides whether the library is an amplicon
+library. At most 4000 reads spread evenly over the sample are examined.
+
+Every molecule of an amplicon library starts with one of its primers, so a
+read keeps one at its 5' end unless it is a fragment, and the reads share the
+lengths of a few targets. The primers of the library are the catalog marker
+primers (16S 27F and 1492R, ITS1F, ITS4), the primer-role entries of a preset
+or FASTA that are marker primers or no catalog sequence, and every discovered
+sequence except the members of a barcode layer and the sequences whose best
+catalog match is another catalog entry (an adapter, barcode, flank or the PCR
+handle of another kit). They may form any number of families, such as a 16S
+pair and a gene-specific pair outside the catalog, and count together. A
+read end is opened when a whole hit of a primer, on either strand within its
+terminal budget, lies at the boundary that the terminal trims of the other
+sequences of the set leave there:
+
+- A marker primer opens the end when its hit starts within 11 bases of that
+  boundary or before it.
+- Any other primer opens the end when its hit starts within 11 bases of the
+  boundary or before it and ends within 11 bases of it or after it. A primer
+  hit that starts within 11 bases of the end of the previous one continues
+  the stack, and the innermost primer opens the insert. Such a primer counts
+  only when the inserts behind it start alike: one 8-base word, read at any
+  of the first five offsets behind the primer and not dominated by one base,
+  starts at least 3% of the ends it opens and at least 10 of them. The start
+  of the targets of an amplicon recurs, while the random fragments behind a
+  technical sequence of a genomic or cDNA library start anywhere.
+
+The library is an amplicon library when primers open an end of at least 60%
+of the examined reads and the median read shares its length, within 5%,
+with at least 15% of them; both shares are logged. A genomic or cDNA library
+fails both: its reads start at a primer site only where they happen to start
+inside an rRNA operon, and its fragments spread over a wide range of
+lengths, each sharing its length with a few percent of the others.
+
+An amplicon holds no primer inside it, so in an amplicon library a marker
+primer inside a read is a chimera junction, and an interior hit of a marker
+primer in the primer role splits the read by itself, as under the `mab114`
+preset alone. The hit must pass its interior budget, and the whole catalog
+primer must align over it on the same strand within the primer's own
+interior budget, leaving fewer than 10 bases to clip; the excision covers
+both alignments. A primer form cut short on its outer side, as discovery
+assembles it from eroded read ends, therefore splits only where the whole
+primer is present. Primers outside the catalog split alone at a whole
+interior hit in every library, within the interior chance bound, as the
+other roles do. Outside an amplicon library the partner requirement above
+stays, and `--adapter-report` is unaffected.
 
 ## Adapter discovery
 
