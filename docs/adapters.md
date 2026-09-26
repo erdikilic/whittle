@@ -283,16 +283,54 @@ primer role: it trims read ends and, with its chance exact matches above the
 interior bound, does not split reads. A tag that a known sequence already
 describes is not reported.
 
-Discovery separates primers from the amplicon they bind by the far end of
-the molecule. A conserved gene start that reads reach from the other side
-appears there without the primer stack around it and is left in the read; a
-primer whose reverse complement is absent from the far end, as in rapid
-amplicon libraries, is trimmed. When reads run through the far primer, the
-primer and the conserved start both recur at both ends and cannot be told
-apart by structure: discovery then leaves the primers of one-sided libraries
-and, in libraries barcoded at both ends, trims the conserved start with them.
-Supply the primers with a kit preset or `--adapter-fasta` for such
-libraries; discovery continues beyond them.
+Discovery separates primers from the amplicon they bind in two ways. The
+far end of the molecule is one: a conserved gene start that reads reach from
+the other side appears there without the primer stack around it and is left
+in the read, and a primer whose reverse complement is absent from the far
+end, as in rapid amplicon libraries, is trimmed. When reads run through the
+far primer, the primer and the conserved start both recur at both ends, and
+the variation of the templates tells them apart. Related templates share a
+conserved start, but its variable bases follow the template: at such a
+column, the reads of each of the two most frequent bases carry k-mers
+further inside the insert, from 16 to 116 bases behind the candidate, that
+at least 90% of the reads holding them share with that base, in at least a
+quarter of that base's reads, and the reads of the two bases continue alike,
+their most frequent bases agreeing in at least two thirds of the 16 columns
+that follow. The degenerate base of a primer and a sequencing error are
+carried by the reads of every template, and alternative technical sequences
+at one position, such as the primers of the two strands behind a shared
+adapter or the members of a barcode panel, continue differently. The second
+base must hold at least 20 reads and one in 20 of the column.
+
+A candidate is cut at the first of its columns that follows the template,
+and dropped when that column lies within its first 11 bases or when one of
+the 16 columns outboard of it follows the template: the candidate then lies
+in the insert. A candidate whose first column behind it follows the
+template, or that holds the inner end of a catalog marker primer (16S 27F
+and 1492R, ITS1F, ITS4), ends at the insert boundary: when accepted it
+closes its read end, as a primer reconstructed from unprimed read starts
+does, and its reverse complement marks the insert boundary at the other read
+end, where the far primer of the molecule is read. A candidate that reads
+past the inner end of such a sequence, in the reads holding both or with at
+least 7 of its outer bases repeating that end, as a read eroded into the
+primer at its physical end holds it, is cut there. A candidate that ends
+inside such a primer in most of the reads holding both, as an outer layer
+assembled together with the first bases of the primer does, is continued to
+the primer's inner end. Where a candidate that follows the template from its
+outer bases lies within 11 bases of the boundary, no other layer is taken at
+that end. Behind the sequences of a preset or FASTA, the reads they trimmed
+are tested column by column behind the boundary, as a whole and as two
+families split by their most frequent far k-mer, as the two ends of a gene
+read from the two strands are; when the template begins within 11 bases of
+the boundary, discovery adds no layer at that end.
+
+Conserved bases before the first variable column of the insert cannot be
+told apart from the primer: a primer outside the catalog whose templates all
+start with the same bases, or a library of one template, keeps them with the
+primer. When the templates vary too rarely for the counts above, discovery
+leaves the primers of one-sided libraries and, in libraries barcoded at both
+ends, trims the conserved start with them. Supply the primers with a kit
+preset or `--adapter-fasta` for such libraries.
 
 Discovery counts exact 16-mers in the first 100 unexplained bases at each end
 of the sampled reads, once per read-end window. Short tandem-repeat seeds are
@@ -373,8 +411,9 @@ Candidates overlapping a validated insert start, or supported mainly on the
 insert-facing side of a reconstructed primer, are excluded. Candidates whose
 insert-facing boundaries remain unresolved are skipped.
 
-Without reads exposing an insert boundary, an unknown primer and a conserved
-gene prefix can be indistinguishable, and a conserved gene end that mirrors at
+Without reads exposing an insert boundary or variants that follow the
+template, an unknown primer and a conserved gene prefix can be
+indistinguishable, and a conserved gene end that mirrors at
 the same depth in fully symmetric amplicon reads is kept as insert only when
 unprimed reads establish the boundary. Short primers, highly degenerate mixtures,
 high sequencing error, adapter lengths approaching the sampling-window length,

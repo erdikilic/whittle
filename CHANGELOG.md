@@ -128,6 +128,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Discovery on amplicon libraries ends each primer where the insert begins
+  and no longer learns the conserved start or end of the amplified gene, or
+  sequences of single templates behind it, as technical layers. The start of
+  the insert is placed from the reads: related templates share a conserved
+  start, but its variable bases follow the template, each variant carried by
+  reads whose sequence further inside the insert differs from that of the
+  other variants, while the degenerate bases of a primer, sequencing errors
+  and alternative technical sequences such as the primers of the two
+  strands or the members of a barcode panel do not. A candidate is cut at
+  the first such column, dropped when it lies behind one, and ends the
+  layers at its end when the template begins right behind it; the inner end
+  of a catalog marker primer also ends a candidate. A candidate that reads
+  on past such a primer in the same reads, or past the reverse complement
+  of a primer of the other read end, is cut where the primer ends, and an
+  outer layer assembled with the first bases of the primer is continued to
+  its inner end. Behind a preset or FASTA whose sequences end where the
+  template begins, discovery adds no layer at that end. These sequences
+  were trimmed from the read ends and split reads inside the gene.
 - In an amplicon library, a marker-gene primer in the primer role (from
   discovery, a FASTA, or a preset that joins `mab114` to a genomic kit)
   splits a read at an interior hit by itself, as under the `mab114` preset

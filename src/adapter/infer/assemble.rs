@@ -73,6 +73,9 @@ pub(super) fn assemble(
         reversed.iter().map(Vec::as_slice).collect()
     };
     let mut deep = None;
+    // Whether a candidate at the boundary follows the template, so that the
+    // insert begins there for the reads holding it.
+    let mut at_template = false;
     for (cons, _) in peel_paths(weighted, KMER_K, end) {
         tracing::debug!(sequence = %String::from_utf8_lossy(&cons), "Assembled end candidate");
         // Original weights show the support of every k-mer of the path,
@@ -160,16 +163,59 @@ pub(super) fn assemble(
         } else {
             trimmed
         };
-        let trimmed = trim_unconserved_inner_end(&trimmed, &following, end, composition);
-        let contrast = contrast
+        let mut trimmed = trim_unconserved_inner_end(&trimmed, &following, end, composition);
+        // The insert of an amplicon begins at the inner end of a marker-gene
+        // primer, or at the first column whose bases follow the template. A
+        // candidate that is insert from its outer bases is dropped; when too
+        // few bases lie before it at the boundary to hold a technical layer,
+        // the insert begins at the boundary itself. A division into strand
+        // primers already accounts for the alternative bases behind a
+        // candidate.
+        let start = if !divided.is_empty() {
+            (None, 0)
+        } else if let Some(keep) = marker_primer_end(&trimmed, end, base.error_rate) {
+            let start = if keep < trimmed.len() {
+                TemplateStart::Inside(keep)
+            } else {
+                TemplateStart::Behind
+            };
+            (Some(start), usize::MAX)
+        } else {
+            template_start(&trimmed, &recount, end, base.error_rate)
+        };
+        let mut template = false;
+        match start {
+            (Some(TemplateStart::Before(distance)), depth) => {
+                tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), distance, depth, "Candidate lies in the template");
+                at_template |= depth < MIN_PATTERN_LEN + distance;
+                continue;
+            },
+            (Some(TemplateStart::Inside(column)), depth) if column < MIN_PATTERN_LEN => {
+                tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), column, depth, "Candidate follows the template");
+                at_template |= depth + column < MIN_PATTERN_LEN;
+                continue;
+            },
+            (Some(TemplateStart::Inside(column)), _) => {
+                trimmed = outer_part(&trimmed, column, end);
+                template = true;
+            },
+            (Some(TemplateStart::Behind), _) => template = true,
+            (None, _) => {},
+        }
+        if template {
+            tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), "Template begins behind candidate");
+        }
+        let contrast = (contrast && !template)
             .then(|| contrast_boundary(&cons, &oriented, end))
             .flatten();
-        let has_insert_boundary = contrast.is_some();
+        let has_insert_boundary = contrast.is_some() || template;
         let mut unbounded = false;
         let mut measured = None;
         let sequences = if let Some(boundary) = contrast {
             insert_starts.push(boundary.insert_start);
             boundary.primers
+        } else if template {
+            vec![trimmed]
         } else {
             let word = match end {
                 End::Five => &cons[hi - KMER_K..hi],
@@ -273,11 +319,14 @@ pub(super) fn assemble(
             }
         }
     }
+    // Behind a boundary where the insert begins, only candidates that end at
+    // an insert boundary themselves are technical.
     out.retain(|(seq, _, boundary, _, _, _)| {
         *boundary
-            || !insert_starts
-                .iter()
-                .any(|start| seq.windows(start.len()).any(|word| word == start))
+            || (!at_template
+                && !insert_starts
+                    .iter()
+                    .any(|start| seq.windows(start.len()).any(|word| word == start)))
     });
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     if primer_edges.iter().any(Option::is_some) {
@@ -295,5 +344,56 @@ pub(super) fn assemble(
             )
         });
     }
+    // A candidate that reads past the inner end of a primer in the reads
+    // holding both continues into the insert that begins there; it ends
+    // where the primer does. A candidate that ends inside such a primer, as
+    // an outer layer assembled together with the primer's first bases does,
+    // is continued to the primer's inner end.
+    let spans: Vec<Vec<Option<(usize, usize)>>> = out
+        .iter()
+        .map(|(seq, _, _, _, _, _)| {
+            hit_spans(seq, &recount, end, edit_budget(base.error_rate, seq.len()))
+        })
+        .collect();
+    let flagged: Vec<bool> = out
+        .iter()
+        .map(|(_, _, boundary, _, _, _)| *boundary)
+        .collect();
+    let mut cut = vec![false; out.len()];
+    for (i, (seq, _, boundary, _, unbounded, _)) in out.iter_mut().enumerate() {
+        let excess = (0..spans.len())
+            .filter(|&j| j != i && flagged[j])
+            .map(|j| read_through(&spans[i], &spans[j]))
+            .max()
+            .unwrap_or(0);
+        if excess > 0 {
+            tracing::debug!(sequence = %String::from_utf8_lossy(seq), excess, "Candidate reads past a primer");
+            *seq = outer_part(seq, seq.len().saturating_sub(excess), end);
+            *boundary = true;
+            *unbounded = false;
+            cut[i] = true;
+        }
+    }
+    let primers: Vec<(usize, Vec<u8>)> = out
+        .iter()
+        .enumerate()
+        .filter(|&(j, _)| flagged[j] && !cut[j])
+        .map(|(j, (seq, _, _, _, _, _))| (j, seq.clone()))
+        .collect();
+    for (i, (seq, _, boundary, _, unbounded, _)) in out.iter_mut().enumerate() {
+        if flagged[i] || cut[i] {
+            continue;
+        }
+        if let Some(joined) = primers
+            .iter()
+            .find_map(|(j, primer)| continued_into(seq, primer, &spans[i], &spans[*j], end))
+        {
+            tracing::debug!(sequence = %String::from_utf8_lossy(&joined), "Candidate continues into a primer");
+            *seq = joined;
+            *boundary = true;
+            *unbounded = false;
+        }
+    }
+    out.retain(|(seq, _, _, _, _, _)| seq.len() >= MIN_PATTERN_LEN);
     out
 }

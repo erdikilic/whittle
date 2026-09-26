@@ -1573,3 +1573,219 @@ fn other_end_keeps_a_form_the_accepted_sequence_does_not_trim() {
     let candidates = vec![(covered, 0.9, 1000, End::Three)];
     assert!(untrimmed_other_end(&accepted, End::Five, &candidates, &windows, &base).is_none());
 }
+
+/// Returns `seq` with the variable bases of lineage `lineage` changed: the
+/// base at each of `sites` is replaced when the lineage carries the bit that
+/// the site follows, so the sites mark nested groups of templates.
+fn with_lineage(seq: &[u8], sites: &[usize], lineage: u64) -> Vec<u8> {
+    let mut out = seq.to_vec();
+    for (bit, &site) in sites.iter().enumerate() {
+        if (lineage >> (bit % 4)) & 1 == 1 {
+            out[site] = b"CGTA"[encode_kmer(&out[site..=site]).unwrap() as usize];
+        }
+    }
+    out
+}
+
+/// The 16 templates of an amplicon: a conserved start and end, each with
+/// variable bases that follow the template's lineage, around an interior of
+/// the template's own.
+fn community_templates() -> Vec<Vec<u8>> {
+    let start = random_bases(61_001, 30);
+    let end = random_bases(61_002, 30);
+    (0..16u64)
+        .map(|lineage| {
+            let mut template = with_lineage(&start, &[0, 3, 11, 19, 26], lineage);
+            template.extend(random_bases(61_100 + lineage, 1200));
+            template.extend(with_lineage(&end, &[4, 10, 18, 27, 29], lineage));
+            template
+        })
+        .collect()
+}
+
+/// Reads with 2% errors of both strands of an amplicon library of the
+/// `community_templates`: a forward primer whose ninth base is C or T, the
+/// template, and the reverse complement of a reverse primer whose eleventh
+/// base is A or G, eroded by up to three bases at the 5' end. The primers are
+/// returned with their ambiguity codes.
+fn community_amplicon_reads() -> (Vec<Vec<u8>>, Vec<u8>, Vec<u8>) {
+    let mut forward = random_bases(61_011, 20);
+    forward[8] = b'Y';
+    let mut reverse = random_bases(61_012, 22);
+    reverse[10] = b'R';
+    let templates = community_templates();
+    let mut state = 61_500u64;
+    let reads = (0..2400u64)
+        .map(|i| {
+            let mut molecule = forward.clone();
+            molecule[8] = b"CT"[(draw(&mut state) % 2) as usize];
+            molecule.extend_from_slice(&templates[(i % 16) as usize]);
+            let mut back = reverse.clone();
+            back[10] = b"AG"[(draw(&mut state) % 2) as usize];
+            molecule.extend(rc(&back));
+            let read = if (i / 16) % 2 == 1 {
+                rc(&molecule)
+            } else {
+                molecule
+            };
+            with_errors(&read[(draw(&mut state) % 4) as usize..], 62_000 + i, 20)
+        })
+        .collect();
+    (reads, forward, reverse)
+}
+
+/// Returns whether each base of `seq` is one of the bases of the IUPAC code
+/// at its position in `pattern`.
+fn iupac_compatible(seq: &[u8], pattern: &[u8]) -> bool {
+    let bases = |c| crate::adapter::search::iupac_bases(c).unwrap_or(&[]);
+    seq.len() == pattern.len()
+        && seq
+            .iter()
+            .zip(pattern)
+            .all(|(&s, &p)| bases(s).iter().all(|b| bases(p).contains(b)))
+}
+
+/// Returns whether `seq`, on either strand, is the inner part of `primer`:
+/// its bases up to the last one, where the insert begins.
+fn ends_at_primer(seq: &[u8], primer: &[u8]) -> bool {
+    [seq.to_vec(), rc(seq)]
+        .iter()
+        .any(|s| s.len() <= primer.len() && iupac_compatible(s, &primer[primer.len() - s.len()..]))
+}
+
+/// Discovery in an amplicon library of related templates ends each primer
+/// where the templates begin, although the templates share their first and
+/// last bases, and learns no template sequence: the variable bases of the
+/// conserved stretches follow the template, while the degenerate primer bases
+/// do not.
+#[test]
+fn amplicon_primers_end_where_the_templates_begin() {
+    let (reads, forward, reverse) = community_amplicon_reads();
+    let found = infer_owned(&reads);
+    for d in &found {
+        assert!(
+            ends_at_primer(&d.adapter.seq, &forward) || ends_at_primer(&d.adapter.seq, &reverse),
+            "{} is not a primer: {found:?}",
+            String::from_utf8_lossy(&d.adapter.seq)
+        );
+    }
+    for primer in [&forward, &reverse] {
+        assert!(
+            found.iter().any(|d| d.adapter.seq.len() >= MIN_PATTERN_LEN
+                && ends_at_primer(&d.adapter.seq, primer)),
+            "{} not found: {found:?}",
+            String::from_utf8_lossy(primer)
+        );
+    }
+    let cfg = trimming_with(found);
+    for (lineage, template) in community_templates().iter().enumerate() {
+        let mut molecule = forward.clone();
+        molecule[8] = b"CT"[lineage % 2];
+        molecule.extend_from_slice(template);
+        let mut back = reverse.clone();
+        back[10] = b'A';
+        molecule.extend(rc(&back));
+        assert_eq!(
+            crate::adapter::adapter_segments(&molecule, &cfg),
+            vec![(forward.len(), forward.len() + template.len())],
+            "template {lineage}"
+        );
+    }
+}
+
+/// With the primers of an amplicon library known, discovery adds nothing
+/// behind them: the templates begin at the boundary they leave.
+#[test]
+fn known_amplicon_primers_leave_nothing_to_discover() {
+    let (reads, forward, reverse) = community_amplicon_reads();
+    let known = [forward, reverse]
+        .into_iter()
+        .enumerate()
+        .map(|(i, seq)| Adapter {
+            name: format!("primer_{i}"),
+            seq,
+            role: Role::Primer,
+        })
+        .collect();
+    let found = infer_with_known(&reads, known);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// A column whose bases follow the template lies behind the primer of an
+/// amplicon, and the degenerate base of the primer does not follow it. The
+/// bases of a primer cut short are not the template.
+#[test]
+fn template_begins_behind_the_primer_not_at_its_degenerate_base() {
+    let (reads, forward, _) = community_amplicon_reads();
+    let windows: Vec<&[u8]> = reads.iter().map(|r| &r[..200.min(r.len())]).collect();
+    let mut primer = forward.clone();
+    primer[8] = b'C';
+    assert_eq!(
+        template_start(&primer, &windows, End::Five, 0.2).0,
+        Some(TemplateStart::Behind)
+    );
+    assert_eq!(
+        template_start(&primer[..14], &windows, End::Five, 0.2).0,
+        None
+    );
+    let mut into_template = primer.clone();
+    into_template.extend_from_slice(&community_templates()[0][..12]);
+    assert_eq!(
+        template_start(&into_template, &windows, End::Five, 0.2).0,
+        Some(TemplateStart::Inside(primer.len()))
+    );
+}
+
+/// A candidate that reads on past the inner end of a sequence ending at the
+/// insert boundary ends there, from a whole copy of that end or from an
+/// eroded one at its outer end.
+#[test]
+fn candidates_end_at_a_known_insert_boundary() {
+    let primer = b"AGAGTTTGATYMTGGCTCAG";
+    let mut through = b"TTTGATCATGGCTCAG".to_vec();
+    through.extend_from_slice(b"GACGAACG");
+    assert_eq!(past_boundary(&through, primer, End::Five), Some(16));
+    let eroded = b"TGGCTCAGGACGAACGCTGG";
+    assert_eq!(past_boundary(eroded, primer, End::Five), Some(8));
+    let rear = rc(primer);
+    let mut three = b"CGTTCGTC".to_vec();
+    three.extend_from_slice(&rear[..9]);
+    assert_eq!(past_boundary(&three, &rear, End::Three), Some(9));
+    assert_eq!(past_boundary(b"TTTGATCATGGCTCAG", primer, End::Five), None);
+}
+
+/// Windows with 2% errors that begin at a boundary behind which each strand
+/// of the `community_templates` is read from its start: the forward primer
+/// then the template, or the reverse primer then the template's reverse
+/// complement, or the same without the primers when `primed` is false.
+fn boundary_windows(primed: bool) -> Vec<Vec<u8>> {
+    let templates = community_templates();
+    let (forward, reverse) = (random_bases(61_011, 20), random_bases(61_012, 22));
+    (0..1600u64)
+        .map(|i| {
+            let template = &templates[(i % 16) as usize];
+            let (primer, insert) = if (i / 16) % 2 == 0 {
+                (&forward, template[..180].to_vec())
+            } else {
+                (&reverse, rc(template)[..180].to_vec())
+            };
+            let mut window = if primed { primer.clone() } else { Vec::new() };
+            window.extend_from_slice(&insert);
+            with_errors(&window, 63_000 + i, 20)
+        })
+        .collect()
+}
+
+/// Behind a boundary followed by the primers of the two strands, the first
+/// columns hold alternative primers, not the template. Where the boundary is
+/// the start of the templates, read from either end of the gene, the
+/// template begins there.
+#[test]
+fn template_begins_at_a_boundary_only_behind_the_primers() {
+    let primed = boundary_windows(true);
+    let primed: Vec<&[u8]> = primed.iter().map(Vec::as_slice).collect();
+    assert!(!template_at_boundary(&primed, End::Five));
+    let inserts = boundary_windows(false);
+    let inserts: Vec<&[u8]> = inserts.iter().map(Vec::as_slice).collect();
+    assert!(template_at_boundary(&inserts, End::Five));
+}

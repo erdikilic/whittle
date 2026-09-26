@@ -357,14 +357,22 @@ pub(super) fn strip_shared_ends(candidates: &mut Vec<Candidate>, error_rate: f64
             .find(|&n| b.windows(n).any(|w| w == &a[..n]))
             .unwrap_or(0)
     };
-    let originals: Vec<(Vec<u8>, f64)> = candidates.iter().map(|c| (c.0.clone(), c.1)).collect();
+    let originals: Vec<(Vec<u8>, f64, bool)> =
+        candidates.iter().map(|c| (c.0.clone(), c.1, c.2)).collect();
     for (i, candidate) in candidates.iter_mut().enumerate() {
-        let (seq, support) = &originals[i];
+        let (seq, support, _) = &originals[i];
         let reversed: Vec<u8> = seq.iter().rev().copied().collect();
         let mut prefix = 0;
         let mut suffix = 0;
-        for (j, (other, other_support)) in originals.iter().enumerate() {
-            if j == i || other_support <= support || same_family(seq, other, error_rate) {
+        // A candidate that ends at the insert boundary is the innermost
+        // layer; what it shares with another candidate lies at its outer
+        // end and belongs to the outer layer.
+        for (j, (other, other_support, boundary)) in originals.iter().enumerate() {
+            if j == i
+                || *boundary
+                || other_support <= support
+                || same_family(seq, other, error_rate)
+            {
                 continue;
             }
             prefix = prefix.max(shared_prefix(seq, other));

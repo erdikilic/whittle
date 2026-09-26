@@ -13,6 +13,7 @@ mod consensus;
 mod degenerate;
 mod kmer;
 mod layers;
+mod linkage;
 mod support;
 use assemble::*;
 use boundary::*;
@@ -20,6 +21,7 @@ use consensus::*;
 use degenerate::*;
 use kmer::*;
 use layers::*;
+use linkage::*;
 use support::*;
 
 /// The physical read end from which a consensus was assembled.
@@ -218,6 +220,19 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     // Opening k-mers of the strand-specific layers behind the divisions of
     // earlier layers.
     let mut strand_words: Vec<Vec<u8>> = Vec::new();
+    // Sequences whose inner end is the insert boundary, as each read end
+    // holds them: the marker-gene primers, and the accepted sequences that
+    // end at the insert boundary.
+    let mut insert_bounds: [Vec<Vec<u8>>; 2] = [
+        crate::adapter::catalog::MARKER_PRIMERS
+            .iter()
+            .map(|p| p.to_vec())
+            .collect(),
+        crate::adapter::catalog::MARKER_PRIMERS
+            .iter()
+            .map(|p| crate::adapter::reverse_complement(p))
+            .collect(),
+    ];
     for layer in 0..MAX_LAYERS {
         let (mut five_w, mut three_w) = layer_windows(sample, &bounds, 2 * WINDOW_LEN);
         if !open[0] {
@@ -226,6 +241,32 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         if !open[1] {
             three_w.clear();
         }
+        // Where the known sequences end at the start of the template of an
+        // amplicon, as a primer does, no layer lies beyond them at that end.
+        // A discovered layer that ends there ends at the insert boundary
+        // itself and closes its end when accepted.
+        if layer == 0 && !known.is_empty() {
+            for (index, (end, windows)) in [(End::Five, &mut five_w), (End::Three, &mut three_w)]
+                .into_iter()
+                .enumerate()
+            {
+                let moved = |i: usize| match end {
+                    End::Five => bounds.five[i] > 0,
+                    End::Three => bounds.three[i] < sample[i].len(),
+                };
+                let texts: Vec<&[u8]> = windows
+                    .iter()
+                    .filter(|(i, _)| moved(*i))
+                    .map(|(_, w)| *w)
+                    .collect();
+                let texts = stride_sample(&texts, RECOUNT_WINDOWS);
+                if template_at_boundary(&texts, end) {
+                    tracing::debug!(layer = layer + 1, ?end, "Template begins at the boundary");
+                    windows.clear();
+                    open[index] = false;
+                }
+            }
+        }
         let five_texts: Vec<&[u8]> = five_w.iter().map(|(_, w)| *w).collect();
         let three_texts: Vec<&[u8]> = three_w.iter().map(|(_, w)| *w).collect();
         // Ranking statistics use windows distributed across the sample.
@@ -233,6 +274,28 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         let three_sample = stride_sample(&three_texts, RECOUNT_WINDOWS);
         let mut five = assemble(&five_texts, &three_phys, base, End::Five, layer == 0);
         let mut three = assemble(&three_texts, &five_phys, base, End::Three, layer == 0);
+        // The insert boundary of a candidate that ends at it holds at both
+        // read ends: at its own end, and reverse complemented at the other,
+        // where the far primer of the molecule is read. A marker-gene primer
+        // ends at the insert boundary as well. A candidate that reads on
+        // past such an inner end continues into the insert.
+        let mut layer_bounds = insert_bounds.clone();
+        for (own, other, index) in [(&five, &three, 0), (&three, &five, 1)] {
+            layer_bounds[index].extend(
+                own.iter()
+                    .filter(|c| c.2)
+                    .map(|c| c.0.clone())
+                    .chain(
+                        other
+                            .iter()
+                            .filter(|c| c.2)
+                            .map(|c| crate::adapter::reverse_complement(&c.0)),
+                    )
+                    .collect::<Vec<_>>(),
+            );
+        }
+        end_at_insert_boundaries(&mut five, &layer_bounds[0], End::Five);
+        end_at_insert_boundaries(&mut three, &layer_bounds[1], End::Three);
         strip_shared_ends(&mut five, base.error_rate);
         strip_shared_ends(&mut three, base.error_rate);
         let (five, five_variable) = with_variable_layer(
@@ -447,7 +510,10 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                             <= ADAPTER_FLUSH
                     });
             if boundary {
-                open[usize::from(end == End::Three)] = false;
+                let index = usize::from(end == End::Three);
+                open[index] = false;
+                insert_bounds[index].push(seq.clone());
+                insert_bounds[1 - index].push(crate::adapter::reverse_complement(&seq));
             }
             accepted_ends.push(end);
             accepted.push(seq.clone());
