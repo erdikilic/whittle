@@ -10,12 +10,14 @@ use crate::adapter::{Adapter, AdapterConfig, MIN_PATTERN_LEN, Role, edit_budget}
 mod assemble;
 mod boundary;
 mod consensus;
+mod degenerate;
 mod kmer;
 mod layers;
 mod support;
 use assemble::*;
 use boundary::*;
 use consensus::*;
+use degenerate::*;
 use kmer::*;
 use layers::*;
 use support::*;
@@ -476,17 +478,82 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         }
     }
 
+    // A random tag behind an accepted layer has no recurrent k-mers and is
+    // read from the base composition of the windows that hold the layer,
+    // oriented inward from either physical end.
+    let oriented: Vec<Vec<u8>> = five_phys
+        .iter()
+        .map(|w| w.to_ascii_uppercase())
+        .chain(
+            three_phys
+                .iter()
+                .map(|w| crate::adapter::reverse_complement(&w.to_ascii_uppercase())),
+        )
+        .collect();
+    let oriented: Vec<&[u8]> = oriented.iter().map(Vec::as_slice).collect();
+    let composition = base_composition(&oriented);
+    // Known sequences precede every discovered layer. Barcodes are skipped:
+    // a shared flank, not a random tag, lies behind the members of a panel.
+    let known_layers = base
+        .adapters
+        .iter()
+        .filter(|a| a.role != Role::Barcode && !crate::adapter::is_construct(a))
+        .map(|a| (a.seq.to_ascii_uppercase(), 0));
+    let discovered_layers = distinct
+        .iter()
+        .filter(|(_, _, _, _, member)| !member)
+        .map(|(seq, _, layer, _, _)| (seq.clone(), *layer + 1));
+    let preceding: Vec<(Vec<u8>, usize)> = known_layers.chain(discovered_layers).collect();
+    let mut tags: Vec<(Vec<u8>, f64, usize, bool, bool)> = Vec::new();
+    for (seq, layer) in preceding {
+        for pattern in [seq.clone(), crate::adapter::reverse_complement(&seq)] {
+            if let Some((tag, present)) = degenerate_layer(
+                &mut searcher,
+                &pattern,
+                &oriented,
+                composition,
+                base.error_rate,
+            ) && !tags.iter().any(|(other, _, _, _, _)| {
+                *other == tag || *other == crate::adapter::reverse_complement(&tag)
+            }) && !known
+                .iter()
+                .filter(|k| !is_plain_acgt(k))
+                .any(|k| same_adapter(&tag, k, base.error_rate))
+            {
+                tracing::debug!(sequence = %String::from_utf8_lossy(&tag), "Degenerate layer");
+                tags.push((
+                    tag,
+                    present as f64 / oriented.len() as f64,
+                    layer,
+                    false,
+                    false,
+                ));
+            }
+        }
+    }
+    let tag_seqs: Vec<Vec<u8>> = tags.iter().map(|t| t.0.clone()).collect();
+    distinct.extend(tags);
+
     let refs = crate::adapter::preset::preset(crate::adapter::preset::Kit::ALL);
     let name_refs: Vec<Adapter> = refs
         .into_iter()
         .chain(base.adapters.iter().cloned())
+        .collect();
+    // Ambiguity codes align to any of their bases, so a degenerate layer is
+    // named only by degenerate entries.
+    let degenerate_refs: Vec<Adapter> = name_refs
+        .iter()
+        .filter(|r| !is_plain_acgt(&r.seq))
+        .cloned()
         .collect();
     distinct.sort_by(|a, b| a.2.cmp(&b.2).then(b.1.total_cmp(&a.1)).then(a.0.cmp(&b.0)));
     distinct
         .into_iter()
         .enumerate()
         .map(|(i, (seq, support, layer, flush, member))| {
-            let name_hits = name_against(&seq, &name_refs, base.error_rate);
+            let tag = tag_seqs.contains(&seq);
+            let refs = if tag { &degenerate_refs } else { &name_refs };
+            let name_hits = name_against(&seq, refs, base.error_rate);
             // A flush layer is an adapter unless it is a marker-gene primer,
             // whose site also lies inside genomic reads.
             let role = if flush && !crate::adapter::matches_marker_primer(&seq, base.error_rate) {
@@ -499,7 +566,11 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             InferredAdapter {
                 adapter: Adapter {
                     name: format!("inferred_{}", i + 1),
-                    seq: crate::adapter::with_marker_codes(&seq, base.error_rate),
+                    seq: if tag {
+                        seq.clone()
+                    } else {
+                        crate::adapter::with_marker_codes(&seq, base.error_rate)
+                    },
                     role,
                 },
                 assembled_seq: seq,

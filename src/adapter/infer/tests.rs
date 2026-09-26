@@ -1228,3 +1228,194 @@ fn inner_run_measures_the_insert_facing_homopolymer() {
     assert_eq!(inner_run(b"AAAAACGT", End::Three), 5);
     assert_eq!(inner_run(b"ACGT", End::Five), 1);
 }
+
+/// Returns a random tag of the form `(VVVVTT)x3 VVVVTTT`, drawing each `V`
+/// from A, C and G.
+fn random_tag(state: &mut u64) -> Vec<u8> {
+    let mut tag = Vec::new();
+    for block in 0..4 {
+        for _ in 0..4 {
+            tag.push(b"ACG"[(draw(state) % 3) as usize]);
+        }
+        tag.extend_from_slice(if block == 3 { b"TTT" } else { b"TT" });
+    }
+    tag
+}
+
+/// The bases behind the primer of a tagged read: a random tag and `GGG`.
+fn tag_and_ggg(i: u64) -> Vec<u8> {
+    let mut state = 90_000 + i;
+    let mut tail = random_tag(&mut state);
+    tail.extend_from_slice(b"GGG");
+    tail
+}
+
+/// Reads of both strands with `per_mille` errors per thousand bases: an
+/// adapter, a primer, then `behind(i)` and a 400-base insert. Returns the
+/// reads and the adapter followed by the primer.
+fn primed_reads(behind: impl Fn(u64) -> Vec<u8>, per_mille: u64) -> (Vec<Vec<u8>>, Vec<u8>) {
+    let mut head = random_bases(9101, 30);
+    head.extend(random_bases(9111, 24));
+    let reads = (0..2000u64)
+        .map(|i| {
+            let mut read = head.clone();
+            read.extend(behind(i));
+            read.extend(random_bases(70_000 + i, 400));
+            let read = with_errors(&read, 80_000 + i, per_mille);
+            if i % 2 == 1 { rc(&read) } else { read }
+        })
+        .collect();
+    (reads, head)
+}
+
+/// Windows read inward from each end of `reads`, as discovery orients them.
+fn oriented_windows(reads: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    reads
+        .iter()
+        .flat_map(|read| {
+            let n = read.len().min(MIRROR_WINDOW);
+            [read[..n].to_vec(), rc(&read[read.len() - n..])]
+        })
+        .collect()
+}
+
+/// Returns the degenerate layer behind the primer of `head` in `reads`.
+fn layer_behind_primer(reads: &[Vec<u8>], head: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let windows = oriented_windows(reads);
+    let windows: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
+    degenerate_layer(
+        &mut crate::adapter::search::new_searcher_fwd(),
+        &head[30..],
+        &windows,
+        base_composition(&windows),
+        0.2,
+    )
+}
+
+/// A random tag behind a primer, with a constrained base set at each
+/// position, is a degenerate layer written with ambiguity codes. The layer
+/// ends with the `TTT` spacer that closes the tag; the `GGG` behind it is
+/// left to the insert.
+#[test]
+fn random_tag_behind_a_primer_is_a_degenerate_layer() {
+    let (reads, head) = primed_reads(tag_and_ggg, 10);
+    let (layer, present) = layer_behind_primer(&reads, &head).expect("degenerate layer");
+    assert_eq!(layer, b"VVVVTTVVVVTTVVVVTTVVVVTTT");
+    assert!(present >= 1800, "{present}");
+}
+
+/// Discovery reports the degenerate layer behind the primer, and trimming
+/// with the discovered set removes the tag and keeps the `GGG` behind it.
+#[test]
+fn discovery_trims_a_random_tag_behind_a_primer() {
+    let (reads, head) = primed_reads(tag_and_ggg, 10);
+    let found = infer_owned(&reads);
+    let tag = b"VVVVTTVVVVTTVVVVTTVVVVTTT";
+    let layer = found
+        .iter()
+        .find(|d| d.adapter.seq == tag || d.adapter.seq == rc(tag))
+        .unwrap_or_else(|| panic!("{found:?}"));
+    assert_eq!(layer.adapter.role, Role::Primer);
+    let cfg = AdapterConfig {
+        adapters: found.into_iter().map(|d| d.adapter).collect(),
+        error_rate: 0.2,
+        end_size: 150,
+        split: true,
+        min_piece: 20,
+        candidate_index: std::sync::OnceLock::new(),
+    };
+    for i in 0..16u64 {
+        let mut read = head.clone();
+        let tagged = read.len() + tag.len();
+        read.extend(tag_and_ggg(i));
+        read.extend(random_bases(70_000 + i, 400));
+        let segments = crate::adapter::adapter_segments(&read, &cfg);
+        assert_eq!(segments, vec![(tagged, read.len())], "{segments:?}");
+        let reverse = rc(&read);
+        let segments = crate::adapter::adapter_segments(&reverse, &cfg);
+        assert_eq!(segments, vec![(0, reverse.len() - tagged)], "{segments:?}");
+    }
+    // A tag alone inside an insert does not split the read.
+    let mut state = 1;
+    let mut read = random_bases(71_000, 600);
+    read.extend(random_tag(&mut state));
+    read.extend(random_bases(72_000, 600));
+    assert_eq!(
+        crate::adapter::adapter_segments(&read, &cfg),
+        vec![(0, read.len())]
+    );
+}
+
+/// A random tag behind a known primer is discovered as the first layer; a
+/// known pattern of the tag leaves nothing to discover.
+#[test]
+fn random_tag_behind_a_known_primer() {
+    let (reads, head) = primed_reads(tag_and_ggg, 10);
+    let known = |seq: &[u8], role| Adapter {
+        name: "known".into(),
+        seq: seq.to_vec(),
+        role,
+    };
+    let tag = b"VVVVTTVVVVTTVVVVTTVVVVTTT";
+    let found = infer_with_known(&reads, vec![known(&head, Role::Adapter)]);
+    let layer = found
+        .iter()
+        .find(|d| d.adapter.seq == tag || d.adapter.seq == rc(tag))
+        .unwrap_or_else(|| panic!("{found:?}"));
+    assert_eq!(layer.layer, 0);
+
+    let found = infer_with_known(
+        &reads,
+        vec![
+            known(&head, Role::Adapter),
+            known(b"TTTVVVVTTVVVVTTVVVVTTVVVVTTT", Role::Primer),
+        ],
+    );
+    assert!(
+        found.iter().all(|d| is_plain_acgt(&d.adapter.seq)),
+        "{found:?}"
+    );
+}
+
+/// Sequence behind a primer that is not a random tag yields no degenerate
+/// layer: a random or AT-rich insert, the conserved starts of a few species,
+/// which exclude bases at many positions but concentrate in a few
+/// combinations, and two alternative primers.
+#[test]
+fn conserved_or_biased_sequence_behind_a_primer_is_not_a_degenerate_layer() {
+    let species: Vec<Vec<u8>> = (0..6).map(|i| random_bases(9200 + i, 60)).collect();
+    let alternatives = [random_bases(9301, 40), random_bases(9311, 40)];
+    type Behind<'a> = Box<dyn Fn(u64) -> Vec<u8> + 'a>;
+    let cases: [(&str, Behind); 4] = [
+        ("random insert", Box::new(|_| Vec::new())),
+        (
+            "AT-rich insert",
+            Box::new(|i| at_rich_bases(95_000 + i, 60)),
+        ),
+        ("species", Box::new(|i| species[(i % 6) as usize].clone())),
+        (
+            "alternative primers",
+            Box::new(|i| alternatives[(i % 2) as usize].clone()),
+        ),
+    ];
+    for (name, behind) in cases {
+        let (reads, head) = primed_reads(behind, 10);
+        let found = layer_behind_primer(&reads, &head);
+        assert!(found.is_none(), "{name}: {found:?}");
+    }
+}
+
+/// Discovery reports no degenerate layer behind a primer followed by an
+/// AT-rich insert.
+#[test]
+fn discovery_adds_no_degenerate_layer_before_an_at_rich_insert() {
+    let (reads, _) = primed_reads(|i| at_rich_bases(95_000 + i, 60), 10);
+    let found = infer_owned(&reads);
+    for d in &found {
+        assert!(
+            is_plain_acgt(&d.adapter.seq),
+            "{:?}",
+            String::from_utf8_lossy(&d.adapter.seq)
+        );
+    }
+}

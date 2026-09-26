@@ -176,6 +176,27 @@ per end. A discovered sequence flush with the physical read end takes the
 adapter role and splits reads at interior hits; deeper sequences trim ends
 only, like catalog barcodes and primers.
 
+A random tag, such as a UMI, differs between reads and has no recurrent
+k-mers, so it is read from base composition instead. Behind every known or
+discovered layer other than a barcode, the bases that follow the layer in the
+windows that hold it are tallied one position at a time, each round
+realigning the windows to the layer and the tag so far. A position belongs to
+the tag when one base holds the midpoint between its composition share and
+one, or when a base falls fourfold below its composition share; it is written
+with the ambiguity code of the bases present, such as `V` for a position that
+excludes T. The tag ends with the run of fixed bases after its last
+degenerate position; a further run, such as the G run a template switch adds,
+varies in length between reads and is left to the insert. A tag needs 16
+positions, at least 1% of the windows and 20 windows, and random degenerate
+positions: no combination of their bases recurs in 20 windows, and at least
+half of the windows hold distinct combinations. A barcode panel, the
+conserved starts of an amplicon's species or two alternative primers
+concentrate in a few combinations, and a genomic insert holds every base near
+its composition share, whatever the genome's composition. A tag takes the
+primer role: it trims read ends and, with its chance exact matches above the
+interior bound, does not split reads. A tag that a known sequence already
+describes is not reported.
+
 Discovery separates primers from the amplicon they bind by the far end of
 the molecule. A conserved gene start that reads reach from the other side
 appears there without the primer stack around it and is left in the read; a

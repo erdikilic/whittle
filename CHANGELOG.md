@@ -102,14 +102,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Discovery learns a random tag, such as a UMI, behind a known or discovered
+  layer. The tag has no recurrent k-mers; it is read from the base
+  composition of each position behind the layer, written with ambiguity
+  codes, and trims read ends without splitting reads. Positions must exclude
+  a base or hold a fixed one against the composition of the reads, and the
+  tag's bases must not concentrate in a few combinations, so conserved,
+  biased or barcoded sequence behind a layer is not taken for a tag.
 - Discovery learns cDNA libraries whose adapter core is shared by both
   strands and followed by a different primer on each: a layer ends where its
   path divides into two continuations that recur reverse complemented at the
   other read end, the primers behind the core are layers of their own, and a
   poly(A) run behind a primer is left to the insert. On SQK-PCS114 reads,
   discovery found no complete layer and left the core and both primers in
-  most reads. A random UMI after the primer is not learned; the `pcs114`
-  preset trims it.
+  most reads.
 - The `pcb114` (`pcs114`) preset trims the SQK-PCS114 UMI, `(VVVVTT)x4 T`,
   that follows the strand-switching primer, as dorado does; it was left at
   one end of most reads. The UMI trims read ends and does not split reads.
