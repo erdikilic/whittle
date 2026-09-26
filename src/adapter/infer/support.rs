@@ -161,6 +161,105 @@ pub(super) fn same_family(a: &[u8], b: &[u8], error_rate: f64) -> bool {
         || shared_substring(a, b) * 100 >= a.len().min(b.len()) * FAMILY_OVERLAP_PERCENT
 }
 
+/// Returns the form in which the other read end holds the family of `seq`,
+/// accepted at `end`, when that end's form stops at a different base on the
+/// insert side, with its support. The form grows from the longest candidate
+/// of the other end, in `candidates` as `(sequence, support, weight, end)`,
+/// that holds at least `KMER_K` bases and half of `seq` and whose reverse
+/// complement aligns inside `seq` within its edit budget, short of the inner
+/// end of `seq`. Erosion at the other physical end shortens that candidate
+/// on its outer side, so the form extends outward with the bases `seq` holds
+/// there for as long as most of the `other_windows` that hold the candidate,
+/// and at least `MIN_SUPPORT_WINDOWS` of them, carry the same base. A
+/// candidate that differs only on its outer side, as an eroded read end
+/// does, is covered by `seq` and yields no form; a shorter one is a fragment
+/// of a layer.
+pub(super) fn other_end_form(
+    seq: &[u8],
+    end: End,
+    candidates: &[(Vec<u8>, f64, u64, End)],
+    other_windows: &[&[u8]],
+    error_rate: f64,
+) -> Option<(Vec<u8>, f64)> {
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let (other, support, oriented_hit) = candidates
+        .iter()
+        .filter(|(other, _, _, other_end)| {
+            *other_end != end
+                && other.len() >= KMER_K
+                && other.len() * 2 >= seq.len()
+                && other.len() < seq.len()
+        })
+        .filter_map(|(other, support, weight, _)| {
+            let oriented = crate::adapter::reverse_complement(other);
+            let hit = searcher
+                .search(&oriented, &seq, edit_budget(error_rate, other.len()))
+                .into_iter()
+                .min_by_key(|m| (m.cost, m.text_start))?;
+            let short = match end {
+                End::Five => hit.text_end < seq.len(),
+                End::Three => hit.text_start > 0,
+            };
+            short.then_some((other, *support, *weight, hit))
+        })
+        .max_by(|a, b| {
+            a.0.len()
+                .cmp(&b.0.len())
+                .then(a.2.cmp(&b.2))
+                .then(b.0.cmp(a.0))
+        })
+        .map(|(other, support, _, hit)| (other, support, hit))?;
+    // The bases of `seq` outward of the candidate, as the other end reads
+    // them: complements of the bases before the aligned part of `seq` for a
+    // 5' `seq`, after it for a 3' one.
+    let outward: Vec<u8> = match end {
+        End::Five => seq[..oriented_hit.text_start]
+            .iter()
+            .rev()
+            .map(|&b| crate::adapter::reverse_complement(&[b])[0])
+            .collect(),
+        End::Three => seq[oriented_hit.text_end..]
+            .iter()
+            .map(|&b| crate::adapter::reverse_complement(&[b])[0])
+            .collect(),
+    };
+    let mut best: Vec<Option<(i32, usize, usize)>> = vec![None; other_windows.len()];
+    for hit in searcher.search_texts(other, other_windows, edit_budget(error_rate, other.len())) {
+        let entry = &mut best[hit.text_idx];
+        if entry.is_none_or(|(cost, _, _)| hit.cost < cost) {
+            *entry = Some((hit.cost, hit.text_start, hit.text_end));
+        }
+    }
+    // The other end reads its form toward the physical 3' end for a 5'
+    // `seq`, and toward the physical 5' end for a 3' one.
+    let mut extension = Vec::new();
+    for (step, &expected) in outward.iter().enumerate() {
+        let (mut carried, mut held) = (0, 0);
+        for (window, hit) in other_windows.iter().zip(&best) {
+            let Some((_, start, stop)) = *hit else {
+                continue;
+            };
+            let base = match end {
+                End::Five => window.get(stop + step),
+                End::Three => start.checked_sub(step + 1).and_then(|i| window.get(i)),
+            };
+            if let Some(&base) = base {
+                held += 1;
+                carried += usize::from(base.to_ascii_uppercase() == expected);
+            }
+        }
+        if carried < MIN_SUPPORT_WINDOWS || carried * 2 <= held {
+            break;
+        }
+        extension.push(expected);
+    }
+    let form = match end {
+        End::Five => [other.as_slice(), &extension].concat(),
+        End::Three => extension.iter().rev().chain(other).copied().collect(),
+    };
+    Some((form, support))
+}
+
 /// Returns whether the shorter of two candidates is a fragment of the
 /// longer: one family by `same_family`, with less than `MIN_PATTERN_LEN` of
 /// the shorter outside their longest common substring, as an end of the

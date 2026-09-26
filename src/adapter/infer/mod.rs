@@ -351,6 +351,10 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         // reconstruction of their family. A sequence supported `RUN_JUMP`
         // times better than the candidate containing it is the shared layer
         // of that candidate, not its fragment.
+        let layer_candidates: Vec<(Vec<u8>, f64, u64, End)> = candidates
+            .iter()
+            .map(|(seq, support, _, _, weight, end)| (seq.clone(), *support, *weight, *end))
+            .collect();
         let mut merged: Vec<(Vec<u8>, f64, u64, bool, End)> = Vec::new();
         for (seq, support, _, boundary, weight, end) in candidates {
             let matched = weight;
@@ -448,6 +452,21 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             accepted.push(seq.clone());
             if !member {
                 accepted_windows.push(windows);
+                // The other read end can hold a form of the family that
+                // ends at a different base on the insert side. It is kept
+                // beside the accepted form, so that an interior copy of it
+                // aligns without paying for bases it lacks.
+                let other_windows = match end {
+                    End::Five => &three_sample,
+                    End::Three => &five_sample,
+                };
+                if let Some(form) =
+                    other_end_form(&seq, end, &layer_candidates, other_windows, base.error_rate)
+                    && !distinct.iter().any(|(other, _, _, _, _)| *other == form.0)
+                {
+                    tracing::debug!(sequence = %String::from_utf8_lossy(&form.0), "Other end form");
+                    distinct.push((form.0, form.1, layer, flush, false));
+                }
             }
             distinct.push((seq, support, layer, flush, member));
         }

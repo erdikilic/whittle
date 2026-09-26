@@ -249,7 +249,16 @@ primers, and the primer layers behind it, are exempt: their mirrors lie at a
 depth set by how much outer adapter each end keeps, which differs between
 the 5' and 3' ends of nanopore reads. A candidate that occupies the same
 reads as a stronger candidate of its layer is a sequencing variant and is
-dropped. Candidates dominated by short
+dropped. The two ends of a library can read one adapter in forms that end at
+different bases on the insert side, as the two strands of a Y adapter do.
+When the other end's candidate of an accepted family, of at least 16 bases
+and half the accepted sequence, aligns inside it short of its inner end, that
+end's form is kept beside it: the candidate, extended outward with the
+accepted sequence's bases for as long as most of the other end's windows, and
+at least 20, carry them, since erosion at the physical end shortens it there.
+An interior copy of either form then aligns without paying for bases it
+lacks, and a junction holding the shorter form splits as one holding the
+longer does. Candidates dominated by short
 approximate repeats are rejected; candidate prevalence must exceed that in
 adjacent interior windows by more than fourfold. These checks allow minority
 families without treating any recurrent sequence as an adapter. Rare families,

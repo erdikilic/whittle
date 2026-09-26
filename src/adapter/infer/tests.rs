@@ -1419,3 +1419,111 @@ fn discovery_adds_no_degenerate_layer_before_an_at_rich_insert() {
         );
     }
 }
+
+/// Returns the configuration that trims with the discovered sequences.
+fn trimming_with(found: Vec<InferredAdapter>) -> AdapterConfig {
+    AdapterConfig {
+        adapters: found.into_iter().map(|d| d.adapter).collect(),
+        error_rate: 0.2,
+        end_size: 150,
+        split: true,
+        min_piece: 20,
+        candidate_index: std::sync::OnceLock::new(),
+    }
+}
+
+/// Reads with 2% errors whose adapter is read in two forms, as a sequencer
+/// reads the two strands of a Y adapter: the whole front form at every 5'
+/// end, and at every 3' end a rear form that lacks the first five bases and
+/// the last base of the front form. Both ends are eroded by a few bases.
+/// Returns the reads and the two forms.
+fn two_form_reads() -> (Vec<Vec<u8>>, Vec<u8>, Vec<u8>) {
+    let front = random_bases(9401, 28);
+    let rear = rc(&front[5..27]);
+    let reads = (0..1500u64)
+        .map(|i| {
+            let mut read = front[(i % 3) as usize..].to_vec();
+            read.extend(random_bases(96_000 + i, 1200));
+            read.extend_from_slice(&rear[..rear.len() - (i % 4) as usize]);
+            with_errors(&read, 97_000 + i, 20)
+        })
+        .collect();
+    (reads, front, rear)
+}
+
+/// An adapter whose rear form ends at a different base on the insert side
+/// is discovered in both forms, so a junction holding the rear form splits
+/// as one holding the front form does.
+#[test]
+fn each_end_keeps_its_own_form_of_a_shared_adapter() {
+    let (reads, front, rear) = two_form_reads();
+    let cfg = trimming_with(infer_owned(&reads));
+    for (seed, junction) in (0..16).map(|seed| (seed, if seed % 2 == 0 { &front } else { &rear })) {
+        let left = random_bases(98_001 + seed, 6000);
+        let right = random_bases(98_101 + seed, 6000);
+        let mut read = front.clone();
+        read.extend_from_slice(&left);
+        read.extend_from_slice(junction);
+        read.extend_from_slice(&right);
+        read.extend_from_slice(&rear);
+        let segments = crate::adapter::adapter_segments(&read, &cfg);
+        assert_eq!(segments.len(), 2, "{segments:?} {:?}", cfg.adapters);
+        let cut = front.len() + left.len();
+        let rejoin = cut + junction.len();
+        assert!(
+            segments[0].1.abs_diff(cut) <= 3 && segments[1].0.abs_diff(rejoin) <= 6,
+            "{segments:?}"
+        );
+    }
+}
+
+/// Reads of both strands with 2% errors of an amplicon library: the 16S
+/// 27F primer at the 5' end, the insert, and the 1492R primer at the 3' end.
+fn amplicon_reads() -> Vec<Vec<u8>> {
+    (0..1500u64)
+        .map(|i| {
+            let mut read = b"AGAGTTTGATCCTGGCTCAG"[(i % 3) as usize..].to_vec();
+            read.extend(random_bases(99_000 + i, 1400));
+            read.extend_from_slice(b"AAGTCGTAACAAGGTAACCGTA");
+            let read = with_errors(&read, 99_500 + i, 20);
+            if i % 2 == 1 { rc(&read) } else { read }
+        })
+        .collect()
+}
+
+/// Marker-gene primers discovered at the read ends keep the primer role: a
+/// primer alone inside a read, as at the rRNA operon site of a genomic
+/// insert, does not split it; beside the other primer, as at a junction of
+/// two amplicons, it does.
+#[test]
+fn discovered_marker_primers_split_only_beside_a_partner() {
+    let found = infer_owned(&amplicon_reads());
+    let markers: Vec<&InferredAdapter> = found
+        .iter()
+        .filter(|d| crate::adapter::matches_marker_primer(&d.adapter.seq, 0.2))
+        .collect();
+    assert_eq!(markers.len(), 2, "{found:?}");
+    assert!(
+        markers.iter().all(|d| d.adapter.role == Role::Primer),
+        "{found:?}"
+    );
+    let cfg = trimming_with(found);
+    let (left, right) = (random_bases(99_901, 1500), random_bases(99_902, 1500));
+    let mut site = left.clone();
+    site.extend_from_slice(b"AGAGTTTGATCCTGGCTCAG");
+    site.extend_from_slice(&right);
+    assert_eq!(
+        crate::adapter::adapter_segments(&site, &cfg),
+        vec![(0, site.len())]
+    );
+    let mut junction = left.clone();
+    junction.extend_from_slice(b"AAGTCGTAACAAGGTAACCGTA");
+    junction.extend_from_slice(b"AGAGTTTGATCCTGGCTCAG");
+    junction.extend_from_slice(&right);
+    assert_eq!(
+        crate::adapter::adapter_segments(&junction, &cfg).len(),
+        2,
+        "{:?}",
+        crate::adapter::adapter_segments(&junction, &cfg)
+    );
+}

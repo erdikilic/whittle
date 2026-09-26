@@ -102,6 +102,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Discovery keeps both forms of an adapter whose two read ends stop at
+  different bases on the insert side, as the two strands of a Y adapter do.
+  The other end's form, extended outward with the bases its reads carry, is
+  reported beside the accepted one, so a junction holding the shorter form
+  splits the read instead of paying edits for bases the form lacks.
 - Discovery learns a random tag, such as a UMI, behind a known or discovered
   layer. The tag has no recurrent k-mers; it is read from the base
   composition of each position behind the layer, written with ambiguity
