@@ -196,6 +196,9 @@ pub(super) struct Applied {
     clip_start: usize,
     /// See `Hit::clip_end`.
     clip_end: usize,
+    /// Whether the hit is one of a junction pair (`Keep::accept_pair`), which
+    /// backs a `CandidateIndex::paired` excision by itself.
+    joined: bool,
 }
 
 /// A terminal trim held until it is anchored at the read end or at an
@@ -381,6 +384,7 @@ impl<'a> Keep<'a> {
             end,
             clip_start,
             clip_end,
+            joined: false,
         };
         match action {
             HitAction::TrimFivePrime => {
@@ -397,6 +401,41 @@ impl<'a> Keep<'a> {
                 self.interior.push((start, end));
                 self.excised.push(applied);
             },
+        }
+    }
+
+    /// Excises both hits of a junction pair: `closing`, of the entry at
+    /// `closing_idx`, reads out of the insert before it, and `opening`, of the
+    /// entry at `opening_idx`, reads into the insert after it; see
+    /// `search_pairs`. A pair splits only when both hits lie outside both end
+    /// zones and the flank slack of either read end, and when each aligns
+    /// whole, leaving fewer than `MIN_OVERLAP` bases to clip.
+    pub(super) fn accept_pair(
+        &mut self,
+        (closing_idx, closing): (usize, Hit),
+        (opening_idx, opening): (usize, Hit),
+    ) {
+        let interior = |hit: &Hit| {
+            hit.start > FLANK_SLACK
+                && self.n - hit.end > FLANK_SLACK
+                && classify_terminal(hit.start, hit.end, self.n, self.end_size) == Terminal::None
+                && hit.clip_start + hit.clip_end < MIN_OVERLAP
+        };
+        if !self.split || !interior(&closing) || !interior(&opening) {
+            return;
+        }
+        for (adapter_idx, hit) in [(closing_idx, closing), (opening_idx, opening)] {
+            self.apply(
+                adapter_idx,
+                hit.start,
+                hit.end,
+                hit.cost,
+                (hit.clip_start, hit.clip_end),
+                HitAction::Excise,
+            );
+            if let Some(applied) = self.excised.last_mut() {
+                applied.joined = true;
+            }
         }
     }
 
@@ -519,7 +558,9 @@ impl<'a> Keep<'a> {
             .interior
             .iter()
             .zip(&self.excised)
-            .map(|(&cut, a)| !self.paired[a.adapter_idx] || self.backs(cut, a.adapter_idx))
+            .map(|(&cut, a)| {
+                !self.paired[a.adapter_idx] || a.joined || self.backs(cut, a.adapter_idx)
+            })
             .collect();
         let Keep {
             lo, hi, interior, ..

@@ -102,6 +102,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Two marker-gene primers side by side in the orientation of a chimera
+  junction split the read, the first reverse complemented as the end of one
+  molecule holds it and the second reading into the next, within 11 bases of
+  each other, whether the primers come from a preset, a FASTA or discovery.
+  Each primer of such a pair may carry up to its terminal edit budget, under
+  a pair budget that keeps chance pairs within the interior chance bound; a
+  primer alone, or two primers facing each other as the sites of a gene do,
+  still does not split. Junctions whose primers exceeded the interior budget
+  of a primer alone were left joined.
 - Discovery keeps the other read end's own form of an adapter family when
   the accepted form does not trim that end through it, as with a hairpin
   adapter read on the same strand at both ends. The form's first bases,

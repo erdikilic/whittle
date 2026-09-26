@@ -1482,6 +1482,172 @@ fn marker_primer_splits_only_beside_a_junction_partner() {
     );
 }
 
+/// Builds `left`, then each of `parts`, then `right`.
+fn joined(left: &[u8], parts: &[&[u8]], right: &[u8]) -> Vec<u8> {
+    let mut out = left.to_vec();
+    for part in parts {
+        out.extend_from_slice(part);
+    }
+    out.extend_from_slice(right);
+    out
+}
+
+/// Two marker primers adjacent in the orientation of a junction, the first
+/// reverse complemented as it closes one molecule and the second reading
+/// into the next, split the read even where each carries more edits than the
+/// interior budget allows a primer alone. Either primer alone stays.
+#[test]
+fn adjacent_marker_primer_pair_splits_beyond_the_interior_budget() {
+    let forward = b"AGAGTTTGATCCTGGCTCAG";
+    let reverse = b"TACGGTTACCTTGTTACGACTT";
+    let c = cfg_with(
+        vec![
+            entry("27F", forward, Role::Primer),
+            entry("1492R", reverse, Role::Primer),
+        ],
+        0.2,
+        150,
+        true,
+    );
+    let (left, right) = (splitmix_dna(41, 900), splitmix_dna(42, 900));
+    let closing = substituted(&reverse_complement(reverse), &[5, 11, 16]);
+    let opening = substituted(forward, &[4, 9, 14]);
+    let junction = joined(&left, &[&closing, &opening], &right);
+    let n = junction.len();
+    let index = CandidateIndex::new(&c.adapters, c.error_rate, c.end_size, true);
+    assert!(index.budgets.iter().all(|b| b.interior(n) < 3));
+    let cut = left.len() + closing.len() + opening.len();
+    assert_eq!(
+        adapter_segments(&junction, &c),
+        vec![(0, left.len()), (cut, n)]
+    );
+    for lone in [
+        joined(&left, &[&closing], &right),
+        joined(&left, &[&opening], &right),
+    ] {
+        assert_eq!(adapter_segments(&lone, &c), vec![(0, lone.len())]);
+    }
+}
+
+/// Two marker primers facing each other, as the two sites of an amplicon lie
+/// in a genome, do not form a junction, however close they are.
+#[test]
+fn marker_primers_facing_each_other_do_not_split() {
+    let forward = b"AGAGTTTGATCCTGGCTCAG";
+    let reverse = b"TACGGTTACCTTGTTACGACTT";
+    let c = cfg_with(
+        vec![
+            entry("27F", forward, Role::Primer),
+            entry("1492R", reverse, Role::Primer),
+        ],
+        0.2,
+        150,
+        true,
+    );
+    let (left, right) = (splitmix_dna(43, 900), splitmix_dna(44, 900));
+    let opening = substituted(forward, &[4, 9, 14]);
+    let closing = substituted(&reverse_complement(reverse), &[5, 11, 16]);
+    let inward = joined(&left, &[&opening, b"ACGTA", &closing], &right);
+    assert_eq!(adapter_segments(&inward, &c), vec![(0, inward.len())]);
+}
+
+/// One marker primer closing a molecule and again opening the next, as where
+/// a read continues into the reverse strand of another copy, is a junction.
+#[test]
+fn inverted_copies_of_one_marker_primer_split() {
+    let forward = b"AGAGTTTGATCCTGGCTCAG";
+    let c = cfg_with(vec![entry("27F", forward, Role::Primer)], 0.2, 150, true);
+    let (left, right) = (splitmix_dna(45, 900), splitmix_dna(46, 900));
+    let closing = substituted(&reverse_complement(forward), &[4, 10, 15]);
+    let opening = substituted(forward, &[3, 8, 13]);
+    let junction = joined(&left, &[&closing, &opening], &right);
+    let cut = left.len() + closing.len() + opening.len();
+    assert_eq!(
+        adapter_segments(&junction, &c),
+        vec![(0, left.len()), (cut, junction.len())]
+    );
+}
+
+/// Marker primers cut short on their outer side, as discovery assembles them
+/// from eroded read ends, pair across the bases they lack at a junction that
+/// holds both primers whole.
+#[test]
+fn eroded_marker_primer_forms_pair_across_the_bases_they_lack() {
+    let forward = b"AGAGTTTGATCCTGGCTCAG";
+    let closing_whole = reverse_complement(b"TACGGTTACCTTGTTACGACTT");
+    let c = cfg_with(
+        vec![
+            entry("five", &forward[1..], Role::Primer),
+            entry("three", &closing_whole[..17], Role::Primer),
+        ],
+        0.2,
+        150,
+        true,
+    );
+    let (left, right) = (splitmix_dna(47, 900), splitmix_dna(48, 900));
+    let closing = substituted(&closing_whole, &[5, 11]);
+    let opening = substituted(forward, &[5, 10, 15]);
+    let junction = joined(&left, &[&closing, &opening], &right);
+    let n = junction.len();
+    let index = CandidateIndex::new(&c.adapters, c.error_rate, c.end_size, true);
+    assert!(index.budgets[0].interior(n) < 3 && index.budgets[1].interior(n) < 2);
+    let cut = left.len() + closing.len() + opening.len();
+    assert_eq!(
+        adapter_segments(&junction, &c),
+        vec![(0, left.len()), (cut, n)]
+    );
+}
+
+/// The pair budget of a marker primer never exceeds its terminal budget,
+/// does not grow with the read-length class, and keeps chance pairs of the
+/// set within the interior bound wherever an edit is admitted.
+#[test]
+fn pair_budgets_respect_the_interior_chance_bound() {
+    use super::preset::{Kit, preset};
+    let adapters = preset(&[Kit::Mab114, Kit::Lsk114]);
+    let index = CandidateIndex::new(&adapters, 0.2, 150, true);
+    let paired: Vec<usize> = (0..adapters.len()).filter(|&i| index.paired[i]).collect();
+    assert_eq!(paired.len(), 4);
+    for &i in &paired {
+        let budget = &index.budgets[i];
+        assert!(budget.k_pair[0] >= budget.interior_max());
+        assert!(budget.k_pair[0] <= budget.k_end);
+        assert!(budget.k_pair.windows(2).all(|pair| pair[0] >= pair[1]));
+    }
+    for class in 0..INTERIOR_CLASSES {
+        let rate: f64 = paired
+            .iter()
+            .map(|&i| {
+                chance_cumulative(&adapters[i].seq, index.budgets[i].k_pair[class])
+                    [index.budgets[i].k_pair[class]]
+            })
+            .sum();
+        let edited = paired.iter().any(|&i| index.budgets[i].k_pair[class] > 0);
+        let expected = rate * rate * PAIR_OFFSETS as f64 * interior_positions(class);
+        assert!(!edited || expected <= INTERIOR_CHANCE_HITS_PER_READ);
+    }
+    let unpaired = (0..adapters.len()).find(|&i| !index.paired[i]).unwrap();
+    assert_eq!(index.budgets[unpaired].k_pair, [0; INTERIOR_CLASSES]);
+}
+
+/// A marker primer's direction is read from the catalog primer it matches:
+/// as synthesized it reads into the insert, and its reverse complement, as a
+/// read's 3' end holds it, reads out of it.
+#[test]
+fn marker_primer_direction_follows_the_catalog_primer() {
+    assert_eq!(
+        marker_primer_opens(b"AGAGTTTGATCCTGGCTCAG", 0.2),
+        Some(true)
+    );
+    assert_eq!(marker_primer_opens(b"GAGTTTGATCATGGCTCAG", 0.2), Some(true));
+    assert_eq!(marker_primer_opens(b"AAGTCGTAACAAGGTAAC", 0.2), Some(false));
+    assert_eq!(
+        marker_primer_opens(b"TACGGTTACCTTGTTACGACTT", 0.2),
+        Some(true)
+    );
+    assert_eq!(marker_primer_opens(b"TTTCTGTTGGTGCTGATATTGC", 0.2), None);
+}
+
 /// A resolved 16S primer, alone or with a few bases of its neighbour, is a
 /// marker primer; an adapter assembled together with the primer behind it,
 /// or an unrelated primer, is not.

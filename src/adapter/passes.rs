@@ -520,6 +520,69 @@ pub(super) fn search_interior(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &
     }
 }
 
+/// Searches the `CandidateIndex::paired` entries over the interior of the
+/// read at their pair budget and excises every junction pair: a hit that
+/// reads out of the insert before it, followed by a hit that reads into the
+/// insert after it, starting within `FLANK_SLACK` bases of its end or
+/// overlapping it by at most as many. A chimera junction joins the end of one
+/// molecule to the start of the next, so it holds the primers of both beside
+/// each other in that orientation, whichever primers they are; the sites of a
+/// marker gene in a genome lie a gene apart and face each other. Of the
+/// overlapping hits of one entry, the cheapest stands for the occurrence.
+pub(super) fn search_pairs(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
+    let n = ctx.read.window.len();
+    let mut found: Vec<(usize, Hit)> = Vec::new();
+    for (adapter_idx, &paired) in ctx.index.paired.iter().enumerate() {
+        if !paired {
+            continue;
+        }
+        let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
+        let reach = len + k_end;
+        let start = (keep.end_size + 1).saturating_sub(reach);
+        let end = (n.saturating_sub(keep.end_size + 1) + reach).min(n);
+        if end <= start || end - start < len {
+            continue;
+        }
+        let first = found.len();
+        search(
+            engine,
+            ctx.index,
+            adapter_idx,
+            &ctx.cfg.adapters[adapter_idx].seq,
+            ctx.read.strands(start, end),
+            ctx.index.budgets[adapter_idx].pair(n),
+            |h| found.push((adapter_idx, shifted(h, start))),
+        );
+        let hits: Vec<Hit> = found[first..].iter().map(|&(_, h)| h).collect();
+        found.truncate(first);
+        found.extend(
+            hits.iter()
+                .filter(|h| {
+                    !hits.iter().any(|g| {
+                        g.rc == h.rc && g.cost < h.cost && g.start < h.end && h.start < g.end
+                    })
+                })
+                .map(|&h| (adapter_idx, h)),
+        );
+    }
+    if found.len() < 2 {
+        return;
+    }
+    let opens = |&(adapter_idx, hit): &(usize, Hit)| ctx.index.opens[adapter_idx] != hit.rc;
+    for closing in found.iter().filter(|hit| !opens(hit)) {
+        for opening in found.iter().filter(|hit| opens(hit)) {
+            let (c, o) = (closing.1, opening.1);
+            if o.start > c.start
+                && o.end > c.end
+                && o.start <= c.end + FLANK_SLACK
+                && o.start + FLANK_SLACK >= c.end
+            {
+                keep.accept_pair(*closing, *opening);
+            }
+        }
+    }
+}
+
 /// Runs the terminal passes over the span: the batched and singleton
 /// whole-pattern searches, then the partial and residue searches over the
 /// ends they left untrimmed.
@@ -633,6 +696,7 @@ pub(super) fn segments_with(
     search_terminal(ctx, (0, n), engine, &mut keep);
     if cfg.split {
         search_interior(ctx, engine, &mut keep);
+        search_pairs(ctx, engine, &mut keep);
     }
     // A trim near an end found by the interior search can anchor a deferred
     // terminal hit, so deferred hits are settled before the tally counts the

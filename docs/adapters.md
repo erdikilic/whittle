@@ -40,6 +40,17 @@ exceptions:
   operon: another excision within 11 bases, or the other end's primer within
   the end zone, across the barcodes between them. A preset made only of
   amplicon kits (`mab114`) promotes them to adapters, which split alone.
+  Two of these primers also split a read where they lie side by side in the
+  orientation of a chimera junction, whether they come from a preset, a
+  FASTA or discovery: the first reverse complemented, as the end of one
+  molecule holds it, and the second as synthesized, reading into the next
+  molecule, the second starting within 11 bases of the end of the first or
+  overlapping it by at most 11. Any two of them pair, including two copies
+  of one primer. The two sites of a marker gene in a genome lie a gene
+  apart and face each other, so they never form such a pair. Each primer
+  of a pair may use up to its terminal budget, bounded jointly by the pair
+  budget below; a primer's direction is that of the catalog primer it
+  matches.
 - An interior hit splits only when the whole sequence aligns: a hit whose
   alignment leaves 10 or more bases to clip at its ends is dropped, as at a
   genomic primer site matched by an adapter assembled with its primer.
@@ -113,6 +124,14 @@ matches; give such entries the primer or barcode role in the FASTA header, or
 use `--adapter-ends-only`. This null model is a specificity guard, not a
 calibrated false-split probability for repetitive or composition-biased
 biological reads.
+
+The marker-gene primers of a pair share a pair budget. For each read-length
+class, it is the largest edit count per primer, at most its terminal budget,
+under which the expected chance pairs of the set in a read of that length
+stay within `1e-4`: any primer of the set followed by any primer at one of
+the 23 admitted offsets, so the chance rate of a pair at one position is the
+square of the summed chance rates of the primers. The largest contributors
+lose an edit first. Exact pairs are always accepted.
 Adapter trims pass through the same tag-rewrite path as
 every other trim, so `MM`/`ML`/`MN` and the per-base tags stay in register
 ([tags.md](tags.md)).

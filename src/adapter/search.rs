@@ -104,10 +104,10 @@ impl RcSearchAble for Strands<'_> {
     }
 }
 
-/// One approximate match of a pattern in the text. Strand is not exposed: a
-/// reverse-complement hit occupies the same text span, which is all the trimmer
-/// needs. The overhang fields are in text orientation and are zero unless the
-/// searcher was built with an overhang cost.
+/// One approximate match of a pattern in the text. A reverse-complement hit
+/// occupies the same text span as a forward one; `rc` records which strand
+/// matched. The overhang fields are in text orientation and are zero unless
+/// the searcher was built with an overhang cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
     /// Start of the span in the text, inclusive.
@@ -126,6 +126,8 @@ pub struct Hit {
     pub clip_start: usize,
     /// Text bases at the hit end that the alignment leaves to the text.
     pub clip_end: usize,
+    /// Whether the pattern matched as its reverse complement.
+    pub rc: bool,
 }
 
 impl Hit {
@@ -148,6 +150,7 @@ impl Hit {
             right_overhang,
             clip_start,
             clip_end,
+            rc,
         }
     }
 }
@@ -213,7 +216,7 @@ pub fn encoded_pattern_hits(
     mut accept: impl FnMut(usize, Hit),
 ) {
     debug_assert_eq!(text.len(), reversed.len());
-    let whole = |m: &sassy::Match, start: usize, end: usize, (clip_start, clip_end)| Hit {
+    let whole = |m: &sassy::Match, start: usize, end: usize, (clip_start, clip_end), rc| Hit {
         start,
         end,
         // The cost is within the non-negative budget `k`; see `Hit::from_match`.
@@ -222,9 +225,16 @@ pub fn encoded_pattern_hits(
         right_overhang: 0,
         clip_start,
         clip_end,
+        rc,
     };
     for m in searcher.search_encoded_patterns(&encoded.forward, text, k) {
-        let hit = whole(m, m.text_start, m.text_end, super::refine::clips(m, false));
+        let hit = whole(
+            m,
+            m.text_start,
+            m.text_end,
+            super::refine::clips(m, false),
+            false,
+        );
         accept(m.pattern_idx, hit);
     }
     let n = text.len();
@@ -237,6 +247,7 @@ pub fn encoded_pattern_hits(
             n - m.text_end,
             n - m.text_start,
             (on_reversed_end, on_reversed_start),
+            true,
         );
         accept(m.pattern_idx, hit);
     }

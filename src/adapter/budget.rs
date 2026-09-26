@@ -77,18 +77,7 @@ pub(super) fn family_budgets(
     positions: f64,
     bound: f64,
 ) -> Vec<usize> {
-    let mut groups: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
-    for (adapter_idx, adapter) in adapters.iter().enumerate() {
-        if included[adapter_idx] {
-            let forward = adapter.seq.to_ascii_uppercase();
-            let reverse = reverse_complement(&forward);
-            groups
-                .entry(forward.min(reverse))
-                .or_default()
-                .push(adapter_idx);
-        }
-    }
-    let members: Vec<Vec<usize>> = groups.into_values().collect();
+    let members = distinct_groups(adapters, included);
     let mut edits: Vec<usize> = members
         .iter()
         .map(|group| group.iter().map(|&i| caps[i]).min().unwrap_or(0))
@@ -119,13 +108,89 @@ pub(super) fn family_budgets(
             }
         }
     }
+    spread(&members, &edits, caps)
+}
+
+/// Returns the entries flagged in `included`, grouped by sequence: a sequence
+/// and its reverse complement form one group.
+fn distinct_groups(adapters: &[Adapter], included: &[bool]) -> Vec<Vec<usize>> {
+    let mut groups: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+    for (adapter_idx, adapter) in adapters.iter().enumerate() {
+        if included[adapter_idx] {
+            let forward = adapter.seq.to_ascii_uppercase();
+            let reverse = reverse_complement(&forward);
+            groups
+                .entry(forward.min(reverse))
+                .or_default()
+                .push(adapter_idx);
+        }
+    }
+    groups.into_values().collect()
+}
+
+/// Returns `caps` with the budget of each group in `edits` given to its
+/// members.
+fn spread(members: &[Vec<usize>], edits: &[usize], caps: &[usize]) -> Vec<usize> {
     let mut out = caps.to_vec();
-    for (group, &k) in members.iter().zip(&edits) {
+    for (group, &k) in members.iter().zip(edits) {
         for &adapter_idx in group {
             out[adapter_idx] = k;
         }
     }
     out
+}
+
+/// Start positions of the second primer of a junction pair relative to the
+/// end of the first: it may begin up to `FLANK_SLACK` bases after it or
+/// overlap it by as many.
+pub(super) const PAIR_OFFSETS: usize = 2 * FLANK_SLACK + 1;
+
+/// Returns budgets, at most `caps`, under which chance junction pairs of the
+/// entries flagged in `included` stay within `bound` expected per read over
+/// `positions` start positions. A pair is any flagged sequence followed, at
+/// one of `PAIR_OFFSETS` offsets, by any flagged sequence, so the chance rate
+/// of a pair at one position is the square of the summed chance rates of the
+/// sequences, times the offsets. The largest contributors lose one edit at a
+/// time, equal ones together, until the bound holds or no edits remain. A
+/// sequence and its reverse complement count once; unflagged entries keep
+/// their caps.
+pub(super) fn pair_budgets(
+    adapters: &[Adapter],
+    included: &[bool],
+    caps: &[usize],
+    positions: f64,
+    bound: f64,
+) -> Vec<usize> {
+    let members = distinct_groups(adapters, included);
+    let mut edits: Vec<usize> = members
+        .iter()
+        .map(|group| group.iter().map(|&i| caps[i]).min().unwrap_or(0))
+        .collect();
+    let chance: Vec<Vec<f64>> = members
+        .iter()
+        .zip(&edits)
+        .map(|(group, &k)| chance_cumulative(&adapters[group[0]].seq, k))
+        .collect();
+    let scale = positions * PAIR_OFFSETS as f64;
+    loop {
+        let rate: f64 = (0..members.len()).map(|g| chance[g][edits[g]]).sum();
+        if rate * rate * scale <= bound {
+            break;
+        }
+        let top = (0..members.len())
+            .filter(|&g| edits[g] > 0)
+            .map(|g| chance[g][edits[g]])
+            .fold(0.0, f64::max);
+        if top == 0.0 {
+            break;
+        }
+        for g in 0..members.len() {
+            if edits[g] > 0 && chance[g][edits[g]] >= top * (1.0 - 1e-9) {
+                edits[g] -= 1;
+            }
+        }
+    }
+    spread(&members, &edits, caps)
 }
 
 /// Edit budgets of one adapter: the configured terminal tolerance bounded by
@@ -144,6 +209,11 @@ pub(super) struct Budget {
     /// Edit budget for interior hits, per read-length class. Budgets do not
     /// increase with the class.
     pub(super) k_mid: [usize; INTERIOR_CLASSES],
+    /// Edit budget for an interior hit of a `CandidateIndex::paired` entry
+    /// beside its junction partner, per read-length class; see
+    /// `pair_budgets`. Zero for other entries. Budgets do not increase with
+    /// the class.
+    pub(super) k_pair: [usize; INTERIOR_CLASSES],
 }
 
 impl Budget {
@@ -185,6 +255,7 @@ impl Budget {
             k_end,
             k_far: k_end,
             k_mid,
+            k_pair: [0; INTERIOR_CLASSES],
         }
     }
 
@@ -196,6 +267,11 @@ impl Budget {
     /// Returns the largest interior edit budget over all read lengths.
     pub(super) fn interior_max(&self) -> usize {
         self.k_mid[0]
+    }
+
+    /// Returns the pair budget for a read of `read_len` bases.
+    pub(super) fn pair(&self, read_len: usize) -> usize {
+        self.k_pair[interior_class(read_len)]
     }
 }
 

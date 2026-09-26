@@ -54,8 +54,14 @@ pub(crate) struct CandidateIndex {
     /// marker-gene primer (`catalog::MARKER_PRIMERS`) in the primer role is
     /// one: its site is part of every genomic read through an rRNA operon,
     /// while a junction holds it beside the other end's primer or a barcode.
-    /// An amplicon-only preset gives it the adapter role instead.
+    /// An amplicon-only preset gives it the adapter role instead. Two such
+    /// hits adjacent in the orientation of a junction also split the read at
+    /// `Budget::k_pair`; see `search_pairs`.
     pub(super) paired: Vec<bool>,
+    /// Per-adapter, for a `paired` entry: whether its sequence as given reads
+    /// into the insert, as its primer is synthesized (`marker_primer_opens`).
+    /// A hit on the other strand reads out of the insert.
+    pub(super) opens: Vec<bool>,
 }
 
 /// Shortest run of `N` that marks a barcode construct: a barcode entry that
@@ -74,12 +80,6 @@ pub(super) fn bounds_barcode(adapter: &Adapter) -> bool {
             .any(|flank| seq == *flank || seq == reverse_complement(flank))
 }
 
-/// Returns whether `adapter` is a marker-gene primer in the primer role; see
-/// `matches_marker_primer`.
-fn is_marker_primer(adapter: &Adapter, error_rate: f64) -> bool {
-    adapter.role == Role::Primer && matches_marker_primer(&adapter.seq, error_rate)
-}
-
 /// Returns whether `seq` is a marker-gene primer: it and a
 /// `catalog::MARKER_PRIMERS` entry differ in length by fewer than
 /// `MIN_OVERLAP` bases, and the shorter aligns within the longer, on either
@@ -89,30 +89,50 @@ fn is_marker_primer(adapter: &Adapter, error_rate: f64) -> bool {
 /// of them; an adapter assembled together with the primer behind it, or a
 /// shorter sequence that aligns inside a primer by chance, is not.
 pub(crate) fn matches_marker_primer(seq: &[u8], error_rate: f64) -> bool {
+    marker_primer_opens(seq, error_rate).is_some()
+}
+
+/// Returns, for a marker-gene primer (`matches_marker_primer`), whether `seq`
+/// reads in the direction the primer is synthesized, into the insert on its
+/// 3' side, or `None` when `seq` is no marker primer. The catalog lists each
+/// primer as synthesized, so `seq` reads that way when it aligns to the
+/// primer's own strand; its reverse complement, as the 3' end of a read holds
+/// the primer, reads out of the insert. The cheapest alignment decides.
+pub(crate) fn marker_primer_opens(seq: &[u8], error_rate: f64) -> Option<bool> {
     let seq = seq.to_ascii_uppercase();
     let mut searcher = new_ambiguous_searcher();
-    super::catalog::MARKER_PRIMERS.iter().any(|&primer| {
-        if seq.len() >= primer.len() {
-            seq.len() < primer.len() + MIN_OVERLAP
-                && !search::hits(
+    super::catalog::MARKER_PRIMERS
+        .iter()
+        .filter_map(|&primer| {
+            if seq.len() >= primer.len() {
+                if seq.len() >= primer.len() + MIN_OVERLAP {
+                    return None;
+                }
+                search::hits(
                     &mut searcher,
                     primer,
                     &seq,
                     edit_budget(error_rate, primer.len()),
                 )
-                .is_empty()
-        } else {
-            seq.len() + MIN_OVERLAP > primer.len()
-                && search::hits(
+                .into_iter()
+                .min_by_key(|hit| hit.cost)
+            } else {
+                if seq.len() + MIN_OVERLAP <= primer.len() {
+                    return None;
+                }
+                search::hits(
                     &mut searcher,
                     &seq,
                     primer,
                     edit_budget(error_rate, seq.len()),
                 )
-                .iter()
-                .any(|hit| hit.start == 0 || hit.end == primer.len())
-        }
-    })
+                .into_iter()
+                .filter(|hit| hit.start == 0 || hit.end == primer.len())
+                .min_by_key(|hit| hit.cost)
+            }
+        })
+        .min_by_key(|hit| hit.cost)
+        .map(|hit| !hit.rc)
 }
 
 /// Returns `seq` with the ambiguity codes of the marker-gene primer it
@@ -297,6 +317,36 @@ impl CandidateIndex {
                 budget.k_mid[class] = k.min(previous);
             }
         }
+        // A marker primer pairs with a partner beside it under the pair
+        // budget, bounded per read-length class over the pairs of the set.
+        let senses: Vec<Option<bool>> = adapters
+            .iter()
+            .zip(&searchable)
+            .map(|(adapter, &searchable)| {
+                if searchable && adapter.role == Role::Primer {
+                    marker_primer_opens(&adapter.seq, error_rate)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let paired: Vec<bool> = senses.iter().map(Option::is_some).collect();
+        let caps: Vec<usize> = budgets.iter().map(|b| b.k_end).collect();
+        for class in 0..INTERIOR_CLASSES {
+            let edits = pair_budgets(
+                adapters,
+                &paired,
+                &caps,
+                interior_positions(class),
+                INTERIOR_CHANCE_HITS_PER_READ,
+            );
+            for ((budget, k), &paired) in budgets.iter_mut().zip(edits).zip(&paired) {
+                let previous = class
+                    .checked_sub(1)
+                    .map_or(usize::MAX, |c| budget.k_pair[c]);
+                budget.k_pair[class] = if paired { k.min(previous) } else { 0 };
+            }
+        }
         let plain: Vec<bool> = adapters
             .iter()
             .map(|adapter| is_plain_acgt(&adapter.seq))
@@ -414,10 +464,8 @@ impl CandidateIndex {
             end_reach,
             panel_gates: adapters.iter().map(bounds_barcode).collect(),
             split_classes,
-            paired: adapters
-                .iter()
-                .map(|adapter| is_marker_primer(adapter, error_rate))
-                .collect(),
+            opens: senses.iter().map(|sense| sense == &Some(true)).collect(),
+            paired,
         }
     }
 
