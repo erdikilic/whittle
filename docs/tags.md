@@ -74,7 +74,7 @@ discovery and trimming, on BAM and tagged FASTQ input. See
 
 Records written to `--rejected-output` carry `wr:Z:<reason>`, in the aux data of
 a BAM record or as a header field of a FASTQ record; see
-[cli.md](cli.md#rejected-outputput) for the reasons.
+[cli.md](cli.md#rejected-output) for the reasons.
 
 ## Tag removal
 

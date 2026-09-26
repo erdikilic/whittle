@@ -173,8 +173,10 @@ struct Cli {
     /// Maximum post-trim GC fraction (0 to 1; 0.4 means 40%).
     #[arg(short = 'G', long, value_name = "FRACTION", help_heading = "Filtering")]
     max_gc: Option<f64>,
-    /// Quality calculation used by --min-quality and --max-quality on each
-    /// output segment. Does not affect trimming, best-segment selection or splitting.
+    /// Quality calculation of the mean-quality filter, --min-quality and
+    /// --max-quality, on each output segment. --quality-trim and
+    /// --max-expected-errors use per-base qualities and are unaffected; a
+    /// recomputed dorado qs tag is always the error-probability mean.
     #[arg(
         short = 'm',
         long = "quality-mode",

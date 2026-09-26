@@ -89,7 +89,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --quality-trim en
 | `-Q, --max-quality <PHRED>` | Maximum post-trim segment quality, a finite value of at least 0 (default 1000) |
 | `--max-expected-errors <E>` | Maximum expected errors per output segment, the sum of its per-base error probabilities; a finite value of at least 0 |
 | `-g, --min-gc <FRACTION>`, `-G, --max-gc <FRACTION>` | GC-fraction bounds (0 to 1; `0.4` means 40%) |
-| `-m, --quality-mode <MODE>` | Quality calculation for `--min-quality`/`--max-quality` only: `mean` (mean error probability as a Phred score, the default), `arithmetic` (mean of the Phred scores), `median` |
+| `-m, --quality-mode <MODE>` | Quality calculation of the mean-quality filter, `--min-quality`/`--max-quality`, only: `mean` (mean error probability as a Phred score, the default), `arithmetic` (mean of the Phred scores), `median` |
 | `--tag-filter <EXPR>` | Keep only reads whose aux tags satisfy EXPR (samtools `-e` syntax over `[tag]` values); repeatable, every expression must hold; applied before adapter discovery and trimming (BAM or tagged FASTQ input) |
 | `-H, --trim-front <BASES>`, `-T, --trim-tail <BASES>` | Fixed crop from each adapter-derived segment after barcode restriction and before quality processing; applied once |
 | `--quality-trim <METHOD>` | Quality trimming of each adapter-derived segment: `ends`, `best`, `segments` or `runs` ([below](#quality-filtering-and-trimming)); requires `--quality-cutoff` |
@@ -127,15 +127,41 @@ sampled records remain in the processing stream.
 
 ## Quality filtering and trimming
 
+### Mean quality
+
 `--quality-mode` determines the segment-level score used by `--min-quality`
-and `--max-quality`. It does not affect trimming, best-segment selection, or
-split locations.
+and `--max-quality`. It applies to this mean-quality filter only. The
+`--quality-trim` methods and `--max-expected-errors` work on per-base
+qualities or error probabilities and are not affected, and a recomputed
+dorado `qs` tag is always the error-probability mean over the kept segment.
 
 | Mode | Calculation |
 |---|---|
 | `mean` (default) | Average per-base error probabilities, then convert the average to a Phred score |
 | `arithmetic` | Average the numerical Phred scores directly |
 | `median` | Take the median Phred score |
+
+The default `mean` averages the per-base error probabilities and converts the
+average back to a Phred score, as dorado, chopper, NanoFilt and Filtlong do.
+`--min-quality Q` in this mode keeps a segment whose expected error rate, its
+expected errors divided by its length, is at most `10^(-Q/10)`: the test of
+`vsearch --fastq_maxee_rate`. `arithmetic` averages the Phred values, as fastp
+and fastplong do. It weighs each base by its score rather than by its error
+probability, so on reads with many bases at the quality cap it gives much
+higher values than `mean`, and the same `--min-quality` keeps more reads.
+
+dorado computes its `qs` tag over the bases after the first 60, so
+`--min-quality` and a read's `qs` can differ, most on reads whose first bases
+are of low quality. `--tag-filter '[qs]>=10'` filters on dorado's own value,
+before any trimming. A trimmed record's `qs` is recomputed over the whole kept
+segment, the first 60 bases included.
+
+On PacBio HiFi, base QVs are binned on current instruments and the read
+accuracy is in the `rq` tag. Filter HiFi reads with
+`--tag-filter '[rq]>=0.99'` rather than with a mean recomputed from binned
+QVs. Quality trimming is rarely needed for HiFi reads.
+
+### Expected errors
 
 `--max-expected-errors E` rejects a segment whose expected errors, the sum of
 its per-base error probabilities `10^(-Q/10)` (Edgar and Flyvbjerg 2015),
@@ -151,6 +177,8 @@ amplicons, targeted panels and DADA2-style workflows. On genomic long reads,
 whose lengths vary by orders of magnitude, it would reject long reads for
 their length alone; `--min-quality` is the bound for them.
 
+### Quality trimming
+
 `--quality-trim METHOD` trims each segment from adapter processing, after the
 fixed crop, against `--quality-cutoff PHRED`. The cutoff has no default: the
 right value depends on the platform and basecaller, so it is always given.
@@ -163,7 +191,10 @@ right value depends on the platform and basecaller, so it is always given.
 | `runs` | The pieces between runs of at least `--min-low-quality-run` consecutive bases below PHRED |
 
 `ends` compares individual base scores with PHRED, removing bases from each end
-until a base meets the threshold. `runs` removes stretches of consecutive bases
+until a base meets the threshold. It stops at the first base at or above
+PHRED, so a single good base inside a low-quality tail ends the trimming
+there. `best` and `segments` score the whole tail, so an isolated good base
+does not stop them. `runs` removes stretches of consecutive bases
 below PHRED when they reach `--min-low-quality-run BASES`. Shorter internal
 stretches remain in their piece; low-quality bases at piece ends are trimmed.
 
@@ -212,6 +243,23 @@ whittle -i reads.fastq.gz -o trimmed.fastq.gz \
   --quality-trim runs --quality-cutoff 9 --min-low-quality-run 50 \
   --min-quality 12 --quality-mode median
 ```
+
+### Choosing a quality operation
+
+- **No quality trimming.** Most long-read uses need none: adapter trimming
+  with a length and quality filter (`-l`, `-q`) keeps whole reads, which
+  aligners and assemblers handle better than reads cut at local quality dips.
+- **`best`** for reads with low-quality ends. It keeps one segment per
+  adapter-derived segment and is not stopped by isolated good bases.
+- **`segments`** for reads with low-quality interior regions. It keeps both
+  flanks of a weak region, including regions that mix low and moderate bases,
+  and `--quality-end-cutoff` trims the piece ends more strictly than the
+  split.
+- **`runs`** when a split must require a minimum run of consecutive bases
+  below the cutoff, set with `--min-low-quality-run`.
+- **`ends`** for plain end trimming to the first good base.
+- **`--max-expected-errors`** for amplicons of a fixed length, next to or
+  instead of `-q`.
 
 The command splits at at least 50 consecutive bases below Q9, then keeps
 segments with median quality of at least Q12. Length and GC filters also apply

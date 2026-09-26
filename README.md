@@ -168,6 +168,16 @@ consecutive low-quality bases that split a read under `runs`.
 a stricter cutoff than the split, so a read splits only at long weak interior
 regions while its ends are trimmed more strictly.
 
+Notes on quality filtering ([details](docs/cli.md#quality-filtering-and-trimming)):
+
+- The default `mean` averages per-base error probabilities and converts back to Phred, as dorado, chopper, NanoFilt and Filtlong do; `-q Q` then keeps segments whose expected error rate (expected errors divided by length) is at most `10^(-Q/10)`, the test of `vsearch --fastq_maxee_rate`. `arithmetic` averages Phred values, as fastp and fastplong do, and gives much higher values on reads with many bases at the quality cap.
+- `--quality-mode` affects only `-q`/`-Q`. The trimming methods and `--max-expected-errors` use per-base qualities, and a recomputed dorado `qs` tag is always the error-probability mean of the kept segment.
+- dorado computes `qs` over the bases after the first 60, so `-q` and a read's `qs` can differ; `--tag-filter '[qs]>=10'` filters on dorado's own value.
+- PacBio HiFi base QVs are binned on current instruments and read accuracy is in the `rq` tag: filter HiFi reads with `--tag-filter '[rq]>=0.99'` rather than a mean recomputed from binned QVs. Quality trimming is rarely needed for HiFi.
+- `-q` limits the error rate per base whatever the length; `--max-expected-errors` limits the total per segment, so long reads need a higher per-base accuracy to pass. Use it for fixed-length amplicons, not for genomic long reads.
+- `--quality-trim ends` stops at the first base at or above the cutoff, so a single good base inside a low-quality tail ends trimming; `best` and `segments` score the whole tail and do not stop there.
+- Most long-read uses need no quality trimming, only a length and quality filter. Use `best` for reads with low-quality ends and `segments` for reads with low-quality interior regions.
+
 `--head-crop` and `--tail-crop` are aliases for `--trim-front` and `--trim-tail`.
 Both accept a base count and retain the short options `-H` and `-T`.
 
