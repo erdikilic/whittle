@@ -152,6 +152,16 @@ detection for the combined FASTA and preset set. `--adapter-sample-reads 0`
 also disables detection and searches the full set. If detection finds nothing,
 whittle warns and falls back to the full set.
 
+With `--adapter-discover`, discovery starts behind every preset entry, and
+detection over the discovery sample then narrows the preset's barcode entries
+in the set trimmed against. The barcode constructs and the flanks between a
+barcode and the insert that the reads do not carry are dropped, since a
+barcode panel leaves its junctions to them. When none of them remains, the
+panel splits its own junctions, and its absent barcodes and the other absent
+barcode flanks are dropped as well, since a splitting sequence takes part in
+the interior chance bound of the set. The other adapters and primers of the
+preset are kept. A FASTA disables this narrowing as well.
+
 Adapter samples are bounded by 256 MiB of retained payload and 64 Mi bases as
 well as `--adapter-sample-reads`. The last sampled record is retained whole;
 the actual sample size is reported, and all sampled reads are processed.

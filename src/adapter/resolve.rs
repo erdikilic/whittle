@@ -277,8 +277,15 @@ where
                 );
             }
         }
-        // Known sequences stay in the set; discoveries extend it.
-        let mut reduced = base;
+        // Known sequences stay in the set; discoveries extend it. Discovery
+        // starts behind every preset entry, while the preset's barcode
+        // entries that the sampled reads do not carry leave the set trimmed
+        // against. A supplied FASTA is searched in full.
+        let mut reduced = if cfg.adapter_fasta.is_none() {
+            without_absent_barcodes(&sample, &seq_of, base, cfg.threads)
+        } else {
+            base
+        };
         let mut adapters = reduced.adapters.clone();
         adapters.extend(discovered.into_iter().map(|d| d.adapter));
         reduced.replace_adapters(adapters);
@@ -351,6 +358,59 @@ where
     }))
 }
 
+/// Removes from `ac` the barcode entries that presence detection
+/// (`detect::present`) does not find in the sampled reads, in two steps.
+/// First the absent entries that bound a barcode (`bounds_barcode`) go: the
+/// barcode constructs and the flanks between a barcode and the insert. A
+/// barcode panel leaves its junctions to them, so one that the reads do not
+/// carry would keep the panel from splitting. When none of them remains, the
+/// panel splits its own junctions, and its absent members and the other
+/// absent barcode-role entries go too, since a splitting entry takes part in
+/// the interior chance bound of the set. The other adapters and primers are
+/// kept. A sample below `detect::MIN_SAMPLE_FOR_DETECTION`, or a set without
+/// barcode entries, is returned as given.
+fn without_absent_barcodes<R, F>(
+    sample: &[R],
+    seq_of: &F,
+    ac: super::AdapterConfig,
+    threads: usize,
+) -> super::AdapterConfig
+where
+    F: for<'a> Fn(&'a R) -> Cow<'a, [u8]>,
+{
+    let s = sample.len();
+    let barcoded = ac
+        .adapters
+        .iter()
+        .any(|a| a.role == super::Role::Barcode || super::bounds_barcode(a));
+    if s < detect::MIN_SAMPLE_FOR_DETECTION || !barcoded {
+        return ac;
+    }
+    let detected = with_sequences(sample, seq_of, |seqs| {
+        detect::present(seqs, &ac, detect::presence_min(s), threads)
+    });
+    let mut kept: Vec<super::Adapter> = ac
+        .adapters
+        .iter()
+        .filter(|a| !super::bounds_barcode(a) || detected.contains(a))
+        .cloned()
+        .collect();
+    if !kept.iter().any(super::bounds_barcode) {
+        kept.retain(|a| a.role != super::Role::Barcode || detected.contains(a));
+    }
+    if kept.len() < ac.adapters.len() {
+        tracing::info!(
+            reads = s,
+            dropped = ac.adapters.len() - kept.len(),
+            configured = ac.adapters.len(),
+            "Adapter presence: barcode entries absent from the sampled prefix are not searched"
+        );
+    }
+    let mut reduced = ac;
+    reduced.replace_adapters(kept);
+    reduced
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +450,97 @@ mod tests {
         .unwrap();
         assert_eq!(sample.len(), 2);
         assert_eq!(records.count(), 18);
+    }
+
+    /// Deterministic bases from a SplitMix64 stream.
+    fn bases(mut state: u64, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                b"ACGT"[((z ^ (z >> 31)) >> 62) as usize]
+            })
+            .collect()
+    }
+
+    /// Builds a set at error rate 0.2 from `(name, sequence, role)` entries.
+    fn set(entries: Vec<(&str, Vec<u8>, crate::adapter::Role)>) -> crate::adapter::AdapterConfig {
+        crate::adapter::AdapterConfig {
+            adapters: entries
+                .into_iter()
+                .map(|(name, seq, role)| crate::adapter::Adapter {
+                    name: name.into(),
+                    seq,
+                    role,
+                })
+                .collect(),
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+            min_piece: 20,
+            candidate_index: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Returns the names of the entries of `ac` kept for 200 reads that each
+    /// start with `lead`.
+    fn kept_names(ac: crate::adapter::AdapterConfig, lead: &[u8]) -> Vec<String> {
+        let reads: Vec<Vec<u8>> = (0..200)
+            .map(|i| [lead, &bases(100 + i, 600)].concat())
+            .collect();
+        without_absent_barcodes(&reads, &|r: &Vec<u8>| Cow::Borrowed(&r[..]), ac, 1)
+            .adapters
+            .into_iter()
+            .map(|a| a.name)
+            .collect()
+    }
+
+    /// A barcode construct the reads do not carry is dropped, and with no
+    /// flank or construct left the absent barcodes go too; every other
+    /// entry, present or not, is kept.
+    #[test]
+    fn absent_barcode_bounds_and_then_absent_barcodes_are_dropped() {
+        use crate::adapter::Role;
+        let adapter = bases(1, 30);
+        let present = bases(2, 24);
+        let mut construct = bases(3, 20);
+        construct.extend(std::iter::repeat_n(b'N', 24));
+        construct.extend(bases(4, 8));
+        let ac = set(vec![
+            ("adapter", adapter.clone(), Role::Adapter),
+            ("absent_adapter", bases(5, 30), Role::Adapter),
+            ("construct", construct, Role::Barcode),
+            ("present", present.clone(), Role::Barcode),
+            ("absent", bases(6, 24), Role::Barcode),
+        ]);
+        assert_eq!(
+            kept_names(ac, &[adapter, present].concat()),
+            ["adapter", "absent_adapter", "present"]
+        );
+    }
+
+    /// While a barcode flank the reads carry remains, the barcodes leave
+    /// their junctions to it and the absent ones are kept; an absent
+    /// construct is still dropped.
+    #[test]
+    fn absent_barcodes_stay_beside_a_present_flank() {
+        use crate::adapter::Role;
+        let flank = b"CCATATCCGTGTCGCCCTT".to_vec();
+        let present = bases(2, 24);
+        let mut construct = bases(3, 20);
+        construct.extend(std::iter::repeat_n(b'N', 24));
+        construct.extend(bases(4, 8));
+        let ac = set(vec![
+            ("construct", construct, Role::Barcode),
+            ("present", present.clone(), Role::Barcode),
+            ("absent", bases(6, 24), Role::Barcode),
+            ("flank", flank.clone(), Role::Barcode),
+        ]);
+        assert_eq!(
+            kept_names(ac, &[present, flank].concat()),
+            ["present", "absent", "flank"]
+        );
     }
 }

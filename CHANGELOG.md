@@ -102,6 +102,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- With `--adapter-discover`, the barcode constructs and barcode flanks of a
+  preset that the sampled reads do not carry are dropped from the set trimmed
+  against, and with them the absent barcodes once no flank or construct
+  remains. A barcode panel whose flanks are absent from the reads splits its
+  own junctions instead of leaving them to flanks that never match, and its
+  absent barcodes no longer tighten the interior budgets of the splitting
+  sequences. Discovery still starts behind every preset entry.
 - Two marker-gene primers side by side in the orientation of a chimera
   junction split the read, the first reverse complemented as the end of one
   molecule holds it and the second reading into the next, within 11 bases of
