@@ -415,6 +415,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         let mut accepted: Vec<Vec<u8>> = Vec::new();
         let mut accepted_windows: Vec<Vec<bool>> = Vec::new();
         let mut accepted_ends: Vec<End> = Vec::new();
+        let mut own_forms: Vec<(Vec<u8>, f64, End)> = Vec::new();
         for (seq, support, windows, own, boundary, end, matched) in ranked {
             // Members of a variable layer share their reads with the
             // constant layer behind them by construction.
@@ -467,8 +468,33 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                     tracing::debug!(sequence = %String::from_utf8_lossy(&form.0), "Other end form");
                     distinct.push((form.0, form.1, layer, flush, false));
                 }
+                // The other end can also read the family in a form that the
+                // accepted sequence does not trim, such as the same strand
+                // of a hairpin adapter; that form is a layer of its own end.
+                if let Some(own) =
+                    untrimmed_other_end(&seq, end, &layer_candidates, other_windows, base)
+                {
+                    own_forms.push(own);
+                }
             }
             distinct.push((seq, support, layer, flush, member));
+        }
+        for (seq, support, end) in own_forms {
+            if accepted.contains(&seq) || distinct.iter().any(|(other, _, _, _, _)| *other == seq) {
+                continue;
+            }
+            tracing::debug!(sequence = %String::from_utf8_lossy(&seq), "Other end layer");
+            let flush = layer == 0
+                && known.is_empty()
+                && [(End::Five, &five_phys), (End::Three, &three_phys)]
+                    .iter()
+                    .any(|(end, phys)| {
+                        outer_depth(&mut searcher, &seq, phys, *end, base.error_rate)
+                            <= ADAPTER_FLUSH
+                    });
+            accepted_ends.push(end);
+            accepted.push(seq.clone());
+            distinct.push((seq, support, layer, flush, false));
         }
         tracing::debug!(
             layer = layer + 1,

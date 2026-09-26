@@ -102,6 +102,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Discovery keeps the other read end's own form of an adapter family when
+  the accepted form does not trim that end through it, as with a hairpin
+  adapter read on the same strand at both ends. The form's first bases,
+  which face the insert at that end, were left in the read, and no layer
+  behind the adapter at that end was learned, so its primer stayed as well.
 - Discovery keeps both forms of an adapter whose two read ends stop at
   different bases on the insert side, as the two strands of a Y adapter do.
   The other end's form, extended outward with the bases its reads carry, is

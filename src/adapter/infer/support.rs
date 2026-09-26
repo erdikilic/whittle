@@ -260,6 +260,83 @@ pub(super) fn other_end_form(
     Some((form, support))
 }
 
+/// Bases by which a trim may stop short of a candidate's inner edge and
+/// still count as trimming it, for alignment differences at the edge.
+const FORM_TRIM_SLACK: usize = 3;
+
+/// Returns the candidate of the other read end, with its support and end,
+/// that the family of `seq`, accepted at `end`, does not trim: the longest
+/// candidate of the other end, in `candidates` as `(sequence, support,
+/// weight, end)`, of at least `KMER_K` bases that shares the family
+/// (`same_family`), in whose `other_windows` a trim with `seq` alone stops
+/// more than `FORM_TRIM_SLACK` bases short of the candidate's inner edge in
+/// at least half of the windows that hold it. The other end then reads the
+/// family in a form of its own, with inner or outer bases that `seq` lacks,
+/// as a hairpin adapter read on the same strand at both ends is.
+pub(super) fn untrimmed_other_end(
+    seq: &[u8],
+    end: End,
+    candidates: &[(Vec<u8>, f64, u64, End)],
+    other_windows: &[&[u8]],
+    base: &AdapterConfig,
+) -> Option<(Vec<u8>, f64, End)> {
+    let family = AdapterConfig {
+        adapters: vec![Adapter {
+            name: "family".into(),
+            seq: seq.to_vec(),
+            role: Role::Adapter,
+        }],
+        error_rate: base.error_rate,
+        end_size: base.end_size,
+        split: false,
+        min_piece: 1,
+        candidate_index: std::sync::OnceLock::new(),
+    };
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    candidates
+        .iter()
+        .filter(|(other, _, _, other_end)| {
+            *other_end != end && other.len() >= KMER_K && same_family(seq, other, base.error_rate)
+        })
+        .filter(|(other, _, _, other_end)| {
+            let mut best: Vec<Option<(i32, usize, usize)>> = vec![None; other_windows.len()];
+            for hit in searcher.search_texts(
+                other,
+                other_windows,
+                edit_budget(base.error_rate, other.len()),
+            ) {
+                let entry = &mut best[hit.text_idx];
+                if entry.is_none_or(|(cost, _, _)| hit.cost < cost) {
+                    *entry = Some((hit.cost, hit.text_start, hit.text_end));
+                }
+            }
+            let (mut held, mut untrimmed) = (0, 0);
+            for (window, hit) in other_windows.iter().zip(&best) {
+                let Some((_, start, stop)) = *hit else {
+                    continue;
+                };
+                held += 1;
+                let kept = crate::adapter::adapter_segments(window, &family);
+                untrimmed += usize::from(match other_end {
+                    End::Five => kept
+                        .first()
+                        .is_some_and(|&(first, _)| first + FORM_TRIM_SLACK < stop),
+                    End::Three => kept
+                        .last()
+                        .is_some_and(|&(_, last)| last > start + FORM_TRIM_SLACK),
+                });
+            }
+            held >= MIN_SUPPORT_WINDOWS && untrimmed * 2 >= held
+        })
+        .max_by(|a, b| {
+            a.0.len()
+                .cmp(&b.0.len())
+                .then(a.2.cmp(&b.2))
+                .then(b.0.cmp(&a.0))
+        })
+        .map(|(other, support, _, other_end)| (other.clone(), *support, *other_end))
+}
+
 /// Returns whether the shorter of two candidates is a fragment of the
 /// longer: one family by `same_family`, with less than `MIN_PATTERN_LEN` of
 /// the shorter outside their longest common substring, as an end of the

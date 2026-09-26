@@ -1527,3 +1527,38 @@ fn discovered_marker_primers_split_only_beside_a_partner() {
         crate::adapter::adapter_segments(&junction, &cfg)
     );
 }
+
+/// The 3' windows of reads with 2% errors that carry one hairpin adapter on
+/// the same strand at both ends, as a polymerase reads it: the insert, then
+/// the adapter from its first base, eroded at the physical end by up to 7
+/// bases.
+fn hairpin_three_windows(hairpin: &[u8]) -> Vec<Vec<u8>> {
+    (0..600u64)
+        .map(|i| {
+            let mut window = random_bases(9600 + i, 150);
+            window.extend_from_slice(&hairpin[..hairpin.len() - (i % 8) as usize]);
+            with_errors(&window, 9700 + i, 20)
+        })
+        .collect()
+}
+
+/// A hairpin adapter whose 5' form lacks its first bases leaves them at
+/// every 3' end, where they face the insert: the 3' candidate that holds
+/// them is that end's own layer. A 3' candidate that the 5' form trims
+/// through is not.
+#[test]
+fn other_end_keeps_a_form_the_accepted_sequence_does_not_trim() {
+    let hairpin = random_bases(9501, 45);
+    let windows = hairpin_three_windows(&hairpin);
+    let windows: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
+    let base = trimming_with(Vec::new());
+    let accepted = hairpin[10..].to_vec();
+    let own = hairpin[..38].to_vec();
+    let candidates = vec![(own.clone(), 0.9, 1000, End::Three)];
+    let found = untrimmed_other_end(&accepted, End::Five, &candidates, &windows, &base);
+    assert_eq!(found, Some((own, 0.9, End::Three)));
+
+    let covered = hairpin[12..38].to_vec();
+    let candidates = vec![(covered, 0.9, 1000, End::Three)];
+    assert!(untrimmed_other_end(&accepted, End::Five, &candidates, &windows, &base).is_none());
+}

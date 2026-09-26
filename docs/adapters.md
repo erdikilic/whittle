@@ -258,7 +258,14 @@ accepted sequence's bases for as long as most of the other end's windows, and
 at least 20, carry them, since erosion at the physical end shortens it there.
 An interior copy of either form then aligns without paying for bases it
 lacks, and a junction holding the shorter form splits as one holding the
-longer does. Candidates dominated by short
+longer does. The other end can also read a family in a form of its own that
+the accepted sequence does not trim, as a hairpin adapter read on the same
+strand at both ends is: its first bases face the insert at the 3' end, where
+a sequence assembled at the eroded 5' end lacks them. A candidate of the other
+end of at least 16 bases in the family is a layer of that end when a trim with
+the accepted sequence alone stops more than 3 bases short of the candidate's
+inner edge in at least half of that end's windows holding it; discovery then
+continues behind it at that end. Candidates dominated by short
 approximate repeats are rejected; candidate prevalence must exceed that in
 adjacent interior windows by more than fourfold. These checks allow minority
 families without treating any recurrent sequence as an adapter. Rare families,
