@@ -93,6 +93,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `-H, --trim-front <BASES>`, `-T, --trim-tail <BASES>` | Fixed crop from each adapter-derived segment after barcode restriction and before quality processing; applied once |
 | `--trim-quality <PHRED>` | Trim both ends up to the first base of quality at least PHRED |
 | `--best-quality-segment <PHRED>` | Keep the highest-scoring segment using cumulative base-error probabilities and the Phred cutoff (modified Mott); may retain bases below the cutoff |
+| `--split-quality-segments <PHRED>` | Keep every maximal-scoring segment under the `--best-quality-segment` score (Ruzzo-Tompa); segments scoring below 50 error-free bases are dropped |
 | `--split-quality <PHRED>` | Split at consecutive bases below PHRED and keep each surviving segment |
 | `--split-min-low-quality-bases <BASES>` | Minimum consecutive bases below the splitting threshold required to split; shorter internal stretches are retained and low-quality ends are trimmed (default 1); requires `--split-quality` |
 | `--update-moves` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM; requires DNA or RNA model metadata in the read-group description) |
@@ -109,8 +110,9 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--progress <MODE>` | Progress reporting, independent of the log level: `auto` (default), `bar`, `plain`, `none` |
 | `--quiet` | Silence progress and the summary; warnings and errors still print. Conflicts with `-v` and `--progress` |
 
-`--trim-quality`, `--best-quality-segment`, and `--split-quality` are alternative
-strategies for one stage, so at most one is accepted. `-H`/`-T` combine with any
+`--trim-quality`, `--best-quality-segment`, `--split-quality-segments`, and
+`--split-quality` are alternative strategies for one stage, so at most one is
+accepted. `-H`/`-T` combine with any
 of them.
 
 An adapter source is `--adapter-fasta`, `--adapter-preset`, or
@@ -148,6 +150,29 @@ their segment; low-quality bases at segment ends are trimmed.
 modified Mott calculation can retain bases below PHRED. Each segment from
 adapter processing is evaluated separately, so an original read can still
 produce multiple outputs.
+
+`--split-quality-segments PHRED` keeps every maximal scoring segment under the
+same score: the maximal scoring subsequences of Ruzzo and Tompa (1999),
+computed in linear time. The best segment is one of them; the others are the
+best segments of the parts on either side, found recursively. Two high-quality
+regions stay separate when the bases between them cost more than the smaller
+of their two scores, so a read with a low-quality interior keeps both flanks.
+The split follows the score rather than a run of consecutive low-quality bases,
+so it also separates regions that mix bases below and above PHRED. Equal scores
+favor the longer segment, as in `--best-quality-segment`, and a read with one
+region above PHRED yields the same segment under both operations when that
+segment reaches the score floor.
+
+A segment is kept when its score is at least that of 50 error-free bases,
+`50 * 10^(-PHRED/10)`. An error-free base contributes the cutoff error
+probability, the largest score one base can add, and a base at the cutoff
+contributes nothing, so the floor is counted in error-free bases rather than in
+bases at the cutoff. Counted this way, the floor needs the same bases at any
+PHRED: 51 bases 20 Phred units above the cutoff, or 101 bases 3 units above
+it, and never fewer than 51 bases. Short high-scoring stretches inside
+low-quality regions fall below it and are removed with the low-quality bases.
+`--min-length` then filters the kept segments like the pieces of
+`--split-quality`; a segment below it is reported as `too_short`.
 
 ```bash
 whittle -i reads.fastq.gz -o trimmed.fastq.gz \
@@ -354,8 +379,8 @@ not describe a window inside the read, and `barcode_tag_unverified_reads`
 counts reads with a recorded barcode span at which no barcode sequence was
 found. All four are also reported on stderr at the end of the run.
 
-`reads.output` counts output segments, not input reads, so under `--split-quality`
-or chimera splitting it can exceed `reads.input`. The read-level buckets
+`reads.output` counts output segments, not input reads, so under `--split-quality`,
+`--split-quality-segments` or chimera splitting it can exceed `reads.input`. The read-level buckets
 `with_output`, `trimmed_to_nothing`, `all_filtered` and `tag_filtered` partition
 `reads.input`; `params.tag_filter` lists the expressions as written.
 

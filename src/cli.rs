@@ -200,7 +200,7 @@ struct Cli {
     )]
     tail_crop: usize,
     /// Trim both ends until reaching a base at or above PHRED.
-    /// Mutually exclusive with --best-quality-segment and --split-quality.
+    /// Mutually exclusive with the other quality operations.
     #[arg(long = "trim-quality", value_name = "PHRED", help_heading = "Trimming")]
     qual_trim: Option<u8>,
     /// Keep the highest-scoring segment using cumulative base-error
@@ -212,6 +212,16 @@ struct Cli {
         help_heading = "Trimming"
     )]
     qual_best_segment: Option<u8>,
+    /// Keep every maximal-scoring segment under the --best-quality-segment
+    /// score (Ruzzo-Tompa), so a low-quality interior splits the read and
+    /// both flanks are kept. Segments scoring below 50 error-free bases are
+    /// dropped. Applied separately to each adapter-derived segment.
+    #[arg(
+        long = "split-quality-segments",
+        value_name = "PHRED",
+        help_heading = "Trimming"
+    )]
+    qual_split_segments: Option<u8>,
     /// Split each cropped adapter-derived segment at consecutive bases below
     /// PHRED. Number the final segments in original-read order.
     /// --split-min-low-quality-bases sets the minimum number required to split.
@@ -447,6 +457,7 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
     let n_quality = [
         c.qual_trim.is_some(),
         c.qual_best_segment.is_some(),
+        c.qual_split_segments.is_some(),
         c.qual_split.is_some(),
     ]
     .iter()
@@ -454,7 +465,8 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
     .count();
     if n_quality > 1 {
         anyhow::bail!(
-            "--trim-quality, --best-quality-segment and --split-quality are mutually exclusive"
+            "--trim-quality, --best-quality-segment, --split-quality-segments and \
+             --split-quality are mutually exclusive"
         );
     }
     if c.qual_split.is_none() && c.qual_split_window.is_some() {
@@ -518,6 +530,9 @@ fn quality_op_for(c: &Cli) -> Option<QualityOp> {
     }
     if let Some(q) = c.qual_best_segment {
         return Some(QualityOp::BestSegment(q));
+    }
+    if let Some(q) = c.qual_split_segments {
+        return Some(QualityOp::SplitSegments(q));
     }
     c.qual_split.map(|cutoff| QualityOp::Split {
         cutoff,

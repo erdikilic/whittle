@@ -128,6 +128,23 @@ fn mutually_exclusive_quality_ops_error() {
 }
 
 #[test]
+fn split_quality_segments_excludes_the_other_quality_ops() {
+    for other in [
+        "--trim-quality",
+        "--best-quality-segment",
+        "--split-quality",
+    ] {
+        whittle()
+            .args(["--split-quality-segments", "10", other, "10"])
+            .args(["--input-format", "fastq"])
+            .write_stdin("@r1\nACGT\n+\nIIII\n")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("mutually exclusive"));
+    }
+}
+
+#[test]
 fn min_length_filters() {
     whittle()
         .args(["--min-length", "10", "--input-format", "fastq"])

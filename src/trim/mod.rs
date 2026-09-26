@@ -3,7 +3,7 @@
 
 pub mod strategies;
 
-use strategies::{best_segment, split_low_quality, trim_by_quality};
+use strategies::{best_segment, maximal_segments, split_low_quality, trim_by_quality};
 
 /// The quality-based operation applied within each adapter segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +12,9 @@ pub enum QualityOp {
     TrimQual(u8),
     /// The single highest-scoring segment (modified Mott).
     BestSegment(u8),
+    /// Every maximal scoring segment under the modified Mott score, above the
+    /// score floor of `strategies::MAXIMAL_SEGMENT_MIN_BASES`.
+    SplitSegments(u8),
     /// A split at runs of at least `window` bases below `cutoff`.
     Split {
         /// Phred cutoff below which a base counts as low quality.
@@ -81,6 +84,7 @@ pub fn apply(
             None => out.push((s, e)),
             Some(QualityOp::TrimQual(q)) => offset(trim_by_quality(wp, *q), out),
             Some(QualityOp::BestSegment(q)) => offset(best_segment(wp, *q), out),
+            Some(QualityOp::SplitSegments(q)) => offset(maximal_segments(wp, *q), out),
             Some(QualityOp::Split { cutoff, window }) => {
                 offset(split_low_quality(wp, *cutoff, *window), out)
             },
@@ -159,6 +163,24 @@ mod tests {
         assert_eq!(
             apply(&seq, &phred, &best, Some(&ac), None),
             vec![(24, 59), (108, 139)]
+        );
+    }
+
+    /// Each maximal segment of a cropped segment is offset back to read
+    /// coordinates.
+    #[test]
+    fn split_segments_are_offset_to_read_coordinates() {
+        let seq = vec![b'C'; 200];
+        let mut phred = vec![40; seq.len()];
+        phred[80..100].fill(2);
+        let plan = TrimPlan {
+            head: 3,
+            tail: 5,
+            quality: Some(QualityOp::SplitSegments(20)),
+        };
+        assert_eq!(
+            apply(&seq, &phred, &plan, None, None),
+            vec![(3, 80), (100, 195)]
         );
     }
 

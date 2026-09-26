@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--split-quality-segments <PHRED>` keeps every maximal scoring segment under
+  the `--best-quality-segment` score (Ruzzo and Tompa 1999) instead of the
+  best one alone, so a read with a low-quality interior keeps both flanks.
+  Segments scoring below 50 error-free bases are dropped; the kept segments
+  are named, filtered and counted like the pieces of `--split-quality`.
 - Adapter trimming is recorded in dorado's trim mode, merged with the input
   value in its `adapter,primer,barcode` grammar: the `tm` field of each `@RG`
   line in BAM output and the per-read `tm:Z` tag in tagged FASTQ output.

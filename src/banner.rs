@@ -115,6 +115,7 @@ pub(crate) fn filters_and_trim_line(
         trim_parts.push(match op {
             trim::QualityOp::TrimQual(q) => format!("trim quality <{q}"),
             trim::QualityOp::BestSegment(q) => format!("best segment >={q}"),
+            trim::QualityOp::SplitSegments(q) => format!("split segments >={q}"),
             trim::QualityOp::Split { cutoff, .. } => format!("split quality <{cutoff}"),
         });
     }
@@ -386,6 +387,9 @@ mod tests {
 
         t.quality = Some(trim::QualityOp::BestSegment(20));
         assert!(filters_and_trim_line(&f, &t).ends_with("trim: best segment >=20"));
+
+        t.quality = Some(trim::QualityOp::SplitSegments(10));
+        assert!(filters_and_trim_line(&f, &t).ends_with("trim: split segments >=10"));
 
         t.quality = Some(trim::QualityOp::Split {
             cutoff: 15,

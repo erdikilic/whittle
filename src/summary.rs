@@ -75,7 +75,7 @@ struct Params {
 /// The selected quality-trimming operation and its threshold.
 #[derive(Debug, Serialize)]
 struct QualityOpParams {
-    /// `trim`, `best_segment`, or `split`.
+    /// `trim`, `best_segment`, `split_segments`, or `split`.
     mode: &'static str,
     threshold: u8,
     /// Only meaningful for `split`; `None` otherwise.
@@ -249,6 +249,11 @@ impl Params {
                 },
                 QualityOp::BestSegment(q) => QualityOpParams {
                     mode: "best_segment",
+                    threshold: *q,
+                    window: None,
+                },
+                QualityOp::SplitSegments(q) => QualityOpParams {
+                    mode: "split_segments",
                     threshold: *q,
                     window: None,
                 },

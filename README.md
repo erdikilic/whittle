@@ -152,9 +152,10 @@ converted to Phred, the default), `arithmetic` (average Phred score), or
 | Fixed crop | `--trim-front BASES`, `--trim-tail BASES` | Remove a fixed number of bases from each adapter-derived segment's 5' and 3' ends after barcode restriction |
 | Quality end trimming | `--trim-quality PHRED` | Trim each end until reaching a base at or above the threshold |
 | Best segment | `--best-quality-segment PHRED` | Select the highest-scoring contiguous segment using cumulative error probabilities; bases below the threshold can be retained |
+| Maximal segments | `--split-quality-segments PHRED` | Keep every maximal-scoring segment under the best-segment score, so a low-quality interior region splits the read and both flanks are kept |
 | Quality splitting | `--split-quality PHRED`, `--split-min-low-quality-bases BASES` | Split at the specified number of consecutive bases below the threshold; retain shorter internal stretches |
 
-The three quality operations are mutually exclusive and apply separately to
+The four quality operations are mutually exclusive and apply separately to
 each segment produced by adapter processing. Filters apply after these
 operations. `--min-length` sets the minimum retained segment length;
 `--split-min-low-quality-bases` sets the number of low-quality bases required
@@ -172,7 +173,7 @@ follows this order:
 1. **Adapters.** Search the original read, trim terminal adapters, primers and barcodes, and split at interior ones. Clean each new end. Reads without a match continue as one segment.
 2. **Barcodes.** Barcode spans recorded in the `bi` tag are removed where a barcode sequence is found at them.
 3. **Fixed crop.** `--trim-front` and `--trim-tail` crop each retained adapter-derived segment once.
-4. **Quality.** Apply `--trim-quality`, `--best-quality-segment`, or `--split-quality` to each cropped segment. Quality splitting can produce further segments; these are not cropped again.
+4. **Quality.** Apply `--trim-quality`, `--best-quality-segment`, `--split-quality-segments`, or `--split-quality` to each cropped segment. The last two can produce further segments; these are not cropped again.
 5. **Filter.** Each final segment must pass the length, quality, and GC bounds.
 6. **Output.** Rewrite tags against each surviving interval and write the records.
 
@@ -213,7 +214,7 @@ Formats are taken from the path extension, a stream sniff, or `--input-format`/`
 - **`--min-length` applies after trimming**, per output segment, not to the raw read.
 - **BAM folder output requires matching read groups.** Conflicting definitions are rejected.
 - **Signal rewriting requires model direction.** `--update-moves` uses a DNA or RNA `basecall_model` in the BAM read-group description.
-- **One quality-trim strategy per run.** `--trim-quality`, `--best-quality-segment`, and `--split-quality` are mutually exclusive; `-H`/`-T` combine with any of them.
+- **One quality-trim strategy per run.** `--trim-quality`, `--best-quality-segment`, `--split-quality-segments`, and `--split-quality` are mutually exclusive; `-H`/`-T` combine with any of them.
 
 ## Citation
 

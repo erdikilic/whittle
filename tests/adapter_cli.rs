@@ -19,6 +19,7 @@ fn help_lists_the_quality_and_adapter_flags() {
         "--split-quality",
         "--trim-quality",
         "--best-quality-segment",
+        "--split-quality-segments",
         "--adapter-fasta",
         "--adapter-preset",
         "--adapter-error-rate",

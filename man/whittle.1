@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-trim\-quality\fR] [\fB\-\-best\-quality\-segment\fR] [\fB\-\-split\-quality\fR] [\fB\-\-split\-min\-low\-quality\-bases\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-report\fR] [\fB\-h\fR|\fB\-\-help\fR]
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-trim\-quality\fR] [\fB\-\-best\-quality\-segment\fR] [\fB\-\-split\-quality\-segments\fR] [\fB\-\-split\-quality\fR] [\fB\-\-split\-min\-low\-quality\-bases\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-report\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH OPTIONS
@@ -150,10 +150,13 @@ Remove this many bases from each adapter\-derived segment\*(Aqs 5\*(Aq end, afte
 Remove this many bases from each adapter\-derived segment\*(Aqs 3\*(Aq end, after barcode restriction and before quality processing. Applied once; quality\-split pieces are not cropped again
 .TP
 \fB\-\-trim\-quality\fR \fI<PHRED>\fR
-Trim both ends until reaching a base at or above PHRED. Mutually exclusive with \-\-best\-quality\-segment and \-\-split\-quality
+Trim both ends until reaching a base at or above PHRED. Mutually exclusive with the other quality operations
 .TP
 \fB\-\-best\-quality\-segment\fR \fI<PHRED>\fR
 Keep the highest\-scoring segment using cumulative base\-error probabilities and the PHRED cutoff (modified Mott). May retain bases below the cutoff. Applied separately to each adapter\-derived segment
+.TP
+\fB\-\-split\-quality\-segments\fR \fI<PHRED>\fR
+Keep every maximal\-scoring segment under the \-\-best\-quality\-segment score (Ruzzo\-Tompa), so a low\-quality interior splits the read and both flanks are kept. Segments scoring below 50 error\-free bases are dropped. Applied separately to each adapter\-derived segment
 .TP
 \fB\-\-split\-quality\fR \fI<PHRED>\fR
 Split each cropped adapter\-derived segment at consecutive bases below PHRED. Number the final segments in original\-read order. \-\-split\-min\-low\-quality\-bases sets the minimum number required to split
