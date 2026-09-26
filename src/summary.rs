@@ -80,6 +80,9 @@ struct QualityTrimParams {
     cutoff: u8,
     /// Only meaningful for `runs`; `None` otherwise.
     min_low_quality_run: Option<usize>,
+    /// The resolved `--quality-end-cutoff` of `segments` and `runs`; `None`
+    /// otherwise.
+    end_cutoff: Option<u8>,
 }
 
 /// The adapter-trimming settings and the configured and resolved set sizes.
@@ -246,6 +249,8 @@ impl Params {
                 cutoff: op.cutoff,
                 min_low_quality_run: (op.method == QualityMethod::Runs)
                     .then_some(op.min_low_quality_run),
+                end_cutoff: matches!(op.method, QualityMethod::Segments | QualityMethod::Runs)
+                    .then_some(op.end_cutoff),
             }),
             update_moves: cfg.update_moves,
             ordered: cfg.ordered,
@@ -385,6 +390,7 @@ mod tests {
         assert_eq!(v["params"]["quality_trim"]["method"], "runs");
         assert_eq!(v["params"]["quality_trim"]["cutoff"], 9);
         assert_eq!(v["params"]["quality_trim"]["min_low_quality_run"], 50);
+        assert_eq!(v["params"]["quality_trim"]["end_cutoff"], 9);
         assert_eq!(v["params"]["fastq_tags"], "all");
         // An unset `--max-length` is null, not `usize::MAX` leaking into the file.
         assert!(v["params"]["max_length"].is_null());

@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-quality\-trim\fR] [\fB\-\-quality\-cutoff\fR] [\fB\-\-min\-low\-quality\-run\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-report\fR] [\fB\-h\fR|\fB\-\-help\fR]
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-quality\-trim\fR] [\fB\-\-quality\-cutoff\fR] [\fB\-\-min\-low\-quality\-run\fR] [\fB\-\-quality\-end\-cutoff\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-report\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH OPTIONS
@@ -171,6 +171,9 @@ Phred cutoff of \-\-quality\-trim. Required with it
 .TP
 \fB\-\-min\-low\-quality\-run\fR \fI<BASES>\fR
 Minimum run of consecutive bases below \-\-quality\-cutoff that splits a read under \-\-quality\-trim runs; shorter runs stay inside their piece. Defaults to 1
+.TP
+\fB\-\-quality\-end\-cutoff\fR \fI<PHRED>\fR
+Trim the ends of every piece of \-\-quality\-trim segments or runs, split or not, up to the first base at or above PHRED, so a read splits only at long weak interior regions while its ends are trimmed more strictly. Defaults to \-\-quality\-cutoff
 .SH "ADAPTER TRIMMING"
 .TP
 \fB\-a\fR, \fB\-\-adapter\-fasta\fR \fI<FILE>\fR

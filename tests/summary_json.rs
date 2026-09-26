@@ -103,7 +103,7 @@ fn summary_records_the_resolved_parameters() {
         .args(["--summary-json", json.to_str().unwrap()])
         .args(["-t", "2", "-H", "3", "-T", "4", "-l", "5", "-q", "7"])
         .args(["--quality-trim", "runs", "--quality-cutoff", "9"])
-        .args(["--min-low-quality-run", "6"])
+        .args(["--min-low-quality-run", "6", "--quality-end-cutoff", "12"])
         .write_stdin(reads())
         .assert()
         .success();
@@ -117,6 +117,7 @@ fn summary_records_the_resolved_parameters() {
     assert_eq!(v["params"]["quality_trim"]["method"], "runs");
     assert_eq!(v["params"]["quality_trim"]["cutoff"], 9);
     assert_eq!(v["params"]["quality_trim"]["min_low_quality_run"], 6);
+    assert_eq!(v["params"]["quality_trim"]["end_cutoff"], 12);
     assert_eq!(v["input"], "<stdin>");
     assert!(
         v["command"]

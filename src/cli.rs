@@ -225,6 +225,16 @@ struct Cli {
         help_heading = "Trimming"
     )]
     min_low_quality_run: Option<usize>,
+    /// Trim the ends of every piece of --quality-trim segments or runs, split
+    /// or not, up to the first base at or above PHRED, so a read splits only at
+    /// long weak interior regions while its ends are trimmed more strictly.
+    /// Defaults to --quality-cutoff.
+    #[arg(
+        long = "quality-end-cutoff",
+        value_name = "PHRED",
+        help_heading = "Trimming"
+    )]
+    quality_end_cutoff: Option<u8>,
     /// Keep the ONT move table consistent through trimming (slice mv, update
     /// ts, ns, sp, pi and the poly-A tags) for signal-aware tools such as
     /// Remora and Clair3 v2, instead of dropping them. BAM-to-BAM only;
@@ -489,9 +499,9 @@ fn compression_level_for(c: &Cli) -> u8 {
     c.compression_level.unwrap_or(if out_is_gz { 4 } else { 6 })
 }
 
-/// Resolves `--quality-trim`, `--quality-cutoff` and `--min-low-quality-run`
-/// into the quality operation. The cutoff is required with a method, since no
-/// single value suits every platform and basecaller.
+/// Resolves `--quality-trim`, `--quality-cutoff`, `--min-low-quality-run` and
+/// `--quality-end-cutoff` into the quality operation. The cutoff is required
+/// with a method, since no single value suits every platform and basecaller.
 fn resolve_quality(c: &Cli) -> anyhow::Result<Option<QualityOp>> {
     if let Some(n) = c.min_low_quality_run {
         if c.quality_trim != Some(QualityMethod::Runs) {
@@ -500,6 +510,14 @@ fn resolve_quality(c: &Cli) -> anyhow::Result<Option<QualityOp>> {
         if n == 0 {
             anyhow::bail!("--min-low-quality-run must be at least 1");
         }
+    }
+    if c.quality_end_cutoff.is_some()
+        && !matches!(
+            c.quality_trim,
+            Some(QualityMethod::Segments | QualityMethod::Runs)
+        )
+    {
+        anyhow::bail!("--quality-end-cutoff requires --quality-trim segments or runs");
     }
     let Some(method) = c.quality_trim else {
         if c.quality_cutoff.is_some() {
@@ -512,6 +530,7 @@ fn resolve_quality(c: &Cli) -> anyhow::Result<Option<QualityOp>> {
     };
     Ok(Some(QualityOp {
         min_low_quality_run: c.min_low_quality_run.unwrap_or(1),
+        end_cutoff: c.quality_end_cutoff.unwrap_or(cutoff),
         ..QualityOp::new(method, cutoff)
     }))
 }

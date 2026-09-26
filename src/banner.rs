@@ -116,6 +116,9 @@ pub(crate) fn filters_and_trim_line(
         if op.method == trim::QualityMethod::Runs {
             part.push_str(&format!(" run {}", op.min_low_quality_run));
         }
+        if op.end_cutoff > op.cutoff {
+            part.push_str(&format!(" ends Q{}", op.end_cutoff));
+        }
         trim_parts.push(part);
     }
     let trim_str = if trim_parts.is_empty() {
@@ -392,6 +395,12 @@ mod tests {
 
         t.quality = Some(trim::QualityOp::runs(15, 50));
         assert!(filters_and_trim_line(&f, &t).ends_with("trim: quality runs Q15 run 50"));
+
+        t.quality = Some(trim::QualityOp {
+            end_cutoff: 20,
+            ..trim::QualityOp::new(trim::QualityMethod::Segments, 10)
+        });
+        assert!(filters_and_trim_line(&f, &t).ends_with("trim: quality segments Q10 ends Q20"));
 
         // Head and tail only (no quality op): no trailing quality-op clause.
         t.quality = None;

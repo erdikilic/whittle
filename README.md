@@ -161,6 +161,9 @@ required with it. The method applies separately to each segment produced by
 adapter processing, and the filters apply after it. `--min-length` sets the
 minimum retained segment length; `--min-low-quality-run` sets the number of
 consecutive low-quality bases that split a read under `runs`.
+`--quality-end-cutoff` trims the ends of every `segments` or `runs` piece at
+a stricter cutoff than the split, so a read splits only at long weak interior
+regions while its ends are trimmed more strictly.
 
 `--head-crop` and `--tail-crop` are aliases for `--trim-front` and `--trim-tail`.
 Both accept a base count and retain the short options `-H` and `-T`.

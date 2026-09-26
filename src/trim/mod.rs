@@ -41,6 +41,10 @@ pub struct QualityOp {
     /// Minimum run of bases below `cutoff` that splits a read under
     /// `QualityMethod::Runs`; 1 for the other methods.
     pub min_low_quality_run: usize,
+    /// Phred cutoff at which each piece of `QualityMethod::Segments` or
+    /// `QualityMethod::Runs` has its ends trimmed after the split; equal to
+    /// `cutoff` unless set.
+    pub end_cutoff: u8,
 }
 
 impl QualityOp {
@@ -51,6 +55,7 @@ impl QualityOp {
             method,
             cutoff,
             min_low_quality_run: 1,
+            end_cutoff: cutoff,
         }
     }
 
@@ -64,13 +69,28 @@ impl QualityOp {
     }
 
     /// Returns the intervals of `phred` the operation keeps, in its coordinates.
+    ///
+    /// Every piece of `Segments` and `Runs` starts and ends at a base at or
+    /// above `cutoff`, so the end trim changes a piece only when `end_cutoff`
+    /// is higher; a piece with no base at or above it is dropped.
     fn apply(&self, phred: &[u8]) -> Vec<(usize, usize)> {
-        match self.method {
-            QualityMethod::Ends => trim_by_quality(phred, self.cutoff),
-            QualityMethod::Best => best_segment(phred, self.cutoff),
+        let pieces = match self.method {
+            QualityMethod::Ends => return trim_by_quality(phred, self.cutoff),
+            QualityMethod::Best => return best_segment(phred, self.cutoff),
             QualityMethod::Segments => maximal_segments(phred, self.cutoff),
             QualityMethod::Runs => split_low_quality(phred, self.cutoff, self.min_low_quality_run),
+        };
+        if self.end_cutoff <= self.cutoff {
+            return pieces;
         }
+        pieces
+            .into_iter()
+            .flat_map(|(s, e)| {
+                trim_by_quality(&phred[s..e], self.end_cutoff)
+                    .into_iter()
+                    .map(move |(ts, te)| (s + ts, s + te))
+            })
+            .collect()
     }
 }
 
@@ -224,6 +244,114 @@ mod tests {
             apply(&seq, &phred, &plan, None, None),
             vec![(3, 80), (100, 195)]
         );
+    }
+
+    /// A read the method leaves whole has its ends trimmed at the stricter end
+    /// cutoff under both splitting methods.
+    #[test]
+    fn end_cutoff_trims_the_ends_of_an_unsplit_read() {
+        let phred = [vec![12u8; 5], vec![30; 100], vec![12; 5]].concat();
+        let seq = vec![b'A'; phred.len()];
+        for method in [QualityMethod::Segments, QualityMethod::Runs] {
+            let op = QualityOp::new(method, 10);
+            let plan = |quality| TrimPlan {
+                quality: Some(quality),
+                ..TrimPlan::default()
+            };
+            assert_eq!(
+                apply(&seq, &phred, &plan(op.clone()), None, None),
+                vec![(0, 110)],
+                "{method:?}"
+            );
+            let strict = QualityOp {
+                end_cutoff: 20,
+                ..op
+            };
+            assert_eq!(
+                apply(&seq, &phred, &plan(strict), None, None),
+                vec![(5, 105)],
+                "{method:?}"
+            );
+        }
+    }
+
+    /// Every piece of a split read has both of its ends trimmed at the end
+    /// cutoff, including the ends facing the low-quality region, and a piece
+    /// left with no base at or above the end cutoff is dropped.
+    #[test]
+    fn end_cutoff_trims_every_piece_of_a_split_read() {
+        let phred = [
+            vec![12u8; 5],
+            vec![30; 80],
+            vec![12; 3],
+            vec![2; 30],
+            vec![14; 4],
+            vec![30; 80],
+            vec![12; 5],
+            vec![2; 30],
+            vec![15; 60],
+        ]
+        .concat();
+        let seq = vec![b'A'; phred.len()];
+        let runs = TrimPlan {
+            quality: Some(QualityOp {
+                end_cutoff: 20,
+                ..QualityOp::runs(10, 10)
+            }),
+            ..TrimPlan::default()
+        };
+        assert_eq!(
+            apply(&seq, &phred, &runs, None, None),
+            vec![(5, 85), (122, 202)]
+        );
+        let segments = TrimPlan {
+            quality: Some(QualityOp {
+                end_cutoff: 20,
+                ..QualityOp::new(QualityMethod::Segments, 10)
+            }),
+            ..TrimPlan::default()
+        };
+        assert_eq!(
+            apply(&seq, &phred, &segments, None, None),
+            vec![(5, 85), (122, 202)]
+        );
+    }
+
+    /// An end cutoff at or below the method cutoff changes nothing: every
+    /// piece already starts and ends at a base at or above the method cutoff.
+    #[test]
+    fn end_cutoff_at_or_below_the_cutoff_keeps_the_method_output() {
+        let mut state = 5u64;
+        for _ in 0..500 {
+            let len = 1 + (lcg(&mut state) % 400) as usize;
+            let phred: Vec<u8> = (0..len).map(|_| (lcg(&mut state) % 40) as u8).collect();
+            let seq = vec![b'A'; len];
+            for op in [
+                QualityOp::runs(12, 3),
+                QualityOp::new(QualityMethod::Segments, 12),
+            ] {
+                let plan = |quality| TrimPlan {
+                    quality: Some(quality),
+                    ..TrimPlan::default()
+                };
+                let want = apply(&seq, &phred, &plan(op.clone()), None, None);
+                for end_cutoff in [0, 7, 12] {
+                    let lower = QualityOp {
+                        end_cutoff,
+                        ..op.clone()
+                    };
+                    assert_eq!(apply(&seq, &phred, &plan(lower), None, None), want);
+                }
+            }
+        }
+    }
+
+    /// A deterministic linear congruential generator for the randomized tests.
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state >> 33
     }
 
     #[test]

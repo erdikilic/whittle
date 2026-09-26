@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one alone, so a read with a low-quality interior keeps both flanks.
   Segments scoring below 50 error-free bases are dropped; the kept segments
   are named, filtered and counted like the pieces of `runs`.
+- `--quality-end-cutoff <PHRED>` trims the ends of every piece of
+  `--quality-trim segments` or `runs`, split or not, up to the first base at
+  or above PHRED, so a read splits at `--quality-cutoff` while its ends are
+  trimmed more strictly. It defaults to `--quality-cutoff`, which leaves the
+  output unchanged, and is reported as `params.quality_trim.end_cutoff`.
 - Adapter trimming is recorded in dorado's trim mode, merged with the input
   value in its `adapter,primer,barcode` grammar: the `tm` field of each `@RG`
   line in BAM output and the per-read `tm:Z` tag in tagged FASTQ output.

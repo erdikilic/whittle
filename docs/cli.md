@@ -94,6 +94,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --quality-trim en
 | `--quality-trim <METHOD>` | Quality trimming of each adapter-derived segment: `ends`, `best`, `segments` or `runs` ([below](#quality-filtering-and-trimming)); requires `--quality-cutoff` |
 | `--quality-cutoff <PHRED>` | Phred cutoff of `--quality-trim`; required with it and rejected without it |
 | `--min-low-quality-run <BASES>` | Consecutive bases below the cutoff that split a read under `--quality-trim runs`; shorter runs stay inside their piece (default 1) |
+| `--quality-end-cutoff <PHRED>` | Trim the ends of every piece of `--quality-trim segments` or `runs` up to the first base at or above PHRED (default `--quality-cutoff`) |
 | `--update-moves` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM; requires DNA or RNA model metadata in the read-group description) |
 | `--remove-tag <TAGS>` | Remove aux tags from every output record; comma-separated and repeatable; an item is a two-character tag or a group: `kinetics` (`ip pw fi fp ri rp sa sm sx`), `mods` (`MM ML MN`), `signal` (`mv ts ns sp pi`) (BAM or tagged FASTQ input) |
 | `-a, --adapter-fasta <FILE>` | Adapter and primer FASTA (IUPAC codes accepted; `primer` or `barcode` in a header description restricts the entry to the read ends); enables adapter trimming |
@@ -178,6 +179,18 @@ it, and never fewer than 51 bases. Short high-scoring stretches inside
 low-quality regions fall below it and are removed with the low-quality bases.
 `--min-length` then filters the kept segments like the pieces of `runs`; a
 segment below it is reported as `too_short`.
+
+`--quality-end-cutoff PHRED` separates the strictness of the split from that
+of the ends under `segments` and `runs`: the method splits at
+`--quality-cutoff`, then every piece, including a read that was not split,
+has its ends trimmed as `ends` does at the end cutoff, up to the first base
+at or above it. A piece with no such base is dropped, and `--min-length`
+applies afterwards. A low `--quality-cutoff` with a higher end cutoff splits a
+read only at long weak interior regions while trimming its ends more
+strictly. The default equals `--quality-cutoff`, and a value at or below it
+changes nothing, since every piece already starts and ends at a base at or
+above `--quality-cutoff`. The end trim does not revisit the score floor of
+`segments`.
 
 ```bash
 whittle -i reads.fastq.gz -o trimmed.fastq.gz \

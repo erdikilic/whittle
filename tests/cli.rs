@@ -153,6 +153,32 @@ fn quality_trim_flag_combinations_are_validated() {
             &["--quality-trim", "middle", "--quality-cutoff", "10"],
             "invalid value",
         ),
+        (
+            &[
+                "--quality-trim",
+                "ends",
+                "--quality-cutoff",
+                "10",
+                "--quality-end-cutoff",
+                "20",
+            ],
+            "--quality-end-cutoff requires --quality-trim segments or runs",
+        ),
+        (
+            &[
+                "--quality-trim",
+                "best",
+                "--quality-cutoff",
+                "10",
+                "--quality-end-cutoff",
+                "20",
+            ],
+            "--quality-end-cutoff requires --quality-trim segments or runs",
+        ),
+        (
+            &["--quality-end-cutoff", "20"],
+            "--quality-end-cutoff requires --quality-trim segments or runs",
+        ),
     ] {
         whittle()
             .args(args)
