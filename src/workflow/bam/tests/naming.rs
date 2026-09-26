@@ -19,14 +19,7 @@ fn split_sets_rn_to_minus_one_without_update_moves() {
         Some(Value::Int32(7))
     );
 
-    let cfg = cfg_bam2fq(
-        Some(QualityOp::Split {
-            cutoff: 20,
-            window: 1,
-        }),
-        0,
-        FastqTags::All,
-    );
+    let cfg = cfg_bam2fq(Some(QualityOp::runs(20, 1)), 0, FastqTags::All);
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
         [Ok(raw_record(&src))].into_iter(),
@@ -226,10 +219,7 @@ fn adapter_and_quality_splits_retain_original_barcode_and_pacbio_coordinates() {
     let mut cfg = split_cfg();
     cfg.trim.head = 3;
     cfg.trim.tail = 5;
-    cfg.trim.quality = Some(QualityOp::Split {
-        cutoff: 9,
-        window: 4,
-    });
+    cfg.trim.quality = Some(QualityOp::runs(9, 4));
     cfg.filter.min_length = 20;
     cfg.adapters = Some(AdapterConfig {
         adapters: vec![Adapter {

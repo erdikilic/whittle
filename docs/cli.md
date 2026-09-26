@@ -65,7 +65,7 @@ Conflicting definitions or different read-group sets fail the run. Only the
 first header is written; FASTQ output does not require matching read groups.
 
 ```bash
-whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
+whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --quality-trim ends --quality-cutoff 10
 ```
 
 ## Options
@@ -91,11 +91,9 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `-m, --quality-mode <MODE>` | Quality calculation for `--min-quality`/`--max-quality` only: `mean` (mean error probability as a Phred score, the default), `arithmetic` (mean of the Phred scores), `median` |
 | `--tag-filter <EXPR>` | Keep only reads whose aux tags satisfy EXPR (samtools `-e` syntax over `[tag]` values); repeatable, every expression must hold; applied before adapter discovery and trimming (BAM or tagged FASTQ input) |
 | `-H, --trim-front <BASES>`, `-T, --trim-tail <BASES>` | Fixed crop from each adapter-derived segment after barcode restriction and before quality processing; applied once |
-| `--trim-quality <PHRED>` | Trim both ends up to the first base of quality at least PHRED |
-| `--best-quality-segment <PHRED>` | Keep the highest-scoring segment using cumulative base-error probabilities and the Phred cutoff (modified Mott); may retain bases below the cutoff |
-| `--split-quality-segments <PHRED>` | Keep every maximal-scoring segment under the `--best-quality-segment` score (Ruzzo-Tompa); segments scoring below 50 error-free bases are dropped |
-| `--split-quality <PHRED>` | Split at consecutive bases below PHRED and keep each surviving segment |
-| `--split-min-low-quality-bases <BASES>` | Minimum consecutive bases below the splitting threshold required to split; shorter internal stretches are retained and low-quality ends are trimmed (default 1); requires `--split-quality` |
+| `--quality-trim <METHOD>` | Quality trimming of each adapter-derived segment: `ends`, `best`, `segments` or `runs` ([below](#quality-filtering-and-trimming)); requires `--quality-cutoff` |
+| `--quality-cutoff <PHRED>` | Phred cutoff of `--quality-trim`; required with it and rejected without it |
+| `--min-low-quality-run <BASES>` | Consecutive bases below the cutoff that split a read under `--quality-trim runs`; shorter runs stay inside their piece (default 1) |
 | `--update-moves` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM; requires DNA or RNA model metadata in the read-group description) |
 | `--remove-tag <TAGS>` | Remove aux tags from every output record; comma-separated and repeatable; an item is a two-character tag or a group: `kinetics` (`ip pw fi fp ri rp sa sm sx`), `mods` (`MM ML MN`), `signal` (`mv ts ns sp pi`) (BAM or tagged FASTQ input) |
 | `-a, --adapter-fasta <FILE>` | Adapter and primer FASTA (IUPAC codes accepted; `primer` or `barcode` in a header description restricts the entry to the read ends); enables adapter trimming |
@@ -110,10 +108,8 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --trim-quality 10
 | `--progress <MODE>` | Progress reporting, independent of the log level: `auto` (default), `bar`, `plain`, `none` |
 | `--quiet` | Silence progress and the summary; warnings and errors still print. Conflicts with `-v` and `--progress` |
 
-`--trim-quality`, `--best-quality-segment`, `--split-quality-segments`, and
-`--split-quality` are alternative strategies for one stage, so at most one is
-accepted. `-H`/`-T` combine with any
-of them.
+`--quality-trim` selects one method for the quality stage. `-H`/`-T` combine
+with any of them.
 
 An adapter source is `--adapter-fasta`, `--adapter-preset`, or
 `--adapter-discover`. `--adapter-error-rate`, `--adapter-end-search`, and
@@ -139,29 +135,38 @@ split locations.
 | `arithmetic` | Average the numerical Phred scores directly |
 | `median` | Take the median Phred score |
 
-`--trim-quality PHRED` compares individual base scores with PHRED, removing
-bases from each end until a base meets the threshold. `--split-quality PHRED`
-removes stretches of consecutive bases below PHRED when they reach
-`--split-min-low-quality-bases BASES`. Shorter internal stretches remain in
-their segment; low-quality bases at segment ends are trimmed.
+`--quality-trim METHOD` trims each segment from adapter processing, after the
+fixed crop, against `--quality-cutoff PHRED`. The cutoff has no default: the
+right value depends on the platform and basecaller, so it is always given.
 
-`--best-quality-segment PHRED` maximizes the cumulative score
-`10^(-PHRED/10) - 10^(-base_quality/10)` over a contiguous segment. This
-modified Mott calculation can retain bases below PHRED. Each segment from
-adapter processing is evaluated separately, so an original read can still
-produce multiple outputs.
+| Method | Keeps |
+|---|---|
+| `ends` | The segment left after removing bases from each end up to the first base at or above PHRED |
+| `best` | The contiguous segment with the highest modified Mott score; bases below PHRED can be kept |
+| `segments` | Every maximal scoring segment under the modified Mott score |
+| `runs` | The pieces between runs of at least `--min-low-quality-run` consecutive bases below PHRED |
 
-`--split-quality-segments PHRED` keeps every maximal scoring segment under the
-same score: the maximal scoring subsequences of Ruzzo and Tompa (1999),
-computed in linear time. The best segment is one of them; the others are the
-best segments of the parts on either side, found recursively. Two high-quality
-regions stay separate when the bases between them cost more than the smaller
-of their two scores, so a read with a low-quality interior keeps both flanks.
-The split follows the score rather than a run of consecutive low-quality bases,
-so it also separates regions that mix bases below and above PHRED. Equal scores
-favor the longer segment, as in `--best-quality-segment`, and a read with one
-region above PHRED yields the same segment under both operations when that
-segment reaches the score floor.
+`ends` compares individual base scores with PHRED, removing bases from each end
+until a base meets the threshold. `runs` removes stretches of consecutive bases
+below PHRED when they reach `--min-low-quality-run BASES`. Shorter internal
+stretches remain in their piece; low-quality bases at piece ends are trimmed.
+
+`best` maximizes the cumulative score `10^(-PHRED/10) - 10^(-base_quality/10)`
+over a contiguous segment (modified Mott, as in phred). It can retain bases
+below PHRED. Each segment from adapter processing is evaluated separately, so
+an original read can still produce multiple outputs.
+
+`segments` keeps every maximal scoring segment under the same score: the
+maximal scoring subsequences of Ruzzo and Tompa (1999), computed in linear
+time. The best segment is one of them; the others are the best segments of
+the parts on either side, found recursively. Two high-quality regions stay
+separate when the bases between them cost more than the smaller of their two
+scores, so a read with a low-quality interior keeps both flanks. The split
+follows the score rather than a run of consecutive low-quality bases, so it
+also separates regions that mix bases below and above PHRED. Equal scores
+favor the longer segment, as in `best`, and a read with one region above
+PHRED yields the same segment under both methods when that segment reaches
+the score floor.
 
 A segment is kept when its score is at least that of 50 error-free bases,
 `50 * 10^(-PHRED/10)`. An error-free base contributes the cutoff error
@@ -171,12 +176,12 @@ bases at the cutoff. Counted this way, the floor needs the same bases at any
 PHRED: 51 bases 20 Phred units above the cutoff, or 101 bases 3 units above
 it, and never fewer than 51 bases. Short high-scoring stretches inside
 low-quality regions fall below it and are removed with the low-quality bases.
-`--min-length` then filters the kept segments like the pieces of
-`--split-quality`; a segment below it is reported as `too_short`.
+`--min-length` then filters the kept segments like the pieces of `runs`; a
+segment below it is reported as `too_short`.
 
 ```bash
 whittle -i reads.fastq.gz -o trimmed.fastq.gz \
-  --split-quality 9 --split-min-low-quality-bases 50 \
+  --quality-trim runs --quality-cutoff 9 --min-low-quality-run 50 \
   --min-quality 12 --quality-mode median
 ```
 
@@ -235,7 +240,7 @@ through these stages:
 2. Intersection of each segment with the verified barcode spans from the
    original `bi` tag, when an adapter source is given.
 3. Fixed cropping at both ends of each retained segment.
-4. Quality end trimming, best-segment selection, or quality splitting.
+4. Quality trimming by the `--quality-trim` method.
 5. Length, quality, and GC filtering of each final segment.
 6. Tag reconstruction and output of surviving segments.
 
@@ -358,7 +363,7 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
   "input": "reads.bam",
   "output": "trimmed.fastq.gz",
   "elapsed_seconds": 12.34,
-  "params": { "threads": 8, "ordered": false, "min_length": 500, "qual_mode": "mean", "quality_op": null,
+  "params": { "threads": 8, "ordered": false, "min_length": 500, "qual_mode": "mean", "quality_trim": null,
               "adapters": { "configured": 120, "count": 4, "sample": 500, "infer": "off" } },
   "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 20, "tag_filtered": 10 },
   "bases": { "input": 10000000, "output": 9500000 },
@@ -379,8 +384,9 @@ not describe a window inside the read, and `barcode_tag_unverified_reads`
 counts reads with a recorded barcode span at which no barcode sequence was
 found. All four are also reported on stderr at the end of the run.
 
-`reads.output` counts output segments, not input reads, so under `--split-quality`,
-`--split-quality-segments` or chimera splitting it can exceed `reads.input`. The read-level buckets
+`reads.output` counts output segments, not input reads, so under
+`--quality-trim segments` or `runs`, or chimera splitting, it can exceed
+`reads.input`. The read-level buckets
 `with_output`, `trimmed_to_nothing`, `all_filtered` and `tag_filtered` partition
 `reads.input`; `params.tag_filter` lists the expressions as written.
 

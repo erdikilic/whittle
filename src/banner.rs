@@ -112,12 +112,11 @@ pub(crate) fn filters_and_trim_line(
         trim_parts.push(format!("head {}, tail {}", trim.head, trim.tail));
     }
     if let Some(op) = &trim.quality {
-        trim_parts.push(match op {
-            trim::QualityOp::TrimQual(q) => format!("trim quality <{q}"),
-            trim::QualityOp::BestSegment(q) => format!("best segment >={q}"),
-            trim::QualityOp::SplitSegments(q) => format!("split segments >={q}"),
-            trim::QualityOp::Split { cutoff, .. } => format!("split quality <{cutoff}"),
-        });
+        let mut part = format!("quality {} Q{}", op.method.label(), op.cutoff);
+        if op.method == trim::QualityMethod::Runs {
+            part.push_str(&format!(" run {}", op.min_low_quality_run));
+        }
+        trim_parts.push(part);
     }
     let trim_str = if trim_parts.is_empty() {
         "none".to_string()
@@ -385,17 +384,14 @@ mod tests {
         let f = base_filter();
         let mut t = base_trim();
 
-        t.quality = Some(trim::QualityOp::BestSegment(20));
-        assert!(filters_and_trim_line(&f, &t).ends_with("trim: best segment >=20"));
+        t.quality = Some(trim::QualityOp::new(trim::QualityMethod::Best, 20));
+        assert!(filters_and_trim_line(&f, &t).ends_with("trim: quality best Q20"));
 
-        t.quality = Some(trim::QualityOp::SplitSegments(10));
-        assert!(filters_and_trim_line(&f, &t).ends_with("trim: split segments >=10"));
+        t.quality = Some(trim::QualityOp::new(trim::QualityMethod::Segments, 10));
+        assert!(filters_and_trim_line(&f, &t).ends_with("trim: quality segments Q10"));
 
-        t.quality = Some(trim::QualityOp::Split {
-            cutoff: 15,
-            window: 50,
-        });
-        assert!(filters_and_trim_line(&f, &t).ends_with("trim: split quality <15"));
+        t.quality = Some(trim::QualityOp::runs(15, 50));
+        assert!(filters_and_trim_line(&f, &t).ends_with("trim: quality runs Q15 run 50"));
 
         // Head and tail only (no quality op): no trailing quality-op clause.
         t.quality = None;
@@ -418,12 +414,12 @@ mod tests {
         let mut t = base_trim();
         t.head = 10;
         t.tail = 5;
-        t.quality = Some(trim::QualityOp::TrimQual(12));
+        t.quality = Some(trim::QualityOp::new(trim::QualityMethod::Ends, 12));
 
         assert_eq!(
             filters_and_trim_line(&f, &t),
             "Filters: length >=200 <=10000; median quality >=8 <=30; GC 0.4-0.6; \
-             trim: head 10, tail 5, trim quality <12"
+             trim: head 10, tail 5, quality ends Q12"
         );
     }
 

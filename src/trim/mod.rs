@@ -5,23 +5,73 @@ pub mod strategies;
 
 use strategies::{best_segment, maximal_segments, split_low_quality, trim_by_quality};
 
-/// The quality-based operation applied within each adapter segment.
+/// The quality trimming method, selected by `--quality-trim`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum QualityMethod {
+    /// Trim each end up to the first base at or above the cutoff
+    Ends,
+    /// Keep the single best segment under the modified Mott score
+    Best,
+    /// Keep every maximal segment under the modified Mott score
+    Segments,
+    /// Split at runs of --min-low-quality-run bases below the cutoff
+    Runs,
+}
+
+impl QualityMethod {
+    /// Lowercase label, as the command line, the banner and the summary spell
+    /// it.
+    pub fn label(self) -> &'static str {
+        match self {
+            QualityMethod::Ends => "ends",
+            QualityMethod::Best => "best",
+            QualityMethod::Segments => "segments",
+            QualityMethod::Runs => "runs",
+        }
+    }
+}
+
+/// The quality trimming applied within each adapter segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QualityOp {
-    /// Trimming of both ends up to the first base at or above the cutoff.
-    TrimQual(u8),
-    /// The single highest-scoring segment (modified Mott).
-    BestSegment(u8),
-    /// Every maximal scoring segment under the modified Mott score, above the
-    /// score floor of `strategies::MAXIMAL_SEGMENT_MIN_BASES`.
-    SplitSegments(u8),
-    /// A split at runs of at least `window` bases below `cutoff`.
-    Split {
-        /// Phred cutoff below which a base counts as low quality.
-        cutoff: u8,
-        /// Minimum run of low-quality bases that splits the read.
-        window: usize,
-    },
+pub struct QualityOp {
+    /// The trimming method.
+    pub method: QualityMethod,
+    /// Phred cutoff the method scores or compares each base against.
+    pub cutoff: u8,
+    /// Minimum run of bases below `cutoff` that splits a read under
+    /// `QualityMethod::Runs`; 1 for the other methods.
+    pub min_low_quality_run: usize,
+}
+
+impl QualityOp {
+    /// The operation `method` at `cutoff`, splitting at every low-quality base
+    /// under `QualityMethod::Runs`.
+    pub fn new(method: QualityMethod, cutoff: u8) -> Self {
+        QualityOp {
+            method,
+            cutoff,
+            min_low_quality_run: 1,
+        }
+    }
+
+    /// The `QualityMethod::Runs` operation at `cutoff`, splitting at runs of at
+    /// least `min_low_quality_run` bases below it.
+    pub fn runs(cutoff: u8, min_low_quality_run: usize) -> Self {
+        QualityOp {
+            min_low_quality_run,
+            ..QualityOp::new(QualityMethod::Runs, cutoff)
+        }
+    }
+
+    /// Returns the intervals of `phred` the operation keeps, in its coordinates.
+    fn apply(&self, phred: &[u8]) -> Vec<(usize, usize)> {
+        match self.method {
+            QualityMethod::Ends => trim_by_quality(phred, self.cutoff),
+            QualityMethod::Best => best_segment(phred, self.cutoff),
+            QualityMethod::Segments => maximal_segments(phred, self.cutoff),
+            QualityMethod::Runs => split_low_quality(phred, self.cutoff, self.min_low_quality_run),
+        }
+    }
 }
 
 /// The per-read trim configuration.
@@ -82,12 +132,7 @@ pub fn apply(
         };
         match &plan.quality {
             None => out.push((s, e)),
-            Some(QualityOp::TrimQual(q)) => offset(trim_by_quality(wp, *q), out),
-            Some(QualityOp::BestSegment(q)) => offset(best_segment(wp, *q), out),
-            Some(QualityOp::SplitSegments(q)) => offset(maximal_segments(wp, *q), out),
-            Some(QualityOp::Split { cutoff, window }) => {
-                offset(split_low_quality(wp, *cutoff, *window), out)
-            },
+            Some(op) => offset(op.apply(wp), out),
         }
     };
 
@@ -135,10 +180,7 @@ mod tests {
         let plan = TrimPlan {
             head: 3,
             tail: 5,
-            quality: Some(QualityOp::Split {
-                cutoff: 9,
-                window: 4,
-            }),
+            quality: Some(QualityOp::runs(9, 4)),
         };
         assert_eq!(
             apply(&seq, &phred, &plan, Some(&ac), None),
@@ -149,7 +191,7 @@ mod tests {
             vec![(13, 20), (24, 59), (83, 104), (108, 130)]
         );
         let end_trim = TrimPlan {
-            quality: Some(QualityOp::TrimQual(20)),
+            quality: Some(QualityOp::new(QualityMethod::Ends, 20)),
             ..plan.clone()
         };
         assert_eq!(
@@ -157,7 +199,7 @@ mod tests {
             vec![(3, 59), (83, 139)]
         );
         let best = TrimPlan {
-            quality: Some(QualityOp::BestSegment(20)),
+            quality: Some(QualityOp::new(QualityMethod::Best, 20)),
             ..plan
         };
         assert_eq!(
@@ -176,7 +218,7 @@ mod tests {
         let plan = TrimPlan {
             head: 3,
             tail: 5,
-            quality: Some(QualityOp::SplitSegments(20)),
+            quality: Some(QualityOp::new(QualityMethod::Segments, 20)),
         };
         assert_eq!(
             apply(&seq, &phred, &plan, None, None),
@@ -210,10 +252,7 @@ mod tests {
         let plan = TrimPlan {
             head: 3,
             tail: 5,
-            quality: Some(QualityOp::Split {
-                cutoff: 9,
-                window: 4,
-            }),
+            quality: Some(QualityOp::runs(9, 4)),
         };
         assert_eq!(
             apply(&seq, &phred, &plan, Some(&ac), None),
@@ -259,7 +298,7 @@ mod tests {
         let plan = TrimPlan {
             head: 2,
             tail: 0,
-            quality: Some(QualityOp::TrimQual(30)),
+            quality: Some(QualityOp::new(QualityMethod::Ends, 30)),
         };
         assert_eq!(apply(&seq, &phred, &plan, None, None), vec![(2, 20)]);
     }
@@ -304,7 +343,7 @@ mod tests {
         let plan = TrimPlan {
             head: 2,
             tail: 1,
-            quality: Some(QualityOp::TrimQual(20)),
+            quality: Some(QualityOp::new(QualityMethod::Ends, 20)),
         };
         let ac = AdapterConfig {
             adapters: vec![Adapter {

@@ -502,7 +502,7 @@ pub struct Counters {
     pub(crate) rejects: OnceLock<reject::Rejects>,
     /// Input reads that produced at least one surviving output segment,
     /// bumped once per input read (not once per segment, unlike
-    /// `output_reads`, which a `--split-quality` read can bump several times).
+    /// `output_reads`, which a quality-split read can bump several times).
     /// Exists so `snapshot` can check that every input read is accounted for
     /// by exactly one of the three read-level outcomes.
     pub reads_with_output: AtomicU64,
@@ -519,7 +519,7 @@ pub struct Counters {
     /// Segments dropped as `TooShort`. This and the four counters below are
     /// segment-level: one bump per segment (not read) that `filter::check`
     /// rejects, by reason, post-trim. A single input read can contribute to
-    /// more than one of these (e.g. a `--split-quality` read whose several pieces
+    /// more than one of these (e.g. a quality-split read whose several pieces
     /// are each judged independently). They are not part of the read-level
     /// invariant.
     pub segments_dropped_short: AtomicU64,

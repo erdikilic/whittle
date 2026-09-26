@@ -69,9 +69,11 @@ fn quality_mode_filters_segments_without_changing_split_locations() {
     for mode in ["mean", "arithmetic", "median"] {
         whittle()
             .args([
-                "--split-quality",
+                "--quality-trim",
+                "runs",
+                "--quality-cutoff",
                 "9",
-                "--split-min-low-quality-bases",
+                "--min-low-quality-run",
                 "2",
                 "--quality-mode",
                 mode,
@@ -91,9 +93,11 @@ fn quality_mode_filters_segments_without_changing_split_locations() {
         };
         whittle()
             .args([
-                "--split-quality",
+                "--quality-trim",
+                "runs",
+                "--quality-cutoff",
                 "9",
-                "--split-min-low-quality-bases",
+                "--min-low-quality-run",
                 "2",
                 "--quality-mode",
                 mode,
@@ -110,37 +114,53 @@ fn quality_mode_filters_segments_without_changing_split_locations() {
     }
 }
 
+/// `--quality-trim`, `--quality-cutoff` and `--min-low-quality-run` are
+/// accepted only together as documented.
 #[test]
-fn mutually_exclusive_quality_ops_error() {
-    whittle()
-        .args([
-            "--trim-quality",
-            "10",
-            "--best-quality-segment",
-            "10",
-            "--input-format",
-            "fastq",
-        ])
-        .write_stdin("@r1\nACGT\n+\nIIII\n")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("mutually exclusive"));
-}
-
-#[test]
-fn split_quality_segments_excludes_the_other_quality_ops() {
-    for other in [
-        "--trim-quality",
-        "--best-quality-segment",
-        "--split-quality",
+fn quality_trim_flag_combinations_are_validated() {
+    for (args, message) in [
+        (
+            &["--quality-trim", "ends"][..],
+            "--quality-trim requires --quality-cutoff",
+        ),
+        (
+            &["--quality-cutoff", "10"],
+            "--quality-cutoff requires --quality-trim",
+        ),
+        (
+            &[
+                "--quality-trim",
+                "best",
+                "--quality-cutoff",
+                "10",
+                "--min-low-quality-run",
+                "5",
+            ],
+            "--min-low-quality-run requires --quality-trim runs",
+        ),
+        (
+            &[
+                "--quality-trim",
+                "runs",
+                "--quality-cutoff",
+                "10",
+                "--min-low-quality-run",
+                "0",
+            ],
+            "--min-low-quality-run must be at least 1",
+        ),
+        (
+            &["--quality-trim", "middle", "--quality-cutoff", "10"],
+            "invalid value",
+        ),
     ] {
         whittle()
-            .args(["--split-quality-segments", "10", other, "10"])
+            .args(args)
             .args(["--input-format", "fastq"])
             .write_stdin("@r1\nACGT\n+\nIIII\n")
             .assert()
             .failure()
-            .stderr(predicate::str::contains("mutually exclusive"));
+            .stderr(predicate::str::contains(message));
     }
 }
 
@@ -300,9 +320,9 @@ fn every_validation_names_its_flag() {
             "--fastq-tags: invalid tag",
         ),
         (
-            vec!["--split-min-low-quality-bases".into(), "5".into()],
+            vec!["--min-low-quality-run".into(), "5".into()],
             Expect::Fails,
-            "--split-quality",
+            "--min-low-quality-run requires --quality-trim runs",
         ),
         (
             vec!["--progress".into(), "bar".into(), "--quiet".into()],

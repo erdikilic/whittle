@@ -55,24 +55,25 @@ cargo build --release   # target/release/whittle
 
 ## Usage
 
-Filter and trim FASTQ: crop 20 bp from each end, quality-trim below Q8, keep reads of at least 500 bp and Q10.
+Filter and trim FASTQ: crop 20 bp from each end, quality-trim the ends below Q8, keep reads of at least 500 bp and Q10.
 
 ```bash
 whittle -i reads.fastq.gz -o trimmed.fastq.gz --trim-front 20 --trim-tail 20 \
-  --trim-quality 8 --min-length 500 --min-quality 10 -t 8
+  --quality-trim ends --quality-cutoff 8 --min-length 500 --min-quality 10 -t 8
 ```
 
-Trim unaligned BAM, split at consecutive low-quality bases, and rewrite the modification tags of every output read.
+Trim unaligned BAM, split at low-quality interior regions, and rewrite the modification tags of every output read.
 
 ```bash
 whittle -i reads.bam -o trimmed.bam --trim-front 10 --trim-tail 10 \
-  --split-quality 9 --split-min-low-quality-bases 50 --min-length 1000
+  --quality-trim segments --quality-cutoff 9 --min-length 1000
 ```
 
 Trim FASTQ exported with its tags; the tags are rewritten the same way.
 
 ```bash
-samtools fastq -T MM,ML,MN reads.bam | whittle -o trimmed.fastq.gz -H 10 -T 10 --trim-quality 10
+samtools fastq -T MM,ML,MN reads.bam | whittle -o trimmed.fastq.gz -H 10 -T 10 \
+  --quality-trim ends --quality-cutoff 10
 ```
 
 Trim adapters with a kit preset. Interior adapters split the read.
@@ -134,7 +135,7 @@ whittle -i reads.bam -o duplex.bam --tag-filter '[dx]==1' --rejected-output reje
 Merge a directory, convert BAM to FASTQ, and write a machine-readable summary.
 
 ```bash
-whittle -i fastq_pass/barcode03/ -o barcode03.fastq.gz --trim-quality 10
+whittle -i fastq_pass/barcode03/ -o barcode03.fastq.gz --quality-trim ends --quality-cutoff 10
 whittle -i reads.bam -o reads.fastq.gz -l 500 --quiet --summary-json qc.json
 ```
 
@@ -150,16 +151,16 @@ converted to Phred, the default), `arithmetic` (average Phred score), or
 | Operation | Parameters | Behavior |
 |---|---|---|
 | Fixed crop | `--trim-front BASES`, `--trim-tail BASES` | Remove a fixed number of bases from each adapter-derived segment's 5' and 3' ends after barcode restriction |
-| Quality end trimming | `--trim-quality PHRED` | Trim each end until reaching a base at or above the threshold |
-| Best segment | `--best-quality-segment PHRED` | Select the highest-scoring contiguous segment using cumulative error probabilities; bases below the threshold can be retained |
-| Maximal segments | `--split-quality-segments PHRED` | Keep every maximal-scoring segment under the best-segment score, so a low-quality interior region splits the read and both flanks are kept |
-| Quality splitting | `--split-quality PHRED`, `--split-min-low-quality-bases BASES` | Split at the specified number of consecutive bases below the threshold; retain shorter internal stretches |
+| Quality end trimming | `--quality-trim ends --quality-cutoff PHRED` | Trim each end until reaching a base at or above the cutoff |
+| Best segment | `--quality-trim best --quality-cutoff PHRED` | Select the highest-scoring contiguous segment using cumulative error probabilities (modified Mott); bases below the cutoff can be retained |
+| Maximal segments | `--quality-trim segments --quality-cutoff PHRED` | Keep every maximal-scoring segment under the best-segment score, so a low-quality interior region splits the read and both flanks are kept |
+| Low-quality runs | `--quality-trim runs --quality-cutoff PHRED`, `--min-low-quality-run BASES` | Split at the specified number of consecutive bases below the cutoff; retain shorter internal stretches |
 
-The four quality operations are mutually exclusive and apply separately to
-each segment produced by adapter processing. Filters apply after these
-operations. `--min-length` sets the minimum retained segment length;
-`--split-min-low-quality-bases` sets the number of low-quality bases required
-to split.
+`--quality-trim` selects one of the four methods, and `--quality-cutoff` is
+required with it. The method applies separately to each segment produced by
+adapter processing, and the filters apply after it. `--min-length` sets the
+minimum retained segment length; `--min-low-quality-run` sets the number of
+consecutive low-quality bases that split a read under `runs`.
 
 `--head-crop` and `--tail-crop` are aliases for `--trim-front` and `--trim-tail`.
 Both accept a base count and retain the short options `-H` and `-T`.
@@ -173,7 +174,7 @@ follows this order:
 1. **Adapters.** Search the original read, trim terminal adapters, primers and barcodes, and split at interior ones. Clean each new end. Reads without a match continue as one segment.
 2. **Barcodes.** Barcode spans recorded in the `bi` tag are removed where a barcode sequence is found at them.
 3. **Fixed crop.** `--trim-front` and `--trim-tail` crop each retained adapter-derived segment once.
-4. **Quality.** Apply `--trim-quality`, `--best-quality-segment`, `--split-quality-segments`, or `--split-quality` to each cropped segment. The last two can produce further segments; these are not cropped again.
+4. **Quality.** Apply the `--quality-trim` method to each cropped segment. `segments` and `runs` can produce further segments; these are not cropped again.
 5. **Filter.** Each final segment must pass the length, quality, and GC bounds.
 6. **Output.** Rewrite tags against each surviving interval and write the records.
 
@@ -214,7 +215,7 @@ Formats are taken from the path extension, a stream sniff, or `--input-format`/`
 - **`--min-length` applies after trimming**, per output segment, not to the raw read.
 - **BAM folder output requires matching read groups.** Conflicting definitions are rejected.
 - **Signal rewriting requires model direction.** `--update-moves` uses a DNA or RNA `basecall_model` in the BAM read-group description.
-- **One quality-trim strategy per run.** `--trim-quality`, `--best-quality-segment`, `--split-quality-segments`, and `--split-quality` are mutually exclusive; `-H`/`-T` combine with any of them.
+- **One quality-trim method per run.** `--quality-trim` takes one method; `-H`/`-T` combine with any of them.
 
 ## Citation
 

@@ -47,7 +47,7 @@ fn summary_counts_match_the_run() {
         .args(["-o", out.to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
         .args(["-l", "15"])
-        .args(["--trim-quality", "20"])
+        .args(["--quality-trim", "ends", "--quality-cutoff", "20"])
         .write_stdin(reads())
         .assert()
         .success();
@@ -102,7 +102,8 @@ fn summary_records_the_resolved_parameters() {
         .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
         .args(["-t", "2", "-H", "3", "-T", "4", "-l", "5", "-q", "7"])
-        .args(["--split-quality", "9", "--split-min-low-quality-bases", "6"])
+        .args(["--quality-trim", "runs", "--quality-cutoff", "9"])
+        .args(["--min-low-quality-run", "6"])
         .write_stdin(reads())
         .assert()
         .success();
@@ -113,15 +114,15 @@ fn summary_records_the_resolved_parameters() {
     assert_eq!(v["params"]["tail_crop"], 4);
     assert_eq!(v["params"]["min_length"], 5);
     assert_eq!(v["params"]["min_qual"], 7.0);
-    assert_eq!(v["params"]["quality_op"]["mode"], "split");
-    assert_eq!(v["params"]["quality_op"]["threshold"], 9);
-    assert_eq!(v["params"]["quality_op"]["window"], 6);
+    assert_eq!(v["params"]["quality_trim"]["method"], "runs");
+    assert_eq!(v["params"]["quality_trim"]["cutoff"], 9);
+    assert_eq!(v["params"]["quality_trim"]["min_low_quality_run"], 6);
     assert_eq!(v["input"], "<stdin>");
     assert!(
         v["command"]
             .as_str()
             .unwrap()
-            .contains("--split-min-low-quality-bases")
+            .contains("--min-low-quality-run")
     );
     assert!(v["elapsed_seconds"].as_f64().unwrap() >= 0.0);
 }

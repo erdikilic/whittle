@@ -275,14 +275,7 @@ fn name_of(rec: &RecordBuf) -> Vec<u8> {
 
 /// Splits at a low-quality base and carries every tag.
 fn split_cfg() -> Config {
-    cfg_bam2fq(
-        Some(QualityOp::Split {
-            cutoff: 20,
-            window: 1,
-        }),
-        0,
-        FastqTags::All,
-    )
+    cfg_bam2fq(Some(QualityOp::runs(20, 1)), 0, FastqTags::All)
 }
 
 /// Runs the BAM-to-FASTQ workflow and returns the stats and the text.

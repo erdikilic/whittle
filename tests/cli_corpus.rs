@@ -71,9 +71,9 @@ enum AdapterCase {
 enum QualityOp {
     /// No quality trimming.
     None,
-    /// `--trim-quality` at the cutoff.
+    /// `--quality-trim ends` at the cutoff.
     Trim(u8),
-    /// `--split-quality` at the cutoff with the window.
+    /// `--quality-trim runs` at the cutoff with the minimum run.
     Split { cutoff: u8, window: usize },
 }
 
@@ -377,7 +377,7 @@ fn write_bam(path: &Path, reads: &[SourceRead]) {
     writer.try_finish().unwrap();
 }
 
-/// The `--trim-quality` model: the window left after trimming both ends below
+/// The `--quality-trim ends` model: the window left after trimming both ends below
 /// `cutoff`, or nothing.
 fn trim_edge(qual: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     let mut start = 0usize;
@@ -395,7 +395,7 @@ fn trim_edge(qual: &[u8], cutoff: u8) -> Vec<(usize, usize)> {
     }
 }
 
-/// The `--split-quality` model: segments separated by low-quality runs of at least
+/// The `--quality-trim runs` model: segments separated by low-quality runs of at least
 /// `window` bases.
 fn split_low_quality(qual: &[u8], cutoff: u8, window: usize) -> Vec<(usize, usize)> {
     let window = window.max(1);
@@ -827,7 +827,7 @@ fn fixed_crop_filter_cfg() -> ExpectCfg {
     }
 }
 
-/// `--trim-quality 20 -l 50`.
+/// `--quality-trim ends --quality-cutoff 20 -l 50`.
 fn qual_trim_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 0,
@@ -842,7 +842,7 @@ fn qual_trim_cfg() -> ExpectCfg {
     }
 }
 
-/// `--split-quality 20 --split-min-low-quality-bases 3 -l 20`.
+/// `--quality-trim runs --quality-cutoff 20 --min-low-quality-run 3 -l 20`.
 fn qual_split_cfg() -> ExpectCfg {
     ExpectCfg {
         head: 0,
@@ -990,9 +990,11 @@ fn adapter_crop_and_quality_splits_preserve_final_names_and_tags() {
                         "3",
                         "--trim-tail",
                         "5",
-                        "--split-quality",
+                        "--quality-trim",
+                        "runs",
+                        "--quality-cutoff",
                         "9",
-                        "--split-min-low-quality-bases",
+                        "--min-low-quality-run",
                         "4",
                         "--threads",
                         threads,
@@ -1090,7 +1092,17 @@ fn fastq_gz_corpus_quality_trim_matches_expected() {
         .arg(&fastq_gz)
         .arg("-o")
         .arg(&out)
-        .args(["--trim-quality", "20", "-l", "50", "-t", "4", "--quiet"])
+        .args([
+            "--quality-trim",
+            "ends",
+            "--quality-cutoff",
+            "20",
+            "-l",
+            "50",
+            "-t",
+            "4",
+            "--quiet",
+        ])
         .assert()
         .success();
 
@@ -1113,9 +1125,11 @@ fn fastq_gz_corpus_quality_split_matches_expected() {
         .arg("-o")
         .arg(&out)
         .args([
-            "--split-quality",
+            "--quality-trim",
+            "runs",
+            "--quality-cutoff",
             "20",
-            "--split-min-low-quality-bases",
+            "--min-low-quality-run",
             "3",
             "-l",
             "20",

@@ -11,7 +11,7 @@ use crate::config::{
 use crate::filter::FilterConfig;
 use crate::io::Format;
 use crate::qual::QualMode;
-use crate::trim::{QualityOp, TrimPlan};
+use crate::trim::{QualityMethod, QualityOp, TrimPlan};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -199,47 +199,32 @@ struct Cli {
         help_heading = "Trimming"
     )]
     tail_crop: usize,
-    /// Trim both ends until reaching a base at or above PHRED.
-    /// Mutually exclusive with the other quality operations.
-    #[arg(long = "trim-quality", value_name = "PHRED", help_heading = "Trimming")]
-    qual_trim: Option<u8>,
-    /// Keep the highest-scoring segment using cumulative base-error
-    /// probabilities and the PHRED cutoff (modified Mott). May retain bases
-    /// below the cutoff. Applied separately to each adapter-derived segment.
+    /// Quality trimming of each adapter-derived segment after the fixed crop,
+    /// scored against --quality-cutoff. The segments and runs methods can split
+    /// a segment into pieces, numbered in original-read order.
     #[arg(
-        long = "best-quality-segment",
+        long = "quality-trim",
+        value_enum,
+        value_name = "METHOD",
+        help_heading = "Trimming"
+    )]
+    quality_trim: Option<QualityMethod>,
+    /// Phred cutoff of --quality-trim. Required with it.
+    #[arg(
+        long = "quality-cutoff",
         value_name = "PHRED",
         help_heading = "Trimming"
     )]
-    qual_best_segment: Option<u8>,
-    /// Keep every maximal-scoring segment under the --best-quality-segment
-    /// score (Ruzzo-Tompa), so a low-quality interior splits the read and
-    /// both flanks are kept. Segments scoring below 50 error-free bases are
-    /// dropped. Applied separately to each adapter-derived segment.
+    quality_cutoff: Option<u8>,
+    /// Minimum run of consecutive bases below --quality-cutoff that splits a
+    /// read under --quality-trim runs; shorter runs stay inside their piece.
+    /// Defaults to 1.
     #[arg(
-        long = "split-quality-segments",
-        value_name = "PHRED",
-        help_heading = "Trimming"
-    )]
-    qual_split_segments: Option<u8>,
-    /// Split each cropped adapter-derived segment at consecutive bases below
-    /// PHRED. Number the final segments in original-read order.
-    /// --split-min-low-quality-bases sets the minimum number required to split.
-    #[arg(
-        long = "split-quality",
-        value_name = "PHRED",
-        help_heading = "Trimming"
-    )]
-    qual_split: Option<u8>,
-    /// Minimum consecutive bases below --split-quality required to split.
-    /// Shorter internal stretches are retained; low-quality ends are trimmed.
-    /// Requires --split-quality. Defaults to 1.
-    #[arg(
-        long = "split-min-low-quality-bases",
+        long = "min-low-quality-run",
         value_name = "BASES",
         help_heading = "Trimming"
     )]
-    qual_split_window: Option<usize>,
+    min_low_quality_run: Option<usize>,
     /// Keep the ONT move table consistent through trimming (slice mv, update
     /// ts, ns, sp, pi and the poly-A tags) for signal-aware tools such as
     /// Remora and Clair3 v2, instead of dropping them. BAM-to-BAM only;
@@ -316,8 +301,8 @@ struct Cli {
 /// The examples block at the end of `--help`.
 const EXAMPLES: &str = "\
 Examples:
-  whittle -i reads.fastq.gz -o trimmed.fastq.gz -H 20 -T 20 --trim-quality 8 -l 500 -q 10 -t 8
-  whittle -i reads.bam -o trimmed.bam --split-quality 9 --split-min-low-quality-bases 50 -l 1000
+  whittle -i reads.fastq.gz -o trimmed.fastq.gz -H 20 --quality-trim ends --quality-cutoff 8 -l 500
+  whittle -i reads.bam -o trimmed.bam --quality-trim segments --quality-cutoff 9 -l 1000
   whittle -i reads.bam -o trimmed.bam --adapter-preset lsk114 -l 500
   whittle -i reads.bam -o trimmed.bam --adapter-discover -l 500
   whittle -i 16s.fastq.gz -o trimmed.fastq.gz --adapter-preset mab114
@@ -356,10 +341,10 @@ pub fn parse() -> anyhow::Result<Config> {
     }
     validate_filters(&c)?;
     let compression_level = compression_level_for(&c);
-    let quality = quality_op_for(&c);
     let fastq_tags = FastqTags::parse(&c.fastq_tags)?;
     let remove_tags = TagRemoval::parse(&c.remove_tag)?;
     let tag_filters = crate::tagfilter::TagFilters::parse(&c.tag_filter)?;
+    let quality = resolve_quality(&c)?;
 
     let mut advisories: Vec<Advisory> = Vec::new();
     let adapter_infer = resolve_infer(&c, &mut advisories)?;
@@ -454,24 +439,6 @@ fn parse_threads(value: &str) -> Result<u64, String> {
 /// Rejects contradictory or out-of-domain trim and filter settings before the
 /// run, which would otherwise keep zero reads and exit successfully.
 fn validate_filters(c: &Cli) -> anyhow::Result<()> {
-    let n_quality = [
-        c.qual_trim.is_some(),
-        c.qual_best_segment.is_some(),
-        c.qual_split_segments.is_some(),
-        c.qual_split.is_some(),
-    ]
-    .iter()
-    .filter(|&&b| b)
-    .count();
-    if n_quality > 1 {
-        anyhow::bail!(
-            "--trim-quality, --best-quality-segment, --split-quality-segments and \
-             --split-quality are mutually exclusive"
-        );
-    }
-    if c.qual_split.is_none() && c.qual_split_window.is_some() {
-        anyhow::bail!("--split-min-low-quality-bases requires --split-quality");
-    }
     let max_length = c.max_length.unwrap_or(usize::MAX);
     if c.min_length > max_length {
         anyhow::bail!(
@@ -522,22 +489,31 @@ fn compression_level_for(c: &Cli) -> u8 {
     c.compression_level.unwrap_or(if out_is_gz { 4 } else { 6 })
 }
 
-/// Returns the selected quality-trimming operation, if any; `validate_filters`
-/// has already rejected a combination.
-fn quality_op_for(c: &Cli) -> Option<QualityOp> {
-    if let Some(q) = c.qual_trim {
-        return Some(QualityOp::TrimQual(q));
+/// Resolves `--quality-trim`, `--quality-cutoff` and `--min-low-quality-run`
+/// into the quality operation. The cutoff is required with a method, since no
+/// single value suits every platform and basecaller.
+fn resolve_quality(c: &Cli) -> anyhow::Result<Option<QualityOp>> {
+    if let Some(n) = c.min_low_quality_run {
+        if c.quality_trim != Some(QualityMethod::Runs) {
+            anyhow::bail!("--min-low-quality-run requires --quality-trim runs");
+        }
+        if n == 0 {
+            anyhow::bail!("--min-low-quality-run must be at least 1");
+        }
     }
-    if let Some(q) = c.qual_best_segment {
-        return Some(QualityOp::BestSegment(q));
-    }
-    if let Some(q) = c.qual_split_segments {
-        return Some(QualityOp::SplitSegments(q));
-    }
-    c.qual_split.map(|cutoff| QualityOp::Split {
-        cutoff,
-        window: c.qual_split_window.unwrap_or(1),
-    })
+    let Some(method) = c.quality_trim else {
+        if c.quality_cutoff.is_some() {
+            anyhow::bail!("--quality-cutoff requires --quality-trim");
+        }
+        return Ok(None);
+    };
+    let Some(cutoff) = c.quality_cutoff else {
+        anyhow::bail!("--quality-trim requires --quality-cutoff");
+    };
+    Ok(Some(QualityOp {
+        min_low_quality_run: c.min_low_quality_run.unwrap_or(1),
+        ..QualityOp::new(method, cutoff)
+    }))
 }
 
 /// Resolves the de novo inference mode and checks it against the other
@@ -852,6 +828,11 @@ mod tests {
             "--qual-best-segment",
             "--qual-split",
             "--qual-split-window",
+            "--trim-quality",
+            "--best-quality-segment",
+            "--split-quality",
+            "--split-min-low-quality-bases",
+            "--split-quality-segments",
             "--update-signal-tags",
             "--remove-kinetics",
             "--discover-adapters",

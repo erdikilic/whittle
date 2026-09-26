@@ -16,10 +16,9 @@ fn help_lists_the_quality_and_adapter_flags() {
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     for flag in [
-        "--split-quality",
-        "--trim-quality",
-        "--best-quality-segment",
-        "--split-quality-segments",
+        "--quality-trim",
+        "--quality-cutoff",
+        "--min-low-quality-run",
         "--adapter-fasta",
         "--adapter-preset",
         "--adapter-error-rate",
@@ -1291,9 +1290,11 @@ fn qual_split_emits_short_pieces_for_post_trim_filter_to_own() {
         .args([
             "-i",
             fq.path().to_str().unwrap(),
-            "--split-quality",
+            "--quality-trim",
+            "runs",
+            "--quality-cutoff",
             "10",
-            "--split-min-low-quality-bases",
+            "--min-low-quality-run",
             "1",
             "-l",
             "5",
@@ -1338,9 +1339,11 @@ fn qual_split_both_pieces_survive_at_lower_length_floor() {
         .args([
             "-i",
             fq.path().to_str().unwrap(),
-            "--split-quality",
+            "--quality-trim",
+            "runs",
+            "--quality-cutoff",
             "10",
-            "--split-min-low-quality-bases",
+            "--min-low-quality-run",
             "1",
             "-l",
             "4",

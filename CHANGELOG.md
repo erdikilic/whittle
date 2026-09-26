@@ -8,11 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `--split-quality-segments <PHRED>` keeps every maximal scoring segment under
-  the `--best-quality-segment` score (Ruzzo and Tompa 1999) instead of the
-  best one alone, so a read with a low-quality interior keeps both flanks.
+- `--quality-trim segments` keeps every maximal scoring segment under the
+  modified Mott score of `best` (Ruzzo and Tompa 1999) instead of the best
+  one alone, so a read with a low-quality interior keeps both flanks.
   Segments scoring below 50 error-free bases are dropped; the kept segments
-  are named, filtered and counted like the pieces of `--split-quality`.
+  are named, filtered and counted like the pieces of `runs`.
 - Adapter trimming is recorded in dorado's trim mode, merged with the input
   value in its `adapter,primer,barcode` grammar: the `tm` field of each `@RG`
   line in BAM output and the per-read `tm:Z` tag in tagged FASTQ output.
@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- Quality trimming is selected with one method and one cutoff:
+  `--quality-trim <ends|best|segments|runs>` with `--quality-cutoff <PHRED>`,
+  which is required with it, and `--min-low-quality-run <BASES>` for `runs`.
+  `--trim-quality Q` becomes `--quality-trim ends --quality-cutoff Q`,
+  `--best-quality-segment Q` becomes `best`, `--split-quality Q` becomes
+  `runs`, and `--split-min-low-quality-bases N` becomes
+  `--min-low-quality-run N`. The old spellings are not accepted. The summary
+  JSON reports `params.quality_trim` with `method`, `cutoff` and
+  `min_low_quality_run` in place of `params.quality_op`.
 - Primers and barcodes split a read at an interior hit, as adapters do. The
   barcodes of a panel leave the split to the barcode flanks when the set
   carries them; the universal 16S and ITS primers split alone only under an

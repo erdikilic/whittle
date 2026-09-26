@@ -83,14 +83,7 @@ fn bam2fq_none_is_plain_fastq() {
 /// mods.
 #[test]
 fn bam2fq_split_suffixes_and_segments_mods() {
-    let cfg = cfg_bam2fq(
-        Some(QualityOp::Split {
-            cutoff: 20,
-            window: 1,
-        }),
-        0,
-        FastqTags::All,
-    );
+    let cfg = cfg_bam2fq(Some(QualityOp::runs(20, 1)), 0, FastqTags::All);
     // Seq CCAC, `C+m` at occurrences 0 and 2 (positions 0 and 3); quality
     // good, good, bad, good, so the split is [0,2), [3,4).
     let mut rec = ubam_with_mods(b"CCAC", vec![40, 40, 1, 40], b"C+m,0,1;", vec![100, 200]);

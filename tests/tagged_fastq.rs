@@ -121,14 +121,16 @@ fn tagged_fastq_matches_the_bam_path_on_every_trim() {
     for (i, args) in [
         vec!["-H", "3", "-T", "2"],
         vec![
-            "--split-quality",
+            "--quality-trim",
+            "runs",
+            "--quality-cutoff",
             "36",
-            "--split-min-low-quality-bases",
+            "--min-low-quality-run",
             "1",
             "-l",
             "1",
         ],
-        vec!["--best-quality-segment", "36"],
+        vec!["--quality-trim", "best", "--quality-cutoff", "36"],
         vec!["--adapter-preset", "lsk114", "-H", "1"],
         vec!["--remove-tag", "kinetics,RG", "-T", "5"],
         vec!["--fastq-tags", "MM,ML,MN", "-H", "2"],
@@ -271,7 +273,15 @@ fn split_identifiers_precede_header_descriptions() {
     std::fs::write(&input, "@r1 description\tMM:Z:C+m,0;\tML:B:C,200\nCCCCC\n+\nII!II\n@plain another description\nCCCCC\n+\nII!II\n").unwrap();
     for threads in ["1", "4"] {
         let output = run(
-            &["--split-quality", "10", "-t", threads, "--preserve-order"],
+            &[
+                "--quality-trim",
+                "runs",
+                "--quality-cutoff",
+                "10",
+                "-t",
+                threads,
+                "--preserve-order",
+            ],
             &input,
             dir.path(),
             "out.fastq",
@@ -370,6 +380,11 @@ fn trim_mode_tag_records_adapter_trimming() {
     ] {
         assert!(trimmed.contains(tm), "{tm}: {trimmed}");
     }
-    let quality = run(&["--trim-quality", "10"], &input, dir.path(), "q.fastq");
+    let quality = run(
+        &["--quality-trim", "ends", "--quality-cutoff", "10"],
+        &input,
+        dir.path(),
+        "q.fastq",
+    );
     assert!(quality.contains("@r0\ttm:Z:none\n"), "{quality}");
 }

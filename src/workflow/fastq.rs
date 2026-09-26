@@ -146,7 +146,7 @@ mod tests {
     use crate::filter;
     use crate::qual::QualMode;
     use crate::record::ReadRecord;
-    use crate::trim::{QualityOp, TrimPlan};
+    use crate::trim::{QualityMethod, QualityOp, TrimPlan};
 
     fn rec(name: &str, seq: &[u8], phred: Vec<u8>) -> ReadRecord {
         ReadRecord {
@@ -217,10 +217,7 @@ mod tests {
     #[test]
     fn split_writes_suffixed_segments() {
         let mut cfg = test_cfg(1);
-        cfg.trim.quality = Some(QualityOp::Split {
-            cutoff: 10,
-            window: 1,
-        });
+        cfg.trim.quality = Some(QualityOp::runs(10, 1));
         // Three good, one bad, three good (`III#III`) gives two segments, (0,3)
         // and (4,7).
         let phred: Vec<u8> = b"III#III".iter().map(|&b| b - 33).collect();
@@ -419,7 +416,7 @@ mod tests {
     fn parallel_matches_sequential_as_multiset() {
         let mk = |threads| {
             let mut cfg = test_cfg(threads);
-            cfg.trim.quality = Some(QualityOp::TrimQual(20));
+            cfg.trim.quality = Some(QualityOp::new(QualityMethod::Ends, 20));
             cfg
         };
         // Owned records (`ReadRecord: Clone`), wrapped in `Ok` at iteration time

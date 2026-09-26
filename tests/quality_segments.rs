@@ -1,4 +1,4 @@
-//! End-to-end `--split-quality-segments` over the compiled binary: segment
+//! End-to-end `--quality-trim segments` over the compiled binary: segment
 //! naming, rejected output and summary counters on FASTQ input, and the
 //! modification calls of each kept segment on uBAM and tagged FASTQ input.
 
@@ -56,7 +56,15 @@ fn fastq_segments_are_named_filtered_and_counted_like_split_pieces() {
     let json = dir.path().join("summary.json");
     std::fs::write(&input, fastq_reads()).unwrap();
     whittle()
-        .args(["--split-quality-segments", "10", "-l", "80", "--quiet"])
+        .args([
+            "--quality-trim",
+            "segments",
+            "--quality-cutoff",
+            "10",
+            "-l",
+            "80",
+            "--quiet",
+        ])
         .args(["-t", "1"])
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
         .args(["--rejected-output", rejected.to_str().unwrap()])
@@ -87,8 +95,8 @@ fn fastq_segments_are_named_filtered_and_counted_like_split_pieces() {
 
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
-    assert_eq!(v["params"]["quality_op"]["mode"], "split_segments");
-    assert_eq!(v["params"]["quality_op"]["threshold"], 10);
+    assert_eq!(v["params"]["quality_trim"]["method"], "segments");
+    assert_eq!(v["params"]["quality_trim"]["cutoff"], 10);
     assert_eq!(v["reads"]["input"], 2);
     assert_eq!(v["reads"]["output"], 2);
     assert_eq!(v["reads"]["with_output"], 1);
@@ -167,7 +175,13 @@ fn split_segments_shift_modification_calls_on_ubam_and_tagged_fastq() {
 
     let out = dir.path().join("out.bam");
     whittle()
-        .args(["--split-quality-segments", "10", "--quiet"])
+        .args([
+            "--quality-trim",
+            "segments",
+            "--quality-cutoff",
+            "10",
+            "--quiet",
+        ])
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
         .assert()
         .success();
@@ -203,7 +217,9 @@ fn split_segments_shift_modification_calls_on_ubam_and_tagged_fastq() {
         let out = dir.path().join("out.fastq");
         whittle()
             .args([
-                "--split-quality-segments",
+                "--quality-trim",
+                "segments",
+                "--quality-cutoff",
                 "10",
                 "--fastq-tags",
                 "MM,ML,MN",

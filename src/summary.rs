@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::config::{Config, FastqTags};
-use crate::trim::QualityOp;
+use crate::trim::QualityMethod;
 use crate::workflow::Stats;
 
 /// Incremented only when an existing field changes meaning or is removed.
@@ -55,8 +55,8 @@ struct Params {
     qual_mode: &'static str,
     head_crop: usize,
     tail_crop: usize,
-    /// `None` when no quality-trimming strategy was selected.
-    quality_op: Option<QualityOpParams>,
+    /// `None` without `--quality-trim`.
+    quality_trim: Option<QualityTrimParams>,
     update_moves: bool,
     ordered: bool,
     /// Aux tags removed from every output record, sorted, with every
@@ -72,14 +72,14 @@ struct Params {
     adapters: Option<AdapterParams>,
 }
 
-/// The selected quality-trimming operation and its threshold.
+/// The `--quality-trim` method and its settings.
 #[derive(Debug, Serialize)]
-struct QualityOpParams {
-    /// `trim`, `best_segment`, `split_segments`, or `split`.
-    mode: &'static str,
-    threshold: u8,
-    /// Only meaningful for `split`; `None` otherwise.
-    window: Option<usize>,
+struct QualityTrimParams {
+    /// `ends`, `best`, `segments`, or `runs`.
+    method: &'static str,
+    cutoff: u8,
+    /// Only meaningful for `runs`; `None` otherwise.
+    min_low_quality_run: Option<usize>,
 }
 
 /// The adapter-trimming settings and the configured and resolved set sizes.
@@ -108,7 +108,7 @@ struct AdapterParams {
 #[derive(Debug, Serialize)]
 struct Reads {
     input: u64,
-    /// Output segments written. A `--split-quality` read can contribute several,
+    /// Output segments written. A quality-split read can contribute several,
     /// so this can exceed `input`.
     output: u64,
     /// Input reads that produced at least one surviving segment.
@@ -241,27 +241,11 @@ impl Params {
             qual_mode: cfg.filter.qual_mode.label(),
             head_crop: cfg.trim.head,
             tail_crop: cfg.trim.tail,
-            quality_op: cfg.trim.quality.as_ref().map(|op| match op {
-                QualityOp::TrimQual(q) => QualityOpParams {
-                    mode: "trim",
-                    threshold: *q,
-                    window: None,
-                },
-                QualityOp::BestSegment(q) => QualityOpParams {
-                    mode: "best_segment",
-                    threshold: *q,
-                    window: None,
-                },
-                QualityOp::SplitSegments(q) => QualityOpParams {
-                    mode: "split_segments",
-                    threshold: *q,
-                    window: None,
-                },
-                QualityOp::Split { cutoff, window } => QualityOpParams {
-                    mode: "split",
-                    threshold: *cutoff,
-                    window: Some(*window),
-                },
+            quality_trim: cfg.trim.quality.as_ref().map(|op| QualityTrimParams {
+                method: op.method.label(),
+                cutoff: op.cutoff,
+                min_low_quality_run: (op.method == QualityMethod::Runs)
+                    .then_some(op.min_low_quality_run),
             }),
             update_moves: cfg.update_moves,
             ordered: cfg.ordered,
@@ -328,10 +312,7 @@ mod tests {
             trim: TrimPlan {
                 head: 20,
                 tail: 20,
-                quality: Some(QualityOp::Split {
-                    cutoff: 9,
-                    window: 50,
-                }),
+                quality: Some(crate::trim::QualityOp::runs(9, 50)),
             },
             threads: 8,
             ..Config::default()
@@ -381,7 +362,7 @@ mod tests {
         assert_eq!(v["reads"]["with_output"], 92);
         assert_eq!(v["reads"]["trimmed_to_nothing"], 5);
         assert_eq!(v["reads"]["all_filtered"], 3);
-        // Output segments can exceed input reads under `--split-quality`.
+        // Output segments can exceed input reads under quality splitting.
         assert_eq!(v["reads"]["output"], 110);
     }
 
@@ -401,9 +382,9 @@ mod tests {
         assert_eq!(v["params"]["min_length"], 500);
         assert_eq!(v["params"]["qual_mode"], "mean");
         assert_eq!(v["params"]["head_crop"], 20);
-        assert_eq!(v["params"]["quality_op"]["mode"], "split");
-        assert_eq!(v["params"]["quality_op"]["threshold"], 9);
-        assert_eq!(v["params"]["quality_op"]["window"], 50);
+        assert_eq!(v["params"]["quality_trim"]["method"], "runs");
+        assert_eq!(v["params"]["quality_trim"]["cutoff"], 9);
+        assert_eq!(v["params"]["quality_trim"]["min_low_quality_run"], 50);
         assert_eq!(v["params"]["fastq_tags"], "all");
         // An unset `--max-length` is null, not `usize::MAX` leaking into the file.
         assert!(v["params"]["max_length"].is_null());

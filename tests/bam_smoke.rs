@@ -982,7 +982,9 @@ fn rna_signal_windows_follow_signal_order() {
             .arg("-o")
             .arg(&output)
             .args([
-                "--split-quality",
+                "--quality-trim",
+                "runs",
+                "--quality-cutoff",
                 "10",
                 "--update-moves",
                 "--preserve-order",

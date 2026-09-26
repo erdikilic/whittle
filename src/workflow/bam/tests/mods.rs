@@ -194,10 +194,7 @@ fn malformed_mod_block_is_removed_and_counted_on_bam_output() {
     for variant in MALFORMED_MOD_VARIANTS {
         for head in [0, 1] {
             let mut cfg = cfg_bam2fq(None, head, FastqTags::All);
-            cfg.trim.quality = Some(QualityOp::Split {
-                cutoff: 20,
-                window: 1,
-            });
+            cfg.trim.quality = Some(QualityOp::runs(20, 1));
             let mut rec = malformed_mod_record(variant);
             // A low-quality base in the middle splits the read in two.
             *rec.quality_scores_mut() = vec![40, 40, 1, 40].into();
