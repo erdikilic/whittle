@@ -50,6 +50,7 @@ struct Params {
     max_length: Option<usize>,
     min_qual: f64,
     max_qual: f64,
+    max_expected_errors: Option<f64>,
     min_gc: Option<f64>,
     max_gc: Option<f64>,
     qual_mode: &'static str,
@@ -140,6 +141,7 @@ struct SegmentsDropped {
     too_long: u64,
     low_quality: u64,
     high_quality: u64,
+    expected_errors: u64,
     gc_out_of_range: u64,
 }
 
@@ -201,6 +203,7 @@ impl Summary {
                 too_long: stats.segments_dropped_long,
                 low_quality: stats.segments_dropped_low_qual,
                 high_quality: stats.segments_dropped_high_qual,
+                expected_errors: stats.segments_dropped_expected_errors,
                 gc_out_of_range: stats.segments_dropped_gc,
             },
             warnings: Warnings {
@@ -239,6 +242,7 @@ impl Params {
             max_length: (cfg.filter.max_length != usize::MAX).then_some(cfg.filter.max_length),
             min_qual: cfg.filter.min_qual,
             max_qual: cfg.filter.max_qual,
+            max_expected_errors: cfg.filter.max_expected_errors,
             min_gc: cfg.filter.min_gc,
             max_gc: cfg.filter.max_gc,
             qual_mode: cfg.filter.qual_mode.label(),
@@ -310,6 +314,7 @@ mod tests {
                 max_length: usize::MAX,
                 min_qual: 10.0,
                 max_qual: 1000.0,
+                max_expected_errors: Some(1.5),
                 min_gc: None,
                 max_gc: None,
                 qual_mode: crate::qual::QualMode::Mean,
@@ -343,6 +348,7 @@ mod tests {
             segments_dropped_long: 0,
             segments_dropped_low_qual: 1,
             segments_dropped_high_qual: 0,
+            segments_dropped_expected_errors: 4,
             segments_dropped_gc: 0,
         }
     }
@@ -392,6 +398,7 @@ mod tests {
         assert_eq!(v["params"]["quality_trim"]["min_low_quality_run"], 50);
         assert_eq!(v["params"]["quality_trim"]["end_cutoff"], 9);
         assert_eq!(v["params"]["fastq_tags"], "all");
+        assert_eq!(v["params"]["max_expected_errors"], 1.5);
         // An unset `--max-length` is null, not `usize::MAX` leaking into the file.
         assert!(v["params"]["max_length"].is_null());
         // Adapter trimming off is null, not a zeroed block.
@@ -493,6 +500,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["bases"]["input"], 10_000);
         assert_eq!(v["segments_dropped"]["too_short"], 7);
+        assert_eq!(v["segments_dropped"]["expected_errors"], 4);
         assert_eq!(v["warnings"]["malformed_tag_reads"], 2);
     }
 }

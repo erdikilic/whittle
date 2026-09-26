@@ -147,6 +147,9 @@ whittle -i reads.bam -o reads.fastq.gz -l 500 --quiet --summary-json qc.json
 calculation selected by `--quality-mode`: `mean` (average error probability
 converted to Phred, the default), `arithmetic` (average Phred score), or
 `median`. This setting does not affect trimming or splitting.
+`--max-expected-errors E` rejects a segment whose summed per-base error
+probabilities exceed E, an absolute budget per segment meant for amplicons of
+a fixed length ([details](docs/cli.md#quality-filtering-and-trimming)).
 
 | Operation | Parameters | Behavior |
 |---|---|---|

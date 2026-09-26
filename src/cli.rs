@@ -94,7 +94,7 @@ struct Cli {
     /// Write every input read or trimmed segment that does not reach the
     /// output to this path, in the output's format family, with a wr:Z tag
     /// naming the reason: tag_filter, trimmed_to_nothing, too_short,
-    /// too_long, low_quality, high_quality or gc.
+    /// too_long, low_quality, high_quality, expected_errors or gc.
     #[arg(long = "rejected-output", value_name = "PATH", help_heading = "Setup")]
     rejected_output: Option<PathBuf>,
 
@@ -150,6 +150,16 @@ struct Cli {
         help_heading = "Filtering"
     )]
     max_qual: f64,
+    /// Maximum expected errors per output segment: the sum of its per-base
+    /// error probabilities 10^(-Q/10) after trimming (Edgar and Flyvbjerg
+    /// 2015). A total per segment rather than a rate, for amplicons of a fixed
+    /// length; a non-negative number.
+    #[arg(
+        long = "max-expected-errors",
+        value_name = "E",
+        help_heading = "Filtering"
+    )]
+    max_expected_errors: Option<f64>,
     /// Minimum post-trim GC fraction (0 to 1; 0.4 means 40%).
     #[arg(short = 'g', long, value_name = "FRACTION", help_heading = "Filtering")]
     min_gc: Option<f64>,
@@ -385,6 +395,7 @@ pub fn parse() -> anyhow::Result<Config> {
             max_length: c.max_length.unwrap_or(usize::MAX),
             min_qual: c.min_qual,
             max_qual: c.max_qual,
+            max_expected_errors: c.max_expected_errors,
             min_gc: c.min_gc,
             max_gc: c.max_gc,
             qual_mode: c.qual_mode,
@@ -463,6 +474,11 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
         if !value.is_finite() || value < 0.0 {
             anyhow::bail!("{flag} ({value}) must be a finite quality of at least 0");
         }
+    }
+    if let Some(e) = c.max_expected_errors
+        && (!e.is_finite() || e < 0.0)
+    {
+        anyhow::bail!("--max-expected-errors ({e}) must be a finite number of at least 0");
     }
     if c.min_qual > c.max_qual {
         anyhow::bail!(

@@ -93,6 +93,10 @@ pub(crate) fn filters_and_trim_line(
         filters.push(quality);
     }
 
+    if let Some(max) = filter.max_expected_errors {
+        filters.push(format!("expected errors <={max}"));
+    }
+
     if filter.min_gc.is_some() || filter.max_gc.is_some() {
         filters.push(format!(
             "GC {}-{}",
@@ -230,6 +234,7 @@ mod tests {
             max_length: usize::MAX,
             min_qual: 0.0,
             max_qual: 1000.0,
+            max_expected_errors: None,
             min_gc: None,
             max_gc: None,
             qual_mode: crate::qual::QualMode::Mean,
@@ -418,6 +423,7 @@ mod tests {
         f.max_qual = 30.0;
         f.min_gc = Some(0.4);
         f.max_gc = Some(0.6);
+        f.max_expected_errors = Some(2.5);
         f.qual_mode = crate::qual::QualMode::Median;
 
         let mut t = base_trim();
@@ -427,7 +433,8 @@ mod tests {
 
         assert_eq!(
             filters_and_trim_line(&f, &t),
-            "Filters: length >=200 <=10000; median quality >=8 <=30; GC 0.4-0.6; \
+            "Filters: length >=200 <=10000; median quality >=8 <=30; expected errors <=2.5; \
+             GC 0.4-0.6; \
              trim: head 10, tail 5, quality ends Q12"
         );
     }

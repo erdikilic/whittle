@@ -1,6 +1,7 @@
-//! Post-trim segment filtering by length, quality and GC fraction.
+//! Post-trim segment filtering by length, quality, expected errors and GC
+//! fraction.
 
-use crate::qual::{QualMode, read_quality};
+use crate::qual::{QualMode, expected_errors, mean_q_from_expected_errors, read_quality};
 
 /// Bounds applied to every produced segment.
 #[derive(Debug, Clone)]
@@ -13,6 +14,8 @@ pub struct FilterConfig {
     pub min_qual: f64,
     /// Maximum read quality, inclusive.
     pub max_qual: f64,
+    /// Maximum expected errors per segment, inclusive, when set.
+    pub max_expected_errors: Option<f64>,
     /// Minimum GC fraction, inclusive, when set.
     pub min_gc: Option<f64>,
     /// Maximum GC fraction, inclusive, when set.
@@ -29,6 +32,7 @@ impl Default for FilterConfig {
             max_length: usize::MAX,
             min_qual: 0.0,
             max_qual: 1000.0,
+            max_expected_errors: None,
             min_gc: None,
             max_gc: None,
             qual_mode: QualMode::Mean,
@@ -64,6 +68,8 @@ pub enum DropReason {
     LowQuality,
     /// Quality above `max_qual`.
     HighQuality,
+    /// Expected errors above `max_expected_errors`.
+    ExpectedErrors,
     /// GC fraction outside `[min_gc, max_gc]`.
     Gc,
 }
@@ -77,6 +83,7 @@ impl DropReason {
             DropReason::TooLong => "too long",
             DropReason::LowQuality => "low quality",
             DropReason::HighQuality => "high quality",
+            DropReason::ExpectedErrors => "too many expected errors",
             DropReason::Gc => "GC out of range",
         }
     }
@@ -105,8 +112,13 @@ pub(crate) fn check_with_gc(
     if len > cfg.max_length {
         return Some(DropReason::TooLong);
     }
+    // The error-probability mean and the expected errors share one sum.
+    let ee = cfg.max_expected_errors.map(|_| expected_errors(phred));
     if cfg.min_qual > 0.0 || cfg.max_qual < 1000.0 {
-        let q = read_quality(phred, cfg.qual_mode);
+        let q = match (cfg.qual_mode, ee) {
+            (QualMode::Mean, Some(ee)) => mean_q_from_expected_errors(ee, len),
+            _ => read_quality(phred, cfg.qual_mode),
+        };
         // Probability summation and logarithms introduce rounding at inclusive bounds.
         let tolerance = if cfg.qual_mode == QualMode::Mean {
             1e-10
@@ -119,6 +131,12 @@ pub(crate) fn check_with_gc(
         if q > cfg.max_qual + tolerance {
             return Some(DropReason::HighQuality);
         }
+    }
+    // Probability summation introduces rounding at the inclusive bound.
+    if let (Some(ee), Some(max)) = (ee, cfg.max_expected_errors)
+        && ee > max + 1e-9
+    {
+        return Some(DropReason::ExpectedErrors);
     }
     if cfg.min_gc.is_some() || cfg.max_gc.is_some() {
         let gc = gc();
@@ -140,6 +158,7 @@ mod tests {
             max_length: usize::MAX,
             min_qual: 0.0,
             max_qual: 1000.0,
+            max_expected_errors: None,
             min_gc: None,
             max_gc: None,
             qual_mode: QualMode::Mean,
@@ -291,6 +310,81 @@ mod tests {
         c.max_gc = Some(0.6);
         assert_eq!(check(b"AAAT", &[30; 4], &c), Some(DropReason::Gc)); // gc 0.0 < min
         assert_eq!(check(b"GGCC", &[30; 4], &c), Some(DropReason::Gc)); // gc 1.0 > max
+    }
+
+    /// A segment with exactly the allowed expected errors passes, one above
+    /// it is rejected, and rounding in the sum does not move the bound.
+    #[test]
+    fn expected_errors_bound_is_inclusive() {
+        let with = |max| FilterConfig {
+            max_expected_errors: Some(max),
+            ..base()
+        };
+        // Four Q10 bases carry 0.4 expected errors, a hundred Q20 bases 1.0.
+        assert_eq!(check(b"ACGT", &[10; 4], &with(0.4)), None);
+        assert_eq!(
+            check(b"ACGT", &[10; 4], &with(0.39)),
+            Some(DropReason::ExpectedErrors)
+        );
+        let seq = vec![b'A'; 100];
+        assert_eq!(check(&seq, &[20; 100], &with(1.0)), None);
+        assert_eq!(
+            check(&seq, &[20; 100], &with(0.999)),
+            Some(DropReason::ExpectedErrors)
+        );
+        let long = vec![b'A'; 1_000];
+        assert_eq!(check(&long, &[20; 1_000], &with(10.0)), None);
+        assert_eq!(
+            check(&long, &[20; 1_000], &with(9.99)),
+            Some(DropReason::ExpectedErrors)
+        );
+    }
+
+    /// Qualities at the FASTQ cap and at the BAM byte limit carry almost no
+    /// expected errors, and a budget of zero admits only them.
+    #[test]
+    fn expected_errors_at_the_quality_cap() {
+        let seq = vec![b'A'; 1_000];
+        let cfg = |max| FilterConfig {
+            max_expected_errors: Some(max),
+            ..base()
+        };
+        assert_eq!(check(&seq, &[93; 1_000], &cfg(0.001)), None);
+        assert_eq!(check(&seq, &[255; 1_000], &cfg(0.0)), None);
+        assert_eq!(
+            check(&seq, &[40; 1_000], &cfg(0.0)),
+            Some(DropReason::ExpectedErrors)
+        );
+    }
+
+    /// An empty segment is too short whatever the budget, and the length
+    /// bounds are evaluated before expected errors.
+    #[test]
+    fn expected_errors_follow_the_length_bounds() {
+        let cfg = FilterConfig {
+            max_expected_errors: Some(0.0),
+            min_length: 3,
+            ..base()
+        };
+        assert_eq!(check(b"", &[], &cfg), Some(DropReason::TooShort));
+        assert_eq!(check(b"AC", &[2, 2], &cfg), Some(DropReason::TooShort));
+    }
+
+    /// The mean-quality bound reads the same error-probability mean whether or
+    /// not the expected errors are computed for their own bound.
+    #[test]
+    fn mean_quality_bound_is_unchanged_by_the_expected_errors_bound() {
+        let phred: Vec<u8> = (0..700u32).map(|i| (i % 37) as u8).collect();
+        let seq = vec![b'A'; phred.len()];
+        let q = crate::qual::mean_prob_q(&phred);
+        for (min_qual, want) in [(q, None), (q + 1e-6, Some(DropReason::LowQuality))] {
+            let cfg = FilterConfig {
+                min_qual,
+                max_expected_errors: Some(1e6),
+                ..base()
+            };
+            assert_eq!(check(&seq, &phred, &cfg), want);
+        }
     }
 
     #[test]

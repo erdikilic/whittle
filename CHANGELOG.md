@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one alone, so a read with a low-quality interior keeps both flanks.
   Segments scoring below 50 error-free bases are dropped; the kept segments
   are named, filtered and counted like the pieces of `runs`.
+- `--max-expected-errors <E>` rejects an output segment whose expected
+  errors, the sum of its per-base error probabilities (Edgar and Flyvbjerg
+  2015), exceed E. Each segment is judged after all trimming and splitting;
+  rejected segments are reported as `expected_errors` in `--rejected-output`
+  and `segments_dropped.expected_errors`, and the bound as
+  `params.max_expected_errors`.
 - `--quality-end-cutoff <PHRED>` trims the ends of every piece of
   `--quality-trim segments` or `runs`, split or not, up to the first base at
   or above PHRED, so a read splits at `--quality-cutoff` while its ends are
@@ -30,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not reach the output to a second file in the output's format family,
   each with a `wr:Z` tag naming the reason (`tag_filter`,
   `trimmed_to_nothing`, `too_short`, `too_long`, `low_quality`,
-  `high_quality`, `gc`).
+  `high_quality`, `expected_errors`, `gc`).
 - Tagged FASTQ input. A FASTQ whose headers carry SAM aux tags in the
   `samtools fastq -T` convention is trimmed on the BAM-to-FASTQ path: `MM`,
   `ML` and `MN` are rebuilt and per-base arrays sliced for every output

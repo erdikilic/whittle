@@ -915,6 +915,7 @@ fn is_no_op(cfg: &Config, same_format: bool) -> bool {
         && cfg.filter.max_length == usize::MAX
         && cfg.filter.min_qual <= 0.0
         && cfg.filter.max_qual >= 1000.0
+        && cfg.filter.max_expected_errors.is_none()
         && cfg.filter.min_gc.is_none()
         && cfg.filter.max_gc.is_none();
     no_trim

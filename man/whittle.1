@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-quality\-trim\fR] [\fB\-\-quality\-cutoff\fR] [\fB\-\-min\-low\-quality\-run\fR] [\fB\-\-quality\-end\-cutoff\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-report\fR] [\fB\-h\fR|\fB\-\-help\fR]
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-\-max\-expected\-errors\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-quality\-trim\fR] [\fB\-\-quality\-cutoff\fR] [\fB\-\-min\-low\-quality\-run\fR] [\fB\-\-quality\-end\-cutoff\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-report\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH OPTIONS
@@ -69,7 +69,7 @@ BGZF compression level (0\-9) for BAM, .bgz and .gz output. Lower levels are fas
 Write a machine\-readable JSON run summary (counters plus the resolved settings) to this path. Written even under \-\-quiet
 .TP
 \fB\-\-rejected\-output\fR \fI<PATH>\fR
-Write every input read or trimmed segment that does not reach the output to this path, in the output\*(Aqs format family, with a wr:Z tag naming the reason: tag_filter, trimmed_to_nothing, too_short, too_long, low_quality, high_quality or gc
+Write every input read or trimmed segment that does not reach the output to this path, in the output\*(Aqs format family, with a wr:Z tag naming the reason: tag_filter, trimmed_to_nothing, too_short, too_long, low_quality, high_quality, expected_errors or gc
 .SH TAGS
 .TP
 \fB\-\-fastq\-tags\fR \fI<all|none|TAGS>\fR [default: all]
@@ -117,6 +117,9 @@ Minimum post\-trim segment quality under \-\-quality\-mode
 .TP
 \fB\-Q\fR, \fB\-\-max\-quality\fR \fI<PHRED>\fR [default: 1000]
 Maximum post\-trim segment quality under \-\-quality\-mode
+.TP
+\fB\-\-max\-expected\-errors\fR \fI<E>\fR
+Maximum expected errors per output segment: the sum of its per\-base error probabilities 10^(\-Q/10) after trimming (Edgar and Flyvbjerg 2015). A total per segment rather than a rate, for amplicons of a fixed length; a non\-negative number
 .TP
 \fB\-g\fR, \fB\-\-min\-gc\fR \fI<FRACTION>\fR
 Minimum post\-trim GC fraction (0 to 1; 0.4 means 40%)

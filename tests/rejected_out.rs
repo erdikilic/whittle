@@ -239,3 +239,63 @@ fn rejected_output_format_family_must_match_the_output() {
         .stderr(predicate::str::contains("--rejected-output"))
         .stderr(predicate::str::contains("format family"));
 }
+
+/// Phred+33 text for `len` bases at quality `q`.
+fn qual(q: u8, len: usize) -> String {
+    char::from(q + 33).to_string().repeat(len)
+}
+
+/// `--max-expected-errors` judges each quality-split piece on its own and an
+/// unsplit read as a whole; a rejected segment carries the `expected_errors`
+/// reason and the summary counts it with the resolved bound.
+#[test]
+fn expected_errors_reject_each_segment_on_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+    // r1 splits into 100 Q30 bases (0.1 expected errors) and 100 Q15 bases
+    // (3.2); r2 carries 0.5 and r3 2.0 expected errors.
+    let r1 = [qual(30, 100), qual(3, 40), qual(15, 100)].concat();
+    std::fs::write(
+        &input,
+        format!(
+            "@r1\n{}\n+\n{r1}\n@r2\n{}\n+\n{}\n@r3\n{}\n+\n{}\n",
+            "A".repeat(240),
+            "C".repeat(50),
+            qual(20, 50),
+            "G".repeat(200),
+            qual(20, 200)
+        ),
+    )
+    .unwrap();
+    let out = dir.path().join("out.fastq");
+    let rej = dir.path().join("rejected.fastq");
+    let json = dir.path().join("summary.json");
+    whittle()
+        .args(["--quality-trim", "runs", "--quality-cutoff", "10"])
+        .args(["--min-low-quality-run", "10", "--max-expected-errors", "1"])
+        .args(["-t", "1", "--quiet"])
+        .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
+        .args(["--rejected-output", rej.to_str().unwrap()])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(
+        fastq_headers(&std::fs::read_to_string(&out).unwrap()),
+        ["r1_segment_1", "r2"]
+    );
+    let rejected = std::fs::read_to_string(&rej).unwrap();
+    assert_eq!(
+        fastq_headers(&rejected),
+        [
+            "r1_segment_2\twr:Z:expected_errors",
+            "r3\twr:Z:expected_errors"
+        ],
+        "{rejected}"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert_eq!(v["params"]["max_expected_errors"], 1.0);
+    assert_eq!(v["segments_dropped"]["expected_errors"], 2);
+    assert_eq!(v["reads"]["with_output"], 2);
+    assert_eq!(v["reads"]["all_filtered"], 1);
+}

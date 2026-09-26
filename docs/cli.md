@@ -87,6 +87,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --quality-trim en
 | `-L, --max-length <BASES>` | Maximum length to keep |
 | `-q, --min-quality <PHRED>` | Minimum post-trim segment quality, a finite value of at least 0 (default 0) |
 | `-Q, --max-quality <PHRED>` | Maximum post-trim segment quality, a finite value of at least 0 (default 1000) |
+| `--max-expected-errors <E>` | Maximum expected errors per output segment, the sum of its per-base error probabilities; a finite value of at least 0 |
 | `-g, --min-gc <FRACTION>`, `-G, --max-gc <FRACTION>` | GC-fraction bounds (0 to 1; `0.4` means 40%) |
 | `-m, --quality-mode <MODE>` | Quality calculation for `--min-quality`/`--max-quality` only: `mean` (mean error probability as a Phred score, the default), `arithmetic` (mean of the Phred scores), `median` |
 | `--tag-filter <EXPR>` | Keep only reads whose aux tags satisfy EXPR (samtools `-e` syntax over `[tag]` values); repeatable, every expression must hold; applied before adapter discovery and trimming (BAM or tagged FASTQ input) |
@@ -135,6 +136,20 @@ split locations.
 | `mean` (default) | Average per-base error probabilities, then convert the average to a Phred score |
 | `arithmetic` | Average the numerical Phred scores directly |
 | `median` | Take the median Phred score |
+
+`--max-expected-errors E` rejects a segment whose expected errors, the sum of
+its per-base error probabilities `10^(-Q/10)` (Edgar and Flyvbjerg 2015),
+exceed E. It is computed on the final segment, after all trimming and
+splitting, so each piece of a split read is judged on its own, and it is
+reported as `expected_errors`. The mean-quality bound and this bound differ in
+what they hold fixed: `--min-quality Q` in `mean` mode limits the expected
+error rate, the expected errors divided by the length, to `10^(-Q/10)`
+whatever the length, while `--max-expected-errors` limits the total per
+segment, so a longer segment needs a higher per-base accuracy to pass. The
+total suits reads of a fixed length, such as full-length 16S or ITS
+amplicons, targeted panels and DADA2-style workflows. On genomic long reads,
+whose lengths vary by orders of magnitude, it would reject long reads for
+their length alone; `--min-quality` is the bound for them.
 
 `--quality-trim METHOD` trims each segment from adapter processing, after the
 fixed crop, against `--quality-cutoff PHRED`. The cutoff has no default: the
@@ -342,8 +357,8 @@ to a second file: reads rejected by `--tag-filter` (as read, untrimmed),
 reads that trimming left without a segment (as read), and every trimmed
 segment a filter dropped (as trimmed, with its `_segment_N` name and its
 rewritten tags). Each record carries a `wr:Z` tag with one of `tag_filter`,
-`trimmed_to_nothing`, `too_short`, `too_long`, `low_quality`, `high_quality`
-or `gc`. In FASTQ output the tag is a header field, as for tagged FASTQ.
+`trimmed_to_nothing`, `too_short`, `too_long`, `low_quality`, `high_quality`,
+`expected_errors` or `gc`. In FASTQ output the tag is a header field, as for tagged FASTQ.
 
 The file takes the output's format family, BAM for BAM output and FASTQ for
 FASTQ output, with compression from its own extension (`.bam`, `.fastq`,
@@ -380,7 +395,7 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
               "adapters": { "configured": 120, "count": 4, "sample": 500, "infer": "off" } },
   "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 20, "tag_filtered": 10 },
   "bases": { "input": 10000000, "output": 9500000 },
-  "segments_dropped": { "too_short": 12, "too_long": 0, "low_quality": 5, "high_quality": 0, "gc_out_of_range": 0 },
+  "segments_dropped": { "too_short": 12, "too_long": 0, "low_quality": 5, "high_quality": 0, "expected_errors": 0, "gc_out_of_range": 0 },
   "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0, "barcode_tag_malformed_reads": 0, "barcode_tag_unverified_reads": 0 }
 }
 ```

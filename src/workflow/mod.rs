@@ -516,7 +516,7 @@ pub struct Counters {
     /// `reads_with_output` and `reads_trimmed_to_nothing` in the invariant
     /// below.
     pub reads_all_filtered: AtomicU64,
-    /// Segments dropped as `TooShort`. This and the four counters below are
+    /// Segments dropped as `TooShort`. This and the five counters below are
     /// segment-level: one bump per segment (not read) that `filter::check`
     /// rejects, by reason, post-trim. A single input read can contribute to
     /// more than one of these (e.g. a quality-split read whose several pieces
@@ -529,6 +529,8 @@ pub struct Counters {
     pub segments_dropped_low_qual: AtomicU64,
     /// Segments dropped as `HighQuality`.
     pub segments_dropped_high_qual: AtomicU64,
+    /// Segments dropped as `ExpectedErrors`.
+    pub segments_dropped_expected_errors: AtomicU64,
     /// Segments dropped as `Gc`.
     pub segments_dropped_gc: AtomicU64,
 }
@@ -555,6 +557,7 @@ impl Counters {
             DropReason::TooLong => &self.segments_dropped_long,
             DropReason::LowQuality => &self.segments_dropped_low_qual,
             DropReason::HighQuality => &self.segments_dropped_high_qual,
+            DropReason::ExpectedErrors => &self.segments_dropped_expected_errors,
             DropReason::Gc => &self.segments_dropped_gc,
         };
         counter.fetch_add(1, Ordering::Relaxed);
@@ -571,6 +574,9 @@ impl Counters {
         let segments_dropped_long = self.segments_dropped_long.load(Ordering::Relaxed);
         let segments_dropped_low_qual = self.segments_dropped_low_qual.load(Ordering::Relaxed);
         let segments_dropped_high_qual = self.segments_dropped_high_qual.load(Ordering::Relaxed);
+        let segments_dropped_expected_errors = self
+            .segments_dropped_expected_errors
+            .load(Ordering::Relaxed);
         let segments_dropped_gc = self.segments_dropped_gc.load(Ordering::Relaxed);
 
         // Every input read lands in exactly one of the four read-level buckets: it
@@ -603,6 +609,7 @@ impl Counters {
             segments_dropped_long,
             segments_dropped_low_qual,
             segments_dropped_high_qual,
+            segments_dropped_expected_errors,
             segments_dropped_gc,
         }
     }
@@ -766,6 +773,9 @@ pub struct Stats {
     pub segments_dropped_low_qual: u64,
     /// Segment-level: segments dropped by post-trim `filter::check` for quality above `max_qual`.
     pub segments_dropped_high_qual: u64,
+    /// Segment-level: segments dropped by post-trim `filter::check` for
+    /// expected errors above `max_expected_errors`.
+    pub segments_dropped_expected_errors: u64,
     /// Segment-level: segments dropped by post-trim `filter::check` for GC fraction
     /// outside `[min_gc, max_gc]`.
     pub segments_dropped_gc: u64,
@@ -858,6 +868,7 @@ mod tests {
             max_length: usize::MAX,
             min_qual: 0.0,
             max_qual: 1000.0,
+            max_expected_errors: None,
             min_gc: None,
             max_gc: None,
             qual_mode: crate::qual::QualMode::Mean,

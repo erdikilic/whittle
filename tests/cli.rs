@@ -335,6 +335,16 @@ fn every_validation_names_its_flag() {
             "--min-quality (-5) must be a finite quality",
         ),
         (
+            vec!["--max-expected-errors=-0.5".into()],
+            Expect::Fails,
+            "--max-expected-errors (-0.5) must be a finite number of at least 0",
+        ),
+        (
+            vec!["--max-expected-errors".into(), "nan".into()],
+            Expect::Fails,
+            "--max-expected-errors (NaN) must be a finite number",
+        ),
+        (
             vec!["--max-quality".into(), "inf".into()],
             Expect::Fails,
             "--max-quality (inf) must be a finite quality",

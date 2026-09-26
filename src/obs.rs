@@ -676,7 +676,8 @@ fn all_filtered_line(stats: &Stats) -> Option<String> {
 
 /// The end-of-run drop-reason line: `Segments dropped: 3,200 (2,100 too short,
 /// 1,100 low quality)`. Only non-zero reasons appear, in a fixed order: too short,
-/// too long, low quality, high quality, GC out of range. Counts segments, not
+/// too long, low quality, high quality, too many expected errors, GC out of
+/// range. Counts segments, not
 /// reads, since a split read can contribute several and still survive. `None` when
 /// nothing was dropped.
 fn segments_dropped_line(stats: &Stats) -> Option<String> {
@@ -690,6 +691,10 @@ fn segments_dropped_line(stats: &Stats) -> Option<String> {
         (DropReason::TooLong, stats.segments_dropped_long),
         (DropReason::LowQuality, stats.segments_dropped_low_qual),
         (DropReason::HighQuality, stats.segments_dropped_high_qual),
+        (
+            DropReason::ExpectedErrors,
+            stats.segments_dropped_expected_errors,
+        ),
         (DropReason::Gc, stats.segments_dropped_gc),
     ];
     let total: u64 = by_reason.iter().map(|(_, n)| n).sum();
@@ -1211,13 +1216,14 @@ mod tests {
             segments_dropped_long: 2,
             segments_dropped_low_qual: 3,
             segments_dropped_high_qual: 4,
+            segments_dropped_expected_errors: 6,
             segments_dropped_gc: 5,
             ..Default::default()
         };
         assert_eq!(
             segments_dropped_line(&stats).unwrap(),
-            "Segments dropped: 15 (1 too short, 2 too long, 3 low quality, \
-             4 high quality, 5 GC out of range)"
+            "Segments dropped: 21 (1 too short, 2 too long, 3 low quality, \
+             4 high quality, 6 too many expected errors, 5 GC out of range)"
         );
     }
 

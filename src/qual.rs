@@ -25,18 +25,29 @@ pub fn phred_to_prob(q: u8) -> f64 {
 const HISTOGRAM_MIN_LEN: usize = 512;
 
 /// Returns the error-probability mean quality: the ONT read Q, the mean
-/// per-base error probability converted back to a Phred score. Long reads sum
-/// through `histogram_prob_sum`; shorter ones sum per base.
+/// per-base error probability converted back to a Phred score.
 pub fn mean_prob_q(phred: &[u8]) -> f64 {
     if phred.is_empty() {
         return 0.0;
     }
-    let sum: f64 = if phred.len() < HISTOGRAM_MIN_LEN {
+    mean_q_from_expected_errors(expected_errors(phred), phred.len())
+}
+
+/// Returns the expected number of errors in `phred`, the sum of its per-base
+/// error probabilities (Edgar and Flyvbjerg 2015). Long reads sum through
+/// `histogram_prob_sum`; shorter ones sum per base.
+pub fn expected_errors(phred: &[u8]) -> f64 {
+    if phred.len() < HISTOGRAM_MIN_LEN {
         phred.iter().map(|&q| phred_to_prob(q)).sum()
     } else {
         histogram_prob_sum(phred)
-    };
-    (sum / phred.len() as f64).log10() * -10.0
+    }
+}
+
+/// Returns the error-probability mean quality of `len` bases carrying
+/// `expected_errors` expected errors, as `mean_prob_q` computes it.
+pub fn mean_q_from_expected_errors(expected_errors: f64, len: usize) -> f64 {
+    (expected_errors / len as f64).log10() * -10.0
 }
 
 /// Returns the sum of the per-base error probabilities of `phred` as the dot
@@ -180,6 +191,21 @@ mod tests {
         // on both paths.
         assert!(mean_prob_q(&[200, 10]).is_finite());
         assert!(mean_prob_q(&[255u8; 1000]).is_finite());
+    }
+
+    /// Expected errors are the sum of the per-base error probabilities on both
+    /// summation paths, and the error-probability mean derives from them.
+    #[test]
+    fn expected_errors_sum_the_error_probabilities() {
+        assert_eq!(expected_errors(&[]), 0.0);
+        assert!((expected_errors(&[10, 20, 30]) - 0.111).abs() < 1e-12);
+        let long = vec![20u8; 2_000];
+        assert!((expected_errors(&long) - 20.0).abs() < 1e-9);
+        let mixed: Vec<u8> = (0..3_001u32).map(|i| (i % 41) as u8).collect();
+        assert_eq!(
+            mean_prob_q(&mixed),
+            mean_q_from_expected_errors(expected_errors(&mixed), mixed.len())
+        );
     }
 
     #[test]

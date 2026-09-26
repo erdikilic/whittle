@@ -40,6 +40,7 @@ impl Reason {
             Reason::Dropped(DropReason::TooLong) => "too_long",
             Reason::Dropped(DropReason::LowQuality) => "low_quality",
             Reason::Dropped(DropReason::HighQuality) => "high_quality",
+            Reason::Dropped(DropReason::ExpectedErrors) => "expected_errors",
             Reason::Dropped(DropReason::Gc) => "gc",
         }
     }
@@ -171,6 +172,10 @@ mod tests {
         assert_eq!(Reason::TrimmedToNothing.label(), "trimmed_to_nothing");
         assert_eq!(Reason::Dropped(DropReason::TooShort).label(), "too_short");
         assert_eq!(Reason::Dropped(DropReason::Gc).label(), "gc");
+        assert_eq!(
+            Reason::Dropped(DropReason::ExpectedErrors).label(),
+            "expected_errors"
+        );
     }
 
     #[test]
