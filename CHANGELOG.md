@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--split-by <SPEC>` (repeatable) assigns every output read, or
+  chimera-split segment, to a primer target and tags it `wt:Z` with the
+  target, `unassigned` or `ambiguous`. Each `SPEC` adds a source, merged
+  into one sheet: an existing file path (a TSV sheet or annotated FASTA),
+  the preset `mab114`, or an inline target
+  `NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]`. A target holds a primer mix, a
+  list of forward and a list of reverse primers in which any forward primer
+  pairs with any reverse primer: comma-separated lists inline and in the
+  TSV `fwd` and `rev` cells, repeated `target=` and `end=` entries in a
+  FASTA sheet. The variants of one target never make a read ambiguous.
+  Further inline pairs begun by `,F:` or `,R:` form a pool of targets
+  `NAME.1`, `NAME.2`, ... in group `NAME`. The preset `mab114` holds the
+  SQK-MAB114.24 16S and ITS primer mixes under their ONT names. Split
+  primers are located and trimmed with the other primers of the adapter
+  search.
+  `--split-require` sets which end(s) need a located primer, `--split-lead`
+  the assignment margin, and `--split-action retain` keeps a located
+  primer instead of trimming it. An `-o` template holding `{target}`,
+  `{group}` or `{barcode}` writes each key to its own file; without one,
+  every record is tagged and written to one output. `--split-discard`
+  drops the `unassigned` or `ambiguous` bin instead of writing it.
+  Reported per key in the end-of-run log and as an additive `split` object
+  in `--summary-json`.
+- The catalog lists the twelve SQK-MAB114.24 primers as ONT ships them,
+  under their ONT names, for the `mab114` adapter preset and `--split-by
+  mab114`: the 16S mix `16S_mix_F`/`16S_mix_R` with its Borrelia, Chlamydia
+  and Enterobacteriaceae variants, and the ITS mix `ITS1`/`ITS4` with its
+  Fusarium, Malassezia and Pythium variants, in place of the classic 27F,
+  1492R and ITS1F; `ITS4` keeps its classic name and sequence, joined by its
+  new Pythium variant `ITS4_Pyt`. The marker-gene primers, which decide the
+  amplicon judgement, primer pairing and discovery's insert boundary, are
+  the twelve kit primers plus the community ITS1F and 22-base 1492R, which
+  the kit does not hold; a sequence that matches several at the same cost is
+  taken as the one nearest it in length. In the set-wide chance bounds the
+  primers of one binding site count as one sequence, at one edit budget, the
+  lowest of theirs, so the variants leave the budgets of the other entries
+  where one primer per site puts them; each primer of a site also keeps no
+  more than its budget with every variant counted separately. The kit's 16S
+  mixes are more degenerate than the classic 27F and 1492R, and ITS1 is
+  shorter than ITS1F; against a catalog of those four, this raises the pair
+  budget of the `PCS114_UMI` pattern by one edit in reads of 8 to 16 kb
+  under `ont` and `all`, lowers the interior budget of `MAB_rear` by one
+  edit in the same reads under `ont`, and under `mab114` alone, where the
+  kit's primers take the adapter role and join no chance family, moves the
+  interior budget of `LSK109_front` and `RAD` by one edit in one read-length
+  class each and of `MAB_rear` by one edit in two read-length classes. Every
+  other budget outside the kit primers stays as that catalog sets it.
 - `--quality-trim segments` keeps every maximal scoring segment under the
   modified Mott score of `best` (Ruzzo and Tompa 1999) instead of the best
   one alone, so a read with a low-quality interior keeps both flanks.
@@ -45,6 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- Library API: `workflow::run_raw_bam` is no longer public,
+  `obs::ProgressHandle::finish` takes `&Config`, `Stats` is no longer
+  `Copy`, `Config::write_targets` yields its paths as `Cow<Path>`,
+  `io::bam::BamSink::block_level` is removed, and the `level` field of
+  `BamSink::Blocks` is removed.
 - Quality trimming is selected with one method and one cutoff:
   `--quality-trim <ends|best|segments|runs>` with `--quality-cutoff <PHRED>`,
   which is required with it, and `--min-low-quality-run <BASES>` for `runs`.
@@ -320,7 +372,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry has a role: adapters split reads at interior hits, primers and
   barcodes trim read ends only, and an amplicon-only preset (`mab114`)
   promotes its primers to adapters. The catalog gains the MAB114 kit
-  (degenerate 16S 27F/1492R and ITS1F/ITS4 primers, MAB flanks, 24 barcodes)
+  (its seven 16S and five ITS primers, MAB flanks, 24 barcodes)
   and the PacBio SMRTbell adapter and C2 primer; the RAB 16S kit-9 entries
   are replaced by the degenerate primers.
 - A FASTA entry whose header description contains the word `primer` or

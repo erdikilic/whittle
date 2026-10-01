@@ -34,9 +34,10 @@ exceptions:
 - The barcodes of a panel (equal-length barcode entries) do not split when the
   set carries barcode flanks or a barcode construct: the flanks at a barcode
   junction split it.
-- The universal marker-gene primers (16S 27F and 1492R, ITS1F, ITS4) split
-  only beside the rest of a junction stack in a selection that includes a
-  genomic kit, since their sites lie inside every genomic read through an rRNA
+- The universal marker-gene primers (see
+  [Marker-gene primers](#marker-gene-primers)) split only beside the rest of
+  a junction stack in a selection that includes a genomic kit, since their
+  sites lie inside every genomic read through an rRNA
   operon: another excision within 11 bases, or the other end's primer within
   the end zone, across the barcodes between them. A preset made only of
   amplicon kits (`mab114`) promotes them to adapters, which split alone.
@@ -58,6 +59,9 @@ exceptions:
 - An interior hit splits only when the whole sequence aligns: a hit whose
   alignment leaves 10 or more bases to clip at its ends is dropped, as at a
   genomic primer site matched by an adapter assembled with its primer.
+- A sheet primer of `--split-by` splits a read only at a junction pair or
+  beside an interior adapter or barcode, whatever its role and whatever the
+  library; see [Primer split](#primer-split).
 - The PCS114 UMI does not split: the SSP beside it splits a junction. It
   trims an end where it follows the SSP.
 - A primer or barcode splits only reads short enough that its exact matches
@@ -110,10 +114,17 @@ edit first, and the members of a panel lose it together. The bound is applied
 in two tiers. A hit anchored at the read end, or directly behind an accepted
 hit, starting within 11 bases of it, keeps the budget bounded over that small
 anchoring zone; a hit anywhere else in the end zone is held to the budget
-bounded over the whole zone. A sequence and its reverse complement count once.
+bounded over the whole zone. A sequence and its reverse complement count once,
+and so do the marker-gene primers of one binding site (see below), such as
+the 16S forward mix and its variants: they count as the one of them with the
+most chance matches, at one budget, the lowest of theirs, in the terminal,
+interior and pair bounds alike, so the variants of a site leave the budgets
+of every other entry where one primer would. Each primer of a site also
+keeps no more than the budget it gets with every variant counted as a
+sequence of its own.
 Every catalog entry keeps its per-pattern budget when anchored at the read end,
-and the catalog adapters and 24-base ONT barcodes keep it anywhere in the end
-zone.
+a marker-gene primer the lowest of its site, and the catalog adapters and
+24-base ONT barcodes keep it anywhere in the end zone.
 
 Interior hits use a stricter budget. For each adapter and read-length class
 (powers of two from 4 kb upward), the interior budget is the largest edit count
@@ -181,7 +192,8 @@ library. At most 4000 reads spread evenly over the sample are examined.
 Every molecule of an amplicon library starts with one of its primers, so a
 read keeps one at its 5' end unless it is a fragment, and the reads share the
 lengths of a few targets. The primers of the library are the catalog marker
-primers (16S 27F and 1492R, ITS1F, ITS4), the primer-role entries of a preset
+primers (see [Marker-gene primers](#marker-gene-primers)), the primer-role
+entries of a preset
 or FASTA that are marker primers or no catalog sequence, and every discovered
 sequence except the members of a barcode layer and the sequences whose best
 catalog match is another catalog entry (an adapter, barcode, flank or the PCR
@@ -306,8 +318,9 @@ A candidate is cut at the first of its columns that follows the template,
 and dropped when that column lies within its first 11 bases or when one of
 the 16 columns outboard of it follows the template: the candidate then lies
 in the insert. A candidate whose first column behind it follows the
-template, or that holds the inner end of a catalog marker primer (16S 27F
-and 1492R, ITS1F, ITS4), ends at the insert boundary: when accepted it
+template, or that holds the inner end of a catalog marker primer (see
+[Marker-gene primers](#marker-gene-primers)), ends at the insert boundary:
+when accepted it
 closes its read end, as a primer reconstructed from unprimed read starts
 does, and its reverse complement marks the insert boundary at the other read
 end, where the far primer of the molecule is read. A candidate that reads
@@ -445,7 +458,7 @@ a comma-separated list of tokens:
 | `nbd114` | Native barcoding kit V14 | Ligation adapter, native flank, 96 barcodes |
 | `pcb114`, `pcs114` | cDNA-PCR sequencing and barcoding kits V14 | Ligation adapter, PCS primers, PCS114 UMI, PCR flanks, 24 barcodes |
 | `rpb114` | Rapid PCR barcoding kit V14 | Rapid adapter, PCR primers, rapid ligation flank, 24 barcodes |
-| `mab114` | Microbial amplicon barcoding kit V14 | Ligation and rapid adapters, degenerate 16S 27F/1492R and ITS1F/ITS4 primers, MAB flanks, 24 barcodes |
+| `mab114` | Microbial amplicon barcoding kit V14 | Ligation and rapid adapters, the kit's seven 16S and five ITS primers, MAB flanks, 24 barcodes |
 | `rna004` | Direct RNA sequencing kit | RNA adapter |
 | `pacbio` | PacBio SMRTbell | SMRTbell adapter, C2 sequencing primer |
 | `ont` | Every ONT kit above | |
@@ -453,8 +466,132 @@ a comma-separated list of tokens:
 
 The catalog is assembled from vendor-published sources: dorado's
 `adapter_primer_kits.cpp` and `barcode_kits.cpp`, Porechop's `adapters.py`,
-qcat's kit definitions, and the NCBI UniVec records of the PacBio sequences.
+qcat's kit definitions, ONT's primer sheet for SQK-MAB114.24, and the NCBI
+UniVec records of the PacBio sequences.
 Every entry names its kits, so a kit preset searches only what its library can
 contain; a union searches everything, at some cost in speed and precision.
 Flanks shorter than 11 bp are excluded, since a pattern that short matches
 almost anywhere.
+
+### Marker-gene primers
+
+The `mab114` preset lists the primers of the kit as ONT ships them, seven
+for 16S and five for ITS, under their ONT names:
+
+| Primer | Sequence |
+|---|---|
+| 16S_mix_F | `AGRGTTYGATYMTGGCTCAG` |
+| 16S_mix_R | `SGGYTACCTTGTTACGACTT` |
+| 16S_Bor_F | `AGAGTTTGATCCTGGCTTAG` |
+| 16S_Bor_R | `CGGCTACCTTGTTACGACTT` |
+| 16S_Chl_F | `AGAATTTGATCTTRGTTCAG` |
+| 16S_Chl_R | `GGGCTACCTTGTTACGACTT` |
+| 16S_Ent_F | `AGAGTTTGATCATGGCTCAG` |
+| ITS1 | `TCCGTAGGTGAACCTGCGG` |
+| ITS1_Fus | `TCCGTTGGTGAACCAGCGG` |
+| ITS1_Mal | `TCTGTAGGTGAACCTGCAG` |
+| ITS4 | `TCCTCCGCTTATTGATATGC` |
+| ITS4_Pyt | `TCCTCCGCTTATTAATATGC` |
+
+The universal marker-gene primers are these twelve and two community
+primers outside the kit, fungal ITS1F (`CTTGGTCATTTAGAGGAAGTAA`) and the
+22-base 16S 1492R (`TACGGYTACCTTGTTACGACTT`). The classic 16S 27F
+(`AGAGTTTGATYMTGGCTCAG`) is an instance of 16S_mix_F. A sequence from a
+preset, a FASTA or discovery is a marker primer when it matches one of
+them on either strand within its edit budget and differs from it in length
+by fewer than 10 bases; a shorter sequence must reach an end of the primer.
+Among primers that match at the same cost, the one nearest in length
+decides, then the first in the order above. The binding sites group them:
+16S forward (16S_mix_F, 16S_Bor_F, 16S_Chl_F, 16S_Ent_F), 16S reverse
+(16S_mix_R, 16S_Bor_R, 16S_Chl_R, 1492R), ITS1 (ITS1, ITS1_Fus, ITS1_Mal),
+ITS4 (ITS4, ITS4_Pyt), and ITS1F.
+
+## Primer split
+
+`--split-by` ([cli.md](cli.md#primer-split)) hands the adapter engine a
+sheet of targets, each a list of forward and a list of reverse primers.
+Each sheet primer joins the search set in the primer
+role: it is matched by sequence, or by reverse complement, to an existing
+preset or FASTA entry and reused under that entry's name, or appended as a
+new entry when no match exists. An entry that matches a primer and the
+reverse complement of another (a target whose reverse primer is the reverse
+complement of its forward primer) reads into the insert in both
+orientations. Sheet primers are attached to the search set
+after presence detection or discovery has narrowed it, so they are always
+searched and can never be narrowed away. `--split-by` leaves the
+amplicon-library judgement as the sampled reads gave it: it still decides
+whether a catalog marker primer outside the sheet splits alone, and it is
+not forced on.
+
+A sheet primer inside a read splits it only at a junction: a sheet primer in
+its closing orientation (reverse complemented, as it ends an amplicon)
+followed by a sheet primer in its opening orientation (as the next amplicon
+starts), the second starting within 11 bases of the end of the first or
+overlapping it by at most 11, or a sheet primer beside an interior adapter
+or barcode. A lone sheet primer inside a read does not split it: a nested or
+overlapping panel carries the primer sites of some targets inside the
+amplicons of others, and a full-length amplicon stays one read. Overlapping
+primers and two primers facing each other form no junction either.
+
+At the read ends, a sheet primer acts only in the orientation a primer has
+there: as given (reading into the insert) at the 5' end, reverse
+complemented at the 3' end. A hit in the other orientation neither trims nor
+locates a primer. Of the valid hits at one end, the outermost, nearest the
+read end or the trimmed adapter, is the located primer, and trimming stops
+at its inner edge: a sheet primer hit further inside the insert moves the
+trim only when it overlaps the outermost one or starts within 11 bases of
+it. Adapters, barcodes and other primers trim by their own rules. A valid
+sheet primer hit that lies within or overlaps the trim of another entry at
+that end (a catalog primer with other degenerate bases, or an entry that
+fuses an adapter with the primer) is located there, and the trim stays
+where that entry set it. When the terminal
+search of an end leaves that end trimmed by another layer (an adapter,
+barcode or other primer) and holds no sheet primer hit there, the bases just
+inside the trim boundary it set are searched once more with the boundary as
+a read end, so a primer that lost its first bases at the adapter junction
+is located under the same partial-hit rules as a primer cut short by the
+read end. When that end still holds no sheet primer hit, a whole sheet
+primer hit in the orientation valid for that end whose outer edge lies at
+most 3 bases outboard of the boundary or at most 11 bases inboard of it is
+located there within the primer's anchored edit budget: the boundary fixes
+its position, so the chance of a random match there is that of a few
+positions, not of the whole end zone. The bases outboard of the boundary
+are the flank the other layer matched, not random bases, so a primer
+extends into them only by the few bases that layer's alignment may claim
+from it. The anchored budget is the largest edit count, at most the
+error-rate ceiling, whose expected chance matches over the 15 start
+positions beside each of the two boundaries of a read, on the one strand
+valid there, stay within the same per-read target as the terminal budgets,
+for each sheet primer alone and for the sheet's primers together, with the
+variants of one marker-primer site counted once as for the terminal
+budgets. The search is measured from the boundary, not from the read end,
+so a primer that the adapter, flank and barcode push past the end zone, or
+that both end zones cover on a short read, is still the terminal primer of
+its end.
+
+Locating a split primer finds one hit per end, but the classifier needs to
+know how every sheet primer, not only the one located, would score there.
+Rescoring aligns each sheet primer against the located locus, widened into
+a window sized to the longest sheet primer and clamped to the read, in the
+orientation valid for that end: as given at the 5' end, reverse
+complemented at the 3'. A primer scores only within its own terminal edit
+budget, or, at a locus found whole at a trim boundary as above, a whole
+primer hit scores within its anchored edit budget. A primer may hang off
+the read end, and also off the outer edge of the located primer when that
+primer was found hanging off a read end or a trim boundary: that edge then
+counts as a read end for every sheet primer, so a primer the engine
+located partially still scores there. A located primer that aligned whole
+keeps a window widened on both sides. The two ends' scores go to the
+classifier. For a target and strand, an end counts at the cheapest scored
+primer of the list the strand puts there, so the primer variants of one
+target never compete with each other. A primer of another key closer than
+`--split-lead` edits to a scored primer stands in for it at one edit more.
+An end that scored primers of other keys only, each within `--split-lead`
+of the penalty, may hold the target's primer at that penalty: the lowest
+budget rescoring applied at that end (terminal, or anchored at a locus
+found whole at a trim boundary) plus one, the same for every target. A
+primer that leads the penalty by the lead rules out every target that does
+not list it there. The classifier assigns the cheapest strand-consistent
+target only when it beats every other target by at least `--split-lead`
+edits; a smaller margin, or a tie, is ambiguous rather than a guess. See
+[cli.md](cli.md#classification) for the calls.

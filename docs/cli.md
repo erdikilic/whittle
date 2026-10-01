@@ -47,9 +47,9 @@ more workers once that thread is saturated; BGZF
 FASTQ input (`bgzip`, or whittle's own `.gz` output) has no such limit. The
 startup banner reports the split.
 
-Records are written in completion order under `-t > 1`. `--preserve-order` restores
-the input order using a bounded window of batches. A slow batch limits read-ahead
-until it is written.
+Records are written in completion order under `-t > 1`. `--preserve-order`
+restores the input order using a bounded window of batches. A slow batch limits
+read-ahead until it is written.
 
 ## Directory input
 
@@ -75,7 +75,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --quality-trim en
 | `-h, --help` | Print the option list and examples |
 | `--version` | Print the version and exit |
 | `-i, --input <PATH>` | Input file or directory (omit, or pass `-`, for stdin) |
-| `-o, --output <PATH>` | Output file (omit, or pass `-`, for stdout) |
+| `-o, --output <PATH>` | Output file (omit, or pass `-`, for stdout); under `--split-by`, a path holding `{target}`, `{group}` or `{barcode}` is a template with one file per split key |
 | `--input-format`, `--output-format <FORMAT>` | Force a format instead of detecting it: `fastq`, `fastq-gz`, `fastq-bgz`, `bam` |
 | `--fastq-tags <all\|none\|TAGS>` | Aux tags written into FASTQ headers on BAM or tagged FASTQ input (default `all`) |
 | `-c, --compression-level <0-9>` | BGZF level for `.gz`, `.bgz` and BAM output (default 4 for `.gz`, 6 for `.bgz` and BAM); ignored for plain FASTQ |
@@ -106,6 +106,11 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --quality-trim en
 | `--adapter-sample-reads <COUNT>` | Reads inspected for preset presence or adapter discovery (defaults 2000 and 40000; at least 100); `0` disables preset detection and is rejected for discovery; ignored with `--adapter-fasta` unless discovering adapters |
 | `--adapter-discover` | Discover adapters, barcodes and primers from the sampled reads and trim them; a preset or FASTA is trimmed first and discovery continues beyond it; enables adapter trimming |
 | `--adapter-report` | Run the same discovery, print the discovered FASTA to stdout and exit without read output or a JSON summary; conflicts with `--adapter-discover` |
+| `--split-by <SPEC>` (repeatable) | Assign every output read or segment to a primer target and tag it `wt:Z`; each `SPEC` adds a source, merged into one sheet: a sheet file (TSV or annotated FASTA), the preset `mab114`, or an inline target ([below](#primer-split)); a target holds one or more forward and reverse primers |
+| `--split-require <RULE>` | Which end(s) need a located primer for an assignment: `either` (default), `both`, `fwd`, `rev` |
+| `--split-action <trim\|retain>` | Whether a located split primer is trimmed (default) or kept by widening the piece back over it |
+| `--split-lead <N>` | Minimum edit-cost lead of the best target over the best different target; a smaller lead is ambiguous (default 2) |
+| `--split-discard <BINS>` | Drop these bins instead of writing them, comma-separated: `unassigned`, `ambiguous` |
 | `-v, --verbose` (repeatable) | Stage detail with `-v`, per-read decisions with `-vv` |
 | `--progress <MODE>` | Progress reporting, independent of the log level: `auto` (default), `bar`, `plain`, `none` |
 | `--quiet` | Silence progress and the summary; warnings and errors still print. Conflicts with `-v` and `--progress` |
@@ -115,10 +120,10 @@ with any of them.
 
 An adapter source is `--adapter-fasta`, `--adapter-preset`, or
 `--adapter-discover`. `--adapter-error-rate`, `--adapter-end-search`, and
-`--adapter-sample-reads` are rejected without one. A forced `--input-format` that
-disagrees with the stream, an output extension that names no format, and
-FASTQ-to-BAM output are reported before any output is written. Adapter trimming is described in
-[adapters.md](adapters.md).
+`--adapter-sample-reads` are rejected without one. A forced `--input-format`
+that disagrees with the stream, an output extension that names no format, and
+FASTQ-to-BAM output are reported before any output is written. Adapter
+trimming is described in [adapters.md](adapters.md).
 
 Adapter sampling stops at the requested read count, 256 MiB of retained payload,
 or 64 Mi bases, whichever is reached first. The last record is kept whole and
@@ -418,6 +423,290 @@ whittle -i reads.bam -o kept.bam --rejected-output rejected.bam -l 500 -q 10 --t
 samtools view rejected.bam | cut -f 1,10 | head
 ```
 
+## Primer split
+
+`--split-by SPEC` assigns every output read, or every chimera-split
+segment, to a target defined by a primer pair, a primer mix, or a pool of
+either, and tags it `wt:Z` with the call. A target holds a list of forward
+primers and a list of reverse primers; any forward primer pairs with any
+reverse primer, as in a kit that ships several primer variants in one tube.
+The flag is repeatable; each `SPEC` adds a source,
+and every source merges into one sheet. `SPEC` resolves in this order: an
+existing file path (a TSV or annotated FASTA sheet), the preset token
+`mab114`, or, when neither matches, the inline form (below). Split primers
+are located and trimmed alongside the other primers of the adapter search:
+at each end, the outermost sheet primer in the orientation valid for that
+end is located and trimmed, and a read is split at a sheet primer only
+where two of them form a chimera junction (or one lies beside an interior
+adapter or barcode), never at a lone primer inside it, so a nested or
+overlapping panel keeps full-length amplicons whole. `--split-by` does not
+force amplicon mode on.
+[adapters.md](adapters.md#primer-split) describes how they join the engine.
+
+### Sheet formats
+
+A TSV sheet has a header row and requires the columns `target`, `fwd` and
+`rev`; `group`, `min_len` and `max_len` are optional.
+
+```
+target	fwd	rev	group
+16S_full	AGRGTTYGATYMTGGCTCAG	CGGTTACCTTGTTACGACTT	16S
+16S_V34	CCTACGGGNGGCWGCAG	GACTACHVGGGTATCTAATCC	16S
+ITS	CTTGGTCATTTAGAGGAAGTAA	TCCTCCGCTTATTGATATGC	ITS
+```
+
+`rev` is written 5' to 3', as ordered; whittle derives its reverse
+complement. A `fwd` or `rev` cell holds one sequence or a comma-separated
+list of them, the primer mix of that role:
+
+```
+target	fwd	rev
+ITS	TCCGTAGGTGAACCTGCGG,TCCGTTGGTGAACCAGCGG,TCTGTAGGTGAACCTGCAG	TCCTCCGCTTATTGATATGC,TCCTCCGCTTATTAATATGC
+```
+
+Either primer cell may be empty, for a target with no primer of that role;
+an empty sequence inside a list (a trailing or doubled comma) is an error.
+A cell of one primer names it `<target>_fwd` or `<target>_rev`, a list
+`<target>_fwd1`, `<target>_fwd2`, and so on.
+`group` defaults to the target name and is the key an `-o` template names
+under `{group}`. A primer sequence may appear in more than one row; whittle
+stores it once and shares it among the targets that name it. `min_len` and
+`max_len` bound the final segment length, inclusive; a segment outside the
+window is unassigned (`length`).
+
+An annotated FASTA extends the existing adapter-FASTA header parse with
+`key=value` fields:
+
+```
+>27F primer target=16S end=fwd group=16S
+AGRGTTYGATYMTGGCTCAG
+>1492R primer target=16S end=rev group=16S
+TACGGYTACCTTGTTACGACTT
+```
+
+`target=` marks an entry as a split primer and names its target; `end=fwd`
+or `end=rev` places it. Several entries may share one `target=` and `end=`;
+each adds a primer to that list. `group=` overrides the default group and
+may appear on any entry of a target; two entries of one target giving
+different `group=` values is an error. Entries with no `target=` field keep
+their existing meaning as `-a` entries.
+
+The preset `mab114` defines two targets, `16S` and `ITS`, holding the primer
+mixes of the ONT Microbial Amplicon Barcoding kit (SQK-MAB114.24) under
+their ONT names:
+
+| Target | Role | Primer | Sequence |
+|---|---|---|---|
+| `16S` | forward | 16S_mix_F | `AGRGTTYGATYMTGGCTCAG` |
+| `16S` | forward | 16S_Bor_F | `AGAGTTTGATCCTGGCTTAG` |
+| `16S` | forward | 16S_Chl_F | `AGAATTTGATCTTRGTTCAG` |
+| `16S` | forward | 16S_Ent_F | `AGAGTTTGATCATGGCTCAG` |
+| `16S` | reverse | 16S_mix_R | `SGGYTACCTTGTTACGACTT` |
+| `16S` | reverse | 16S_Bor_R | `CGGCTACCTTGTTACGACTT` |
+| `16S` | reverse | 16S_Chl_R | `GGGCTACCTTGTTACGACTT` |
+| `ITS` | forward | ITS1 | `TCCGTAGGTGAACCTGCGG` |
+| `ITS` | forward | ITS1_Fus | `TCCGTTGGTGAACCAGCGG` |
+| `ITS` | forward | ITS1_Mal | `TCTGTAGGTGAACCTGCAG` |
+| `ITS` | reverse | ITS4 | `TCCTCCGCTTATTGATATGC` |
+| `ITS` | reverse | ITS4_Pyt | `TCCTCCGCTTATTAATATGC` |
+
+These are the primers `--adapter-preset mab114` searches; the split preset
+takes their sequences from the same catalog entries. The token also enables
+`--adapter-preset mab114` unless `-a` or `--adapter-preset` is given. A
+sheet file enables no library adapters by itself.
+
+Target and group names are checked at load time: `unassigned`, `ambiguous`
+and `unclassified` are reserved, since the classifier writes them itself,
+every target name must be unique, and every name must be printable ASCII
+(space included), since it fills the `wt:Z` tag. Each primer must be at least 11 nt of
+nucleotide or IUPAC alphabet. A primer sequence may appear in several
+targets. A target with no primer of a role that
+`--split-require` needs (no `rev` under `both`, say) is an error. whittle
+also warns for any two primers of different targets whose IUPAC edit
+distance is below `--split-lead`: those targets cannot be reliably told
+apart at that lead. The primers of one target are never compared with each
+other.
+
+A target may use one sequence for both roles, which splits reads by a
+barcode-like sequence flanking both ends: the 5' end of the read holds the
+sequence as given and the 3' end its reverse complement, on either strand.
+Such a target is assigned from one end or both under `--split-require
+either`, and only from both under `both`. Its two strands look alike, so
+its reads carry no orientation information: they are all counted under
+`plus`, and the `plus`/`minus` counts of its key say nothing about strand.
+
+### Inline targets
+
+When a `--split-by` value is neither an existing file nor a preset token,
+it is read as an inline target:
+
+```
+NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...][,F:SEQ[,SEQ...]:R:SEQ[,SEQ...]...]
+```
+
+`NAME` is the target name. `F:` and `R:` each introduce the forward or
+reverse primer list: one sequence, or several separated by commas. A pair
+may give one tag or both, each once, but not neither. `SEQ` follows the
+sheet's own normalization and checks: uppercase, `U` folded to `T`, IUPAC
+alphabet, at least 11 nt. `R` sequences are written 5' to 3', as ordered,
+like the sheet's `rev`.
+
+After a comma, a field that is exactly the tag `F` or `R`, in either
+case, followed by `:` begins a new primer pair; anything else is another
+sequence of the current list. A sequence that starts with `F`-like bases or
+holds the IUPAC code `R` is therefore never mistaken for a tag. An empty
+sequence in a list (a trailing or doubled comma), a trailing `:`, and a tag
+repeated within one pair are errors. So is a pool in which a pair gives
+only one tag and the pair after it only the other, as `16S:F:A,R:B` does:
+that is one pair written with `,R:` in place of `:R:`, and would otherwise
+be read as two targets with one primer each. Such targets go in separate
+`--split-by` values.
+
+```bash
+whittle -i pool.fastq.gz -o out/{target}.fastq.gz \
+  --split-by '16S:F:AGRGTTYGATYMTGGCTCAG:R:CGGTTACCTTGTTACGACTT'
+```
+
+One pair gives target `NAME` in group `NAME`, with primers named `NAME_F`
+and `NAME_R`; a list of several primers names them `NAME_F1`, `NAME_F2`,
+... and `NAME_R1`, `NAME_R2`, ... by position. The primer mixes of the
+MAB114 kit, written inline, are one target per mix:
+
+```bash
+--split-by '16S:F:AGRGTTYGATYMTGGCTCAG,AGAGTTTGATCCTGGCTTAG,AGAATTTGATCTTRGTTCAG,AGAGTTTGATCATGGCTCAG:R:SGGYTACCTTGTTACGACTT,CGGCTACCTTGTTACGACTT,GGGCTACCTTGTTACGACTT'
+--split-by 'ITS:F:TCCGTAGGTGAACCTGCGG,TCCGTTGGTGAACCAGCGG,TCTGTAGGTGAACCTGCAG:R:TCCTCCGCTTATTGATATGC,TCCTCCGCTTATTAATATGC'
+```
+
+A read carrying any forward primer of `16S` and any of its reverse primers
+is assigned to `16S`; the variants of one target never make a read
+ambiguous.
+
+Several pairs, each begun by `,F:` or `,R:`, form a pool of distinct
+amplicons: targets `NAME.1`, `NAME.2`, ... in group `NAME`, with primers
+`NAME.1_F`, `NAME.1_R`, `NAME.2_F`, and so on.
+
+```bash
+--split-by '16S:F:AGRGTTYGATYMTGGCTCAG:R:CGGTTACCTTGTTACGACTT,F:CCTACGGGNGGCWGCAG:R:GACTACHVGGGTATCTAATCC'
+```
+
+defines `16S.1` and `16S.2`, both in group `16S`, so an `out/{group}.fastq`
+template collapses them into one file. Lists and pools combine:
+`16S:F:a,b:R:x,F:c:R:y` gives `16S.1` with forward primers `a` and `b` and
+reverse primer `x`, and `16S.2` with forward primer `c` and reverse primer
+`y`.
+
+### Merging sources
+
+Every `--split-by` value loads independently and the results merge into one
+sheet, in the order given. Target names must be unique across all sources;
+a name repeated by two sources is an error. Primers are shared by sequence
+across sources exactly as within one sheet, so a primer sequence common to
+a sheet file and an inline target is stored once. Validation, the
+`--split-lead` edit-distance warning, and the output-template name checks
+all run on the merged sheet, not on each source alone.
+
+### End rule, lead and action
+
+`--split-require <either|both|fwd|rev>` (default `either`) sets which
+end(s) of a segment need a located primer before it can be assigned; `fwd`
+and `rev` mean any primer of the target's forward or reverse list. An end
+that scores several primers of one list counts at the cheapest of them.
+`--split-lead <N>` (default 2) is the minimum edit-cost lead the cheapest
+consistent target needs over the next cheapest different target; a tie, or
+a smaller lead, is `ambiguous` rather than a guess. `--split-action
+<trim|retain>` (default `trim`) trims the located split primers like any
+other primer; `retain` widens the kept span back over them, so the primer
+sequence stays in the output.
+
+### Classification
+
+Each segment is classified independently, so a chimera split into several
+pieces gives each piece its own call:
+
+- **Assigned** to a target's key (the target name, or its group under a
+  `{group}` template), when a strand-consistent target beats every other
+  key by at least `--split-lead`.
+- **Unassigned**, for one of four reasons: `no_primer` (no primer located at
+  either end), `require` (a target matched, but not at the end(s)
+  `--split-require` needs), `orientation` (a target's primer scored at both
+  ends, so no strand is consistent), or `length` (the segment length falls
+  outside the assigned target's `min_len`/`max_len` window).
+- **Ambiguous**, when two keys tie for cheapest, or the cheapest does not
+  beat the runner-up by `--split-lead`.
+
+A target is matched at an end when a primer of the list its strand puts
+there scored at that end. A primer of another key closer than
+`--split-lead` to a scored primer counts as scored there at that cost plus
+one, so near-identical primers of different keys are judged by the lead
+rather than by which one cleared its budget; a target matched only through
+such a stand-in is never assigned. An end that scores a primer of another
+key and none of the target's own does not rule the target out when every
+score there is within `--split-lead` of the penalty: the lowest budget
+rescoring applied at that end plus one, the least any primer that did not
+score there can cost. The missing primer then counts at the penalty, the
+same for every target, and such a target competes only when no target is
+matched at every scored end. A score that leads the penalty by
+`--split-lead` or more rules out every target that does not list its
+primer at that end, so a chimera with exact primers of two keys at its two
+ends is assigned to neither. A penalised end does not count toward
+`--split-require`.
+
+### Output routing
+
+Without a placeholder, `-o` writes every record to one file and tags it:
+tag-only mode. A path holding `{target}`, `{group}` or `{barcode}` is a
+template, and each key is written to the path it expands to. The key is the
+target when `{target}` is present in the template, otherwise the group when
+`{group}` is present; `{group}` may still appear alongside `{target}` to
+nest the output by group, as in `out/{group}/{target}.fastq.gz`, without
+changing which one names the key. Under `{group}`, ambiguity is judged
+across groups only. `unassigned` and `ambiguous` calls substitute those
+words for the key placeholder: `out/{barcode}.{target}.bam` gives
+`out/BC03.unassigned.bam`. `{barcode}` takes the record's `BC:Z` barcode
+call (BAM or tagged FASTQ input), or `unclassified` when the record carries
+none; plain FASTQ carries no barcode call, so every record takes
+`unclassified`.
+
+A template needs a known output extension to fix the format. A target or
+group name that is empty, `.` or `..`, or holds a path separator, is not one
+path component and is refused at load time when the template uses it, as
+are two target or group names the template uses that differ only in letter
+case, since they would share one file on a case-insensitive file system.
+Tag-only mode accepts any such name, since it never becomes a path. A
+`BC:Z` barcode call under `{barcode}` must be one path component too; it is
+checked per record as the record is routed, and a call that is not one path
+component is an error. Placeholders may appear in directory and file components, and whittle
+creates the directories. Each expanded path is
+checked before its file is opened, against the input path, against
+`--rejected-output`, and against every other key's path, so two keys
+expanding to the same file are refused rather than one silently
+overwriting the other. A run opening more than 512 files is warned once.
+Files exist only for keys that received at least one record; the report
+still lists every sheet key.
+
+Filter drops still go to `--rejected-output` as usual. The `unassigned` and
+`ambiguous` bins hold only segments that passed the length, quality and GC
+filters. `--split-discard <unassigned,ambiguous>` drops those bins instead
+of writing them, and counts the dropped segments as `discarded`.
+
+### Tag and report
+
+Every output record, in every mode, carries a `wt:Z` tag naming its call
+(the key, `unassigned` or `ambiguous`); an existing `wt` tag in the input is
+replaced. [tags.md](tags.md#split-target) has the tag's exact placement on
+BAM and FASTQ output. A record written to `--rejected-output` carries no
+`wt:Z` tag.
+
+The end-of-run log prints a per-key table, and `--summary-json` carries the
+same counts in an additive `split` object ([below](#summary-json)).
+
+```bash
+whittle -i pool.bam -o out/{barcode}.{target}.fastq.gz --split-by primers.tsv -t 8
+whittle -i pool.fastq.gz -o trimmed.fastq.gz --split-by mab114
+whittle -i pool.fastq.gz -o out/{group}.fastq.gz \
+  --split-by mab114 --split-by 'V34:F:CCTACGGGNGGCWGCAG:R:GACTACHVGGGTATCTAATCC'
+```
+
 ## Summary JSON
 
 `--summary-json <PATH>` writes one JSON object describing the run: the resolved
@@ -475,6 +764,37 @@ prints `configured`. Under `--adapter-discover` and `--adapter-report` nothing i
 `schema_version` is incremented only when an existing field changes meaning or
 disappears. New fields may appear without an increment, so consumers should
 tolerate unknown fields.
+
+Under `--split-by`, the summary carries an additive `split` object; it is
+absent without `--split-by`.
+
+```json
+"split": {
+  "spec": ["primers.tsv"], "require": "either", "action": "trim", "lead": 2,
+  "keys": [
+    { "key": "16S", "reads": 420, "bases": 168000, "both_ends": 400, "five_only": 15,
+      "three_only": 5, "plus": 410, "minus": 10 }
+  ],
+  "unassigned": { "no_primer": 30, "require": 4, "orientation": 1, "length": 2 },
+  "ambiguous": 6,
+  "discarded": 0
+}
+```
+
+`spec` is the `--split-by` values as given, in order; `require`, `action`
+and `lead` are the resolved `--split-require`, `--split-action` and
+`--split-lead` settings. `keys` lists every sheet key (one per target, or
+one per group when the `-o` template holds `{group}`), in sheet order, zero
+counts included; `both_ends`, `five_only` and `three_only` count how many
+of a key's assigned segments had primer evidence at each end, and
+`plus`/`minus` count its strand. A target that uses one sequence for both
+roles has no strand to tell, so its segments all count under `plus`.
+`unassigned` breaks unassigned segments down by reason. `discarded` counts
+segments `--split-discard` dropped from the `unassigned` or `ambiguous` bins
+rather than writing; a discarded segment is still counted under its key or
+reason, so `sum(keys[].reads) + sum(unassigned.*) + ambiguous` always equals
+`reads.output + discarded`. The same per-key counts are logged as a table at
+the end of the run.
 
 ## Logging and progress
 

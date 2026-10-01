@@ -83,7 +83,7 @@ whittle -i reads.bam -o trimmed.bam --adapter-preset lsk114 -l 500
 whittle -i reads.fastq.gz -o trimmed.fastq.gz --adapter-preset nbd114 -t 16
 ```
 
-Trim amplicon primers with the `mab114` preset (degenerate 16S 27F/1492R and ITS1F/ITS4 primers) or a custom FASTA. IUPAC codes are accepted; `primer` or `barcode` in a header sets the entry's role.
+Trim amplicon primers with the `mab114` preset (the kit's seven 16S and five ITS primers) or a custom FASTA. IUPAC codes are accepted; `primer` or `barcode` in a header sets the entry's role.
 
 ```bash
 whittle -i 16s.fastq.gz -o trimmed.fastq.gz --adapter-preset mab114
@@ -95,6 +95,16 @@ whittle -i 16s.fastq.gz -o trimmed.fastq.gz -a primers.fa
 AGAGTTTGATYMTGGCTCAG
 >1492R primer
 TACGGYTACCTTGTTACGACTT
+```
+
+Split a pooled amplicon run by primer target: `--split-by` (repeatable)
+takes a TSV or FASTA sheet of primer pairs or primer mixes, the preset
+`mab114` (the kit's 16S and ITS primer mixes), or an inline target such as
+`16S:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]`, and tags each record `wt:Z`; an `-o`
+template writes each target to its own file.
+
+```bash
+whittle -i pool.bam -o out/{barcode}.{target}.fastq.gz --split-by mab114
 ```
 
 Trim PacBio SMRTbell adapters and split concatemers.
