@@ -262,7 +262,7 @@ mod tests {
         let mab = preset(&[Kit::Mab114]);
         assert!(
             mab.iter()
-                .any(|a| a.name == "16S_27F" && a.role == Role::Adapter)
+                .any(|a| a.name == "16S_mix_F" && a.role == Role::Adapter)
         );
         assert_eq!(mab.iter().filter(|a| a.name.starts_with("TP")).count(), 24);
         assert!(
@@ -273,7 +273,7 @@ mod tests {
         assert!(
             mixed
                 .iter()
-                .any(|a| a.name == "16S_27F" && a.role == Role::Primer)
+                .any(|a| a.name == "16S_mix_F" && a.role == Role::Primer)
         );
 
         let pb = preset(&[Kit::PacBio]);

@@ -199,6 +199,7 @@ pub(super) fn window_edit<'a>(
         name,
         updates,
         remove,
+        target: None,
         reason: None,
     })
 }
@@ -278,14 +279,25 @@ pub(super) fn prepare_read<'a>(
 /// produced segment and calls `render` with every window and the record's
 /// modification block: `None` for a survivor, or the reason for a rejected
 /// segment (a read that produced no segment is one rejected full window).
-/// Rejected windows are rendered only while a rejected output is open.
-/// Counts a dropped undo blob once the survivors are known. Shared by the BAM
-/// and FASTQ output paths.
+/// Under `--split-by` each survivor is called first: a discarded one is not
+/// rendered, and every other one is rendered with its bin name as the target
+/// tag and its output key, which also takes the record's `BC:Z` barcode call
+/// when the template holds `{barcode}`; a rejected window has no target. A
+/// survivor without a target is written to key 0. Rejected windows are
+/// rendered only while a rejected output is open. Counts a dropped undo blob
+/// once the written survivors are known. Shared by the BAM and FASTQ output
+/// paths.
 pub(super) fn render_windows(
     rec: &RecordBuf,
     cfg: &Config,
     counters: &Counters,
-    render: impl FnMut(Window, ModBlock, Option<&IndexedMods>, Option<Reason>) -> anyhow::Result<()>,
+    render: impl FnMut(
+        Window,
+        ModBlock,
+        Option<&IndexedMods>,
+        Option<Reason>,
+        Option<(&str, KeyId)>,
+    ) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let PreparedRead {
         seq,
@@ -295,7 +307,7 @@ pub(super) fn render_windows(
     } = prepare_read(rec, cfg, counters)?;
     let _read = crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
     let _read = _read.enter();
-    let produced = trim::apply(seq, qual, &cfg.trim, cfg.adapters.as_ref(), barcode);
+    let (produced, pieces) = crate::workflow::trim_read(seq, qual, cfg, barcode);
     let indexed =
         if matches!(mod_block, ModBlock::Consistent | ModBlock::MissingMn) && produced.len() > 1 {
             mod_tags(rec).map(|(mm, ml)| IndexedMods::new(mods::parse(mm, ml.unwrap_or(&[])), seq))
@@ -303,6 +315,11 @@ pub(super) fn render_windows(
             None
         };
     let mut survivors: Vec<(usize, usize)> = Vec::new();
+    let bc_tag = cfg
+        .splitter
+        .as_ref()
+        .filter(|s| s.reads_barcode())
+        .and_then(|_| barcode_call(rec));
     // Both callbacks render, so the closure is shared through a cell.
     let render = std::cell::RefCell::new(render);
     process_read_segments(
@@ -312,6 +329,19 @@ pub(super) fn render_windows(
         &cfg.filter,
         counters,
         |idx, total, start, end| {
+            let target = match crate::workflow::route(
+                cfg,
+                seq,
+                &pieces,
+                idx,
+                (end - start) as u64,
+                bc_tag,
+                counters,
+            )? {
+                Routing::Untagged => None,
+                Routing::Tagged(label, key) => Some((label, key)),
+                Routing::Discarded => return Ok(false),
+            };
             survivors.push((start, end));
             render.borrow_mut()(
                 Window {
@@ -323,7 +353,9 @@ pub(super) fn render_windows(
                 mod_block,
                 indexed.as_ref(),
                 None,
-            )
+                target,
+            )?;
+            Ok(true)
         },
         |rejection| {
             if !counters.wants_rejects() {
@@ -355,7 +387,7 @@ pub(super) fn render_windows(
                     Reason::TrimmedToNothing,
                 ),
             };
-            render.borrow_mut()(window, mod_block, indexed.as_ref(), Some(reason))
+            render.borrow_mut()(window, mod_block, indexed.as_ref(), Some(reason), None)
         },
     )?;
     count_undo_tags_dropped(counters, rec, seq.len(), &survivors);
@@ -364,16 +396,17 @@ pub(super) fn render_windows(
 
 /// Renders one record for BAM output: every surviving window is built from
 /// the raw record `raw` with the edit its decoded form `rec` determines and
-/// handed to `emit`, and every rejected window is sent to the rejected output.
-/// Shared by the sequential and parallel drivers. `emit` receives `None` for
-/// a window whose output record is the input record.
+/// handed to `emit` with its output key, and every rejected window is sent to
+/// the rejected output. Shared by the sequential and parallel drivers. `emit`
+/// receives `None` for a window whose output record is the input record; a
+/// window with a target tag is always built.
 pub(super) fn render_bam_read(
     header: &sam::Header,
     raw: &bam::Record,
     rec: &RecordBuf,
     cfg: &Config,
     counters: &Counters,
-    mut emit: impl FnMut(Option<Vec<u8>>) -> io::Result<()>,
+    mut emit: impl FnMut(KeyId, Option<Vec<u8>>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let direction = if cfg.update_moves {
         signal_reversed(header, rec)
@@ -383,35 +416,46 @@ pub(super) fn render_bam_read(
     // The move table is indexed on the first window that needs it.
     let moves: std::cell::OnceCell<Option<MoveIndex<'_>>> = std::cell::OnceCell::new();
     let seq = rec.sequence().as_ref();
-    render_windows(rec, cfg, counters, |window, mod_block, indexed, reason| {
-        let partial = window.start != 0 || window.end != seq.len();
-        if cfg.update_moves
-            && direction.is_none()
-            && partial
-            && rec.data().get(&Tag::new(b'm', b'v')).is_some()
-        {
-            anyhow::bail!(
-                "read {}: --update-moves requires a DNA or RNA basecall_model in the @RG description",
-                crate::io::bam::display_name(rec.name().map(AsRef::as_ref))
-            );
-        }
-        let moves = if partial {
-            moves
-                .get_or_init(|| direction.and_then(|reverse| MoveIndex::new(rec, reverse)))
-                .as_ref()
-        } else {
-            None
-        };
-        let edit = window_edit(rec, window, mod_block, indexed, moves, &cfg.remove_tags);
-        match (edit, reason) {
-            (None, None) => Ok(emit(None)?),
-            (Some(edit), None) => Ok(emit(Some(build_record(raw, edit)?))?),
-            (edit, Some(reason)) => {
-                let mut edit =
-                    edit.unwrap_or_else(|| RecordEdit::unchanged(seq.len(), &cfg.remove_tags));
-                edit.reason = Some(reason);
-                counters.reject(RejectItem::Bam(build_record(raw, edit)?))
-            },
-        }
-    })
+    render_windows(
+        rec,
+        cfg,
+        counters,
+        |window, mod_block, indexed, reason, target| {
+            let partial = window.start != 0 || window.end != seq.len();
+            if cfg.update_moves
+                && direction.is_none()
+                && partial
+                && rec.data().get(&Tag::new(b'm', b'v')).is_some()
+            {
+                anyhow::bail!(
+                    "read {}: --update-moves requires a DNA or RNA basecall_model in the @RG description",
+                    crate::io::bam::display_name(rec.name().map(AsRef::as_ref))
+                );
+            }
+            let moves = if partial {
+                moves
+                    .get_or_init(|| direction.and_then(|reverse| MoveIndex::new(rec, reverse)))
+                    .as_ref()
+            } else {
+                None
+            };
+            let edit = window_edit(rec, window, mod_block, indexed, moves, &cfg.remove_tags);
+            match (edit, reason) {
+                (None, None) if target.is_none() => emit(0, None),
+                (edit, None) => {
+                    let mut edit =
+                        edit.unwrap_or_else(|| RecordEdit::unchanged(seq.len(), &cfg.remove_tags));
+                    edit.target = target.map(|(label, _)| label.as_bytes().to_vec());
+                    let key = target.map_or(0, |(_, key)| key);
+                    emit(key, Some(build_record(raw, edit)?))
+                },
+                (edit, Some(reason)) => {
+                    let mut edit =
+                        edit.unwrap_or_else(|| RecordEdit::unchanged(seq.len(), &cfg.remove_tags));
+                    edit.reason = Some(reason);
+                    counters.reject(RejectItem::Bam(build_record(raw, edit)?))
+                },
+            }
+        },
+    )
 }

@@ -1467,3 +1467,158 @@ fn degenerate_primer_trims_every_variant_it_covers() {
         "A base outside the ambiguity set does not trim"
     );
 }
+
+/// Reverse complement of an ACGT sequence.
+fn revcomp(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&b| match b {
+            b'A' => b'T',
+            b'C' => b'G',
+            b'G' => b'C',
+            _ => b'A',
+        })
+        .collect()
+}
+
+/// An SQK-MAB114.24 amplicon read: the barcode flanks, barcode TP01 and a
+/// kit primer at each end of `insert`, as the top strand, or as its reverse
+/// complement when `plus` is false.
+fn mab114_read(forward: &[u8], reverse: &[u8], insert: &[u8], plus: bool) -> Vec<u8> {
+    let front: &[u8] = b"GCTTGGGTGTTTAACC";
+    let barcode = b"GCACCTGGAACTTGTGCCTTCCAC";
+    let rear = b"CCATATCCGTGTCGCCCTT";
+    let head = |primer: &[u8]| [front, barcode, rear, primer].concat();
+    let top = [head(forward), insert.to_vec(), revcomp(&head(reverse))].concat();
+    if plus { top } else { revcomp(&top) }
+}
+
+/// Runs `--adapter-preset mab114` over `reads` and returns the output
+/// sequences in input order; every read yields one record.
+fn mab114_trimmed(reads: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.fastq");
+    let output = dir.path().join("out.fastq");
+    let mut fq = String::new();
+    for (i, seq) in reads.iter().enumerate() {
+        let seq = std::str::from_utf8(seq).unwrap();
+        fq.push_str(&format!("@r{i}\n{seq}\n+\n{}\n", "I".repeat(seq.len())));
+    }
+    std::fs::write(&input, fq).unwrap();
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", output.to_str().unwrap()])
+        .args(["--adapter-preset", "mab114", "--preserve-order", "-t", "1"])
+        .assert()
+        .success();
+    let out = std::fs::read_to_string(&output).unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 4 * reads.len(), "every read is kept whole");
+    lines
+        .chunks(4)
+        .enumerate()
+        .map(|(i, record)| {
+            assert_eq!(record[0], format!("@r{i}"));
+            record[1].as_bytes().to_vec()
+        })
+        .collect()
+}
+
+/// The top strand and the bottom strand of an MAB114 amplicon of `forward`
+/// and `reverse` around a `len`-base insert drawn from `seed`, each with
+/// the insert as that strand holds it.
+fn mab114_strands(
+    forward: &[u8],
+    reverse: &[u8],
+    seed: usize,
+    len: usize,
+) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    [true, false]
+        .into_iter()
+        .enumerate()
+        .map(|(i, plus)| {
+            let insert = splitmix_tail(seed + i, len);
+            let read = mab114_read(forward, reverse, &insert, plus);
+            (read, if plus { insert } else { revcomp(&insert) })
+        })
+        .unzip()
+}
+
+/// A 16S amplicon that carries two variant primers of the kit's mix,
+/// 16S_Bor_F and 16S_Chl_R, is trimmed to its insert on either strand.
+#[test]
+fn mab114_preset_trims_a_16s_variant_pair_to_the_insert() {
+    let (reads, inserts) =
+        mab114_strands(b"AGAGTTTGATCCTGGCTTAG", b"GGGCTACCTTGTTACGACTT", 900, 1500);
+    assert_eq!(mab114_trimmed(&reads), inserts);
+}
+
+/// An ITS amplicon that carries two variant primers of the kit's mix,
+/// ITS1_Mal and ITS4_Pyt, is trimmed to its insert on either strand.
+#[test]
+fn mab114_preset_trims_an_its_variant_pair_to_the_insert() {
+    let (reads, inserts) =
+        mab114_strands(b"TCTGTAGGTGAACCTGCAG", b"TCCTCCGCTTATTAATATGC", 910, 600);
+    assert_eq!(mab114_trimmed(&reads), inserts);
+}
+
+/// A library of every 16S and ITS primer variant of the kit, large enough
+/// for presence detection to narrow the preset, loses every primer: no
+/// output holds bases outside its insert, and a variant too rare to be kept
+/// is covered by the entries that are. A chance match in a random insert
+/// may trim a few bases more within the end zone; at least 97% of the reads
+/// keep their insert exactly.
+#[test]
+fn mab114_preset_trims_every_variant_after_presence_detection() {
+    let forward_16s: [&[u8]; 4] = [
+        b"AGAGTTTGATCCTGGCTCAG",
+        b"AGAGTTTGATCCTGGCTTAG",
+        b"AGAATTTGATCTTAGTTCAG",
+        b"AGAGTTTGATCATGGCTCAG",
+    ];
+    let reverse_16s: [&[u8]; 3] = [
+        b"CGGTTACCTTGTTACGACTT",
+        b"CGGCTACCTTGTTACGACTT",
+        b"GGGCTACCTTGTTACGACTT",
+    ];
+    let forward_its: [&[u8]; 3] = [
+        b"TCCGTAGGTGAACCTGCGG",
+        b"TCCGTTGGTGAACCAGCGG",
+        b"TCTGTAGGTGAACCTGCAG",
+    ];
+    let reverse_its: [&[u8]; 2] = [b"TCCTCCGCTTATTGATATGC", b"TCCTCCGCTTATTAATATGC"];
+    let (reads, inserts): (Vec<Vec<u8>>, Vec<Vec<u8>>) = (0..600usize)
+        .map(|i| {
+            // One read in 300 carries the rare variants; the rest carry the
+            // first variant of each mix.
+            let rare = i % 300 == 7;
+            let pick = |n: usize| if rare { 1 + i / 300 % (n - 1) } else { 0 };
+            let plus = i % 2 == 0;
+            let (forward, reverse, len) = if i % 3 == 0 {
+                (forward_its[pick(3)], reverse_its[pick(2)], 600)
+            } else {
+                (forward_16s[pick(4)], reverse_16s[pick(3)], 1500)
+            };
+            let insert = splitmix_tail(2000 + i, len);
+            let read = mab114_read(forward, reverse, &insert, plus);
+            (read, if plus { insert } else { revcomp(&insert) })
+        })
+        .unzip();
+    let trimmed = mab114_trimmed(&reads);
+    let mut exact = 0;
+    for (i, (seq, insert)) in trimmed.iter().zip(&inserts).enumerate() {
+        exact += usize::from(seq == insert);
+        assert!(
+            seq.len() + 300 >= insert.len()
+                && insert.windows(seq.len()).any(|window| window == seq),
+            "r{i} keeps bases outside its insert or loses more than both end zones"
+        );
+    }
+    assert!(
+        100 * exact >= 97 * reads.len(),
+        "{exact} of {}",
+        reads.len()
+    );
+}

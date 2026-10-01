@@ -19,6 +19,11 @@ pub(super) struct ThreadState {
     /// The overhang-aware searcher for the read ends, keyed by the overhang
     /// cost it was built with so a run at another error rate rebuilds it.
     pub(super) overhang: Option<(f32, AmbiguousSearcher)>,
+    /// The all-ACGT searcher over the forward strand only, for the search
+    /// of one strand at a time in `search_pairs`.
+    pub(super) plain_fwd: PlainSearcher,
+    /// The ambiguity-tolerant searcher over the forward strand only.
+    pub(super) ambiguous_fwd: AmbiguousSearcher,
     /// The normalized read, when the input is not its own normalization.
     pub(super) normalized: Vec<u8>,
     /// The normalized read reversed, for the reverse strand of every search.
@@ -31,6 +36,8 @@ pub(super) struct ThreadState {
     pub(super) head_flags: Vec<bool>,
     /// Per-adapter end-seed flags for the tail window.
     pub(super) tail_flags: Vec<bool>,
+    /// Hits of the tiled singleton batches; see `search_singleton_batches`.
+    pub(super) pooled: Vec<Pooled>,
 }
 
 impl ThreadState {
@@ -40,12 +47,15 @@ impl ThreadState {
             plain: new_searcher(),
             ambiguous: new_ambiguous_searcher(),
             overhang: None,
+            plain_fwd: new_plain_searcher_fwd(),
+            ambiguous_fwd: new_searcher_fwd(),
             normalized: Vec::new(),
             reversed: Vec::new(),
             windows: Vec::new(),
             mask: MaskScratch::default(),
             head_flags: Vec::new(),
             tail_flags: Vec::new(),
+            pooled: Vec::new(),
         }
     }
 }
@@ -174,6 +184,10 @@ pub(super) struct Engine<'a> {
     pub(super) ambiguous: &'a mut AmbiguousSearcher,
     /// The IUPAC-profile searcher with overhang alignment, for the read ends.
     pub(super) overhang: &'a mut AmbiguousSearcher,
+    /// The DNA-profile searcher over the forward strand only.
+    pub(super) plain_fwd: &'a mut PlainSearcher,
+    /// The IUPAC-profile searcher over the forward strand only.
+    pub(super) ambiguous_fwd: &'a mut AmbiguousSearcher,
     /// Candidate windows of the interior search; see `candidate_windows`.
     pub(super) windows: &'a mut Vec<(usize, usize, usize)>,
     /// Masked end windows of the residue search.
@@ -182,13 +196,15 @@ pub(super) struct Engine<'a> {
     pub(super) head_flags: &'a mut Vec<bool>,
     /// Per-adapter end-seed flags for the tail window.
     pub(super) tail_flags: &'a mut Vec<bool>,
+    /// Hits of the tiled singleton batches; see `search_singleton_batches`.
+    pub(super) pooled: &'a mut Vec<Pooled>,
 }
 
 /// A span `[start, end)` of the read that is searched as a read of its own.
 pub(super) type Span = (usize, usize);
 
-/// Searches every equal-length batch over the two end windows of the span.
-/// All adapters in a batch share a length and budget, so the windows are
+/// Searches every equal-length barcode batch over the two end windows of the
+/// span. All adapters in a batch share a length and budget, so the windows are
 /// shared too; this collapses a kit's equal-length barcode searches into one
 /// SIMD pattern search per end. An end trimmed through an entry that bounds
 /// its barcode (see `bounds_barcode`) is not searched. Hits are passed to
@@ -248,28 +264,32 @@ pub(super) fn accept_batch_hits(
     );
 }
 
-/// Searches every adapter without an equal-length partner over the two end
-/// windows of the span, one pattern at a time, for whole-pattern hits.
-pub(super) fn search_singletons(
-    ctx: Context<'_>,
-    span: Span,
-    engine: &mut Engine<'_>,
-    keep: &mut Keep<'_>,
-) {
-    let (ws, we) = span;
-    let n = we - ws;
-    for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
-        if !ctx.index.singletons[adapter_idx] {
-            continue;
-        }
-        let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
-        let (head_end, tail_start) = terminal_windows(n, keep.end_size, len, k_end);
-        // An end window of at least four alignment lengths is cut into two
-        // texts at a split point: the first owns the hits ending at or before
-        // it, the second those ending after it. An alignment spans at most
-        // `reach` bases, so each text extends `reach` bases past its owned
-        // ends, and every owned end sees the costs the whole window gives it.
-        // The four texts fill sassy's four lanes.
+/// The texts one whole-pattern search covers at the two ends of a span, and
+/// the hit ends each text owns.
+pub(super) struct EndTexts<'a> {
+    /// The texts; the first `count` are set.
+    windows: [Strands<'a>; 4],
+    /// Per text: its offset in the span, the site of its end window, and the
+    /// range of hit ends, in span coordinates, that it owns.
+    owned: [(usize, Site, usize, usize); 4],
+    /// The number of texts.
+    count: usize,
+}
+
+impl<'a> EndTexts<'a> {
+    /// Returns the texts for a pattern of `len` bases at budget `k_end` over
+    /// the end windows of the span, with zones of `end_size` bases.
+    ///
+    /// An end window of at least four alignment lengths is cut into two
+    /// texts at a split point: the first owns the hits ending at or before
+    /// it, the second those ending after it. An alignment spans at most
+    /// `reach` bases, so each text extends `reach` bases past its owned
+    /// ends, and every owned end sees the costs the whole window gives it.
+    /// The four texts fill sassy's four lanes.
+    fn new(ctx: Context<'a>, span: Span, end_size: usize, len: usize, k_end: usize) -> Self {
+        let (ws, we) = span;
+        let n = we - ws;
+        let (head_end, tail_start) = terminal_windows(n, end_size, len, k_end);
         let reach = len + k_end;
         let empty = ctx.read.strands(ws, ws);
         let mut windows = [empty; 4];
@@ -296,24 +316,110 @@ pub(super) fn search_singletons(
                 }
             }
         }
-        let mut found: Vec<(Site, Hit)> = Vec::new();
-        let accept = |text_idx: usize, h: Hit| {
-            let (offset, site, first_end, last_end) = owned[text_idx];
-            let h = shifted(h, offset);
-            if (first_end..last_end).contains(&h.end) {
-                found.push((site, h));
-            }
-        };
-        let windows = &windows[..count];
-        if engine.plain_read && ctx.index.plain[adapter_idx] {
-            for_each_hit_in_texts(engine.plain, &adapter.seq, windows, k_end, accept);
-        } else {
-            for_each_hit_in_texts(engine.ambiguous, &adapter.seq, windows, k_end, accept);
+        Self {
+            windows,
+            owned,
+            count,
         }
+    }
+
+    /// Returns the site of text `text_idx` and `hit`, found in that text, in
+    /// span coordinates, or `None` when the text does not own the hit.
+    fn owned_hit(&self, text_idx: usize, hit: Hit) -> Option<(Site, Hit)> {
+        let (offset, site, first_end, last_end) = self.owned[text_idx];
+        let hit = shifted(hit, offset);
+        (first_end..last_end)
+            .contains(&hit.end)
+            .then_some((site, hit))
+    }
+}
+
+/// A hit of the tiled search of a singleton batch, held until
+/// `search_singletons` reaches its adapter.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Pooled {
+    /// Index into the configured adapters.
+    adapter_idx: usize,
+    /// The index of the text the hit was found in; see `EndTexts`.
+    text_idx: usize,
+    /// The site of that text.
+    site: Site,
+    /// The hit in span coordinates.
+    hit: Hit,
+}
+
+impl Pooled {
+    /// The position of the hit among the hits of its adapter as the
+    /// single-pattern search reports them: the forward strand before the
+    /// reverse, each strand text by text, and each text in scan order, by
+    /// end on the forward strand and by descending start on the reverse
+    /// strand, which is scanned over the reversed text.
+    fn order(&self) -> (usize, bool, usize, usize) {
+        let scan = if self.hit.rc {
+            usize::MAX - self.hit.start
+        } else {
+            self.hit.end
+        };
+        (self.adapter_idx, self.hit.rc, self.text_idx, scan)
+    }
+}
+
+/// Searches the tiled singleton batches (`TerminalBatch::tiled`) over the
+/// texts of their members and fills `engine.pooled` with the owned hits,
+/// sorted by adapter in the order of `Pooled::order`. The members of a batch
+/// share their length and budget, so the texts and the budget are those of
+/// each member's own search.
+fn search_singleton_batches(
+    ctx: Context<'_>,
+    span: Span,
+    end_size: usize,
+    engine: &mut Engine<'_>,
+) {
+    engine.pooled.clear();
+    for batch in &ctx.index.singleton_batches {
+        if !batch.tiled(engine.plain_read) {
+            continue;
+        }
+        let texts = EndTexts::new(ctx, span, end_size, batch.len, batch.k_end);
+        for (text_idx, text) in texts.windows[..texts.count].iter().enumerate() {
+            let pooled = &mut *engine.pooled;
+            encoded_pattern_hits(
+                engine.ambiguous,
+                &batch.encoded,
+                text.forward,
+                text.reversed,
+                batch.k_end,
+                |pattern_idx, hit| {
+                    if let Some((site, hit)) = texts.owned_hit(text_idx, hit) {
+                        pooled.push(Pooled {
+                            adapter_idx: batch.adapter_indices[pattern_idx],
+                            text_idx,
+                            site,
+                            hit,
+                        });
+                    }
+                },
+            );
+        }
+    }
+    engine.pooled.sort_unstable_by_key(Pooled::order);
+}
+
+/// Searches every adapter outside the barcode batches over the two end
+/// windows of the span for whole-pattern hits, in adapter order, and passes
+/// `keep` the hits of each (`singleton_hits`) that no cheaper overlapping
+/// hit of the same adapter dominates.
+pub(super) fn search_singletons(
+    ctx: Context<'_>,
+    span: Span,
+    engine: &mut Engine<'_>,
+    keep: &mut Keep<'_>,
+) {
+    singleton_hits(ctx, span, keep.end_size, engine, |adapter_idx, found| {
         // Overlapping hits of one pattern are placements of one occurrence,
         // as a pattern with a repeating unit aligns one unit apart; the
         // cheapest applies.
-        for &(site, h) in &found {
+        for &(site, h) in found {
             let dominated = found
                 .iter()
                 .any(|(_, g)| g.cost < h.cost && g.start < h.end && h.start < g.end);
@@ -321,6 +427,61 @@ pub(super) fn search_singletons(
                 keep.accept(site, adapter_idx, h);
             }
         }
+    });
+}
+
+/// Calls `visit` with each adapter outside the barcode batches, in adapter
+/// order, and its whole-pattern hits over the two end windows of the span
+/// with zones of `end_size` bases. An adapter of a tiled singleton batch
+/// takes its hits from the tiled search of the batch
+/// (`search_singleton_batches`); every other adapter is searched one pattern
+/// at a time.
+///
+/// The two searches are separate sassy code paths, each with its own
+/// traceback, so an equal-cost choice of hit start, as an indel beside a
+/// homopolymer run allows, is not the same by construction. Both report the
+/// rightmost local minima within the budget over the same texts, and
+/// `segment_tests::tiled_singleton_batches_report_the_hits_of_the_one_by_one_search`
+/// checks that they give every adapter the same sites and hits in the same
+/// order, on planted entries with edits and homopolymer indels, reads with
+/// `N`, spans shorter than a pattern, chimeras and random reads, under
+/// sassy 0.2.6, the exact version `Cargo.toml` pins.
+pub(super) fn singleton_hits(
+    ctx: Context<'_>,
+    span: Span,
+    end_size: usize,
+    engine: &mut Engine<'_>,
+    mut visit: impl FnMut(usize, &[(Site, Hit)]),
+) {
+    search_singleton_batches(ctx, span, end_size, engine);
+    let mut pooled = 0;
+    let mut found: Vec<(Site, Hit)> = Vec::new();
+    for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
+        if !ctx.index.singletons[adapter_idx] {
+            continue;
+        }
+        found.clear();
+        let tiled = ctx.index.singleton_batch_of[adapter_idx]
+            .is_some_and(|batch| ctx.index.singleton_batches[batch].tiled(engine.plain_read));
+        if tiled {
+            while let Some(p) = engine.pooled.get(pooled)
+                && p.adapter_idx == adapter_idx
+            {
+                found.push((p.site, p.hit));
+                pooled += 1;
+            }
+        } else {
+            let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
+            let texts = EndTexts::new(ctx, span, end_size, len, k_end);
+            let accept = |text_idx: usize, h: Hit| found.extend(texts.owned_hit(text_idx, h));
+            let windows = &texts.windows[..texts.count];
+            if engine.plain_read && ctx.index.plain[adapter_idx] {
+                for_each_hit_in_texts(engine.plain, &adapter.seq, windows, k_end, accept);
+            } else {
+                for_each_hit_in_texts(engine.ambiguous, &adapter.seq, windows, k_end, accept);
+            }
+        }
+        visit(adapter_idx, &found);
     }
 }
 
@@ -329,7 +490,8 @@ pub(super) fn search_singletons(
 /// the entries whose end seeds occur in that window. The end-seed flags are
 /// set only for the partial-matching entries (see `CandidateIndex::new`), so
 /// they gate the role as well as the seed. A partial hit flush with the read
-/// end trims it; see `Keep::partial_hit_is_valid`.
+/// end trims it; see `Keep::partial_hit_is_valid`. An end is untrimmed as
+/// `Keep::five_open` and `Keep::three_open` judge it.
 pub(super) fn search_partial(
     ctx: Context<'_>,
     span: Span,
@@ -338,8 +500,8 @@ pub(super) fn search_partial(
 ) {
     let (ws, we) = span;
     let n = we - ws;
-    let head_open = keep.lo == 0;
-    let tail_open = keep.hi == n;
+    let head_open = keep.five_open();
+    let tail_open = keep.three_open();
     for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
         let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
         let (head_end, tail_start) = terminal_windows(n, keep.end_size, len, k_end);
@@ -406,7 +568,8 @@ impl MaskScratch {
 /// that overlap and lie inside the current keep boundaries, so a hit the
 /// plain pass already trimmed at the opposite end is not read as residue of
 /// this one; the masked stretch itself is trimmed with the hit. The end-seed
-/// flags gate the entries as in `search_partial`.
+/// flags gate the entries as in `search_partial`. A hit of a split sheet
+/// primer is held for `Keep::place_split` (`Keep::accept_residue`).
 pub(super) fn search_residue(
     ctx: Context<'_>,
     span: Span,
@@ -416,8 +579,8 @@ pub(super) fn search_residue(
     let (ws, we) = span;
     let n = we - ws;
     let window = ctx.read.window;
-    let retry_head = keep.lo == 0;
-    let retry_tail = keep.hi == n;
+    let retry_head = keep.five_open();
+    let retry_tail = keep.three_open();
     for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
         let retry_head = retry_head && engine.head_flags[adapter_idx];
         let retry_tail = retry_tail && engine.tail_flags[adapter_idx];
@@ -440,14 +603,8 @@ pub(super) fn search_residue(
                         && overlap >= MIN_OVERLAP
                         && keep.residue_within_budget(h, overlap)
                     {
-                        trace_hit(
-                            &adapter.name,
-                            h.start,
-                            h.end,
-                            h.cost,
-                            Some(HitAction::TrimFivePrime),
-                        );
-                        keep.trim_five_fixed(h.end);
+                        let unmasked = (masked.max(h.start), h.end);
+                        keep.accept_residue(adapter_idx, h, unmasked, HitAction::TrimFivePrime);
                     }
                 });
             }
@@ -464,8 +621,13 @@ pub(super) fn search_residue(
                         && keep.residue_within_budget(h, overlap)
                     {
                         let (s, e) = (start + h.start, start + h.end.min(reach));
-                        trace_hit(&adapter.name, s, e, h.cost, Some(HitAction::TrimThreePrime));
-                        keep.trim_three_fixed(s);
+                        let hit = Hit {
+                            start: s,
+                            end: e,
+                            ..h
+                        };
+                        let aligned = (s, start + unmasked.min(h.end));
+                        keep.accept_residue(adapter_idx, hit, aligned, HitAction::TrimThreePrime);
                     }
                 });
             }
@@ -585,48 +747,70 @@ fn whole_primer_over(
 /// each other in that orientation, whichever primers they are; the sites of a
 /// marker gene in a genome lie a gene apart and face each other. Of the
 /// overlapping hits of one entry, the cheapest stands for the occurrence.
+/// The hits are those of a two-strand search of each entry, in its order.
 pub(super) fn search_pairs(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
     let n = ctx.read.window.len();
+    // A pair needs a hit that reads out of an insert, so the strand on which
+    // each entry reads out is searched first, and the other strand only in
+    // a read that holds such a hit.
     let mut found: Vec<(usize, Hit)> = Vec::new();
-    for (adapter_idx, &paired) in ctx.index.paired.iter().enumerate() {
-        if !paired {
-            continue;
+    for closing in [true, false] {
+        for (adapter_idx, &paired) in ctx.index.paired.iter().enumerate() {
+            if !paired {
+                continue;
+            }
+            let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
+            let reach = len + k_end;
+            let start = (keep.end_size + 1).saturating_sub(reach);
+            let end = (n.saturating_sub(keep.end_size + 1) + reach).min(n);
+            if end <= start || end - start < len {
+                continue;
+            }
+            let opens = ctx.index.opens[adapter_idx];
+            let pattern = &ctx.cfg.adapters[adapter_idx].seq;
+            let text = ctx.read.strands(start, end);
+            let k = ctx.index.budgets[adapter_idx].pair(n);
+            let accept = |h: Hit| found.push((adapter_idx, shifted(h, start)));
+            if opens == Opens::Both {
+                if closing {
+                    search(engine, ctx.index, adapter_idx, pattern, text, k, accept);
+                }
+                continue;
+            }
+            let rc = opens.reads_out(true) == closing;
+            if engine.plain_read && ctx.index.plain[adapter_idx] {
+                for_each_hit_on_strand(engine.plain_fwd, pattern, &text, rc, k, accept);
+            } else {
+                for_each_hit_on_strand(engine.ambiguous_fwd, pattern, &text, rc, k, accept);
+            }
         }
-        let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
-        let reach = len + k_end;
-        let start = (keep.end_size + 1).saturating_sub(reach);
-        let end = (n.saturating_sub(keep.end_size + 1) + reach).min(n);
-        if end <= start || end - start < len {
-            continue;
+        if found.is_empty() {
+            return;
         }
-        let first = found.len();
-        search(
-            engine,
-            ctx.index,
-            adapter_idx,
-            &ctx.cfg.adapters[adapter_idx].seq,
-            ctx.read.strands(start, end),
-            ctx.index.budgets[adapter_idx].pair(n),
-            |h| found.push((adapter_idx, shifted(h, start))),
-        );
-        let hits: Vec<Hit> = found[first..].iter().map(|&(_, h)| h).collect();
-        found.truncate(first);
-        found.extend(
-            hits.iter()
-                .filter(|h| {
-                    !hits.iter().any(|g| {
-                        g.rc == h.rc && g.cost < h.cost && g.start < h.end && h.start < g.end
-                    })
-                })
-                .map(|&h| (adapter_idx, h)),
-        );
     }
+    // The hits of each entry in the order of a two-strand search, the
+    // forward strand first; the sort is stable, so each strand keeps its
+    // scan order.
+    found.sort_by_key(|&(adapter_idx, hit)| (adapter_idx, hit.rc));
+    let found: Vec<(usize, Hit)> = found
+        .chunk_by(|a, b| a.0 == b.0)
+        .flat_map(|hits| {
+            hits.iter().copied().filter(|&(_, h)| {
+                !hits.iter().any(|&(_, g)| {
+                    g.rc == h.rc && g.cost < h.cost && g.start < h.end && h.start < g.end
+                })
+            })
+        })
+        .collect();
     if found.len() < 2 {
         return;
     }
-    let opens = |&(adapter_idx, hit): &(usize, Hit)| ctx.index.opens[adapter_idx] != hit.rc;
-    for closing in found.iter().filter(|hit| !opens(hit)) {
-        for opening in found.iter().filter(|hit| opens(hit)) {
+    let opens =
+        |&&(adapter_idx, hit): &&(usize, Hit)| ctx.index.opens[adapter_idx].reads_in(hit.rc);
+    let closes =
+        |&&(adapter_idx, hit): &&(usize, Hit)| ctx.index.opens[adapter_idx].reads_out(hit.rc);
+    for closing in found.iter().filter(closes) {
+        for opening in found.iter().filter(opens) {
             let (c, o) = (closing.1, opening.1);
             if o.start > c.start
                 && o.end > c.end
@@ -639,9 +823,10 @@ pub(super) fn search_pairs(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut
     }
 }
 
-/// Runs the terminal passes over the span: the batched and singleton
-/// whole-pattern searches, then the partial and residue searches over the
-/// ends they left untrimmed.
+/// Runs the terminal passes over the span: the singleton and the barcode
+/// batch whole-pattern searches, then the partial and residue searches over the
+/// ends they left untrimmed, and, with a split sheet attached, the search of
+/// the ends that another layer trimmed (`search_trimmed_ends`).
 pub(super) fn search_terminal(
     ctx: Context<'_>,
     span: Span,
@@ -655,35 +840,171 @@ pub(super) fn search_terminal(
         keep.settle();
     }
     let (ws, we) = span;
-    if keep.lo != 0 && keep.hi != we - ws {
-        return;
+    if keep.five_open() || keep.three_open() {
+        ctx.index.end_candidates(
+            ctx.read.window,
+            ws,
+            we,
+            keep.end_size,
+            engine.head_flags,
+            engine.tail_flags,
+        );
+        search_partial(ctx, span, engine, keep);
+        search_residue(ctx, span, engine, keep);
+        keep.settle();
     }
-    ctx.index.end_candidates(
-        ctx.read.window,
-        ws,
-        we,
-        keep.end_size,
-        engine.head_flags,
-        engine.tail_flags,
-    );
-    search_partial(ctx, span, engine, keep);
-    search_residue(ctx, span, engine, keep);
-    keep.settle();
+    if !ctx.cfg.split_of.is_empty() {
+        search_trimmed_ends(ctx, span, engine, keep);
+    }
 }
 
-/// Runs the search passes over per-thread state; see `adapter_segments`.
+/// Searches the split sheet primers at each end of the span whose keep
+/// boundary another layer moved and where no split primer hit is held
+/// (`Keep::holds`), with that boundary standing in for the read end. A
+/// primer that lost bases at its junction with the layer hangs off the
+/// boundary, as one cut short by the read end hangs off the end: each end is
+/// searched with overhang alignment over the `end_reach` bases inward of its
+/// boundary, for the entries with an end seed there, and a hit is held under
+/// the rules of a partial hit at a read end (`Keep::hold_at_boundary`). An
+/// end that still holds no split primer hit is then searched for a whole
+/// primer at the boundary (`search_boundary_primers`).
+pub(super) fn search_trimmed_ends(
+    ctx: Context<'_>,
+    span: Span,
+    engine: &mut Engine<'_>,
+    keep: &mut Keep<'_>,
+) {
+    let Some(table) = &ctx.index.end_seeds else {
+        return;
+    };
+    let (ws, we) = span;
+    let n = we - ws;
+    let reach = ctx.index.end_reach;
+    let ends = [
+        (HitAction::TrimFivePrime, keep.lo > 0 && keep.lo < keep.hi),
+        (HitAction::TrimThreePrime, keep.hi < n && keep.lo < keep.hi),
+    ];
+    for (action, trimmed) in ends {
+        if !trimmed || keep.holds(action) {
+            continue;
+        }
+        let (start, end) = match action {
+            HitAction::TrimFivePrime => (keep.lo, (keep.lo + reach).min(keep.hi)),
+            _ => (keep.hi.saturating_sub(reach).max(keep.lo), keep.hi),
+        };
+        if end - start < MIN_OVERLAP {
+            continue;
+        }
+        let flags = &mut *engine.head_flags;
+        flags.clear();
+        flags.resize(ctx.cfg.adapters.len(), false);
+        table.scan(&ctx.read.window[ws + start..ws + end], |adapter_idx, _| {
+            flags[adapter_idx] = true
+        });
+        for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
+            if !engine.head_flags[adapter_idx] || !keep.is_split(adapter_idx) {
+                continue;
+            }
+            let k_end = ctx.index.budgets[adapter_idx].k_end;
+            let text = ctx.read.strands(ws + start, ws + end);
+            for_each_hit(engine.overhang, &adapter.seq, &text, k_end, |h| {
+                keep.hold_at_boundary(adapter_idx, shifted(h, start), action);
+            });
+        }
+        if !keep.holds(action) {
+            search_boundary_primers(ctx, span, engine, keep, action);
+        }
+    }
+}
+
+/// Searches every split sheet primer for whole hits at the keep boundary of
+/// the end `action` trims (`Keep::fits_boundary`): the outer edge, the start
+/// at the 5' end or the end at the 3' end, lies at most
+/// `BOUNDARY_OUTER_SLACK` bases outboard of the boundary or at most
+/// `FLANK_SLACK` bases inboard of it, within the primer's anchored budget
+/// (`Budget::k_anchor`). Of the hits that fit, each that no cheaper
+/// overlapping fitting hit of the same primer dominates is held
+/// (`Keep::hold_whole_at_boundary`), so a hit that does not fit, such as
+/// one on the strand that faces away from the insert, suppresses none. The
+/// boundary fixes where such a hit lies, so its chance of a random match is
+/// that of the few positions beside the boundaries on one strand, which the
+/// anchored budget bounds, not that of a whole end zone.
+fn search_boundary_primers(
+    ctx: Context<'_>,
+    span: Span,
+    engine: &mut Engine<'_>,
+    keep: &mut Keep<'_>,
+    action: HitAction,
+) {
+    let (ws, we) = span;
+    let n = we - ws;
+    let mut found: Vec<Hit> = Vec::new();
+    for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
+        if !keep.is_split(adapter_idx) {
+            continue;
+        }
+        let Budget { len, k_anchor, .. } = ctx.index.budgets[adapter_idx];
+        let reach = FLANK_SLACK + len + k_anchor;
+        let (start, end) = match action {
+            HitAction::TrimFivePrime => (
+                keep.lo.saturating_sub(BOUNDARY_OUTER_SLACK),
+                (keep.lo + reach).min(keep.hi),
+            ),
+            _ => (
+                keep.hi.saturating_sub(reach).max(keep.lo),
+                (keep.hi + BOUNDARY_OUTER_SLACK).min(n),
+            ),
+        };
+        if end < start + len {
+            continue;
+        }
+        found.clear();
+        let text = ctx.read.strands(ws + start, ws + end);
+        search(
+            engine,
+            ctx.index,
+            adapter_idx,
+            &adapter.seq,
+            text,
+            k_anchor,
+            |h| found.push(shifted(h, start)),
+        );
+        found.retain(|h| keep.fits_boundary(adapter_idx, h, action));
+        for &h in &found {
+            let dominated = found
+                .iter()
+                .any(|g| g.cost < h.cost && g.start < h.end && h.start < g.end);
+            if !dominated {
+                keep.hold_whole_at_boundary(adapter_idx, h, action);
+            }
+        }
+    }
+}
+
+/// Runs the search passes over per-thread state; see
+/// `adapter_segments_annotated`.
 pub(super) fn segments_tallied(
     window: &[u8],
     cfg: &AdapterConfig,
     acted: Option<&mut [bool]>,
-) -> Vec<(usize, usize)> {
+) -> Vec<Segment> {
     let n = window.len();
     if n == 0 {
         return vec![];
     }
     if cfg.adapters.is_empty() {
-        return vec![(0, n)];
+        return vec![Segment::located(0, n, &[])];
     }
+    with_engine(window, cfg, |ctx, engine| segments_with(ctx, engine, acted))
+}
+
+/// Runs `f` over the context of `window` under `cfg` and this thread's
+/// searchers and buffers.
+pub(super) fn with_engine<T>(
+    window: &[u8],
+    cfg: &AdapterConfig,
+    f: impl FnOnce(Context<'_>, &mut Engine<'_>) -> T,
+) -> T {
     let index = cfg
         .candidate_index
         .get_or_init(|| CandidateIndex::for_config(cfg));
@@ -696,12 +1017,15 @@ pub(super) fn segments_tallied(
             plain,
             ambiguous,
             overhang,
+            plain_fwd,
+            ambiguous_fwd,
             normalized,
             reversed,
             windows,
             mask,
             head_flags,
             tail_flags,
+            pooled,
         } = state;
         let (window, plain_read) = normalize_into(window, normalized);
         reversed.clear();
@@ -721,22 +1045,38 @@ pub(super) fn segments_tallied(
             plain,
             ambiguous,
             overhang,
+            plain_fwd,
+            ambiguous_fwd,
             windows,
             mask,
             head_flags,
             tail_flags,
+            pooled,
         };
-        segments_with(ctx, &mut engine, acted)
+        f(ctx, &mut engine)
     })
 }
 
-/// The search passes behind `adapter_segments`, over per-thread searchers.
-/// `acted` receives the adapters that trimmed or excised, when given.
+/// Asserts in debug builds that every primer `place_split` located over
+/// `window` keeps the convention of its site (`site_holds`).
+fn debug_assert_sites(window: &[u8], cfg: &AdapterConfig, located: &[Located]) {
+    debug_assert!(
+        located
+            .iter()
+            .all(|h| site_holds(window, &cfg.adapters, &h.locus)),
+        "a located primer's site does not align over its locus: {located:?}"
+    );
+}
+
+/// The search passes behind `adapter_segments_annotated`, over per-thread
+/// searchers. `acted` receives the adapters that trimmed or excised, when
+/// given. The loci of each segment are taken from the split primer hits of
+/// the whole-window pass and of every piece pass.
 pub(super) fn segments_with(
     ctx: Context<'_>,
     engine: &mut Engine<'_>,
     mut acted: Option<&mut [bool]>,
-) -> Vec<(usize, usize)> {
+) -> Vec<Segment> {
     let cfg = ctx.cfg;
     let n = ctx.read.window.len();
     let gate_panels = acted.is_none();
@@ -754,17 +1094,19 @@ pub(super) fn segments_with(
         search_interior(ctx, engine, &mut keep);
         search_pairs(ctx, engine, &mut keep);
     }
-    // A trim near an end found by the interior search can anchor a deferred
-    // terminal hit, so deferred hits are settled before the tally counts the
-    // adapters that acted.
+    // A trim near an end found by the interior search, or a placed split
+    // primer, can anchor a deferred terminal hit, so deferred hits are
+    // settled before the tally counts the adapters that acted.
+    keep.place_split();
+    debug_assert_sites(ctx.read.window, cfg, &keep.primer_hits);
     keep.settle();
     tally(&keep);
-    let (lo, hi, cuts) = keep.into_cuts(cfg.min_piece);
+    let (lo, hi, cuts, mut hits) = keep.into_cuts(cfg.min_piece);
     if lo >= hi {
         return vec![];
     }
     if cuts.is_empty() {
-        return vec![(lo, hi)];
+        return vec![Segment::located(lo, hi, &hits)];
     }
 
     // Each piece between cuts gets the terminal search again over its own
@@ -774,17 +1116,21 @@ pub(super) fn segments_with(
     // new boundary.
     let mut segs = Vec::with_capacity(cuts.len() + 1);
     let mut cursor = lo;
-    let mut push_piece = |s: usize, e: usize, segs: &mut Vec<(usize, usize)>| {
+    let mut push_piece = |s: usize, e: usize, segs: &mut Vec<Segment>| {
         if s >= e {
             return;
         }
         let mut keep = Keep::new(cfg, ctx.index, e - s, false);
         keep.gate_panels = gate_panels;
         search_terminal(ctx, (s, e), engine, &mut keep);
+        keep.place_split();
+        debug_assert_sites(&ctx.read.window[s..e], cfg, &keep.primer_hits);
+        keep.settle();
         keep.refine();
         tally(&keep);
+        hits.extend(keep.primer_hits.iter().map(|h| h.shifted(s)));
         if keep.lo < keep.hi {
-            segs.push((s + keep.lo, s + keep.hi));
+            segs.push(Segment::located(s + keep.lo, s + keep.hi, &[]));
         }
     };
     for (s, e) in cuts {
@@ -792,5 +1138,10 @@ pub(super) fn segments_with(
         cursor = cursor.max(e);
     }
     push_piece(cursor, hi, &mut segs);
+    if !hits.is_empty() {
+        for seg in &mut segs {
+            *seg = Segment::located(seg.start, seg.end, &hits);
+        }
+    }
     segs
 }

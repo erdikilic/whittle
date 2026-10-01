@@ -1,6 +1,7 @@
 //! Resolved run configuration: `Config`, tag carry-through policy,
 //! adapter-inference settings, progress mode, and the thread budget.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -299,6 +300,17 @@ pub struct Config {
     /// in dorado's `tm` token order. Recorded by `settle` and merged into the
     /// `@RG` and per-read `tm` fields.
     pub trim_classes: [bool; 3],
+    /// The resolved `--split-by` configuration, or `None` without `--split-by`.
+    /// `settle` builds `splitter` from it once the adapter set is final.
+    pub split_opts: Option<crate::split::SplitOptions>,
+    /// The adapter search settings the split primers are attached to when no
+    /// adapter source is given: `--adapter-error-rate`,
+    /// `--adapter-end-search`, `--adapter-ends-only` and `--min-length`, with
+    /// no adapters. `None` without `--split-by`.
+    pub split_search: Option<crate::adapter::AdapterConfig>,
+    /// The splitter that calls every surviving segment, built by `settle`
+    /// after adapter resolution; `None` without `--split-by`.
+    pub splitter: Option<std::sync::Arc<crate::split::Splitter>>,
 }
 
 impl Default for Config {
@@ -332,22 +344,46 @@ impl Default for Config {
             adapter_fasta: None,
             adapters_configured: None,
             trim_classes: [false; 3],
+            split_opts: None,
+            split_search: None,
+            splitter: None,
         }
     }
 }
 
+/// The flag `Config::write_targets` names the output by.
+pub const OUTPUT_FLAG: &str = "-o/--output";
+
 impl Config {
     /// Every file the run writes, each paired with the flag that named it. The
     /// overwrite guards and the report-only advisories both derive from this
-    /// list, so an artifact flag added here is covered by both.
-    pub fn write_targets(&self) -> impl Iterator<Item = (&'static str, &Path)> {
+    /// list, so an artifact flag added here is covered by both. An output
+    /// template is listed with each placeholder as `*`; its expanded paths
+    /// are checked as their files are opened.
+    pub fn write_targets(&self) -> impl Iterator<Item = (&'static str, Cow<'_, Path>)> {
+        let output = match self.output_template() {
+            Some(template) => Some(Cow::Owned(template.glob())),
+            None => self.io.output.as_deref().map(Cow::Borrowed),
+        };
         [
-            ("-o/--output", self.io.output.as_deref()),
-            ("--rejected-output", self.rejected_output.as_deref()),
-            ("--summary-json", self.summary_json.as_deref()),
+            (OUTPUT_FLAG, output),
+            (
+                "--rejected-output",
+                self.rejected_output.as_deref().map(Cow::Borrowed),
+            ),
+            (
+                "--summary-json",
+                self.summary_json.as_deref().map(Cow::Borrowed),
+            ),
         ]
         .into_iter()
         .filter_map(|(flag, path)| path.map(|p| (flag, p)))
+    }
+
+    /// The `-o` output template of a `--split-by` run, or `None` for a run
+    /// with one output.
+    pub fn output_template(&self) -> Option<&crate::split::Template> {
+        self.split_opts.as_ref()?.template.as_ref()
     }
 }
 

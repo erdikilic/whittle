@@ -1,6 +1,6 @@
 //! Classification and accumulation of adapter hits: terminal trims, interior
-//! excisions, the anchoring of deferred terminal hits, and the cuts of one
-//! window.
+//! excisions, the anchoring of deferred terminal hits, the placement of split
+//! sheet primers at each end, and the cuts of one window.
 
 use super::*;
 
@@ -105,7 +105,7 @@ pub(super) fn ends_only_terminal(start: usize, end: usize, n: usize, end_size: u
 /// Every 5' trim and every excision lies inside the head window and every 3'
 /// trim inside the tail window: a hit reaching an end zone starts or ends within
 /// `end_size` of that end and spans at most `len + k_end` bases.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Site {
     /// `[0, end_size + len + k_end)`: owns 5' trims and excisions.
     Head,
@@ -142,6 +142,10 @@ pub(super) struct Keep<'a> {
     split_classes: &'a [usize],
     /// Per-adapter `CandidateIndex::paired`.
     paired: &'a [bool],
+    /// Per-adapter `AdapterConfig::split_of`; empty without a split sheet.
+    split_of: &'a [Option<usize>],
+    /// Per-adapter `CandidateIndex::opens`.
+    opens: &'a [Opens],
     /// The read-length class of the window (`interior_class`).
     class: usize,
     /// Whether a `bounds_barcode` entry trimmed the 5' end.
@@ -180,6 +184,15 @@ pub(super) struct Keep<'a> {
     /// Terminal trims above the `k_far` budget of their adapter, applied by
     /// `settle` once anchored.
     pub(super) deferred: Vec<Deferred>,
+    /// Terminal hits of split sheet primers, placed by `place_split`.
+    held: Vec<Held>,
+    /// The spans of the terminal trims by entries that are no split sheet
+    /// primer, residue trims included, with the end each trims. Recorded
+    /// only with a split sheet attached, for `anchored`.
+    trimmed: Vec<(HitAction, usize, usize)>,
+    /// The split primers `place_split` located, in window coordinates;
+    /// `into_cuts` adds the split primer hits of the excisions that cut.
+    pub(super) primer_hits: Vec<Located>,
 }
 
 /// An applied hit, kept for `refine`: its span and the clips of its
@@ -222,6 +235,41 @@ pub(super) struct Deferred {
     pub(super) action: HitAction,
 }
 
+/// A terminal hit of a split sheet primer in the orientation valid for its
+/// end, held until `Keep::place_split` places the primers of that end.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    /// Index into the configured adapters.
+    adapter_idx: usize,
+    /// Hit start in window coordinates.
+    start: usize,
+    /// Hit end in window coordinates.
+    end: usize,
+    /// Edit cost of the hit.
+    cost: usize,
+    /// See `Hit::clip_start`.
+    clip_start: usize,
+    /// See `Hit::clip_end`.
+    clip_end: usize,
+    /// `TrimFivePrime` or `TrimThreePrime`.
+    action: HitAction,
+    /// Whether the hit is a whole terminal hit above the `k_far` budget of
+    /// its adapter, which acts only once anchored, as a `Deferred` trim does.
+    far: bool,
+    /// Whether part of the primer hangs off the end of the searched span or
+    /// off the trim boundary the search started from.
+    overhung: bool,
+    /// Whether the hit was aligned against a masked copy of the window
+    /// (`search_residue`), so the boundary it sets is one `refine` keeps as
+    /// found.
+    fixed: bool,
+    /// Whether the hit is a whole hit at an outer layer's trim boundary
+    /// (`hold_whole_at_boundary`), within the entry's anchored budget.
+    boundary: bool,
+    /// See `Hit::rc`.
+    rc: bool,
+}
+
 impl<'a> Keep<'a> {
     /// Creates an accumulator that keeps the whole `[0, n)` window. `split`
     /// selects the classification: with it, a hit covered by both end zones
@@ -238,6 +286,8 @@ impl<'a> Keep<'a> {
             panel_gates: &index.panel_gates,
             split_classes: &index.split_classes,
             paired: &index.paired,
+            split_of: &cfg.split_of,
+            opens: &index.opens,
             class: interior_class(n),
             five_bounded: false,
             three_bounded: false,
@@ -256,6 +306,9 @@ impl<'a> Keep<'a> {
             fixed_hi: n,
             acted: Vec::new(),
             deferred: Vec::new(),
+            held: Vec::new(),
+            trimmed: Vec::new(),
+            primer_hits: Vec::new(),
         }
     }
 
@@ -276,17 +329,20 @@ impl<'a> Keep<'a> {
 
     /// Returns whether a hit whose `overlap` bases lie in the text is within
     /// the partial budget of that overlap, once the cost of the pattern bases
-    /// beyond the text end is discounted.
+    /// beyond the text end is discounted. See `budget::residue_within_budget`.
     pub(super) fn residue_within_budget(&self, hit: Hit, overlap: usize) -> bool {
-        let charged = overhang_cost(
-            self.error_rate as f32,
+        residue_within_budget(
+            self.error_rate,
+            hit.cost,
             hit.left_overhang,
             hit.right_overhang,
-        );
-        hit.cost.saturating_sub(charged) <= partial_budget(self.error_rate, overlap)
+            overlap,
+        )
     }
 
-    /// Classifies one hit and applies it when `site` owns the outcome.
+    /// Classifies one hit and applies it when `site` owns the outcome. A
+    /// terminal hit of a split sheet primer is held for `place_split`
+    /// instead (`hold`).
     pub(super) fn accept(&mut self, site: Site, adapter_idx: usize, hit: Hit) {
         let adapter = &self.adapters[adapter_idx];
         let Hit {
@@ -339,7 +395,12 @@ impl<'a> Keep<'a> {
         let whole = hit.left_overhang + hit.right_overhang == 0;
         let terminal = matches!(site, Site::Head | Site::Tail { .. })
             && matches!(action, HitAction::TrimFivePrime | HitAction::TrimThreePrime);
-        if whole && terminal && cost > self.budgets[adapter_idx].k_far {
+        let far = whole && terminal && cost > self.budgets[adapter_idx].k_far;
+        if self.is_split(adapter_idx) && action != HitAction::Excise {
+            self.hold(adapter_idx, hit, action, far, !whole);
+            return;
+        }
+        if far {
             self.deferred.push(Deferred {
                 adapter_idx,
                 start,
@@ -387,6 +448,9 @@ impl<'a> Keep<'a> {
             clip_end,
             standalone: false,
         };
+        if action != HitAction::Excise && !self.split_of.is_empty() && !self.is_split(adapter_idx) {
+            self.trimmed.push((action, start, end));
+        }
         match action {
             HitAction::TrimFivePrime => {
                 self.lo = self.lo.max(end);
@@ -453,6 +517,334 @@ impl<'a> Keep<'a> {
         {
             applied.standalone = true;
         }
+    }
+
+    /// Returns whether a hit of the split entry at `adapter_idx`, matched on
+    /// the strand `rc` gives, reads as a primer at the end `action` trims:
+    /// into the insert at the 5' end, out of it at the 3' end.
+    pub(super) fn faces_insert(&self, adapter_idx: usize, rc: bool, action: HitAction) -> bool {
+        match action {
+            HitAction::TrimFivePrime => self.opens[adapter_idx].reads_in(rc),
+            _ => self.opens[adapter_idx].reads_out(rc),
+        }
+    }
+
+    /// Holds a terminal hit of the split entry at `adapter_idx` for
+    /// `place_split` when it faces the insert (`faces_insert`). A hit in the
+    /// other orientation neither trims nor locates a primer. `far` and
+    /// `overhung` are as in `Held`.
+    fn hold(&mut self, adapter_idx: usize, hit: Hit, action: HitAction, far: bool, overhung: bool) {
+        self.hold_as(adapter_idx, hit, action, (far, overhung, false, false));
+    }
+
+    /// `hold` with the `far`, `overhung`, `fixed` and `boundary` flags of
+    /// `Held`.
+    fn hold_as(
+        &mut self,
+        adapter_idx: usize,
+        hit: Hit,
+        action: HitAction,
+        (far, overhung, fixed, boundary): (bool, bool, bool, bool),
+    ) {
+        if !self.faces_insert(adapter_idx, hit.rc, action) {
+            trace_hit(
+                &self.adapters[adapter_idx].name,
+                hit.start,
+                hit.end,
+                hit.cost,
+                None,
+            );
+            return;
+        }
+        self.held.push(Held {
+            adapter_idx,
+            start: hit.start,
+            end: hit.end,
+            cost: hit.cost,
+            clip_start: hit.clip_start,
+            clip_end: hit.clip_end,
+            action,
+            far,
+            overhung,
+            fixed,
+            boundary,
+            rc: hit.rc,
+        });
+    }
+
+    /// Trims the end `action` names through a hit of the entry at
+    /// `adapter_idx` aligned against a masked copy of the window
+    /// (`search_residue`), in window coordinates, at a boundary `refine`
+    /// keeps as found. A hit of a split sheet primer is held for
+    /// `place_split` instead, as a partial hit at a read end, with
+    /// `unmasked`, the part of the hit aligned outside the mask, as its span.
+    pub(super) fn accept_residue(
+        &mut self,
+        adapter_idx: usize,
+        hit: Hit,
+        unmasked: (usize, usize),
+        action: HitAction,
+    ) {
+        if self.is_split(adapter_idx) {
+            let (start, end) = unmasked;
+            let hit = Hit { start, end, ..hit };
+            self.hold_as(adapter_idx, hit, action, (false, true, true, false));
+            return;
+        }
+        trace_hit(
+            &self.adapters[adapter_idx].name,
+            hit.start,
+            hit.end,
+            hit.cost,
+            Some(action),
+        );
+        if !self.split_of.is_empty() {
+            self.trimmed.push((action, hit.start, hit.end));
+        }
+        match action {
+            HitAction::TrimFivePrime => self.trim_five_fixed(hit.end),
+            _ => self.trim_three_fixed(hit.start),
+        }
+    }
+
+    /// Holds a partial hit of the split entry at `adapter_idx` that hangs off
+    /// a trim boundary as `search_trimmed_ends` finds it: flush with the 5'
+    /// boundary `lo` for `TrimFivePrime`, or with the 3' boundary `hi` for
+    /// `TrimThreePrime`, with at least `MIN_OVERLAP` bases aligned within the
+    /// partial budget of that overlap, as a partial hit at a read end.
+    pub(super) fn hold_at_boundary(&mut self, adapter_idx: usize, hit: Hit, action: HitAction) {
+        let (flush, hanging, other) = match action {
+            HitAction::TrimFivePrime => {
+                (hit.start == self.lo, hit.left_overhang, hit.right_overhang)
+            },
+            _ => (hit.end == self.hi, hit.right_overhang, hit.left_overhang),
+        };
+        let overlap = self.adapters[adapter_idx].seq.len().saturating_sub(hanging);
+        if flush
+            && hanging > 0
+            && other == 0
+            && overlap >= MIN_OVERLAP
+            && self.residue_within_budget(hit, overlap)
+        {
+            self.hold(adapter_idx, hit, action, false, true);
+        }
+    }
+
+    /// Whether a hit of the split entry at `adapter_idx` is a whole primer at
+    /// the keep boundary of the end `action` trims, as
+    /// `search_boundary_primers` locates one: it faces the insert there
+    /// (`faces_insert`), it has no overhang, its cost is within the entry's
+    /// anchored budget (`Budget::k_anchor`), it reaches inward past the
+    /// boundary, and its outer edge lies at most `BOUNDARY_OUTER_SLACK` bases
+    /// outboard of the boundary or at most `FLANK_SLACK` bases inboard of it.
+    pub(super) fn fits_boundary(&self, adapter_idx: usize, hit: &Hit, action: HitAction) -> bool {
+        let at_boundary = match action {
+            HitAction::TrimFivePrime => {
+                hit.start + BOUNDARY_OUTER_SLACK >= self.lo
+                    && hit.start <= self.lo + FLANK_SLACK
+                    && hit.end > self.lo
+            },
+            _ => {
+                hit.end <= self.hi + BOUNDARY_OUTER_SLACK
+                    && hit.end + FLANK_SLACK >= self.hi
+                    && hit.start < self.hi
+            },
+        };
+        at_boundary
+            && hit.left_overhang + hit.right_overhang == 0
+            && hit.cost <= self.budgets[adapter_idx].k_anchor
+            && self.faces_insert(adapter_idx, hit.rc, action)
+    }
+
+    /// Holds a whole hit of the split entry at `adapter_idx` that
+    /// `fits_boundary` admits at the end `action` trims. A hit above the
+    /// `k_far` budget is held as `far`. The hit is held as `boundary`, so
+    /// rescoring admits the anchored budget at its locus.
+    pub(super) fn hold_whole_at_boundary(
+        &mut self,
+        adapter_idx: usize,
+        hit: Hit,
+        action: HitAction,
+    ) {
+        let far = hit.cost > self.budgets[adapter_idx].k_far;
+        self.hold_as(adapter_idx, hit, action, (far, false, false, true));
+    }
+
+    /// Whether `place_split` may place the held hit `h`: it reaches inward
+    /// past the keep boundary of its end (`reaches`), or it overlaps a trim of
+    /// its end by an entry that is no split sheet primer (`covered`).
+    fn anchored(&self, h: &Held) -> bool {
+        self.reaches(h) || self.covered(h)
+    }
+
+    /// Whether the held hit `h` reaches inward past the keep boundary of its
+    /// end, and a `far` hit starts, at the 5' end, or ends, at the 3' end,
+    /// within `FLANK_SLACK` of that boundary.
+    fn reaches(&self, h: &Held) -> bool {
+        match h.action {
+            HitAction::TrimFivePrime => {
+                h.end > self.lo && (!h.far || h.start <= self.lo + FLANK_SLACK)
+            },
+            _ => h.start < self.hi && (!h.far || h.end + FLANK_SLACK >= self.hi),
+        }
+    }
+
+    /// Whether the held hit `h` lies within or overlaps a trim of its end by
+    /// an entry that is no split sheet primer: the primer site of that entry
+    /// is the sheet primer's own.
+    fn covered(&self, h: &Held) -> bool {
+        self.trimmed
+            .iter()
+            .any(|&(action, start, end)| action == h.action && start < h.end && h.start < end)
+    }
+
+    /// Whether a split primer hit that `place_split` may place is held at the
+    /// end `action` trims.
+    pub(super) fn holds(&self, action: HitAction) -> bool {
+        self.held
+            .iter()
+            .any(|h| h.action == action && self.anchored(h))
+    }
+
+    /// Whether a split primer hit that `place_split` may place is held at the
+    /// end `action` trims with fewer than `MIN_OVERLAP` bases outboard of it,
+    /// too few for a partial hit flush with the read end beyond it.
+    fn holds_at_end(&self, action: HitAction) -> bool {
+        self.held.iter().any(|h| {
+            let outboard = match action {
+                HitAction::TrimFivePrime => h.start,
+                _ => self.n - h.end,
+            };
+            h.action == action && outboard < MIN_OVERLAP && self.anchored(h)
+        })
+    }
+
+    /// Whether the 5' end is untrimmed: its keep boundary is the window start
+    /// and no placeable split primer hit is held at the read end
+    /// (`holds_at_end`). A primer held further inward leaves the read end to
+    /// the partial and residue searches, which find a primer cut short there.
+    pub(super) fn five_open(&self) -> bool {
+        self.lo == 0 && !self.holds_at_end(HitAction::TrimFivePrime)
+    }
+
+    /// Whether the 3' end is untrimmed, as `five_open` is for the 5' end.
+    pub(super) fn three_open(&self) -> bool {
+        self.hi == self.n && !self.holds_at_end(HitAction::TrimThreePrime)
+    }
+
+    /// Places the held split primer hits of each end. The outermost anchored
+    /// hit (`anchored`), the one nearest the end, cheapest and then longest
+    /// on a tie, is the primer located there and trims the end; every other
+    /// held hit of that end trims too when it reaches further inward and
+    /// overlaps it or starts, at the 5' end, or ends, at the 3' end, within
+    /// `FLANK_SLACK` bases of it. A hit trims only past the keep boundary the
+    /// other entries set, so a located primer within a trim of another entry
+    /// leaves that trim as it is. The other held hits neither trim nor
+    /// locate a primer. The matched span of the locus covers the trims of
+    /// other entries it overlaps. The locus is `outer_open` when its hit is
+    /// `overhung`: its outer side is then the end of the searched span or the
+    /// trim boundary it was searched against. A whole hit leaves it closed
+    /// and is its `site`. The locus is `boundary` when its hit is.
+    pub(super) fn place_split(&mut self) {
+        if self.held.is_empty() {
+            return;
+        }
+        let held = std::mem::take(&mut self.held);
+        for action in [HitAction::TrimFivePrime, HitAction::TrimThreePrime] {
+            let five = action == HitAction::TrimFivePrime;
+            let bound = if five { self.lo } else { self.hi };
+            let n = self.n;
+            let outward = |h: &Held| if five { h.start } else { n - h.end };
+            let outer = held
+                .iter()
+                .filter(|h| h.action == action && self.anchored(h))
+                .min_by_key(|h| {
+                    (
+                        outward(h),
+                        h.cost,
+                        std::cmp::Reverse(h.end - h.start),
+                        h.adapter_idx,
+                    )
+                })
+                .copied();
+            let (mut start, mut end) = outer.map_or((0, 0), |o| (o.start, o.end));
+            for h in held.iter().filter(|h| h.action == action) {
+                let joins = outer.is_some_and(|o| {
+                    let same = (h.adapter_idx, h.start, h.end) == (o.adapter_idx, o.start, o.end);
+                    same || if five {
+                        h.end > o.end && h.start <= o.end + FLANK_SLACK
+                    } else {
+                        h.start < o.start && h.end + FLANK_SLACK >= o.start
+                    }
+                });
+                let past = if five { h.end > bound } else { h.start < bound };
+                if !joins || !past {
+                    trace_hit(
+                        &self.adapters[h.adapter_idx].name,
+                        h.start,
+                        h.end,
+                        h.cost,
+                        None,
+                    );
+                    if !joins {
+                        continue;
+                    }
+                } else if h.fixed {
+                    trace_hit(
+                        &self.adapters[h.adapter_idx].name,
+                        h.start,
+                        h.end,
+                        h.cost,
+                        Some(action),
+                    );
+                    if five {
+                        self.trim_five_fixed(h.end);
+                    } else {
+                        self.trim_three_fixed(h.start);
+                    }
+                } else {
+                    self.apply(
+                        h.adapter_idx,
+                        h.start,
+                        h.end,
+                        h.cost,
+                        (h.clip_start, h.clip_end),
+                        action,
+                    );
+                }
+                start = start.min(h.start);
+                end = end.max(h.end);
+            }
+            let Some(o) = outer else {
+                continue;
+            };
+            for &(trim, s, e) in &self.trimmed {
+                if trim == action && s < o.end && o.start < e {
+                    start = start.min(s);
+                    end = end.max(e);
+                }
+            }
+            self.primer_hits.push(Located {
+                locus: Locus {
+                    start: o.start,
+                    end: o.end,
+                    outer_open: o.overhung,
+                    boundary: o.boundary,
+                    site: (!o.overhung).then_some(PrimerSite {
+                        entry: o.adapter_idx,
+                        rc: o.rc,
+                        cost: o.cost,
+                    }),
+                },
+                start,
+                end,
+            });
+        }
+    }
+
+    /// Whether `adapter_idx` is a split sheet primer.
+    pub(super) fn is_split(&self, adapter_idx: usize) -> bool {
+        self.split_of.get(adapter_idx).copied().flatten().is_some()
     }
 
     /// Whether an interior hit of `adapter_idx` splits this window.
@@ -538,15 +930,21 @@ impl<'a> Keep<'a> {
     /// adapter that extends it by at least `MIN_OVERLAP` bases, within
     /// `FLANK_SLACK` of it, or within `end_size` for another paired entry. A
     /// junction holds the primers of both ends across the layers between
-    /// them, where a genome holds no two such sites.
+    /// them, where a genome holds no two such sites. A split sheet primer and
+    /// another paired entry never back each other: beside another paired
+    /// entry, a split sheet primer marks a junction only as a pair that
+    /// `search_pairs` finds. `adapter_idx` is a paired entry.
     fn backs(&self, (s, e): (usize, usize), adapter_idx: usize) -> bool {
+        let split = self.is_split(adapter_idx);
         self.interior.iter().zip(&self.excised).any(|(&(t, u), b)| {
-            let reach = if self.paired[b.adapter_idx] {
+            let paired = self.paired[b.adapter_idx];
+            let reach = if paired {
                 self.end_size.max(FLANK_SLACK)
             } else {
                 FLANK_SLACK
             };
             b.adapter_idx != adapter_idx
+                && !(paired && (split || self.is_split(b.adapter_idx)))
                 && t <= e + reach
                 && u + reach >= s
                 && s.saturating_sub(t) + u.saturating_sub(e) >= MIN_OVERLAP
@@ -557,8 +955,12 @@ impl<'a> Keep<'a> {
     /// the boundaries, merged: two excisions overlapping, touching, or
     /// separated by at most `FLANK_SLACK` bases or fewer than `min_piece` bases
     /// become one, since the bases between them are junction residue or a
-    /// piece the length filter would discard.
-    pub(super) fn into_cuts(mut self, min_piece: usize) -> (usize, usize, Vec<(usize, usize)>) {
+    /// piece the length filter would discard. Also returns `primer_hits`
+    /// with the split primer hits of the excisions that cut.
+    pub(super) fn into_cuts(
+        mut self,
+        min_piece: usize,
+    ) -> (usize, usize, Vec<(usize, usize)>, Vec<Located>) {
         self.settle();
         self.refine();
         for d in &self.deferred {
@@ -578,11 +980,33 @@ impl<'a> Keep<'a> {
                 !self.paired[a.adapter_idx] || a.standalone || self.backs(cut, a.adapter_idx)
             })
             .collect();
+        let excised: Vec<Located> = self
+            .excised
+            .iter()
+            .zip(&backed)
+            .filter(|&(a, &b)| b && self.is_split(a.adapter_idx))
+            .map(|(a, _)| Located {
+                locus: Locus {
+                    start: a.start,
+                    end: a.end,
+                    outer_open: false,
+                    boundary: false,
+                    site: None,
+                },
+                start: a.start,
+                end: a.end,
+            })
+            .collect();
+        self.primer_hits.extend(excised);
         let Keep {
-            lo, hi, interior, ..
+            lo,
+            hi,
+            interior,
+            primer_hits,
+            ..
         } = self;
         if lo >= hi {
-            return (lo, hi, Vec::new());
+            return (lo, hi, Vec::new(), Vec::new());
         }
         let mut cuts: Vec<(usize, usize)> = interior
             .into_iter()
@@ -606,6 +1030,6 @@ impl<'a> Keep<'a> {
             }
             merged.push((s, e));
         }
-        (lo, hi, merged)
+        (lo, hi, merged, primer_hits)
     }
 }

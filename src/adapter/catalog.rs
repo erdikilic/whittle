@@ -3,9 +3,9 @@
 //! Assembled from primary sources and cross-verified: dorado
 //! `adapter_primer_kits.cpp` and `utils/barcode_kits.cpp` (kit-14
 //! authoritative), Porechop `porechop/adapters.py` (legacy kits and the 96
-//! barcodes), the qcat kit YAMLs, and the NCBI UniVec records for the PacBio
-//! sequences. The sequences are vendor-published facts; the catalog itself is
-//! whittle's own compilation.
+//! barcodes), the qcat kit YAMLs, the ONT primer sheet of SQK-MAB114.24, and
+//! the NCBI UniVec records for the PacBio sequences. The sequences are
+//! vendor-published facts; the catalog itself is whittle's own compilation.
 //!
 //! Every entry names the kits it belongs to, so a preset selects the subset a
 //! library can contain. Every entry is searched on both strands, so a rear
@@ -25,7 +25,7 @@ use super::preset::Kit;
 /// Sequences are uppercase nucleotide codes of at least `MIN_PATTERN_LEN`
 /// bases, which `preset::tests::entries_are_valid_nucleotide_sequences` and
 /// `preset::tests::entries_meet_the_minimum_pattern_length` enforce.
-pub(super) type Entry = (&'static str, Role, &'static [Kit], &'static [u8]);
+pub(crate) type Entry = (&'static str, Role, &'static [Kit], &'static [u8]);
 
 /// Every kit-14 ligation, rapid and PCR kit carries the ligation Y-adapter.
 const KIT14: &[Kit] = &[
@@ -55,15 +55,84 @@ pub(super) const INSERT_SIDE_FLANKS: &[&[u8]] = &[
     b"CCATATCCGTGTCGCCCTT",
 ];
 
-/// The universal marker-gene primers of the amplicon kit: 16S 27F and 1492R,
-/// ITS1F and ITS4. They bind conserved sites of the rRNA operon, so they also
-/// occur inside genomic reads.
+/// The primers of the Microbial Amplicon Barcoding Kit (SQK-MAB114.24) under
+/// their ONT names, as synthesized: the 16S mix with its Borrelia,
+/// Chlamydia and Enterobacteriaceae variants, and the ITS mix with its
+/// Fusarium, Malassezia and Pythium variants.
+/// [ONT:SQK-MAB114.24 primer sequences, 16S and ITS]
+const S16_MIX_F: &[u8] = b"AGRGTTYGATYMTGGCTCAG";
+const S16_MIX_R: &[u8] = b"SGGYTACCTTGTTACGACTT";
+const S16_BOR_F: &[u8] = b"AGAGTTTGATCCTGGCTTAG";
+const S16_BOR_R: &[u8] = b"CGGCTACCTTGTTACGACTT";
+const S16_CHL_F: &[u8] = b"AGAATTTGATCTTRGTTCAG";
+const S16_CHL_R: &[u8] = b"GGGCTACCTTGTTACGACTT";
+const S16_ENT_F: &[u8] = b"AGAGTTTGATCATGGCTCAG";
+const ITS1: &[u8] = b"TCCGTAGGTGAACCTGCGG";
+const ITS1_FUS: &[u8] = b"TCCGTTGGTGAACCAGCGG";
+const ITS1_MAL: &[u8] = b"TCTGTAGGTGAACCTGCAG";
+const ITS4: &[u8] = b"TCCTCCGCTTATTGATATGC";
+const ITS4_PYT: &[u8] = b"TCCTCCGCTTATTAATATGC";
+
+/// Community marker-gene primers outside the amplicon kit: fungal ITS1F,
+/// which binds upstream of the ITS1 site, and the 22-base 16S 1492R.
+const ITS1F: &[u8] = b"CTTGGTCATTTAGAGGAAGTAA";
+const S16_1492R: &[u8] = b"TACGGYTACCTTGTTACGACTT";
+
+/// The universal marker-gene primers, as synthesized: the twelve primers of
+/// the amplicon kit, and the community primers outside it that bind another
+/// site or differ in length, fungal ITS1F and the 22-base 16S 1492R. The
+/// classic 16S 27F is an instance of the kit's forward mix. They bind
+/// conserved sites of the rRNA operon, so they also occur inside genomic
+/// reads. A sequence that matches one of them (`matches_marker_primer`) is a
+/// marker primer, whether it comes from a preset, a FASTA or discovery.
+#[rustfmt::skip]
 pub(super) const MARKER_PRIMERS: &[&[u8]] = &[
-    b"AGAGTTTGATYMTGGCTCAG",
-    b"TACGGYTACCTTGTTACGACTT",
-    b"CTTGGTCATTTAGAGGAAGTAA",
-    b"TCCTCCGCTTATTGATATGC",
+    S16_MIX_F,
+    S16_MIX_R,
+    S16_BOR_F,
+    S16_BOR_R,
+    S16_CHL_F,
+    S16_CHL_R,
+    S16_ENT_F,
+    ITS1,
+    ITS1_FUS,
+    ITS1_MAL,
+    ITS4,
+    ITS4_PYT,
+    ITS1F,
+    S16_1492R,
 ];
+
+/// The `MARKER_PRIMERS` by the site they bind: the variants of one site
+/// differ by a few bases or in length and match the same template bases.
+/// The set-wide edit budgets count the chance matches of a site's variants
+/// as those of one sequence; see `budget::family_budgets` and
+/// `index::set_budgets`.
+pub(super) const MARKER_SITES: &[&[&[u8]]] = &[
+    &[S16_MIX_F, S16_BOR_F, S16_CHL_F, S16_ENT_F],
+    &[S16_MIX_R, S16_BOR_R, S16_CHL_R, S16_1492R],
+    &[ITS1, ITS1_FUS, ITS1_MAL],
+    &[ITS4, ITS4_PYT],
+    &[ITS1F],
+];
+
+/// Returns the index into `MARKER_SITES` of the site `primer`, a
+/// `MARKER_PRIMERS` entry, binds.
+pub(super) fn marker_site(primer: &[u8]) -> usize {
+    MARKER_SITES
+        .iter()
+        .position(|site| site.contains(&primer))
+        .expect("every marker primer is listed under its site")
+}
+
+/// Returns the sequence of the catalog entry named `name`, or `None` when the
+/// catalog holds no such entry.
+pub(crate) fn sequence_of(name: &str) -> Option<&'static [u8]> {
+    CATALOG
+        .iter()
+        .find(|(entry, _, _, _)| *entry == name)
+        .map(|&(_, _, _, seq)| seq)
+}
 
 /// UMI patterns of the catalog: SQK-PCS114's UMI after the SSP. A UMI holds
 /// no fixed sequence beyond the primer bases that open it.
@@ -72,7 +141,7 @@ pub(super) const UMIS: &[&[u8]] = &[b"TTTVVVVTTVVVVTTVVVVTTVVVVTTT"];
 /// Every catalog entry in display order. `preset::build` collapses duplicate
 /// sequences.
 #[rustfmt::skip]
-pub(super) const CATALOG: &[Entry] = &[
+pub(crate) const CATALOG: &[Entry] = &[
 
     // Ligation Y-adapter, two chemistry generations, both kept.
     // SQK-LSK114 and every kit-14 kit [dorado:adapter_primer_kits.cpp(LSK110)]
@@ -125,12 +194,21 @@ pub(super) const CATALOG: &[Entry] = &[
     // cDNA SSP (legacy) [porechop:adapters.py(cDNA_SSP)]
     ("cDNA_SSP", Role::Primer, &[Kit::Pcb114], b"TTTCTGTTGGTGCTGATATTGCTGCCATTACGGCCGGG"),
 
-    // Universal marker-gene primers of the microbial amplicon kit, IUPAC
-    // degenerate: 16S 27F and 1492R, ITS1F and ITS4.
-    ("16S_27F", Role::Primer, &[Kit::Mab114], b"AGAGTTTGATYMTGGCTCAG"),
-    ("16S_1492R", Role::Primer, &[Kit::Mab114], b"TACGGYTACCTTGTTACGACTT"),
-    ("ITS1F", Role::Primer, &[Kit::Mab114], b"CTTGGTCATTTAGAGGAAGTAA"),
-    ("ITS4", Role::Primer, &[Kit::Mab114], b"TCCTCCGCTTATTGATATGC"),
+    // Primers of the microbial amplicon kit under their ONT names, IUPAC
+    // degenerate: seven 16S and five ITS primers.
+    // SQK-MAB114.24 [ONT:SQK-MAB114.24 primer sequences, 16S and ITS]
+    ("16S_mix_F", Role::Primer, &[Kit::Mab114], S16_MIX_F),
+    ("16S_mix_R", Role::Primer, &[Kit::Mab114], S16_MIX_R),
+    ("16S_Bor_F", Role::Primer, &[Kit::Mab114], S16_BOR_F),
+    ("16S_Bor_R", Role::Primer, &[Kit::Mab114], S16_BOR_R),
+    ("16S_Chl_F", Role::Primer, &[Kit::Mab114], S16_CHL_F),
+    ("16S_Chl_R", Role::Primer, &[Kit::Mab114], S16_CHL_R),
+    ("16S_Ent_F", Role::Primer, &[Kit::Mab114], S16_ENT_F),
+    ("ITS1", Role::Primer, &[Kit::Mab114], ITS1),
+    ("ITS1_Fus", Role::Primer, &[Kit::Mab114], ITS1_FUS),
+    ("ITS1_Mal", Role::Primer, &[Kit::Mab114], ITS1_MAL),
+    ("ITS4", Role::Primer, &[Kit::Mab114], ITS4),
+    ("ITS4_Pyt", Role::Primer, &[Kit::Mab114], ITS4_PYT),
 
     // Barcode flanks (dorado kit-14 constants). Trimming through a flank removes the
     // barcode regardless of its number. Flanks shorter than `MIN_PATTERN_LEN`

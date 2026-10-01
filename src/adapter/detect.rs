@@ -413,6 +413,8 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         }
     }
 

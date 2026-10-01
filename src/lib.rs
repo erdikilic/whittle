@@ -13,6 +13,7 @@ pub mod mods;
 pub mod obs;
 pub mod qual;
 pub mod record;
+pub mod split;
 pub mod summary;
 pub mod tagfilter;
 pub mod trim;
@@ -61,6 +62,7 @@ pub fn run(cfg: Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
 fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result<()> {
     let setup_start = Instant::now();
     guards::guard_output_collisions(cfg, &[])?;
+    guard_split_outputs(cfg, &[])?;
 
     let in_path = cfg.io.input.clone();
     let in_path = in_path.as_deref();
@@ -220,6 +222,7 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
     // every member.
     let (family, paths) = io::dir::classify(dir, cfg.io.output.as_deref())?;
     guards::guard_output_collisions(cfg, &paths)?;
+    guard_split_outputs(cfg, &paths)?;
     let family_fmt = match family {
         io::dir::Family::Fastq => Format::Fastq,
         io::dir::Family::Bam => Format::Bam,
@@ -422,6 +425,13 @@ impl Session {
         out_fmt: Format,
         source: Source,
     ) -> anyhow::Result<()> {
+        let members = match &source {
+            Source::Folder(paths) => paths.as_slice(),
+            Source::Stream(_) => &[],
+        };
+        let protected = protected_paths(cfg, members);
+        let parallel = cfg.threads > 1;
+        let level = cfg.compression_level;
         match (in_fmt, out_fmt) {
             (Format::Bam, Format::Bam) => {
                 note_tags_ignored(cfg, in_fmt, out_fmt);
@@ -437,6 +447,7 @@ impl Session {
                     records,
                     cfg,
                     self.budget,
+                    self.counters.as_ref(),
                     adapter::resolve::bam_seq,
                     adapter::resolve::bam_sample_weight,
                 )?
@@ -444,19 +455,25 @@ impl Session {
                     return Ok(());
                 };
                 io::bam::merge_trim_mode(&mut out_header, cfg.trim_classes);
-                let mut sink = io::bam::writer(
-                    cfg.io.output.as_deref(),
+                let header = out_header.clone();
+                let mut sinks = output_sinks(cfg, protected, move |path| {
+                    io::bam::writer(path, &header, parallel, level)
+                })?;
+                let stats = workflow::run_raw_bam(
                     &out_header,
-                    cfg.threads > 1,
-                    cfg.compression_level,
+                    records,
+                    &mut sinks,
+                    level,
+                    cfg,
+                    &self.counters,
                 )?;
-                let stats =
-                    workflow::run_raw_bam(&out_header, records, &mut sink, cfg, &self.counters)?;
                 // Explicit finish (final bgzf block and EOF marker) rather than
                 // `Drop`, which discards a `try_finish` error: an I/O failure on
                 // the final flush (ENOSPC) would otherwise yield a truncated BAM
                 // and a success exit code.
-                sink.finish()?;
+                for (_, sink) in sinks.into_sinks() {
+                    sink.finish()?;
+                }
                 finish_rejects(rejects)?;
                 self.finish(obs, &stats, cfg)
             },
@@ -469,15 +486,26 @@ impl Session {
                     records,
                     cfg,
                     self.budget,
+                    self.counters.as_ref(),
                     adapter::resolve::bam_seq,
                     adapter::resolve::bam_sample_weight,
                 )?
                 else {
                     return Ok(());
                 };
-                let mut writer = io::fastq::writer(cfg, out_fmt, cfg.threads > 1)?;
-                let stats = workflow::run_bam_to_fastq(records, &mut writer, cfg, &self.counters)?;
-                writer.finish()?;
+                let mut writers = output_sinks(cfg, protected, move |path| {
+                    io::fastq::writer_to(path, out_fmt, level, parallel)
+                })?;
+                let stats = workflow::run_bam_to_fastq(
+                    records,
+                    &mut writers,
+                    io::fastq::block_level(out_fmt, level, parallel),
+                    cfg,
+                    &self.counters,
+                )?;
+                for (_, writer) in writers.into_sinks() {
+                    writer.finish()?;
+                }
                 finish_rejects(rejects)?;
                 self.finish(obs, &stats, cfg)
             },
@@ -497,6 +525,7 @@ impl Session {
                 #[cfg(feature = "paraseq")]
                 let paraseq = workflow::paraseq_selected()
                     && !sampling
+                    && cfg.split_opts.is_none()
                     && cfg.tag_filters.is_empty()
                     && in_fmt != Format::FastqBgzf
                     && cfg.threads > 1;
@@ -505,9 +534,15 @@ impl Session {
                     let src = std::mem::replace(src, Box::new(std::io::empty()));
                     cfg.render_workers = self.budget.render;
                     let stream = io::fastq::byte_stream(src, in_fmt == Format::FastqGz, true);
-                    let mut writer = io::fastq::writer(cfg, out_fmt, true)?;
-                    let stats =
-                        workflow::run_fastq_paraseq(stream, &mut writer, cfg, &self.counters)?;
+                    let mut writer =
+                        io::fastq::writer_to(cfg.io.output.as_deref(), out_fmt, level, true)?;
+                    let stats = workflow::run_fastq_paraseq(
+                        stream,
+                        &mut writer,
+                        io::fastq::block_level(out_fmt, level, true),
+                        cfg,
+                        &self.counters,
+                    )?;
                     let tagged = self
                         .counters
                         .tagged_fastq
@@ -526,6 +561,7 @@ impl Session {
                     records,
                     cfg,
                     self.budget,
+                    self.counters.as_ref(),
                     |r| Cow::Borrowed(r.seq.as_slice()),
                     |r| {
                         (
@@ -540,13 +576,23 @@ impl Session {
                 else {
                     return Ok(());
                 };
-                let mut writer = io::fastq::writer(cfg, out_fmt, cfg.threads > 1)?;
-                let stats = workflow::run_fastq(records, &mut writer, cfg, &self.counters)?;
+                let mut writers = output_sinks(cfg, protected, move |path| {
+                    io::fastq::writer_to(path, out_fmt, level, parallel)
+                })?;
+                let stats = workflow::run_fastq(
+                    records,
+                    &mut writers,
+                    io::fastq::block_level(out_fmt, level, parallel),
+                    cfg,
+                    &self.counters,
+                )?;
                 let tagged = self
                     .counters
                     .tagged_fastq
                     .load(std::sync::atomic::Ordering::Relaxed);
-                writer.finish()?;
+                for (_, writer) in writers.into_sinks() {
+                    writer.finish()?;
+                }
                 finish_rejects(rejects)?;
                 guards::guard_tag_flags(cfg, in_fmt, tagged)?;
                 if !tagged {
@@ -737,7 +783,7 @@ impl Session {
             bases_out = stats.output_bases,
             "Processing finished"
         );
-        let elapsed = obs.finish(stats);
+        let elapsed = obs.finish(stats, cfg);
         if let Some(path) = cfg.summary_json.as_deref() {
             summary::Summary::new(
                 cfg,
@@ -761,12 +807,20 @@ impl Session {
 /// render-pool size comes from the thread budget. Both are assigned in this one
 /// place so every dispatch arm sees the same narrowed set and pool size.
 ///
+/// Under `--split-by`, the split primers are attached to the resolved set, or to
+/// `Config::split_search` when no adapter source is given, and the splitter
+/// is built from it. Attaching follows resolution, since resolution replaces
+/// the adapter set and would detach them. The splitter's per-key counters are
+/// created here too, sized to its keys, and installed on `counters` before
+/// any read is processed.
+///
 /// `Ok(None)` means the run is over without writing records: that is
 /// `--adapter-report`, which prints the inferred FASTA and stops.
 fn settle<R, I, F>(
     records: I,
     cfg: &mut Config,
     budget: config::ThreadBudget,
+    counters: &workflow::Counters,
     seq_of: F,
     weight: impl Fn(&R) -> (usize, usize),
 ) -> anyhow::Result<Option<Box<dyn Iterator<Item = anyhow::Result<R>> + Send>>>
@@ -783,16 +837,61 @@ where
     // the summary reports it alongside what resolution settled on.
     cfg.adapters_configured = cfg.adapters.as_ref().map(|a| a.adapters.len());
     cfg.adapters = resolved.adapters;
+    if let Some(opts) = cfg.split_opts.clone() {
+        let mut adapters = match cfg.adapters.take().or_else(|| cfg.split_search.clone()) {
+            Some(adapters) => adapters,
+            None => {
+                anyhow::bail!("--split-by requires adapter search settings (Config::split_search)")
+            },
+        };
+        adapters.attach_split(&opts.sheet.primers);
+        warn_close_primers(&opts);
+        let splitter = split::Splitter::new(opts, &adapters)?;
+        counters
+            .split
+            .set(split::SplitCounters::new(splitter.keys.names.len()))
+            .map_err(|_| anyhow::anyhow!("the split counters were initialized twice"))?;
+        cfg.splitter = Some(Arc::new(splitter));
+        cfg.adapters = Some(adapters);
+    }
     cfg.trim_classes = trim_classes(cfg);
     cfg.render_workers = budget.render;
     Ok(Some(resolved.records))
 }
 
+/// Warns for every pair of split primers of different keys closer than
+/// `--split-lead`: reads carrying either primer cannot be told apart by it.
+fn warn_close_primers(opts: &split::SplitOptions) {
+    let by_group = opts.level == split::KeyLevel::Group;
+    for (a, b, distance) in opts.sheet.close_pairs(opts.rules.lead, by_group) {
+        tracing::warn!(
+            primer_a = %opts.sheet.primers[a].name,
+            primer_b = %opts.sheet.primers[b].name,
+            distance,
+            lead = opts.rules.lead,
+            "Split primers of different keys are closer than --split-lead; their keys may be \
+             called ambiguous"
+        );
+    }
+}
+
 /// Returns which sequence classes the resolved adapter set trims, as the
 /// `adapter`, `primer` and `barcode` flags of `io::bam::merge_trim_mode`.
+/// Under `--split-action retain` the split sheet primers are kept, so their
+/// entries count for no class.
 fn trim_classes(cfg: &Config) -> [bool; 3] {
+    let retain = cfg
+        .splitter
+        .as_ref()
+        .is_some_and(|s| s.opts.action == split::Action::Retain);
     let mut classes = [false; 3];
-    for adapter in cfg.adapters.iter().flat_map(|a| &a.adapters) {
+    let Some(adapters) = cfg.adapters.as_ref() else {
+        return classes;
+    };
+    for (i, adapter) in adapters.adapters.iter().enumerate() {
+        if retain && adapters.is_split(i) {
+            continue;
+        }
         let class = match adapter.role {
             adapter::Role::Adapter => 0,
             adapter::Role::Primer => 1,
@@ -921,9 +1020,78 @@ fn is_no_op(cfg: &Config, same_format: bool) -> bool {
     no_trim
         && pass_through_filter
         && cfg.adapters.is_none()
+        && cfg.split_opts.is_none()
         && cfg.remove_tags.is_empty()
         && cfg.tag_filters.is_empty()
         && same_format
+}
+
+/// Builds the run's output sinks. With one output, `open` builds its sink
+/// over `-o` (stdout without one) as key 0. Under an output template, each
+/// key's sink is built by `open` over the key's path when its first record
+/// arrives, on the writer thread, once `split::route::OpenGuard` has created
+/// the path's directories and checked it against `protected` and the paths
+/// of earlier keys; a key no record reaches has no file.
+fn output_sinks<S: 'static>(
+    cfg: &Config,
+    protected: Vec<(String, PathBuf)>,
+    mut open: impl FnMut(Option<&Path>) -> anyhow::Result<S> + Send + 'static,
+) -> anyhow::Result<workflow::KeyedSinks<S>> {
+    let Some(splitter) = cfg.splitter.as_ref().filter(|s| s.opts.template.is_some()) else {
+        return Ok(workflow::KeyedSinks::single(open(
+            cfg.io.output.as_deref(),
+        )?));
+    };
+    let splitter = Arc::clone(splitter);
+    let mut guard = split::route::OpenGuard::new(protected, cfg.io.input.is_none());
+    Ok(workflow::KeyedSinks::with_opener(Box::new(move |key| {
+        let path = splitter.table.path(key);
+        guard.admit(&path)?;
+        open(Some(&path))
+    })))
+}
+
+/// Checks, before any input is read, every path an output template without
+/// `{barcode}` can expand to: two bins on one path, or a path naming a
+/// protected file (`protected_paths`) or aliasing another bin's, stop the
+/// run before a file is written. Directories are not created. A template
+/// with `{barcode}` is checked per key as its files are opened.
+fn guard_split_outputs(cfg: &Config, members: &[PathBuf]) -> anyhow::Result<()> {
+    let Some(opts) = cfg.split_opts.as_ref() else {
+        return Ok(());
+    };
+    let Some(template) = opts.template.as_ref().filter(|t| !t.barcode()) else {
+        return Ok(());
+    };
+    let mut guard =
+        split::route::OpenGuard::new(protected_paths(cfg, members), cfg.io.input.is_none());
+    for path in template.bin_paths(&opts.sheet)? {
+        guard.check(&path)?;
+    }
+    Ok(())
+}
+
+/// The files a split output must not overwrite, each with the description
+/// an error names it by: the input file or the folder's read files
+/// `members`, `--adapter-fasta`, the rejected output and the summary file.
+fn protected_paths(cfg: &Config, members: &[PathBuf]) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(p) = cfg.io.input.as_deref().filter(|p| !p.is_dir()) {
+        out.push(("the input".into(), p.to_path_buf()));
+    }
+    for p in members {
+        out.push(("an input file in the directory".into(), p.clone()));
+    }
+    for (what, path) in [
+        ("the --adapter-fasta file", cfg.adapter_fasta.as_deref()),
+        ("the --rejected-output file", cfg.rejected_output.as_deref()),
+        ("the --summary-json file", cfg.summary_json.as_deref()),
+    ] {
+        if let Some(p) = path {
+            out.push((what.into(), p.to_path_buf()));
+        }
+    }
+    out
 }
 
 /// Finishes the rejected output, if one was opened.
@@ -992,6 +1160,7 @@ mod tests {
             records,
             &mut cfg,
             budget,
+            &workflow::Counters::default(),
             |r| Cow::Borrowed(r.seq.as_slice()),
             |r| (r.name.len() + r.seq.len() + r.qual.len(), r.seq.len()),
         )
@@ -1020,6 +1189,7 @@ mod tests {
             records,
             &mut cfg,
             budget,
+            &workflow::Counters::default(),
             |r| Cow::Borrowed(r.seq.as_slice()),
             |r| (r.name.len() + r.seq.len() + r.qual.len(), r.seq.len()),
         )

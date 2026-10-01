@@ -283,7 +283,8 @@ fn bam2fq(recs: Vec<RecordBuf>, cfg: &Config) -> (Stats, String) {
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
         recs.iter().map(|r| Ok(raw_record(r))),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         cfg,
         &Arc::new(Counters::default()),
     )
@@ -297,16 +298,20 @@ fn bam2bam(recs: Vec<RecordBuf>, cfg: &Config) -> (Stats, Vec<RecordBuf>) {
     let header = sam::Header::default();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("o.bam");
-    let mut sink = crate::io::bam::writer(Some(&path), &header, false, 6).unwrap();
+    let mut sinks =
+        KeyedSinks::single(crate::io::bam::writer(Some(&path), &header, false, 6).unwrap());
     let stats = run_bam(
         &header,
         recs.iter().map(|r| Ok(raw_record(r))),
-        &mut sink,
+        &mut sinks,
+        6,
         cfg,
         &Arc::new(Counters::default()),
     )
     .unwrap();
-    sink.finish().unwrap();
+    for (_, sink) in sinks.into_sinks() {
+        sink.finish().unwrap();
+    }
     let bytes = std::fs::read(&path).unwrap();
     let mut reader = noodles_bam::io::Reader::new(bytes.as_slice());
     let h = reader.read_header().unwrap();

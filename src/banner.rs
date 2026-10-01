@@ -454,6 +454,8 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         };
         let line = adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off).unwrap();
         assert!(line.contains("1 sequences"));
@@ -481,6 +483,8 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         };
         assert!(
             adapter_banner_line(Some(&cfg), 10000, AdapterInfer::Off)
@@ -499,6 +503,8 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         };
         let trim_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::Discover).unwrap();
         assert!(trim_line.ends_with("\u{b7} discover"), "{trim_line}");

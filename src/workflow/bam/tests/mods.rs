@@ -44,8 +44,9 @@ fn qual_seq_length_mismatch_errors_without_panicking() {
 
     let header = sam::Header::default();
     let dir = tempfile::tempdir().unwrap();
-    let mut sink =
-        crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, false, 6).unwrap();
+    let mut sinks = KeyedSinks::single(
+        crate::io::bam::writer(Some(&dir.path().join("o.bam")), &header, false, 6).unwrap(),
+    );
 
     let cfg = Config {
         quiet: true,
@@ -55,7 +56,8 @@ fn qual_seq_length_mismatch_errors_without_panicking() {
     let result = run_bam(
         &header,
         [Ok(raw_record(&rec))].into_iter(),
-        &mut sink,
+        &mut sinks,
+        6,
         &cfg,
         &Arc::new(Counters::default()),
     );
@@ -201,17 +203,21 @@ fn malformed_mod_block_is_removed_and_counted_on_bam_output() {
             let header = sam::Header::default();
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("o.bam");
-            let mut sink = crate::io::bam::writer(Some(&path), &header, false, 6).unwrap();
+            let mut sinks =
+                KeyedSinks::single(crate::io::bam::writer(Some(&path), &header, false, 6).unwrap());
             let counters = Arc::new(Counters::default());
             let stats = run_bam(
                 &header,
                 [Ok(raw_record(&rec))].into_iter(),
-                &mut sink,
+                &mut sinks,
+                6,
                 &cfg,
                 &counters,
             )
             .unwrap();
-            sink.finish().unwrap();
+            for (_, sink) in sinks.into_sinks() {
+                sink.finish().unwrap();
+            }
             assert_eq!(
                 stats.malformed_mod_reads, 1,
                 "{variant} head={head}: counted once per read"
@@ -250,7 +256,8 @@ fn well_formed_mod_block_is_not_counted_and_gains_mn() {
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
         [Ok(raw_record(&rec))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -297,12 +304,15 @@ fn interior_adapter_split_reconstructs_mods_per_segment() {
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     });
 
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
         [Ok(raw_record(&rec))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )

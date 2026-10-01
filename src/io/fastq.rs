@@ -10,7 +10,6 @@ use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
 use seq_io::fastq::{Reader, Record};
 
-use crate::config::Config;
 use crate::record::ReadRecord;
 
 /// Capacity of the buffer between a compressed source and its decoder, which
@@ -656,12 +655,11 @@ pub(crate) enum FastqOut {
     Plain(BufferedOutput),
     /// BGZF output compressed in the writing thread.
     Bgzf(crate::io::bgzf::Writer<BufferedOutput>),
-    /// Pre-compressed BGZF blocks.
+    /// Pre-compressed BGZF blocks, compressed at the level `block_level`
+    /// names.
     Blocks {
         /// The output.
         inner: BufferedOutput,
-        /// The BGZF DEFLATE level the render workers compress at.
-        level: u8,
     },
 }
 
@@ -681,14 +679,6 @@ impl Write for FastqOut {
 }
 
 impl FastqOut {
-    /// The BGZF level the render workers compress at, for a `Blocks` sink.
-    pub(crate) fn block_level(&self) -> Option<u8> {
-        match self {
-            FastqOut::Blocks { level, .. } => Some(*level),
-            FastqOut::Plain(_) | FastqOut::Bgzf(_) => None,
-        }
-    }
-
     /// Finalizes the writer: the BGZF variants write their last block and the
     /// BGZF EOF block, and every variant then flushes the output buffer, whose
     /// write error surfaces here. Must be called before returning success;
@@ -716,25 +706,10 @@ pub(crate) fn encode_blocks(level: u8, data: &[u8]) -> std::io::Result<Vec<u8>> 
     Ok(blocks)
 }
 
-/// Builds the FASTQ output writer over a file or stdout: for `FastqGz` and
-/// `FastqBgzf`, a BGZF writer at `cfg.compression_level` compressing in the
+/// Builds a FASTQ output writer over `path`, or stdout when `None`: for
+/// `FastqGz` and `FastqBgzf`, a BGZF writer at `level` compressing in the
 /// writing thread, or a `Blocks` sink when `parallel`; a plain buffered
 /// writer for `Fastq`.
-pub(crate) fn writer(
-    cfg: &Config,
-    out_fmt: crate::io::Format,
-    parallel: bool,
-) -> anyhow::Result<FastqOut> {
-    writer_to(
-        cfg.io.output.as_deref(),
-        out_fmt,
-        cfg.compression_level,
-        parallel,
-    )
-}
-
-/// Builds a FASTQ output writer over `path`, or stdout when `None`, at
-/// `level` for the compressed formats; see `writer`.
 pub(crate) fn writer_to(
     path: Option<&std::path::Path>,
     out_fmt: crate::io::Format,
@@ -752,13 +727,25 @@ pub(crate) fn writer_to(
         crate::io::Format::FastqGz | crate::io::Format::FastqBgzf => {
             crate::io::bgzf::compression_level(level)?;
             if parallel {
-                return Ok(FastqOut::Blocks { inner: base, level });
+                return Ok(FastqOut::Blocks { inner: base });
             }
             Ok(FastqOut::Bgzf(crate::io::bgzf::Writer::new(base, level)))
         },
         crate::io::Format::Fastq => Ok(FastqOut::Plain(base)),
         crate::io::Format::Bam => unreachable!("BAM output is written by `io::bam::writer`"),
     }
+}
+
+/// The BGZF level at which the render workers compress blocks for the
+/// writer `writer_to` builds for `out_fmt`, `level` and `parallel`:
+/// `Some(level)` for a `Blocks` sink, `None` for a writer that takes the
+/// rendered bytes.
+pub(crate) fn block_level(out_fmt: crate::io::Format, level: u8, parallel: bool) -> Option<u8> {
+    let compressed = matches!(
+        out_fmt,
+        crate::io::Format::FastqGz | crate::io::Format::FastqBgzf
+    );
+    (parallel && compressed).then_some(level)
 }
 
 #[cfg(test)]
@@ -982,9 +969,14 @@ mod tests {
     fn gz_writer_clamps_zero_workers_and_writes_bgzf() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("o.fastq.gz");
-        let mut cfg = crate::cli::config_for_test(&path, &path, 0, 0);
-        cfg.io.output = Some(path.clone());
-        let mut w = writer(&cfg, crate::io::Format::FastqGz, false).unwrap();
+        let cfg = crate::cli::config_for_test(&path, &path, 0, 0);
+        let mut w = writer_to(
+            Some(&path),
+            crate::io::Format::FastqGz,
+            cfg.compression_level,
+            false,
+        )
+        .unwrap();
         w.write_all(b"@r1\nACGT\n+\nIIII\n").unwrap();
         w.finish().unwrap();
 

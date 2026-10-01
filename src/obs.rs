@@ -39,15 +39,16 @@ use tracing_subscriber::util::SubscriberInitExt;
 use crate::workflow::{Counters, Stats};
 
 /// How often the ticker thread refreshes the bar's position and message in
-/// `Mode::Bar`.
+/// `Mode::Bar`. The thread waits this long via `park_timeout`, but `stop_ticker`
+/// cuts the wait short with `unpark`, so a finished run does not idle for it.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// Steady-tick interval for the indicatif spinner shown when `total` is
 /// unknown (no byte count to drive a determinate bar).
 const SPINNER_TICK: Duration = Duration::from_millis(120);
 
 /// Returns the periodic-log cadence of `Mode::Line`: 30 s by default, 10 s at
-/// `-v`/`-vv`. The ticker sleeps in `TICK_INTERVAL` steps so `stop_ticker`
-/// joins promptly, and logs only once this cadence has elapsed.
+/// `-v`/`-vv`. The ticker wakes at most every `TICK_INTERVAL`, or sooner if
+/// `stop_ticker` unparks it, and logs only once this cadence has elapsed.
 fn log_interval(verbosity: u8) -> Duration {
     if verbosity >= 1 {
         Duration::from_secs(10)
@@ -189,7 +190,9 @@ pub struct ProgressHandle {
     multi: MultiProgress,
     /// The output mode selected by `init`.
     mode: Mode,
-    /// The ticker thread and its stop flag, while live.
+    /// The ticker thread, its stop flag, and its join handle, while live. The
+    /// join handle also serves `stop_ticker`'s `unpark` call that wakes the
+    /// thread out of its `park_timeout` wait.
     ticker: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
     /// The live bar or spinner in `Mode::Bar`.
     bar: Option<ProgressBar>,
@@ -284,7 +287,7 @@ impl ProgressHandle {
         let handle = std::thread::spawn(move || {
             let mut last_log = start;
             while !stop_t.load(Ordering::Relaxed) {
-                std::thread::sleep(TICK_INTERVAL);
+                std::thread::park_timeout(TICK_INTERVAL);
                 let ir = counters.input_reads.load(Ordering::Relaxed);
                 let or = counters.output_reads.load(Ordering::Relaxed);
                 let by = counters.bytes_read.load(Ordering::Relaxed);
@@ -313,7 +316,9 @@ impl ProgressHandle {
         self.bar = bar;
     }
 
-    /// Stops the ticker (signal and join) and clears the bar, if either is live.
+    /// Stops the ticker (signal, unpark, and join) and clears the bar, if either
+    /// is live. The unpark cuts short whatever `park_timeout` wait the thread is
+    /// in, so the join returns immediately instead of waiting for the next tick.
     /// Idempotent: both fields are taken, so a second call (including the one in
     /// `Drop` after an explicit `finish`) is a no-op. Shared by `finish`, which
     /// follows it with the end-of-run summary, and `Drop`, which cleans up
@@ -321,6 +326,7 @@ impl ProgressHandle {
     fn stop_ticker(&mut self) {
         if let Some((stop, handle)) = self.ticker.take() {
             stop.store(true, Ordering::Relaxed);
+            handle.thread().unpark();
             // The default panic hook has already printed a ticker panic; the
             // assertion documents that a clean join is the only expected outcome.
             let joined = handle.join();
@@ -339,11 +345,9 @@ impl ProgressHandle {
     ///
     /// Returns the elapsed duration it reported, so `summary::Summary` quotes
     /// the same number.
-    pub fn finish(&mut self, stats: &Stats) -> Duration {
-        // Elapsed is taken before `stop_ticker`, which joins the ticker thread;
-        // the thread notices the stop flag only when it wakes from its
-        // `TICK_INTERVAL` sleep, so measuring afterward would charge up to a full
-        // tick to a fast run.
+    pub fn finish(&mut self, stats: &Stats, cfg: &Config) -> Duration {
+        // Elapsed is taken before `stop_ticker`, so the join of the ticker
+        // thread is not charged to the run.
         let elapsed = self.start.elapsed();
         self.stop_ticker();
 
@@ -366,6 +370,11 @@ impl ProgressHandle {
         }
 
         if let Some(line) = segments_dropped_line(stats) {
+            tracing::info!("{}", line);
+        }
+
+        let key_names = cfg.splitter.as_deref().map(|s| s.keys.names.as_slice());
+        for line in split_lines(stats, key_names) {
             tracing::info!("{}", line);
         }
 
@@ -713,6 +722,54 @@ fn segments_dropped_line(stats: &Stats) -> Option<String> {
     ))
 }
 
+/// The end-of-run `--split-by` table: one line per sheet key (`Split <key>: 120
+/// reads, 45.2 kbp (60.0% of assigned)`), then the unassigned reasons on one
+/// line, then ambiguous and discarded totals. Percentages are of the total
+/// assigned reads across every key, `0.0%` when that total is zero. Empty
+/// without `--split-by` (`key_names` is `None`) or before `stats` carries a
+/// split snapshot. `key_names` is `Keys::names`, so it and `split.keys` are
+/// the same length and order.
+fn split_lines(stats: &Stats, key_names: Option<&[String]>) -> Vec<String> {
+    let (Some(key_names), Some(split)) = (key_names, stats.split.as_ref()) else {
+        return Vec::new();
+    };
+    let assigned_total: u64 = split.keys.iter().map(|k| k.reads).sum();
+    let mut lines: Vec<String> = key_names
+        .iter()
+        .zip(&split.keys)
+        .map(|(name, k)| {
+            let pct = if assigned_total == 0 {
+                0.0
+            } else {
+                100.0 * k.reads as f64 / assigned_total as f64
+            };
+            format!(
+                "Split {name}: {} segments, {} ({pct:.1}% of assigned)",
+                commas(k.reads),
+                human_bases(k.bases),
+            )
+        })
+        .collect();
+    let unassigned_total: u64 = split.unassigned.iter().sum();
+    lines.push(format!(
+        "Split unassigned: {} segments (no_primer {}, require {}, orientation {}, length {})",
+        commas(unassigned_total),
+        commas(split.unassigned[0]),
+        commas(split.unassigned[1]),
+        commas(split.unassigned[2]),
+        commas(split.unassigned[3]),
+    ));
+    lines.push(format!(
+        "Split ambiguous: {} segments",
+        commas(split.ambiguous)
+    ));
+    lines.push(format!(
+        "Split discarded: {} segments",
+        commas(split.discarded)
+    ));
+    lines
+}
+
 /// Human-readable duration for the summary, debug, and closer lines: `420ms`,
 /// `1.42s`, `1m08s`, `1h02m`. `pub` because `main.rs`'s failure path renders
 /// the `Failed after ...` elapsed time before any run-scoped state exists.
@@ -835,6 +892,30 @@ mod tests {
         h.start(None, Arc::new(Counters::default()));
         assert!(first.load(std::sync::atomic::Ordering::Relaxed));
         assert!(h.ticker.is_some());
+    }
+
+    /// Stopping a live ticker returns without waiting for its next
+    /// `TICK_INTERVAL` tick, since `stop_ticker` unparks it. The bound
+    /// (200 ms) stays below the tick interval (250 ms), so a stop that waits
+    /// for the tick fails, and leaves room for scheduling delay.
+    #[test]
+    fn stop_ticker_wakes_immediately_instead_of_waiting_for_the_next_tick() {
+        let mut h = ProgressHandle {
+            multi: MultiProgress::new(),
+            mode: Mode::Line,
+            ticker: None,
+            bar: None,
+            start: Instant::now(),
+            log_interval: Duration::from_secs(30),
+        };
+        h.start(None, Arc::new(Counters::default()));
+        let began = Instant::now();
+        h.stop_ticker();
+        let took = began.elapsed();
+        assert!(
+            took < Duration::from_millis(200),
+            "stop_ticker took {took:?}, expected well under the {TICK_INTERVAL:?} tick interval"
+        );
     }
 
     /// Dropping an active bar-mode handle joins its ticker and clears the bar.
@@ -1230,6 +1311,66 @@ mod tests {
     #[test]
     fn segments_dropped_line_omitted_when_total_zero() {
         assert_eq!(segments_dropped_line(&Stats::default()), None);
+    }
+
+    fn key_stats(reads: u64, bases: u64) -> crate::split::KeyStats {
+        crate::split::KeyStats {
+            reads,
+            bases,
+            both_ends: reads,
+            five_only: 0,
+            three_only: 0,
+            plus: reads,
+            minus: 0,
+        }
+    }
+
+    #[test]
+    fn split_lines_reports_one_line_per_key_then_unassigned_ambiguous_discarded() {
+        let names = ["16S".to_string(), "ITS".to_string()];
+        let stats = Stats {
+            split: Some(crate::split::SplitStats {
+                keys: vec![key_stats(30, 12_000), key_stats(10, 4_000)],
+                unassigned: [5, 2, 1, 0],
+                ambiguous: 3,
+                discarded: 4,
+            }),
+            ..Default::default()
+        };
+        let lines = split_lines(&stats, Some(&names));
+        assert_eq!(
+            lines,
+            vec![
+                "Split 16S: 30 segments, 12.0 kbp (75.0% of assigned)",
+                "Split ITS: 10 segments, 4.0 kbp (25.0% of assigned)",
+                "Split unassigned: 8 segments (no_primer 5, require 2, orientation 1, length 0)",
+                "Split ambiguous: 3 segments",
+                "Split discarded: 4 segments",
+            ]
+        );
+    }
+
+    /// A key with no reads reports `0.0%`, not a NaN from dividing by an
+    /// assigned total of zero.
+    #[test]
+    fn split_lines_reports_zero_percent_when_nothing_was_assigned() {
+        let names = ["16S".to_string()];
+        let stats = Stats {
+            split: Some(crate::split::SplitStats {
+                keys: vec![key_stats(0, 0)],
+                unassigned: [7, 0, 0, 0],
+                ambiguous: 0,
+                discarded: 0,
+            }),
+            ..Default::default()
+        };
+        let lines = split_lines(&stats, Some(&names));
+        assert_eq!(lines[0], "Split 16S: 0 segments, 0 bp (0.0% of assigned)");
+    }
+
+    #[test]
+    fn split_lines_empty_without_split() {
+        assert_eq!(split_lines(&Stats::default(), None), Vec::<String>::new());
     }
 
     #[test]

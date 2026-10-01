@@ -3,7 +3,7 @@
 use std::io::IsTerminal;
 use std::path::Path;
 
-use crate::config::Config;
+use crate::config::{Config, OUTPUT_FLAG};
 use crate::io;
 
 /// True iff writing `fmt`'s bytes to stdout would send binary (BAM) or gzip
@@ -129,7 +129,8 @@ pub(crate) fn guard_output_collisions(
         reads.push(("an input file in the directory", p.as_path()));
     }
 
-    let targets: Vec<(&str, &Path)> = cfg.write_targets().collect();
+    let owned: Vec<(&str, std::borrow::Cow<'_, Path>)> = cfg.write_targets().collect();
+    let targets: Vec<(&str, &Path)> = owned.iter().map(|(f, p)| (*f, p.as_ref())).collect();
     for &(what, dest) in &targets {
         for (label, src) in &reads {
             if same_path(src, dest) {
@@ -177,8 +178,13 @@ pub(crate) fn guard_output_collisions(
     // reads are written. Probing the parent directory instead of creating the
     // file leaves nothing behind on a run that writes no artifact
     // (`--adapter-report`). A permission failure still surfaces at write
-    // time; a nonexistent directory does not.
+    // time; a nonexistent directory does not. An output template is exempt:
+    // its directories are created as its files are opened, and each file is
+    // checked then (`split::route::OpenGuard`).
     for &(flag, path) in &targets {
+        if flag == OUTPUT_FLAG && cfg.output_template().is_some() {
+            continue;
+        }
         if path.is_dir() {
             anyhow::bail!("{flag} {} is a directory", path.display());
         }
@@ -222,7 +228,7 @@ fn redirects_to(fd: std::os::fd::BorrowedFd<'_>, path: &Path) -> bool {
 
 /// Whether `path` is the file being read on stdin (`whittle -o x < x`).
 #[cfg(unix)]
-fn stdin_is(path: &Path) -> bool {
+pub(crate) fn stdin_is(path: &Path) -> bool {
     use std::os::fd::AsFd;
     redirects_to(std::io::stdin().as_fd(), path)
 }
@@ -235,7 +241,7 @@ fn stdout_is(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn stdin_is(_path: &Path) -> bool {
+pub(crate) fn stdin_is(_path: &Path) -> bool {
     false
 }
 
@@ -272,21 +278,25 @@ pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
             return true;
         }
     }
-    fn resolve(p: &std::path::Path) -> Option<std::path::PathBuf> {
-        if let Ok(c) = std::fs::canonicalize(p) {
-            return Some(c);
-        }
-        let file = p.file_name()?;
-        let parent = match p.parent() {
-            Some(par) if !par.as_os_str().is_empty() => par,
-            _ => std::path::Path::new("."),
-        };
-        std::fs::canonicalize(parent).ok().map(|c| c.join(file))
-    }
     match (resolve(a), resolve(b)) {
         (Some(x), Some(y)) => x == y,
         _ => false,
     }
+}
+
+/// Resolves `p` to a canonical path: the path itself when it exists,
+/// otherwise its canonical parent directory joined with its file name.
+/// `None` when neither resolves.
+pub(crate) fn resolve(p: &Path) -> Option<std::path::PathBuf> {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return Some(c);
+    }
+    let file = p.file_name()?;
+    let parent = match p.parent() {
+        Some(par) if !par.as_os_str().is_empty() => par,
+        _ => Path::new("."),
+    };
+    std::fs::canonicalize(parent).ok().map(|c| c.join(file))
 }
 
 #[cfg(test)]

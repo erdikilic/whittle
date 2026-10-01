@@ -38,7 +38,7 @@ libdeflater = "1"
 flate2 = { version = "1", features = ["zlib-rs"], default-features = false }
 
 
-sassy = { version = "0.2", default-features = false }
+sassy = { version = "=0.2.6", default-features = false }
 ensure_simd = "0.1"
 
 serde = { version = "1", features = ["derive"] }

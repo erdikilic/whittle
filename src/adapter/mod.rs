@@ -16,10 +16,13 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use crate::split::Primer;
+
 use search::{
     AmbiguousSearcher, EncodedAdapterBatch, Hit, MAX_TILED_PATTERN_LEN, PlainSearcher, Strands,
-    encode_patterns, encoded_pattern_hits, for_each_hit, for_each_hit_in_texts, is_plain_acgt,
-    iupac_bases, new_ambiguous_searcher, new_overhang_searcher, new_searcher,
+    encode_patterns, encoded_pattern_hits, for_each_hit, for_each_hit_in_texts,
+    for_each_hit_on_strand, is_plain_acgt, iupac_bases, new_ambiguous_searcher,
+    new_overhang_searcher, new_plain_searcher_fwd, new_searcher, new_searcher_fwd,
 };
 
 mod budget;
@@ -104,14 +107,134 @@ pub struct AdapterConfig {
     /// itself where the whole primer aligns, as a junction partner otherwise
     /// requires. Resolution sets it; `false` keeps the partner requirement.
     pub amplicon: bool,
+    /// Per adapter: the index of the split sheet primer it is, or `None`.
+    /// Empty when no split sheet is attached (`attach_split`).
+    pub(crate) split_of: Vec<Option<usize>>,
+    /// Per adapter with a `split_of` primer: the strands on which its hits
+    /// read into the insert, as the sheet primer does. `Reversed` for an
+    /// entry that is the reverse complement of its primer, `Both` for an
+    /// entry that is a primer and the reverse complement of a primer. Empty
+    /// when no split sheet is attached.
+    pub(crate) split_opens: Vec<Opens>,
+}
+
+/// The strands on which a hit of a paired entry reads into the insert, as its
+/// primer is synthesized, and the strands on which it reads out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Opens {
+    /// A hit of the sequence as given reads into the insert; a hit of its
+    /// reverse complement reads out of it.
+    AsGiven,
+    /// A hit of the reverse complement reads into the insert; a hit of the
+    /// sequence as given reads out of it.
+    Reversed,
+    /// A hit on either strand reads into the insert and out of it: the entry
+    /// is a primer and the reverse complement of a primer.
+    Both,
+}
+
+impl Opens {
+    /// Returns `AsGiven` when `as_given` and `Reversed` otherwise.
+    pub(crate) fn from_given(as_given: bool) -> Self {
+        if as_given {
+            Opens::AsGiven
+        } else {
+            Opens::Reversed
+        }
+    }
+
+    /// Whether a hit on the strand `rc` gives reads into the insert.
+    pub(crate) fn reads_in(self, rc: bool) -> bool {
+        match self {
+            Opens::AsGiven => !rc,
+            Opens::Reversed => rc,
+            Opens::Both => true,
+        }
+    }
+
+    /// Whether a hit on the strand `rc` gives reads out of the insert.
+    pub(crate) fn reads_out(self, rc: bool) -> bool {
+        match self {
+            Opens::AsGiven => rc,
+            Opens::Reversed => !rc,
+            Opens::Both => true,
+        }
+    }
+
+    /// Returns the sense of an entry that serves the primers of `self` and
+    /// of `other`.
+    fn merged(self, other: Opens) -> Opens {
+        if self == other { self } else { Opens::Both }
+    }
 }
 
 impl AdapterConfig {
-    /// Replaces the adapter set and discards the candidate index built for the
-    /// previous set.
+    /// Replaces the adapter set, detaches the split sheet, and discards the
+    /// candidate index built for the previous set.
     pub(crate) fn replace_adapters(&mut self, adapters: Vec<Adapter>) {
         self.adapters = adapters;
+        self.split_of.clear();
+        self.split_opens.clear();
         self.candidate_index = OnceLock::new();
+    }
+
+    /// Attaches the primers of a split sheet. Each primer maps to the first
+    /// entry whose uppercase sequence equals the primer or its reverse
+    /// complement, which keeps its name and role; a primer with no such entry
+    /// is appended in the primer role. An entry maps to the first primer that
+    /// matches it, and reads into the insert in the orientation of every
+    /// primer that matches it (`split_opens`). Leaves `amplicon` as resolution
+    /// judged it: a split entry splits a read only at a junction pair
+    /// (`search_pairs`). Discards the candidate index built without the split
+    /// sheet.
+    pub fn attach_split(&mut self, primers: &[Primer]) {
+        let mut split_of = vec![None; self.adapters.len()];
+        let mut split_opens = vec![Opens::AsGiven; self.adapters.len()];
+        for (primer_idx, primer) in primers.iter().enumerate() {
+            let seq = primer.seq.to_ascii_uppercase();
+            let rc = reverse_complement(&seq);
+            let found = self.adapters.iter().enumerate().find_map(|(i, entry)| {
+                let entry_seq = entry.seq.to_ascii_uppercase();
+                match (entry_seq == seq, entry_seq == rc) {
+                    (true, true) => Some((i, Opens::Both)),
+                    (true, false) => Some((i, Opens::AsGiven)),
+                    (false, true) => Some((i, Opens::Reversed)),
+                    (false, false) => None,
+                }
+            });
+            match found {
+                Some((i, opens)) => {
+                    if split_of[i].is_none() {
+                        split_of[i] = Some(primer_idx);
+                        split_opens[i] = opens;
+                    } else {
+                        split_opens[i] = split_opens[i].merged(opens);
+                    }
+                },
+                None => {
+                    let opens = if seq == rc {
+                        Opens::Both
+                    } else {
+                        Opens::AsGiven
+                    };
+                    self.adapters.push(Adapter {
+                        name: primer.name.clone(),
+                        seq: primer.seq.clone(),
+                        role: Role::Primer,
+                    });
+                    split_of.push(Some(primer_idx));
+                    split_opens.push(opens);
+                },
+            }
+        }
+        self.split_of = split_of;
+        self.split_opens = split_opens;
+        self.candidate_index = OnceLock::new();
+    }
+
+    /// Returns whether the entry at `adapter_idx` is a split sheet primer.
+    pub(crate) fn is_split(&self, adapter_idx: usize) -> bool {
+        self.split_of.get(adapter_idx).copied().flatten().is_some()
     }
 
     /// Sets `amplicon` and discards the candidate index built without it.
@@ -240,6 +363,13 @@ const FLANK_SLACK: usize = MIN_PATTERN_LEN;
 ///
 /// Returns `[start, end)` spans in `window` coordinates.
 pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
+    spans(segments_tallied(window, cfg, None))
+}
+
+/// `adapter_segments` with the split primer located at each end of every
+/// segment (`Segment::five`, `Segment::three`). Without an attached split
+/// sheet (`AdapterConfig::attach_split`) every locus is `None`.
+pub fn adapter_segments_annotated(window: &[u8], cfg: &AdapterConfig) -> Vec<Segment> {
     segments_tallied(window, cfg, None)
 }
 
@@ -250,7 +380,154 @@ pub(crate) fn adapter_segments_tallied(
     cfg: &AdapterConfig,
     acted: &mut [bool],
 ) -> Vec<(usize, usize)> {
-    segments_tallied(window, cfg, Some(acted))
+    spans(segments_tallied(window, cfg, Some(acted)))
+}
+
+/// Returns the `[start, end)` span of each segment.
+fn spans(segments: Vec<Segment>) -> Vec<(usize, usize)> {
+    segments.into_iter().map(|s| (s.start, s.end)).collect()
+}
+
+/// The span of an accepted split primer hit, in window coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Locus {
+    /// Hit start.
+    pub start: usize,
+    /// Hit end, exclusive.
+    pub end: usize,
+    /// Whether the outer edge of the locus (`start` at the 5' end, `end` at
+    /// the 3' end) counts as a read end for rescoring: the hit that located
+    /// it hung off the end of the searched span or off the trim boundary it
+    /// was searched against, so that edge is a read end or that boundary.
+    pub outer_open: bool,
+    /// Whether the locus is a whole primer at an outer layer's trim boundary,
+    /// located within its anchored budget (`anchored_budgets`), which
+    /// rescoring then applies at this end.
+    pub boundary: bool,
+    /// The whole hit that located the locus and spans exactly `[start,
+    /// end)`, or `None` for a locus whose hit overhangs or that an excision
+    /// located.
+    pub site: Option<PrimerSite>,
+}
+
+/// The whole entry hit behind a locus: the read holds the sequence of the
+/// entry (its reverse complement when `rc`) over the locus span at `cost`
+/// edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrimerSite {
+    /// Index into `AdapterConfig::adapters`.
+    pub entry: usize,
+    /// Whether the entry matched as its reverse complement.
+    pub rc: bool,
+    /// Edit cost of the hit.
+    pub cost: usize,
+}
+
+/// Whether `locus` keeps the convention of a site: without a site, or with
+/// the sequence of its entry in `adapters` (its reverse complement when
+/// `rc`) aligning end to end over `[start, end)` of `read` at no more than
+/// the site's cost. Rescoring bounds a primer's cost at a locus from its
+/// site on that convention (`Scorer::score_at_site`). A read byte matches a
+/// code that stands for it after normalization (`normalize_base`), so a
+/// byte outside ACGT matches nothing.
+pub(crate) fn site_holds(read: &[u8], adapters: &[Adapter], locus: &Locus) -> bool {
+    let Some(site) = locus.site else {
+        return true;
+    };
+    let (Some(entry), Some(text)) = (adapters.get(site.entry), read.get(locus.start..locus.end))
+    else {
+        return false;
+    };
+    let pattern = if site.rc {
+        reverse_complement(&entry.seq)
+    } else {
+        entry.seq.clone()
+    };
+    let matches = |code: u8, base: u8| {
+        let base = normalize_base(base);
+        iupac_bases(code).is_some_and(|bases| bases.contains(&base))
+    };
+    // `row[j]` is the least cost of aligning the pattern prefix so far with
+    // the first `j` bases of the text.
+    let mut row: Vec<usize> = (0..=text.len()).collect();
+    for (i, &code) in pattern.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, &base) in text.iter().enumerate() {
+            let substitution = diagonal + usize::from(!matches(code, base));
+            diagonal = row[j + 1];
+            row[j + 1] = substitution.min(row[j + 1] + 1).min(row[j] + 1);
+        }
+    }
+    row[text.len()] <= site.cost
+}
+
+/// One kept adapter segment with the split primer located at each of its
+/// ends, in window coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Segment {
+    /// Segment start.
+    pub start: usize,
+    /// Segment end, exclusive.
+    pub end: usize,
+    /// The split primer located at `start`: the outermost orientation-valid
+    /// terminal hit of its end, or the excised junction hit beside it.
+    pub five: Option<Locus>,
+    /// The split primer located at `end`, as `five` is at `start`.
+    pub three: Option<Locus>,
+}
+
+/// A located split primer and the span by which it is matched to a segment
+/// end: the locus itself, or, where further hits abutting it moved the trim
+/// boundary, the locus together with those hits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Located {
+    /// The located primer.
+    pub(crate) locus: Locus,
+    /// Start of the matched span.
+    pub(crate) start: usize,
+    /// End of the matched span, exclusive.
+    pub(crate) end: usize,
+}
+
+impl Located {
+    /// Returns `self` moved `offset` bases to the right.
+    fn shifted(self, offset: usize) -> Self {
+        Located {
+            locus: Locus {
+                start: self.locus.start + offset,
+                end: self.locus.end + offset,
+                ..self.locus
+            },
+            start: self.start + offset,
+            end: self.end + offset,
+        }
+    }
+}
+
+impl Segment {
+    /// Returns the segment `[start, end)` with the loci of `hits` at its
+    /// ends: at `start`, the locus whose matched span ends within
+    /// `FLANK_SLACK` bases of it, the one ending last when several do; at
+    /// `end`, the locus whose matched span starts within `FLANK_SLACK` bases
+    /// of it, the one starting first when several do.
+    fn located(start: usize, end: usize, hits: &[Located]) -> Self {
+        let near = |pos: usize, at: usize| pos + FLANK_SLACK >= at && pos <= at + FLANK_SLACK;
+        Segment {
+            start,
+            end,
+            five: hits
+                .iter()
+                .filter(|h| near(h.end, start))
+                .max_by_key(|h| h.end)
+                .map(|h| h.locus),
+            three: hits
+                .iter()
+                .filter(|h| near(h.start, end))
+                .min_by_key(|h| h.start)
+                .map(|h| h.locus),
+        }
+    }
 }
 
 #[cfg(test)]

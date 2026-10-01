@@ -48,6 +48,8 @@ fn cfg(adapters: Vec<Adapter>, split: bool) -> AdapterConfig {
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     }
 }
 
@@ -66,6 +68,8 @@ fn cfg_with(
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     }
 }
 
@@ -227,6 +231,8 @@ fn check_candidate_search_randomized(seed: u64, degenerate: bool) {
             min_piece: 1 + rng.below(60),
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         };
         assert_eq!(
             adapter_segments(&window, &cfg),
@@ -1222,15 +1228,29 @@ fn duplicate_entries_count_once_toward_the_chance_bound() {
 }
 
 /// The whole catalog keeps the per-pattern terminal budget of every
-/// adapter and primer at the read end, and deep in the end zone for every
-/// entry of 24 bases or more.
+/// adapter and primer at the read end, the lowest of its site for a marker
+/// primer, and deep in the end zone for every entry of 24 bases or more.
 #[test]
 fn catalog_budgets_keep_their_per_pattern_tolerance() {
     let catalog = super::preset::preset(super::preset::Kit::ALL);
     let index = CandidateIndex::new(&catalog, 0.2, 150, true);
+    let site = |adapter: &Adapter| {
+        marker_primer_of(&adapter.seq, 0.2)
+            .filter(|_| !is_umi(adapter))
+            .map(|(primer, _)| super::catalog::marker_site(primer))
+    };
     for (adapter, budget) in catalog.iter().zip(&index.budgets) {
         let own = Budget::new(&adapter.seq, 0.2, 150);
-        assert_eq!(budget.k_end, own.k_end, "{}", adapter.name);
+        let expected = match site(adapter) {
+            Some(s) => catalog
+                .iter()
+                .filter(|other| site(other) == Some(s))
+                .map(|other| Budget::new(&other.seq, 0.2, 150).k_end)
+                .min()
+                .unwrap(),
+            None => own.k_end,
+        };
+        assert_eq!(budget.k_end, expected, "{}", adapter.name);
         if adapter.seq.len() >= 24 {
             assert_eq!(budget.k_far, own.k_end, "{}", adapter.name);
         }
@@ -1430,7 +1450,7 @@ fn marker_primers_pair_outside_amplicon_selections() {
     let paired_of = |kits: &[Kit]| {
         let adapters = preset(kits);
         let index = CandidateIndex::new(&adapters, 0.2, 150, true);
-        let i = adapters.iter().position(|a| a.name == "16S_27F").unwrap();
+        let i = adapters.iter().position(|a| a.name == "16S_mix_F").unwrap();
         assert!(index.split_classes[i] > 0);
         index.paired[i]
     };
@@ -1675,27 +1695,235 @@ fn pair_budgets_respect_the_interior_chance_bound() {
     let adapters = preset(&[Kit::Mab114, Kit::Lsk114]);
     let index = CandidateIndex::new(&adapters, 0.2, 150, true);
     let paired: Vec<usize> = (0..adapters.len()).filter(|&i| index.paired[i]).collect();
-    assert_eq!(paired.len(), 4);
+    assert_eq!(paired.len(), 12);
     for &i in &paired {
         let budget = &index.budgets[i];
         assert!(budget.k_pair[0] >= budget.interior_max());
         assert!(budget.k_pair[0] <= budget.k_end);
         assert!(budget.k_pair.windows(2).all(|pair| pair[0] >= pair[1]));
     }
+    // The primers of one marker-primer site count as their member of
+    // highest chance.
+    let site = |i: usize| {
+        let (primer, _) = marker_primer_of(&adapters[i].seq, 0.2).unwrap();
+        super::catalog::marker_site(primer)
+    };
     for class in 0..INTERIOR_CLASSES {
-        let rate: f64 = paired
-            .iter()
-            .map(|&i| {
-                chance_cumulative(&adapters[i].seq, index.budgets[i].k_pair[class])
-                    [index.budgets[i].k_pair[class]]
-            })
-            .sum();
+        let mut by_site: BTreeMap<usize, f64> = BTreeMap::new();
+        for &i in &paired {
+            let k = index.budgets[i].k_pair[class];
+            let rate = by_site.entry(site(i)).or_default();
+            *rate = rate.max(chance_cumulative(&adapters[i].seq, k)[k]);
+        }
+        let rate: f64 = by_site.values().sum();
         let edited = paired.iter().any(|&i| index.budgets[i].k_pair[class] > 0);
         let expected = rate * rate * PAIR_OFFSETS as f64 * interior_positions(class);
         assert!(!edited || expected <= INTERIOR_CHANCE_HITS_PER_READ);
     }
     let unpaired = (0..adapters.len()).find(|&i| !index.paired[i]).unwrap();
     assert_eq!(index.budgets[unpaired].k_pair, [0; INTERIOR_CLASSES]);
+}
+
+/// Every marker primer is listed under exactly one site, and every site
+/// lists only marker primers.
+#[test]
+fn marker_sites_partition_the_marker_primers() {
+    use super::catalog::{MARKER_PRIMERS, MARKER_SITES};
+    for primer in MARKER_PRIMERS {
+        let listed = MARKER_SITES
+            .iter()
+            .filter(|site| site.contains(primer))
+            .count();
+        assert_eq!(listed, 1, "{}", String::from_utf8_lossy(primer));
+    }
+    let sited: usize = MARKER_SITES.iter().map(|site| site.len()).sum();
+    assert_eq!(sited, MARKER_PRIMERS.len());
+}
+
+/// Under the `mab114` preset alone, its twelve primers take the adapter
+/// role (`preset::preset`'s amplicon-only conversion), so none of them
+/// joins another entry's chance family or pairs; only the set-wide
+/// terminal and interior chance bounds can still move another entry's
+/// budget when the twelve kit primers stand in for the four legacy
+/// primers 16S 27F and 1492R, ITS1F and ITS4. `LSK109_front`, `RAD` and
+/// `MAB_rear` move by one edit in one or two read-length classes; every
+/// other entry of the preset, including `TP01` to `TP24` and the barcode
+/// flank `RBK4_front`, keeps its budgets exactly.
+#[test]
+fn kit_primer_variants_move_named_budgets_under_mab114_alone() {
+    use super::catalog::CATALOG;
+    use super::preset::{Kit, preset};
+    let one_per_site: [(&str, &[u8]); 4] = [
+        ("16S_27F", b"AGAGTTTGATYMTGGCTCAG"),
+        ("16S_1492R", b"TACGGYTACCTTGTTACGACTT"),
+        ("ITS1F", b"CTTGGTCATTTAGAGGAAGTAA"),
+        ("ITS4", b"TCCTCCGCTTATTGATATGC"),
+    ];
+    let is_kit_primer = |name: &str| {
+        CATALOG.iter().any(|&(entry, role, kits, _)| {
+            entry == name && kits == [Kit::Mab114] && role == Role::Primer
+        })
+    };
+    let kit = preset(&[Kit::Mab114]);
+    let mut single: Vec<Adapter> = kit
+        .iter()
+        .filter(|a| !is_kit_primer(&a.name))
+        .cloned()
+        .collect();
+    single.extend(one_per_site.iter().map(|&(name, seq)| Adapter {
+        name: name.to_string(),
+        seq: seq.to_vec(),
+        // preset() gives the mab114 primers the adapter role since the kit
+        // is amplicon-only; the stand-ins take the same role.
+        role: Role::Adapter,
+    }));
+    let variants = CandidateIndex::new(&kit, 0.2, 150, true);
+    let baseline = CandidateIndex::new(&single, 0.2, 150, true);
+
+    #[rustfmt::skip]
+    let expected_move: &[(&str, [usize; INTERIOR_CLASSES], [usize; INTERIOR_CLASSES])] = &[
+        (
+            "LSK109_front",
+            [4, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1],
+            [4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1],
+        ),
+        (
+            "RAD",
+            [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8],
+            [10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8],
+        ),
+        (
+            "MAB_rear",
+            [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ),
+    ];
+
+    let mut compared = 0;
+    let mut moved = 0;
+    for (i, adapter) in kit.iter().enumerate() {
+        if is_kit_primer(&adapter.name) {
+            continue;
+        }
+        let j = single.iter().position(|a| a.name == adapter.name).unwrap();
+        let (a, b) = (&variants.budgets[i], &baseline.budgets[j]);
+        assert_eq!(a.k_end, b.k_end, "{}", adapter.name);
+        assert_eq!(a.k_far, b.k_far, "{}", adapter.name);
+        assert_eq!(a.k_pair, b.k_pair, "{}", adapter.name);
+        match expected_move
+            .iter()
+            .find(|(name, _, _)| *name == adapter.name)
+        {
+            Some((_, want_variants, want_baseline)) => {
+                assert_eq!(&a.k_mid, want_variants, "{}", adapter.name);
+                assert_eq!(&b.k_mid, want_baseline, "{}", adapter.name);
+                moved += 1;
+            },
+            None => assert_eq!(a.k_mid, b.k_mid, "{}", adapter.name),
+        }
+        compared += 1;
+    }
+    assert_eq!(moved, expected_move.len());
+    assert_eq!(compared, 31, "{compared}");
+}
+
+/// A barcode entry whose sequence matches a marker primer within its edit
+/// budget keeps its own chance family: only a primer-role entry or a split
+/// primer joins a marker-primer site.
+#[test]
+fn a_barcode_within_a_marker_primers_budget_keeps_its_own_family() {
+    let primer = Adapter {
+        name: "16S_27F".to_string(),
+        role: Role::Primer,
+        seq: b"AGAGTTTGATCCTGGCTCAG".to_vec(),
+    };
+    // An eroded variant of the same primer, within its edit budget, tagged
+    // as a barcode instead of a primer.
+    let barcode = Adapter {
+        name: "fake_barcode".to_string(),
+        role: Role::Barcode,
+        seq: b"GAGTTTGATCATGGCTCAG".to_vec(),
+    };
+    assert!(matches_marker_primer(&barcode.seq, 0.2));
+
+    // The same variant, but tagged as another primer, does join the site
+    // and is bounded together with it.
+    let mut as_primer = barcode.clone();
+    as_primer.role = Role::Primer;
+    let grouped = CandidateIndex::new(&[primer.clone(), as_primer], 0.2, 150, true);
+    let with_barcode = CandidateIndex::new(&[primer.clone(), barcode.clone()], 0.2, 150, true);
+    assert_ne!(
+        (grouped.budgets[0].k_end, grouped.budgets[0].k_mid),
+        (with_barcode.budgets[0].k_end, with_barcode.budgets[0].k_mid),
+        "a same-role variant and a barcode should not bound the primer the same way"
+    );
+
+    // The barcode keeps the budget a plain entry of its own sequence gets,
+    // unaffected by sitting beside a marker primer it happens to match.
+    let barcode_alone = CandidateIndex::new(std::slice::from_ref(&barcode), 0.2, 150, true);
+    let (a, b) = (&with_barcode.budgets[1], &barcode_alone.budgets[0]);
+    assert_eq!(
+        (a.k_end, a.k_far, a.k_mid, a.k_pair),
+        (b.k_end, b.k_far, b.k_mid, b.k_pair)
+    );
+}
+
+/// The kit primers of one marker-primer site form one chance family, so the
+/// variants of a site leave the budgets of every other entry where the
+/// catalog of one primer per site put them: under the `ont` and `all`
+/// presets, each entry outside the amplicon kit keeps its terminal and
+/// interior budgets when the twelve kit primers stand in for the four
+/// primers 16S 27F and 1492R, ITS1F and ITS4. The pair budget of the UMI,
+/// the one such entry that pairs with the primers, follows theirs.
+#[test]
+fn kit_primer_variants_leave_the_budgets_of_other_entries() {
+    use super::catalog::CATALOG;
+    use super::preset::{Kit, preset};
+    let one_per_site: [(&str, &[u8]); 4] = [
+        ("16S_27F", b"AGAGTTTGATYMTGGCTCAG"),
+        ("16S_1492R", b"TACGGYTACCTTGTTACGACTT"),
+        ("ITS1F", b"CTTGGTCATTTAGAGGAAGTAA"),
+        ("ITS4", b"TCCTCCGCTTATTGATATGC"),
+    ];
+    let amplicon_only = |name: &str| {
+        CATALOG
+            .iter()
+            .any(|&(entry, _, kits, _)| entry == name && kits == [Kit::Mab114])
+    };
+    for kits in [Kit::ONT, Kit::ALL] {
+        let kit = preset(kits);
+        let mut single: Vec<Adapter> = kit
+            .iter()
+            .filter(|a| !amplicon_only(&a.name) || a.role != Role::Primer)
+            .cloned()
+            .collect();
+        single.extend(one_per_site.iter().map(|&(name, seq)| Adapter {
+            name: name.to_string(),
+            seq: seq.to_vec(),
+            role: Role::Primer,
+        }));
+        let variants = CandidateIndex::new(&kit, 0.2, 150, true);
+        let sites = CandidateIndex::new(&single, 0.2, 150, true);
+        let mut compared = 0;
+        for (i, adapter) in kit.iter().enumerate() {
+            if amplicon_only(&adapter.name) {
+                continue;
+            }
+            let j = single.iter().position(|a| a.name == adapter.name).unwrap();
+            let (a, b) = (&variants.budgets[i], &sites.budgets[j]);
+            assert_eq!(
+                (a.k_end, a.k_far, a.k_mid),
+                (b.k_end, b.k_far, b.k_mid),
+                "{}",
+                adapter.name
+            );
+            if !is_umi(adapter) {
+                assert_eq!(a.k_pair, b.k_pair, "{}", adapter.name);
+            }
+            compared += 1;
+        }
+        assert!(compared > 100, "{compared}");
+    }
 }
 
 /// A marker primer's direction is read from the catalog primer it matches:
@@ -1746,7 +1974,15 @@ fn eroded_marker_primers_match() {
 fn marker_codes_restore_degenerate_positions() {
     assert_eq!(
         with_marker_codes(b"AGAGTTTGATCCTGGCTCAG", 0.2),
-        b"AGAGTTTGATYMTGGCTCAG"
+        b"AGRGTTYGATYMTGGCTCAG"
+    );
+    assert_eq!(
+        with_marker_codes(b"AGAGTTTGATCCTGGCTTAG", 0.2),
+        b"AGAGTTTGATCCTGGCTTAG"
+    );
+    assert_eq!(
+        with_marker_codes(b"TACGGTTACCTTGTTACGACTT", 0.2),
+        b"TACGGYTACCTTGTTACGACTT"
     );
     assert_eq!(
         with_marker_codes(b"AAGTCGTAACAAGGTAAC", 0.2),
@@ -1756,6 +1992,116 @@ fn marker_codes_restore_degenerate_positions() {
         with_marker_codes(b"TTTCTGTTGGTGCTGATATTGC", 0.2),
         b"TTTCTGTTGGTGCTGATATTGC"
     );
+}
+
+/// Every primer of the amplicon kit is a marker primer that reads into the
+/// insert as listed, and pairs in the primer role.
+#[test]
+fn kit_primers_are_marker_primers_as_listed() {
+    use super::preset::{Kit, preset};
+    let adapters = preset(&[Kit::Mab114, Kit::Lsk114]);
+    let index = CandidateIndex::new(&adapters, 0.2, 150, true);
+    let mut primers = 0;
+    for (i, adapter) in adapters.iter().enumerate() {
+        if !(adapter.name.starts_with("16S_") || adapter.name.starts_with("ITS")) {
+            continue;
+        }
+        primers += 1;
+        assert_eq!(
+            marker_primer_of(&adapter.seq, 0.2).map(|(_, opens)| opens),
+            Some(true),
+            "{}",
+            adapter.name
+        );
+        assert!(
+            index.paired[i] && index.opens[i] == Opens::AsGiven,
+            "{}",
+            adapter.name
+        );
+    }
+    assert_eq!(primers, 12);
+}
+
+/// The community primers outside the amplicon kit are marker primers as a
+/// FASTA gives them. The classic 16S 27F is an instance of the kit's forward
+/// mix; the 22-base 1492R, which the kit's reverse mix also aligns within,
+/// and fungal ITS1F match their own entries.
+#[test]
+fn community_marker_primers_are_recognised() {
+    let classic: [(&str, &[u8], &[u8]); 3] = [
+        ("27F", b"AGAGTTTGATYMTGGCTCAG", b"AGRGTTYGATYMTGGCTCAG"),
+        (
+            "1492R",
+            b"TACGGYTACCTTGTTACGACTT",
+            b"TACGGYTACCTTGTTACGACTT",
+        ),
+        (
+            "ITS1F",
+            b"CTTGGTCATTTAGAGGAAGTAA",
+            b"CTTGGTCATTTAGAGGAAGTAA",
+        ),
+    ];
+    for (name, seq, primer) in classic {
+        assert_eq!(marker_primer_of(seq, 0.2), Some((primer, true)), "{name}");
+        assert_eq!(
+            marker_primer_of(&reverse_complement(seq), 0.2),
+            Some((primer, false)),
+            "{name}"
+        );
+    }
+    let entries: Vec<Adapter> = classic
+        .iter()
+        .map(|(name, seq, _)| entry(name, seq, Role::Primer))
+        .collect();
+    let index = CandidateIndex::new(&entries, 0.2, 150, true);
+    for (i, (name, _, _)) in classic.iter().enumerate() {
+        assert!(
+            index.paired[i] && index.opens[i] == Opens::AsGiven,
+            "{name}"
+        );
+    }
+    let mut c = cfg_with(entries, 0.2, 150, true);
+    c.set_amplicon(true);
+    let index = CandidateIndex::for_config(&c);
+    for (i, (name, _, primer)) in classic.iter().enumerate() {
+        assert_eq!(
+            index.whole_primers[i].as_ref().map(|w| w.seq.as_slice()),
+            Some(*primer),
+            "{name}"
+        );
+    }
+}
+
+/// An MAB114 amplicon that carries variant primers of the kit's mixes is
+/// trimmed to its insert under the amplicon preset: 16S_Bor_F with
+/// 16S_Chl_R, and ITS1_Mal with ITS4_Pyt, behind the barcode and its flanks.
+#[test]
+fn mab114_variant_primer_pairs_trim_to_the_insert() {
+    use super::preset::{Kit, preset};
+    let c = cfg_with(preset(&[Kit::Mab114]), 0.2, 150, true);
+    let head = |primer: &[u8]| {
+        [
+            b"GCTTGGGTGTTTAACC".as_slice(),
+            b"GCACCTGGAACTTGTGCCTTCCAC",
+            b"CCATATCCGTGTCGCCCTT",
+            primer,
+        ]
+        .concat()
+    };
+    let pairs: [(&[u8], &[u8], usize); 2] = [
+        (b"AGAGTTTGATCCTGGCTTAG", b"GGGCTACCTTGTTACGACTT", 1500),
+        (b"TCTGTAGGTGAACCTGCAG", b"TCCTCCGCTTATTAATATGC", 600),
+    ];
+    for (i, (forward, reverse, len)) in pairs.into_iter().enumerate() {
+        let (left, right) = (head(forward), reverse_complement(&head(reverse)));
+        let insert = splitmix_dna(700 + i as u64, len);
+        let read = [left.as_slice(), &insert, &right].concat();
+        let span = vec![(left.len(), left.len() + len)];
+        assert_eq!(adapter_segments(&read, &c), span);
+        let flipped = reverse_complement(&read);
+        let span = vec![(right.len(), right.len() + len)];
+        assert_eq!(adapter_segments(&flipped, &c), span);
+    }
 }
 
 /// An interior hit splits only when the whole adapter aligns: a site that
@@ -1828,4 +2174,1112 @@ fn pcs114_ssp_is_trimmed_through_its_umi() {
     bare.extend_from_slice(b"GGG");
     bare.extend_from_slice(&insert);
     assert_eq!(adapter_segments(&bare, &c), vec![(ssp.len(), bare.len())]);
+}
+
+/// The sheet primers of two targets, `A` and `B`, as SplitMix sequences:
+/// forward and reverse primer of each, as ordered.
+fn split_primers() -> Vec<crate::split::Primer> {
+    [
+        ("fA", 111, 20),
+        ("rA", 112, 22),
+        ("fB", 113, 21),
+        ("rB", 114, 20),
+    ]
+    .into_iter()
+    .map(|(name, seed, len)| crate::split::Primer {
+        name: name.into(),
+        seq: splitmix_dna(seed, len),
+    })
+    .collect()
+}
+
+/// A split configuration: one sequencing adapter at error rate 0.2 and end
+/// zone 150, with the two-target sheet of `split_primers` attached.
+fn split_cfg() -> AdapterConfig {
+    let mut c = cfg_with(
+        vec![ad("lsk", b"AATGTACTTCGTTCAGTTACGTATTGCT")],
+        0.2,
+        150,
+        true,
+    );
+    c.attach_split(&split_primers());
+    c
+}
+
+/// The anchored budgets rescoring takes for a sheet (`anchored_budgets`)
+/// are those the candidate index gives the sheet's split entries, whatever
+/// else the adapter set holds: the MAB114 preset with the `mab114` sheet,
+/// and an adapter with a panel of twenty random pairs of 15-base primers,
+/// whose set-wide bound lowers every anchored budget below the error-rate
+/// ceiling.
+#[test]
+fn sheet_anchored_budgets_match_the_index() {
+    let mab114 = crate::split::Sheet::preset("mab114").unwrap().primers;
+    let panel: Vec<crate::split::Primer> = (0..40)
+        .map(|i| crate::split::Primer {
+            name: format!("p{i}"),
+            seq: splitmix_dna(7_000 + i, 15),
+        })
+        .collect();
+    let sets = [
+        (
+            super::preset::preset(&[super::preset::Kit::Mab114]),
+            mab114,
+            false,
+        ),
+        (
+            vec![ad("lsk", b"AATGTACTTCGTTCAGTTACGTATTGCT")],
+            panel,
+            true,
+        ),
+    ];
+    for (adapters, primers, below_ceiling) in sets {
+        let mut c = cfg_with(adapters, 0.2, 150, true);
+        c.attach_split(&primers);
+        let index = CandidateIndex::for_config(&c);
+        let seqs: Vec<&[u8]> = primers.iter().map(|p| p.seq.as_slice()).collect();
+        let anchored = anchored_budgets(&seqs, 0.2);
+        for (adapter_idx, primer) in c.split_of.iter().enumerate() {
+            if let Some(primer) = *primer {
+                assert_eq!(
+                    index.budgets[adapter_idx].k_anchor, anchored[primer],
+                    "{}",
+                    c.adapters[adapter_idx].name
+                );
+            }
+        }
+        if below_ceiling {
+            assert!(anchored.iter().all(|&k| k < edit_budget(0.2, 15)));
+        }
+    }
+}
+
+/// Returns a segment at `[start, end)` with its primer loci.
+fn seg(start: usize, end: usize, five: Option<Locus>, three: Option<Locus>) -> Segment {
+    Segment {
+        start,
+        end,
+        five,
+        three,
+    }
+}
+
+/// Returns the locus `[start, end)`, its outer edge no read end, located by
+/// an exact whole hit of the entry at `entry`, as its reverse complement
+/// when `rc`.
+fn locus(start: usize, end: usize, entry: usize, rc: bool) -> Option<Locus> {
+    sited(start, end, PrimerSite { entry, rc, cost: 0 })
+}
+
+/// Returns the locus `[start, end)`, its outer edge no read end, located by
+/// the whole hit `site`.
+fn sited(start: usize, end: usize, site: PrimerSite) -> Option<Locus> {
+    Some(Locus {
+        start,
+        end,
+        outer_open: false,
+        boundary: false,
+        site: Some(site),
+    })
+}
+
+/// Returns the locus `[start, end)` located by an excision, which carries
+/// no site.
+fn excised(start: usize, end: usize) -> Option<Locus> {
+    Some(Locus {
+        start,
+        end,
+        outer_open: false,
+        boundary: false,
+        site: None,
+    })
+}
+
+/// Without split primers the segments carry no loci, and a configuration
+/// whose `split_of` marks no entry gives the spans of one without it.
+#[test]
+fn split_off_output_unchanged() {
+    let adapter = b"GGGGTTTTGGGGTTTTGGGG";
+    let primer = b"CACACAGAGAGACACACAGAGA";
+    let mut w = vec![b'A'; 80];
+    w.extend_from_slice(&reverse_complement(primer));
+    w.extend_from_slice(adapter);
+    w.extend_from_slice(primer);
+    w.extend_from_slice(&[b'C'; 80]);
+    let c = cfg_with(
+        vec![ad("a", adapter), entry("p", primer, Role::Primer)],
+        0.2,
+        30,
+        true,
+    );
+    assert!(c.split_of.is_empty());
+    let expected = vec![(0, 80), (144, 224)];
+    assert_eq!(adapter_segments(&w, &c), expected);
+    assert_eq!(
+        adapter_segments_annotated(&w, &c),
+        vec![seg(0, 80, None, None), seg(144, 224, None, None)]
+    );
+    let mut unmarked = c.clone();
+    unmarked.split_of = vec![None; c.adapters.len()];
+    unmarked.split_opens = vec![Opens::AsGiven; c.adapters.len()];
+    assert_eq!(adapter_segments(&w, &unmarked), expected);
+}
+
+/// A plus-strand amplicon reports the forward primer at its 5' end and the
+/// reverse primer, reverse complemented, at its 3' end.
+#[test]
+fn loci_at_both_ends() {
+    let p = split_primers();
+    let read = joined(
+        &p[0].seq,
+        &[&splitmix_dna(121, 800)],
+        &reverse_complement(&p[1].seq),
+    );
+    let n = read.len();
+    let (f, r) = (p[0].seq.len(), p[1].seq.len());
+    assert_eq!(
+        adapter_segments_annotated(&read, &split_cfg()),
+        vec![seg(
+            f,
+            n - r,
+            locus(0, f, 1, false),
+            locus(n - r, n, 2, true)
+        )]
+    );
+}
+
+/// A minus-strand amplicon reports the reverse primer at its 5' end and the
+/// forward primer, reverse complemented, at its 3' end.
+#[test]
+fn loci_on_minus_strand_read() {
+    let p = split_primers();
+    let read = joined(
+        &p[1].seq,
+        &[&splitmix_dna(122, 800)],
+        &reverse_complement(&p[0].seq),
+    );
+    let n = read.len();
+    let (f, r) = (p[0].seq.len(), p[1].seq.len());
+    assert_eq!(
+        adapter_segments_annotated(&read, &split_cfg()),
+        vec![seg(
+            r,
+            n - f,
+            locus(0, r, 2, false),
+            locus(n - f, n, 1, true)
+        )]
+    );
+}
+
+/// A chimera of two amplicons splits at the junction, and each piece
+/// reports the primer on its side of the junction.
+#[test]
+fn junction_pieces_get_loci() {
+    let p = split_primers();
+    let (ins1, ins2) = (splitmix_dna(123, 800), splitmix_dna(124, 800));
+    let (fa, ra_rc) = (p[0].seq.clone(), reverse_complement(&p[1].seq));
+    let (fb, rb_rc) = (p[2].seq.clone(), reverse_complement(&p[3].seq));
+    let read = joined(&fa, &[&ins1, &ra_rc, &fb, &ins2], &rb_rc);
+    let n = read.len();
+    let junction = fa.len() + ins1.len();
+    let second = junction + ra_rc.len() + fb.len();
+    assert_eq!(
+        adapter_segments_annotated(&read, &split_cfg()),
+        vec![
+            seg(
+                fa.len(),
+                junction,
+                locus(0, fa.len(), 1, false),
+                excised(junction, junction + ra_rc.len())
+            ),
+            seg(
+                second,
+                n - rb_rc.len(),
+                excised(second - fb.len(), second),
+                locus(n - rb_rc.len(), n, 4, true)
+            ),
+        ]
+    );
+}
+
+/// Two amplicons joined through an adapter split at the adapter, and the
+/// sheet primers beside it, backed by its excision, are the loci of the
+/// pieces on either side.
+#[test]
+fn adapter_junction_splits_beside_split_primers() {
+    let p = split_primers();
+    let lsk = b"AATGTACTTCGTTCAGTTACGTATTGCT";
+    let (ins1, ins2) = (splitmix_dna(127, 800), splitmix_dna(128, 800));
+    let (fa, ra_rc) = (p[0].seq.clone(), reverse_complement(&p[1].seq));
+    let (fb, rb_rc) = (p[2].seq.clone(), reverse_complement(&p[3].seq));
+    let read = joined(&fa, &[&ins1, &ra_rc, lsk, &fb, &ins2], &rb_rc);
+    let n = read.len();
+    let junction = fa.len() + ins1.len();
+    let second = junction + ra_rc.len() + lsk.len() + fb.len();
+    assert_eq!(
+        adapter_segments_annotated(&read, &split_cfg()),
+        vec![
+            seg(
+                fa.len(),
+                junction,
+                locus(0, fa.len(), 1, false),
+                excised(junction, junction + ra_rc.len())
+            ),
+            seg(
+                second,
+                n - rb_rc.len(),
+                excised(second - fb.len(), second),
+                locus(n - rb_rc.len(), n, 4, true)
+            ),
+        ]
+    );
+}
+
+/// A lone sheet primer inside a read and a catalog marker primer beside it,
+/// within the end zone of each other, back neither excision: the read stays
+/// whole under `--split-by`.
+#[test]
+fn nested_sheet_primer_does_not_back_a_marker_primer() {
+    let p = split_primers();
+    let marker = b"AGAGTTTGATCATGGCTCAG";
+    let entries = vec![
+        ad("lsk", b"AATGTACTTCGTTCAGTTACGTATTGCT"),
+        entry("27F", b"AGAGTTTGATYMTGGCTCAG", Role::Primer),
+    ];
+    let mut c = cfg_with(entries, 0.2, 150, true);
+    c.attach_split(&p);
+    assert!(CandidateIndex::for_config(&c).paired[1]);
+    let (fa, ra_rc, fb) = (
+        p[0].seq.clone(),
+        reverse_complement(&p[1].seq),
+        p[2].seq.clone(),
+    );
+    let read = joined(
+        &fa,
+        &[
+            &splitmix_dna(129, 500),
+            &fb,
+            &splitmix_dna(130, 50),
+            marker,
+            &splitmix_dna(131, 500),
+        ],
+        &ra_rc,
+    );
+    let n = read.len();
+    assert_eq!(
+        adapter_segments_annotated(&read, &c),
+        vec![seg(
+            fa.len(),
+            n - ra_rc.len(),
+            locus(0, fa.len(), 2, false),
+            locus(n - ra_rc.len(), n, 3, true)
+        )]
+    );
+}
+
+/// A sheet primer that maps to the reverse complement of an entry
+/// (`split_opens` `Reversed`) locates a primer only in the orientation valid for
+/// its end: as ordered at the 5' end it trims, and the entry's own sequence
+/// there, which closes an amplicon, neither trims nor becomes a locus.
+#[test]
+fn reverse_complement_entry_is_gated_by_orientation() {
+    let p = split_primers();
+    let ra_rc = reverse_complement(&p[1].seq);
+    let mut c = cfg_with(vec![entry("rA_rc", &ra_rc, Role::Barcode)], 0.2, 150, true);
+    c.attach_split(&p);
+    assert_eq!(c.split_opens[0], Opens::Reversed);
+    let fa_rc = reverse_complement(&p[0].seq);
+    let insert = splitmix_dna(132, 800);
+    let (r, f) = (ra_rc.len(), fa_rc.len());
+
+    let valid = joined(&p[1].seq, &[&insert], &fa_rc);
+    let n = valid.len();
+    assert_eq!(
+        adapter_segments_annotated(&valid, &c),
+        vec![seg(
+            r,
+            n - f,
+            locus(0, r, 0, true),
+            locus(n - f, n, 1, true)
+        )]
+    );
+
+    let wrong = joined(&ra_rc, &[&insert], &fa_rc);
+    let n = wrong.len();
+    assert_eq!(
+        adapter_segments_annotated(&wrong, &c),
+        vec![seg(0, n - f, None, locus(n - f, n, 1, true))]
+    );
+}
+
+/// An entry that fuses an adapter with a sheet primer trims the 5' end as
+/// given, and the sheet primer within its trim is the locus there.
+#[test]
+fn fused_adapter_primer_entry_yields_the_sheet_primer_locus() {
+    let p = split_primers();
+    let lsk = b"AATGTACTTCGTTCAGTTACGTATTGCT";
+    let fused = [lsk.as_slice(), &p[0].seq].concat();
+    let mut c = cfg_with(vec![ad("lsk_fA", &fused)], 0.2, 150, true);
+    c.attach_split(&p);
+    assert!(!c.is_split(0));
+    let ra_rc = reverse_complement(&p[1].seq);
+    let read = joined(&fused, &[&splitmix_dna(135, 800)], &ra_rc);
+    let n = read.len();
+    let (a, f, r) = (lsk.len(), p[0].seq.len(), ra_rc.len());
+    assert_eq!(
+        adapter_segments_annotated(&read, &c),
+        vec![seg(
+            a + f,
+            n - r,
+            locus(a, a + f, 1, false),
+            locus(n - r, n, 2, true)
+        )]
+    );
+}
+
+/// A sheet primer that overlaps a longer entry of the set at the 3' end is
+/// the locus there, and the trim stays where the longer entry set it.
+#[test]
+fn overlapping_catalog_entry_keeps_its_trim_and_yields_the_locus() {
+    let p = split_primers();
+    let ra_rc = reverse_complement(&p[1].seq);
+    let longer = [ra_rc.as_slice(), &splitmix_dna(136, 6)].concat();
+    let mut c = cfg_with(
+        vec![entry("rA_long", &longer, Role::Primer)],
+        0.2,
+        150,
+        true,
+    );
+    c.attach_split(&p);
+    let read = joined(&p[0].seq, &[&splitmix_dna(137, 800)], &longer);
+    let n = read.len();
+    let (f, l) = (p[0].seq.len(), longer.len());
+    assert_eq!(
+        adapter_segments_annotated(&read, &c),
+        vec![seg(
+            f,
+            n - l,
+            locus(0, f, 1, false),
+            locus(n - l, n - l + ra_rc.len(), 2, true)
+        )]
+    );
+}
+
+/// A remnant of a sheet primer in the adapter role behind unalignable bases,
+/// which only the residue search finds, trims the end and is the locus
+/// there, its outer edge a read end.
+#[test]
+fn residue_trimmed_split_adapter_yields_an_open_locus() {
+    let p = split_primers();
+    let mut c = cfg_with(vec![ad("fA", &p[0].seq)], 0.2, 150, true);
+    c.attach_split(&p);
+    assert!(c.is_split(0));
+    let junk = splitmix_dna(139, 12);
+    let remnant = &p[0].seq[8..];
+    let ra_rc = reverse_complement(&p[1].seq);
+    let read = joined(&junk, &[remnant, &splitmix_dna(142, 800)], &ra_rc);
+    let n = read.len();
+    let (j, r) = (junk.len(), ra_rc.len());
+    let open = Some(Locus {
+        start: j,
+        end: j + remnant.len(),
+        outer_open: true,
+        boundary: false,
+        site: None,
+    });
+    assert_eq!(
+        adapter_segments_annotated(&read, &c),
+        vec![seg(
+            j + remnant.len(),
+            n - r,
+            open,
+            locus(n - r, n, 1, true)
+        )]
+    );
+}
+
+/// An entry that serves a primer and its reverse complement, as a sheet
+/// whose reverse primer is the reverse complement of its forward primer
+/// gives, reads into the insert on both strands: its hits are located at
+/// both ends of a read on either strand.
+#[test]
+fn entry_of_a_primer_and_its_reverse_complement_opens_both_ways() {
+    let px = splitmix_dna(140, 22);
+    let primers = vec![
+        crate::split::Primer {
+            name: "fX".into(),
+            seq: px.clone(),
+        },
+        crate::split::Primer {
+            name: "rX".into(),
+            seq: reverse_complement(&px),
+        },
+    ];
+    let mut c = cfg_with(
+        vec![ad("lsk", b"AATGTACTTCGTTCAGTTACGTATTGCT")],
+        0.2,
+        150,
+        true,
+    );
+    c.attach_split(&primers);
+    assert_eq!(c.adapters.len(), 2);
+    assert_eq!(c.split_opens[1], Opens::Both);
+    assert_eq!(CandidateIndex::for_config(&c).opens[1], Opens::Both);
+    let insert = splitmix_dna(141, 800);
+    let x = px.len();
+    for (ends, rc) in [(px.clone(), false), (reverse_complement(&px), true)] {
+        let read = joined(&ends, &[&insert], &ends);
+        let n = read.len();
+        assert_eq!(
+            adapter_segments_annotated(&read, &c),
+            vec![seg(x, n - x, locus(0, x, 1, rc), locus(n - x, n, 1, rc))]
+        );
+    }
+}
+
+/// A valid sheet primer hit that overlaps the outermost one, or starts
+/// within `FLANK_SLACK` bases of its end, moves the trim to its own end;
+/// the outermost hit stays the locus. One starting further away stays in
+/// the read.
+#[test]
+fn abutting_inner_primer_moves_the_trim_but_not_the_locus() {
+    let p = split_primers();
+    let (fa, fb) = (p[0].seq.clone(), p[2].seq.clone());
+    let ra_rc = reverse_complement(&p[1].seq);
+    let insert = splitmix_dna(133, 800);
+    for gap in [0, 5, FLANK_SLACK, FLANK_SLACK + 1] {
+        let read = joined(&fa, &[&splitmix_dna(134, gap), &fb, &insert], &ra_rc);
+        let n = read.len();
+        let start = if gap <= FLANK_SLACK {
+            fa.len() + gap + fb.len()
+        } else {
+            fa.len()
+        };
+        assert_eq!(
+            adapter_segments_annotated(&read, &split_cfg()),
+            vec![seg(
+                start,
+                n - ra_rc.len(),
+                locus(0, fa.len(), 1, false),
+                locus(n - ra_rc.len(), n, 2, true)
+            )],
+            "gap {gap}"
+        );
+    }
+}
+
+/// A whole sheet primer hit above the `k_far` budget of its entry is placed
+/// only when anchored: at the read start, or directly behind an adapter, it
+/// trims and is the locus; 80 bases into the read it neither trims nor
+/// locates a primer. A sheet of 24 primers of 16 bases shares one terminal
+/// chance bound, which admits three edits anchored and two anywhere in the
+/// end zone.
+#[test]
+fn far_primer_hit_is_placed_only_when_anchored() {
+    let primers: Vec<crate::split::Primer> = (1..=24)
+        .map(|i| crate::split::Primer {
+            name: format!("p{i}"),
+            seq: splitmix_dna(i, 16),
+        })
+        .collect();
+    let adapter = b"AATGTACTTCGTTCAGTTACGTATTGCT";
+    let mut c = cfg_with(vec![ad("lsk", adapter)], 0.2, 150, true);
+    c.attach_split(&primers);
+    let Budget { k_end, k_far, .. } = CandidateIndex::for_config(&c).budgets[5];
+    assert_eq!((k_end, k_far), (3, 2));
+    let marginal = substituted(&primers[4].seq, &[3, 8, 13]);
+    let marginal_site = PrimerSite {
+        entry: 5,
+        rc: false,
+        cost: 3,
+    };
+    let insert = splitmix_dna(9001, 2000);
+    let n = insert.len() + marginal.len();
+
+    let at_end = [marginal.clone(), insert.clone()].concat();
+    assert_eq!(
+        adapter_segments_annotated(&at_end, &c),
+        vec![seg(16, n, sited(0, 16, marginal_site), None)]
+    );
+
+    let behind_adapter = [adapter.to_vec(), marginal.clone(), insert.clone()].concat();
+    assert_eq!(
+        adapter_segments_annotated(&behind_adapter, &c),
+        vec![seg(
+            44,
+            n + adapter.len(),
+            sited(28, 44, marginal_site),
+            None
+        )]
+    );
+
+    let deep = [insert[..80].to_vec(), marginal, insert[80..].to_vec()].concat();
+    assert_eq!(
+        adapter_segments_annotated(&deep, &c),
+        vec![seg(0, n, None, None)]
+    );
+}
+
+/// A held sheet primer hit with fewer than `MIN_OVERLAP` bases outboard of
+/// it holds the read end: with `MIN_OVERLAP - 1` bases of another primer
+/// before `fA`, `fA` is the locus. With `MIN_OVERLAP` bases, the read end is
+/// left to the partial search, which locates the other primer cut short
+/// there as an open locus.
+#[test]
+fn held_primer_holds_the_read_end_below_the_minimum_overlap() {
+    let p = split_primers();
+    let (fa, fb) = (p[0].seq.clone(), p[2].seq.clone());
+    let ra_rc = reverse_complement(&p[1].seq);
+    for outboard in [MIN_OVERLAP - 1, MIN_OVERLAP] {
+        let cut = &fb[fb.len() - outboard..];
+        let read = joined(cut, &[&fa, &splitmix_dna(155, 800)], &ra_rc);
+        let segments = adapter_segments_annotated(&read, &split_cfg());
+        assert_eq!(segments.len(), 1, "{outboard}: {segments:?}");
+        let five = segments[0].five.expect("a primer is located");
+        if outboard < MIN_OVERLAP {
+            assert_eq!(
+                (five.start, five.end, five.outer_open),
+                (outboard, outboard + fa.len(), false),
+                "{outboard}: {segments:?}"
+            );
+        } else {
+            assert_eq!(
+                (five.start, five.end, five.outer_open),
+                (0, outboard, true),
+                "{outboard}: {segments:?}"
+            );
+        }
+    }
+}
+
+/// A sheet primer site deep in an end zone leaves the read end to the
+/// partial search: the primer cut short at each read end is the locus there
+/// and trims, and the whole site of the other target's primer further inward
+/// stays in the read.
+#[test]
+fn deep_sheet_primer_site_leaves_the_read_end_to_the_partial_search() {
+    let p = split_primers();
+    let (fa, fb) = (p[0].seq.clone(), p[2].seq.clone());
+    let (ra_rc, rb_rc) = (reverse_complement(&p[1].seq), reverse_complement(&p[3].seq));
+    let cut = 6;
+    let (fa_cut, ra_cut) = (&fa[cut..], &ra_rc[..ra_rc.len() - cut]);
+    let read = joined(
+        fa_cut,
+        &[
+            &splitmix_dna(150, 100),
+            &fb,
+            &splitmix_dna(151, 800),
+            &rb_rc,
+            &splitmix_dna(152, 100),
+        ],
+        ra_cut,
+    );
+    let n = read.len();
+    let (f, r) = (fa_cut.len(), ra_cut.len());
+    let open = |start, end| {
+        Some(Locus {
+            start,
+            end,
+            outer_open: true,
+            boundary: false,
+            site: None,
+        })
+    };
+    assert_eq!(
+        adapter_segments_annotated(&read, &split_cfg()),
+        vec![seg(f, n - r, open(0, f), open(n - r, n))]
+    );
+}
+
+/// An adapter-role entry of a primer variant, as an amplicon kit lists it,
+/// cut short at the 3' read end trims there even when a whole sheet primer
+/// site lies deeper in the end zone, and the sheet primer it covers is the
+/// locus of that end.
+#[test]
+fn kit_primer_cut_short_at_the_read_end_covers_the_sheet_primer() {
+    let p = split_primers();
+    let ra_rc = reverse_complement(&p[1].seq);
+    let rb_rc = reverse_complement(&p[3].seq);
+    let kit = substituted(&p[1].seq, &[0]);
+    let mut c = cfg_with(
+        vec![
+            ad("lsk", b"AATGTACTTCGTTCAGTTACGTATTGCT"),
+            ad("kit_rA", &kit),
+        ],
+        0.2,
+        150,
+        true,
+    );
+    c.attach_split(&p);
+    assert!(!c.is_split(1));
+    let cut = 6;
+    let ra_cut = &ra_rc[..ra_rc.len() - cut];
+    let fa = &p[0].seq;
+    let read = joined(
+        fa,
+        &[&splitmix_dna(153, 800), &rb_rc, &splitmix_dna(154, 100)],
+        ra_cut,
+    );
+    let n = read.len();
+    let (f, r) = (fa.len(), ra_cut.len());
+    assert_eq!(
+        adapter_segments_annotated(&read, &c),
+        vec![seg(
+            f,
+            n - r,
+            locus(0, f, 2, false),
+            Some(Locus {
+                start: n - r,
+                end: n,
+                outer_open: true,
+                boundary: false,
+                site: None,
+            })
+        )]
+    );
+}
+
+/// A read with no primer keeps its whole span and reports no locus.
+#[test]
+fn no_locus_without_primer() {
+    let read = splitmix_dna(125, 800);
+    assert_eq!(
+        adapter_segments_annotated(&read, &split_cfg()),
+        vec![seg(0, read.len(), None, None)]
+    );
+}
+
+/// Sheet primers already in the adapter set, as the MAB114 preset holds
+/// them, map to their entries: the set keeps its size, names and roles.
+/// Attaching a sheet leaves the amplicon judgement as it was, and a split
+/// entry gets no whole primer even in an amplicon library, since it splits a
+/// read only at a junction pair.
+#[test]
+fn attach_split_maps_preset_duplicate() {
+    let mut c = cfg_with(
+        super::preset::preset(&[super::preset::Kit::Mab114]),
+        0.2,
+        150,
+        true,
+    );
+    let before = c.adapters.clone();
+    let sheet = crate::split::Sheet::parse_fasta(
+        b">16S_mix_F target=16S end=fwd\nAGRGTTYGATYMTGGCTCAG\n\
+          >16S_mix_R target=16S end=rev\nSGGYTACCTTGTTACGACTT\n\
+          >ITS1 target=ITS end=fwd\nTCCGTAGGTGAACCTGCGG\n\
+          >ITS4 target=ITS end=rev\nTCCTCCGCTTATTGATATGC\n",
+    )
+    .unwrap();
+    c.attach_split(&sheet.primers);
+    assert_eq!(c.adapters, before);
+    assert!(!c.amplicon);
+    for (primer_idx, primer) in sheet.primers.iter().enumerate() {
+        let i = c
+            .adapters
+            .iter()
+            .position(|a| a.name == primer.name)
+            .unwrap();
+        assert_eq!(c.split_of[i], Some(primer_idx), "{}", primer.name);
+    }
+    assert_eq!(c.split_of.iter().flatten().count(), sheet.primers.len());
+    let index = CandidateIndex::for_config(&c);
+    let i = c
+        .adapters
+        .iter()
+        .position(|a| a.name == "16S_mix_F")
+        .unwrap();
+    assert!(index.paired[i] && index.opens[i] == Opens::AsGiven);
+    assert!(index.whole_primers[i].is_none());
+    c.set_amplicon(true);
+    let index = CandidateIndex::for_config(&c);
+    assert!(index.whole_primers.iter().all(Option::is_none));
+}
+
+/// A sheet primer absent from the adapter set is appended in the primer
+/// role under its sheet name.
+#[test]
+fn attach_split_appends_new_primer() {
+    let c = split_cfg();
+    let p = split_primers();
+    assert_eq!(c.adapters.len(), 1 + p.len());
+    assert_eq!(c.split_of[0], None);
+    for (primer_idx, primer) in p.iter().enumerate() {
+        let entry = &c.adapters[1 + primer_idx];
+        assert_eq!(
+            (entry.name.as_str(), entry.seq.as_slice(), entry.role),
+            (primer.name.as_str(), primer.seq.as_slice(), Role::Primer)
+        );
+        assert_eq!(c.split_of[1 + primer_idx], Some(primer_idx));
+    }
+    let index = CandidateIndex::for_config(&c);
+    assert!((1..c.adapters.len()).all(|i| index.paired[i] && index.opens[i] == Opens::AsGiven));
+    assert!(!index.paired[0]);
+}
+
+/// A sheet primer whose reverse complement is already in the set maps to
+/// that entry, which reads out of the insert, and still locates the primer.
+#[test]
+fn attach_split_maps_reverse_complement_entry() {
+    let p = split_primers();
+    let ra_rc = reverse_complement(&p[1].seq);
+    let mut c = cfg_with(vec![entry("rA_rc", &ra_rc, Role::Barcode)], 0.2, 150, true);
+    c.attach_split(&p);
+    assert_eq!(c.adapters.len(), p.len());
+    assert_eq!(
+        (c.adapters[0].name.as_str(), c.adapters[0].role),
+        ("rA_rc", Role::Barcode)
+    );
+    assert_eq!(c.split_of[0], Some(1));
+    let index = CandidateIndex::for_config(&c);
+    assert!(index.paired[0] && index.opens[0] == Opens::Reversed);
+    let read = joined(&p[0].seq, &[&splitmix_dna(126, 800)], &ra_rc);
+    let n = read.len();
+    let (f, r) = (p[0].seq.len(), ra_rc.len());
+    assert_eq!(
+        adapter_segments_annotated(&read, &c),
+        vec![seg(
+            f,
+            n - r,
+            locus(0, f, 1, false),
+            locus(n - r, n, 0, false)
+        )]
+    );
+}
+
+/// Replacing the adapter set detaches the split primers.
+#[test]
+fn replace_adapters_clears_split() {
+    let mut c = split_cfg();
+    c.replace_adapters(vec![ad("lsk", b"AATGTACTTCGTTCAGTTACGTATTGCT")]);
+    assert!(c.split_of.is_empty() && c.split_opens.is_empty());
+}
+
+/// Returns `cfg` with an index whose singleton batches are all searched
+/// tiled (`tiled`) or all one pattern at a time, whatever the read.
+fn with_singleton_batches(cfg: &AdapterConfig, tiled: bool) -> AdapterConfig {
+    let mut index = CandidateIndex::for_config(cfg);
+    for batch in &mut index.singleton_batches {
+        batch.tiled_on_plain_read = tiled;
+        batch.tiled_on_ambiguous_read = tiled;
+    }
+    AdapterConfig {
+        candidate_index: std::sync::OnceLock::from(index),
+        ..cfg.clone()
+    }
+}
+
+/// Amplicon reads of the MAB114 kit for the batch comparison: SplitMix
+/// inserts between every forward and reverse primer variant, with the
+/// ambiguity codes resolved, behind a barcode construct or bare, with edits
+/// in the primers, in both orientations, some cut short at an end, some
+/// joined into chimeras and some holding an `N`.
+fn planted_primer_reads(count: usize) -> Vec<Vec<u8>> {
+    use super::catalog::sequence_of;
+    let forward = [
+        "16S_mix_F",
+        "16S_Bor_F",
+        "16S_Chl_F",
+        "16S_Ent_F",
+        "ITS1",
+        "ITS1_Fus",
+        "ITS1_Mal",
+    ];
+    let reverse = ["16S_mix_R", "16S_Bor_R", "16S_Chl_R", "ITS4", "ITS4_Pyt"];
+    let mut rng = Lcg(114);
+    let planted = |name: &str, rng: &mut Lcg| -> Vec<u8> {
+        let mut seq: Vec<u8> = sequence_of(name)
+            .unwrap()
+            .iter()
+            .map(|&code| {
+                let bases = iupac_bases(code).unwrap();
+                bases[rng.below(bases.len())]
+            })
+            .collect();
+        for _ in 0..rng.below(4) {
+            let at = rng.below(seq.len());
+            match rng.below(3) {
+                0 => seq[at] = b"ACGT"[rng.below(4)],
+                1 => {
+                    seq.remove(at);
+                },
+                _ => seq.insert(at, b"ACGT"[rng.below(4)]),
+            }
+        }
+        seq
+    };
+    let amplicon = |seed: u64, rng: &mut Lcg| -> Vec<u8> {
+        let construct: &[u8] = if rng.below(3) == 0 {
+            b""
+        } else {
+            b"GCTTGGGTGTTTAACCGCACCTGGAACTTGTGCCTTCCACCCATATCCGTGTCGCCCTT"
+        };
+        let head = [construct, &planted(forward[rng.below(forward.len())], rng)].concat();
+        let tail = [construct, &planted(reverse[rng.below(reverse.len())], rng)].concat();
+        let insert = splitmix_dna(40_000 + seed, 200 + rng.below(400));
+        let read = [head, insert, reverse_complement(&tail)].concat();
+        if rng.below(2) == 0 {
+            read
+        } else {
+            reverse_complement(&read)
+        }
+    };
+    (0..count)
+        .map(|i| {
+            let mut read = amplicon(2 * i as u64, &mut rng);
+            if rng.below(8) == 0 {
+                read.extend(amplicon(2 * i as u64 + 1, &mut rng));
+            }
+            if rng.below(6) == 0 {
+                let cut = rng.below(25);
+                read.drain(..cut);
+                read.truncate(read.len() - rng.below(25));
+            }
+            if rng.below(7) == 0 {
+                let at = rng.below(read.len());
+                read[at] = b'N';
+            }
+            read
+        })
+        .collect()
+}
+
+/// Some batch takes the one-at-a-time path (`TerminalBatch::tiled`) on a
+/// plain read, under the kit, amplicon, split and ends-only configs.
+#[test]
+fn tiled_singleton_batches_match_the_one_by_one_search() {
+    use super::preset::{Kit, preset};
+    let kit = cfg_with(preset(&[Kit::Mab114]), 0.2, 150, true);
+    let mut amplicon = kit.clone();
+    amplicon.set_amplicon(true);
+    let mut split = kit.clone();
+    split.attach_split(&crate::split::Sheet::preset("mab114").unwrap().primers);
+    let mut ends_only = kit.clone();
+    ends_only.split = false;
+    ends_only.candidate_index = std::sync::OnceLock::new();
+    let reads = planted_primer_reads(300);
+    for (label, c) in [
+        ("kit", kit),
+        ("amplicon", amplicon),
+        ("split", split),
+        ("ends only", ends_only),
+    ] {
+        let index = CandidateIndex::for_config(&c);
+        assert!(
+            index.singleton_batches.iter().any(|b| b.tiled(false)),
+            "{label}: no batch is tiled on a read with an N"
+        );
+        assert!(
+            index.singleton_batches.iter().any(|b| !b.tiled(true)),
+            "{label}: no batch keeps the DNA profile on a plain read"
+        );
+        let one_by_one = with_singleton_batches(&c, false);
+        let tiled = with_singleton_batches(&c, true);
+        let run = |cfg: &AdapterConfig, read: &[u8]| {
+            let mut acted = vec![false; cfg.adapters.len()];
+            adapter_segments_tallied(read, cfg, &mut acted);
+            (adapter_segments_annotated(read, cfg), acted)
+        };
+        let mut trimmed = 0;
+        for (i, read) in reads.iter().enumerate() {
+            let expected = run(&one_by_one, read);
+            assert_eq!(run(&tiled, read), expected, "{label}: read {i}, tiled");
+            assert_eq!(run(&c, read), expected, "{label}: read {i}, default");
+            trimmed += usize::from(expected.0 != [Segment::located(0, read.len(), &[])]);
+        }
+        assert!(
+            trimmed > reads.len() / 2,
+            "{label}: {trimmed} reads trimmed"
+        );
+    }
+}
+
+/// Returns every singleton's whole-pattern hits over the end windows of
+/// `span` of `read` under `cfg`, as `singleton_hits` reports them.
+fn singleton_hit_lists(
+    read: &[u8],
+    cfg: &AdapterConfig,
+    span: (usize, usize),
+) -> Vec<(usize, Vec<(Site, search::Hit)>)> {
+    let mut lists = Vec::new();
+    super::passes::with_engine(read, cfg, |ctx, engine| {
+        super::passes::singleton_hits(ctx, span, cfg.end_size, engine, |adapter_idx, found| {
+            lists.push((adapter_idx, found.to_vec()))
+        });
+    });
+    lists
+}
+
+/// Reads for the hit-level comparison of the tiled and one-by-one terminal
+/// searches under `cfg`: the entries of the set that a singleton batch holds,
+/// planted with edits at the ends and inside, with indels beside
+/// homopolymer runs, with `N` bases, cut to spans shorter than a pattern,
+/// joined into chimeras, and SplitMix reads without a planted entry.
+fn batch_comparison_reads(cfg: &AdapterConfig, random: usize) -> Vec<Vec<u8>> {
+    let index = CandidateIndex::for_config(cfg);
+    let batched: Vec<&[u8]> = index
+        .singleton_batches
+        .iter()
+        .flat_map(|batch| batch.adapter_indices.iter())
+        .map(|&idx| cfg.adapters[idx].seq.as_slice())
+        .collect();
+    assert!(!batched.is_empty());
+    let mut rng = Lcg(0x7469_6c65_6421);
+    let resolved = |seq: &[u8], rng: &mut Lcg| -> Vec<u8> {
+        seq.iter()
+            .map(|&code| {
+                let bases = iupac_bases(code).unwrap();
+                bases[rng.below(bases.len())]
+            })
+            .collect()
+    };
+    let edited = |mut seq: Vec<u8>, rng: &mut Lcg| -> Vec<u8> {
+        for _ in 0..rng.below(4) {
+            let at = rng.below(seq.len());
+            match rng.below(3) {
+                0 => seq[at] = b"ACGT"[rng.below(4)],
+                1 => {
+                    seq.remove(at);
+                },
+                _ => seq.insert(at, b"ACGT"[rng.below(4)]),
+            }
+        }
+        seq
+    };
+    // An insertion or deletion of one base of a homopolymer run, where the
+    // alignment may place the edit anywhere along the run.
+    let homopolymer_indel = |mut seq: Vec<u8>, rng: &mut Lcg| -> Vec<u8> {
+        let runs: Vec<usize> = (1..seq.len()).filter(|&i| seq[i] == seq[i - 1]).collect();
+        let at = if runs.is_empty() {
+            let at = rng.below(seq.len());
+            seq.insert(at, seq[at]);
+            at
+        } else {
+            runs[rng.below(runs.len())]
+        };
+        if rng.below(2) == 0 {
+            seq.insert(at, seq[at]);
+        } else {
+            seq.remove(at);
+        }
+        seq
+    };
+    let planted = |rng: &mut Lcg| -> Vec<u8> {
+        let entry = resolved(batched[rng.below(batched.len())], rng);
+        let entry = match rng.below(3) {
+            0 => entry,
+            1 => edited(entry, rng),
+            _ => homopolymer_indel(entry, rng),
+        };
+        if rng.below(2) == 0 {
+            entry
+        } else {
+            reverse_complement(&entry)
+        }
+    };
+    let flank = |rng: &mut Lcg| -> Vec<u8> {
+        let len = rng.below(40);
+        if rng.below(3) == 0 {
+            vec![b"ACGT"[rng.below(4)]; len]
+        } else {
+            rng.dna(len)
+        }
+    };
+    let mut reads = Vec::new();
+    for i in 0..600u64 {
+        let mut read = [
+            flank(&mut rng),
+            planted(&mut rng),
+            splitmix_dna(70_000 + i, 20 + rng.below(300)),
+            planted(&mut rng),
+            flank(&mut rng),
+        ]
+        .concat();
+        if rng.below(4) == 0 {
+            let at = 150 + rng.below(read.len().saturating_sub(150).max(1));
+            let inner = planted(&mut rng);
+            let at = at.min(read.len());
+            read.splice(at..at, inner);
+        }
+        if rng.below(5) == 0 {
+            let other = [
+                planted(&mut rng),
+                splitmix_dna(80_000 + i, 200),
+                planted(&mut rng),
+            ]
+            .concat();
+            read.extend(other);
+        }
+        if rng.below(4) == 0 {
+            for _ in 0..1 + rng.below(3) {
+                let at = rng.below(read.len());
+                read[at] = b'N';
+            }
+        }
+        reads.push(read);
+    }
+    for _ in 0..200 {
+        let entry = planted(&mut rng);
+        let len = 1 + rng.below(entry.len() + 8);
+        let mut read = [entry, rng.dna(8)].concat();
+        read.truncate(len);
+        reads.push(read);
+    }
+    for i in 0..random as u64 {
+        reads.push(splitmix_dna(90_000 + i, 1 + rng.below(500)));
+    }
+    reads
+}
+
+/// The tiled search of a singleton batch reports, for every adapter it
+/// holds, the hits and sites of the one-by-one search in the same order:
+/// under the `all` and `ont` presets, in an amplicon library, over whole
+/// reads and over spans of every length, on the reads of
+/// `batch_comparison_reads`.
+#[test]
+fn tiled_singleton_batches_report_the_hits_of_the_one_by_one_search() {
+    use super::preset::{Kit, preset};
+    let mut amplicon = cfg_with(preset(&[Kit::Mab114]), 0.2, 150, true);
+    amplicon.set_amplicon(true);
+    for (label, c) in [
+        ("all", cfg_with(preset(Kit::ALL), 0.2, 150, true)),
+        ("ont", cfg_with(preset(Kit::ONT), 0.2, 150, true)),
+        ("mab114", amplicon),
+    ] {
+        let one_by_one = with_singleton_batches(&c, false);
+        let tiled = with_singleton_batches(&c, true);
+        let reads = batch_comparison_reads(&c, 3000);
+        let batched = CandidateIndex::for_config(&c).singleton_batch_of;
+        let mut rng = Lcg(0x7370_616e);
+        let (mut spans, mut hits) = (0, 0);
+        for (i, read) in reads.iter().enumerate() {
+            let n = read.len();
+            let mut read_spans = vec![(0, n)];
+            for _ in 0..2 {
+                let start = rng.below(n + 1);
+                let end = start + rng.below(n - start + 1);
+                read_spans.push((start, end));
+            }
+            for span in read_spans {
+                if span.0 == span.1 {
+                    continue;
+                }
+                let expected = singleton_hit_lists(read, &one_by_one, span);
+                assert_eq!(
+                    singleton_hit_lists(read, &tiled, span),
+                    expected,
+                    "{label}: read {i}, span {span:?}"
+                );
+                spans += 1;
+                hits += expected
+                    .iter()
+                    .filter(|(adapter_idx, _)| batched[*adapter_idx].is_some())
+                    .map(|(_, found)| found.len())
+                    .sum::<usize>();
+            }
+        }
+        assert!(
+            spans > reads.len() && hits > reads.len(),
+            "{label}: {hits} hits of batched entries"
+        );
+    }
 }

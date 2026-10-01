@@ -181,6 +181,21 @@ pub fn new_searcher_fwd() -> AmbiguousSearcher {
     Searcher::<Iupac>::new_fwd()
 }
 
+/// Returns a fresh DNA-profile searcher over the forward strand only, for
+/// `for_each_hit_on_strand`.
+pub fn new_plain_searcher_fwd() -> PlainSearcher {
+    Searcher::<Dna>::new_fwd()
+}
+
+/// Returns a fresh IUPAC-profile searcher over the forward strand only that
+/// also reports partial matches hanging off either text end, each
+/// overhanging base costing `alpha` (0 to 1). Used where the caller already
+/// orients the pattern for the strand it searches, so no reverse-complement
+/// search is needed; see `new_overhang_searcher`.
+pub fn new_overhang_searcher_fwd(alpha: f32) -> AmbiguousSearcher {
+    Searcher::<Iupac>::new_fwd_with_overhang(alpha.clamp(0.0, 1.0))
+}
+
 /// Encodes equal-length patterns of 1 to `MAX_TILED_PATTERN_LEN` bases for
 /// `encoded_pattern_hits`. The encoding holds the bit profiles of every
 /// pattern on both strands.
@@ -271,6 +286,35 @@ pub fn for_each_hit<P: Profile, T: RcSearchAble + ?Sized>(
     }
 }
 
+/// Calls `accept` with every match of `pattern` on one strand of `text`
+/// within `k` edits: the forward strand, or the reverse strand when `rc`.
+/// `searcher` searches the forward strand only (`new_plain_searcher_fwd`,
+/// `new_searcher_fwd`). The hits of the two strands, forward first, are the
+/// hits `for_each_hit` reports with a two-strand searcher, which searches the
+/// reverse strand as done here: the complemented pattern over the reversed
+/// text, with each span mapped back onto the text.
+pub fn for_each_hit_on_strand<P: Profile>(
+    searcher: &mut Searcher<P>,
+    pattern: &[u8],
+    text: &Strands<'_>,
+    rc: bool,
+    k: usize,
+    mut accept: impl FnMut(Hit),
+) {
+    if !rc {
+        for m in searcher.search(pattern, text.forward, k) {
+            accept(Hit::from_match(&m, pattern.len()));
+        }
+        return;
+    }
+    let n = text.forward.len();
+    for mut m in searcher.search(&P::complement(pattern), text.reversed, k) {
+        m.strand = sassy::Strand::Rc;
+        (m.text_start, m.text_end) = (n - m.text_end, n - m.text_start);
+        accept(Hit::from_match(&m, pattern.len()));
+    }
+}
+
 /// Calls `accept` with the text index and every match of `pattern` in each of
 /// `texts` within `k` edits. The texts share one pattern encoding and run in
 /// parallel SIMD lanes, so two end windows cost about one search instead of
@@ -285,6 +329,48 @@ pub fn for_each_hit_in_texts<P: Profile, T: RcSearchAble>(
     for m in searcher.search_texts(pattern, texts, k) {
         accept(m.text_idx, Hit::from_match(&m, pattern.len()));
     }
+}
+
+/// Calls `accept` with the pattern index and every match of each of
+/// `patterns`, which share one length, in `text` within `k` edits. The
+/// patterns run in parallel SIMD lanes over the one text, so a group costs
+/// about one search instead of one per pattern. The text is scanned whole in
+/// every lane, where the single-pattern search cuts it into one chunk per
+/// lane; the two scans are the same over a text of one block, which
+/// `fits_one_block` tells.
+pub fn for_each_hit_in_patterns<P: Profile>(
+    searcher: &mut Searcher<P>,
+    patterns: &[&[u8]],
+    text: &[u8],
+    k: usize,
+    mut accept: impl FnMut(usize, Hit),
+) {
+    let Some(first) = patterns.first() else {
+        return;
+    };
+    let len = first.len();
+    for m in searcher.search_patterns(patterns, text, k) {
+        accept(m.pattern_idx, Hit::from_match(&m, len));
+    }
+}
+
+/// Bases of text the searcher scans as one block.
+const SCAN_BLOCK: usize = 64;
+
+/// Returns whether a search of a `pattern_len`-base pattern over `text_len`
+/// bases of text stays inside one scan block of the searcher, with or
+/// without overhang alignment: the text and the longest overhang past its
+/// end, which is at most the pattern, fit the block.
+///
+/// This relies on how sassy 0.2.6 (`Searcher::search_prep`, the exact
+/// version `Cargo.toml` pins) lays a text out over its SIMD lanes: a
+/// single-pattern search cuts one text, with its overhang padding, into one
+/// chunk of whole 64-base blocks per lane, overlapping by the blocks of one
+/// alignment, while a multi-pattern search scans the whole text in every
+/// lane. A padded text of one block leaves a single chunk that starts at
+/// the text start, so both searches scan the same columns.
+pub fn fits_one_block(pattern_len: usize, text_len: usize) -> bool {
+    pattern_len + text_len < SCAN_BLOCK
 }
 
 /// Returns all matches of `pattern` in `text` within `k` edits, as text spans.

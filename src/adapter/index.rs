@@ -11,7 +11,7 @@ pub(super) const MAX_SEED_EXPANSIONS: usize = 256;
 
 /// Exact-seed index over the adapter set. Partition seeds, looked up through a
 /// prefix table, bound the interior search to candidate windows, and
-/// equal-length barcode entries are grouped into SIMD batches for the terminal
+/// equal-length entries are grouped into SIMD batches for the terminal
 /// search.
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateIndex {
@@ -26,11 +26,21 @@ pub(crate) struct CandidateIndex {
     /// `MAX_SEED_EXPANSIONS`) or whose seeds open windows over more than
     /// `MAX_WINDOW_COVERAGE` of a read.
     pub(super) unfiltered: Vec<bool>,
-    /// Equal-length adapter groups searched together over the end windows.
+    /// Equal-length barcode groups searched together over the end windows,
+    /// under the panel gate (`search_batched`).
     pub(super) terminal_batches: Vec<TerminalBatch>,
-    /// Adapters searched one pattern at a time over the end windows: those of
-    /// searchable length that no batch covers.
+    /// Adapters searched over the end windows by `search_singletons`: those
+    /// of searchable length that no barcode batch covers.
     pub(super) singletons: Vec<bool>,
+    /// Groups of `singletons` entries that share a length and a terminal
+    /// budget, whatever their role. `search_singletons` may search a group
+    /// with one tiled search in place of one search per entry
+    /// (`TerminalBatch::tiled`); see `passes::singleton_hits` for how far the
+    /// two agree.
+    pub(super) singleton_batches: Vec<TerminalBatch>,
+    /// Per-adapter index into `singleton_batches`, or `None` for an entry in
+    /// no such group.
+    pub(super) singleton_batch_of: Vec<Option<usize>>,
     /// Table over every `END_SEED_LEN`-mer of the entries eligible for
     /// partial matching, both strands; `None` when there are none. Gates the
     /// overhang search of an end to the entries with an exact seed in it.
@@ -56,18 +66,21 @@ pub(crate) struct CandidateIndex {
     /// while a junction holds it beside the other end's primer or a barcode.
     /// An amplicon-only preset gives it the adapter role instead. Two such
     /// hits adjacent in the orientation of a junction also split the read at
-    /// `Budget::k_pair`; see `search_pairs`.
+    /// `Budget::k_pair`; see `search_pairs`. A split sheet primer
+    /// (`AdapterConfig::split_of`) is one in every role.
     pub(super) paired: Vec<bool>,
-    /// Per-adapter, for a `paired` entry: whether its sequence as given reads
-    /// into the insert, as its primer is synthesized (`marker_primer_opens`).
-    /// A hit on the other strand reads out of the insert.
-    pub(super) opens: Vec<bool>,
+    /// Per-adapter, for a `paired` entry: the strands on which its hits read
+    /// into the insert, as its primer is synthesized, and out of it
+    /// (`marker_primer_opens`, or `AdapterConfig::split_opens` for a split
+    /// sheet primer). `Reversed` for every other entry.
+    pub(super) opens: Vec<Opens>,
     /// Per-adapter, for a `paired` entry of an amplicon library
-    /// (`AdapterConfig::amplicon`): the whole marker primer it matches. An
-    /// interior hit of the entry splits the read by itself where that primer
-    /// aligns whole over it, within its own interior budget; see
-    /// `search_interior`. `None` for every other entry and outside an
-    /// amplicon library.
+    /// (`AdapterConfig::amplicon`) that is no split sheet primer: the whole
+    /// marker primer it matches. An interior hit of the entry splits the read
+    /// by itself where that primer aligns whole over it, within its own
+    /// interior budget; see `search_interior`. `None` for every other entry,
+    /// for a split sheet primer, which splits only at a junction pair, and
+    /// outside an amplicon library.
     pub(super) whole_primers: Vec<Option<WholePrimer>>,
 }
 
@@ -112,7 +125,9 @@ pub(crate) fn marker_primer_opens(seq: &[u8], error_rate: f64) -> Option<bool> {
 /// Returns the `catalog::MARKER_PRIMERS` entry that `seq` matches
 /// (`matches_marker_primer`) and whether `seq` reads as that primer is
 /// synthesized (`marker_primer_opens`), or `None` when `seq` is no marker
-/// primer. The cheapest alignment decides.
+/// primer. The cheapest alignment decides; among primers that align at the
+/// same cost, as the variants of one primer mix do, the one nearest `seq` in
+/// length, and then the first listed.
 pub(crate) fn marker_primer_of(seq: &[u8], error_rate: f64) -> Option<(&'static [u8], bool)> {
     let seq = seq.to_ascii_uppercase();
     let mut searcher = new_ambiguous_searcher();
@@ -147,7 +162,7 @@ pub(crate) fn marker_primer_of(seq: &[u8], error_rate: f64) -> Option<(&'static 
             };
             best.map(|hit| (primer, hit))
         })
-        .min_by_key(|(_, hit)| hit.cost)
+        .min_by_key(|(primer, hit)| (hit.cost, primer.len().abs_diff(seq.len())))
         .map(|(primer, hit)| (primer, !hit.rc))
 }
 
@@ -156,7 +171,7 @@ pub(crate) fn marker_primer_of(seq: &[u8], error_rate: f64) -> Option<(&'static 
 /// read by itself.
 #[derive(Debug, Clone)]
 pub(super) struct WholePrimer {
-    /// The `catalog::MARKER_PRIMERS` entry in the orientation of the entry:
+    /// The `catalog::MARKER_PRIMERS` entry in the orientation of the entry,
     /// reverse complemented when the entry reads out of the insert.
     pub(super) seq: Vec<u8>,
     /// The interior edit budget of `seq` alone, per read-length class; see
@@ -165,33 +180,31 @@ pub(super) struct WholePrimer {
 }
 
 /// Returns `seq` with the ambiguity codes of the marker-gene primer it
-/// matches (`matches_marker_primer`) at the bases they align to, or `seq`
-/// unchanged when it matches none. A consensus assembled from the reads of a
-/// degenerate primer holds one variant at each ambiguous position, and every
-/// other variant would cost an edit per position.
+/// matches (`marker_primer_of`) at the bases they align to, or `seq`
+/// unchanged when it matches none. The primer is aligned in the orientation
+/// `seq` reads it. A consensus assembled from the reads of a degenerate
+/// primer holds one variant at each ambiguous position, and every other
+/// variant would cost an edit per position.
 pub(crate) fn with_marker_codes(seq: &[u8], error_rate: f64) -> Vec<u8> {
     let mut out = seq.to_ascii_uppercase();
-    if !matches_marker_primer(&out, error_rate) {
+    let Some((primer, opens)) = marker_primer_of(&out, error_rate) else {
         return out;
-    }
-    let mut searcher = search::new_searcher_fwd();
-    let mut best: Option<(sassy::Match, Vec<u8>)> = None;
-    for primer in super::catalog::MARKER_PRIMERS
-        .iter()
-        .flat_map(|&primer| [primer.to_vec(), reverse_complement(primer)])
-    {
-        let (pattern, text) = if out.len() <= primer.len() {
-            (&out, &primer)
-        } else {
-            (&primer, &out)
-        };
-        for m in searcher.search(pattern, text, edit_budget(error_rate, pattern.len())) {
-            if best.as_ref().is_none_or(|(b, _)| m.cost < b.cost) {
-                best = Some((m, primer.clone()));
-            }
-        }
-    }
-    let Some((m, primer)) = best else {
+    };
+    let primer = if opens {
+        primer.to_vec()
+    } else {
+        reverse_complement(primer)
+    };
+    let (pattern, text) = if out.len() <= primer.len() {
+        (&out, &primer)
+    } else {
+        (&primer, &out)
+    };
+    let Some(m) = search::new_searcher_fwd()
+        .search(pattern, text, edit_budget(error_rate, pattern.len()))
+        .into_iter()
+        .min_by_key(|m| m.cost)
+    else {
         return out;
     };
     let seq_is_pattern = out.len() <= primer.len();
@@ -214,6 +227,48 @@ pub(crate) fn with_marker_codes(seq: &[u8], error_rate: f64) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Returns the anchored edit budget (`Budget::k_anchor`) of each split sheet
+/// primer of `primers` at `error_rate`. The set-wide anchored bound covers
+/// the split entries alone, and their budgets depend only on their sequences
+/// up to reverse complement, so every adapter set with these primers
+/// attached (`AdapterConfig::attach_split`) gives its split entries these
+/// budgets.
+pub(crate) fn anchored_budgets(primers: &[&[u8]], error_rate: f64) -> Vec<usize> {
+    let adapters: Vec<Adapter> = primers
+        .iter()
+        .map(|seq| Adapter {
+            name: String::new(),
+            seq: seq.to_vec(),
+            role: Role::Primer,
+        })
+        .collect();
+    let split = vec![Some(Opens::AsGiven); adapters.len()];
+    CandidateIndex::with_split(&adapters, error_rate, 0, false, &split)
+        .budgets
+        .iter()
+        .map(|budget| budget.k_anchor)
+        .collect()
+}
+
+/// Returns the expected chance whole hits per read of the split sheet
+/// primers `primers` within their anchored budgets (`anchored_budgets`) over
+/// `ANCHORED_POSITIONS`, under the null model of `chance_cumulative`, each
+/// distinct primer counted as a sequence of its own.
+#[cfg(test)]
+pub(crate) fn anchored_chance_per_read(primers: &[&[u8]], error_rate: f64) -> f64 {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let mut total = 0.0;
+    for (seq, k) in primers.iter().zip(anchored_budgets(primers, error_rate)) {
+        let forward = seq.to_ascii_uppercase();
+        let canonical = reverse_complement(&forward).min(forward);
+        if !seen.contains(&canonical) {
+            seen.push(canonical);
+            total += chance_cumulative(seq, k)[k] * ANCHORED_POSITIONS;
+        }
+    }
+    total
 }
 
 /// Returns whether `adapter` is a UMI pattern (`catalog::UMIS`, either
@@ -261,17 +316,205 @@ pub(super) struct TerminalBatch {
     /// The largest terminal edit budget of the batch; a hit above the budget
     /// of its own entry is discarded.
     pub(super) k_end: usize,
+    /// Whether `search_singletons` searches the batch tiled on a read of
+    /// plain ACGT bases; see `tiled`. Read only for a
+    /// `CandidateIndex::singleton_batches` entry.
+    pub(super) tiled_on_plain_read: bool,
+    /// Whether `search_singletons` searches the batch tiled on a read with
+    /// bases outside ACGT.
+    pub(super) tiled_on_ambiguous_read: bool,
+}
+
+/// Relative CPU cost of the whole-pattern search of one entry over the end
+/// windows on the DNA profile, which takes a plain pattern on a plain read.
+const DNA_SEARCH_COST: usize = 2;
+
+/// Relative CPU cost of that search on the IUPAC profile, which every other
+/// pattern and read take.
+const IUPAC_SEARCH_COST: usize = 3;
+
+/// Relative CPU cost of the tiled search of one batch over the end windows.
+/// It scans every window base once for the whole batch, so it costs about
+/// the same for a few members as for many.
+const TILED_SEARCH_COST: usize = 14;
+
+impl TerminalBatch {
+    /// Builds the batch of the entries at `adapter_indices`, which share the
+    /// length `len`.
+    fn new(
+        adapters: &[Adapter],
+        budgets: &[Budget],
+        adapter_indices: Vec<usize>,
+        len: usize,
+    ) -> Self {
+        let patterns: Vec<Vec<u8>> = adapter_indices
+            .iter()
+            .map(|&idx| adapters[idx].seq.clone())
+            .collect();
+        let members = patterns.len();
+        let plain = patterns.iter().filter(|p| is_plain_acgt(p)).count();
+        let one_by_one_on_plain_read =
+            plain * DNA_SEARCH_COST + (members - plain) * IUPAC_SEARCH_COST;
+        TerminalBatch {
+            k_end: adapter_indices
+                .iter()
+                .map(|&idx| budgets[idx].k_end)
+                .max()
+                .unwrap_or(0),
+            tiled_on_plain_read: one_by_one_on_plain_read >= TILED_SEARCH_COST,
+            tiled_on_ambiguous_read: members * IUPAC_SEARCH_COST >= TILED_SEARCH_COST,
+            adapter_indices,
+            encoded: encode_patterns(&patterns),
+            len,
+        }
+    }
+
+    /// Whether `search_singletons` searches the batch with one tiled search
+    /// on a read that is plain ACGT (`plain_read`) or not: the batch is
+    /// tiled where the single-pattern searches of its members, each on the
+    /// profile it would take alone, the DNA profile for a plain pattern on a
+    /// plain read and the IUPAC profile otherwise, cost at least as much
+    /// together as the tiled search. A small batch of plain patterns thus
+    /// keeps the DNA profile on a plain read.
+    pub(super) fn tiled(&self, plain_read: bool) -> bool {
+        if plain_read {
+            self.tiled_on_plain_read
+        } else {
+            self.tiled_on_ambiguous_read
+        }
+    }
+}
+
+/// The entries each set-wide budget bound covers; see `set_budgets`.
+struct BudgetClasses<'a> {
+    /// Per-adapter: long enough to be searched at all.
+    searchable: &'a [bool],
+    /// Per-adapter: the number of read-length classes in which it splits.
+    split_classes: &'a [usize],
+    /// Per-adapter: `CandidateIndex::paired`.
+    paired: &'a [bool],
+    /// Per-adapter: a searchable split sheet primer.
+    split: &'a [bool],
+}
+
+/// Returns the edit budgets of `adapters`: each pattern's own
+/// (`Budget::new`), bounded by the set-wide terminal, anchored, interior and
+/// pair chance bounds over the chance families of `sites`
+/// (`family_budgets`, `pair_budgets`).
+fn set_budgets(
+    adapters: &[Adapter],
+    error_rate: f64,
+    end_size: usize,
+    classes: &BudgetClasses<'_>,
+    sites: &[Option<usize>],
+) -> Vec<Budget> {
+    let mut budgets: Vec<Budget> = adapters
+        .iter()
+        .map(|adapter| Budget::new(&adapter.seq, error_rate, end_size))
+        .collect();
+    // A hit anchored at the read end or at an accepted hit starts within
+    // `FLANK_SLACK` of it; a hit anywhere in the zone may start at any of its
+    // `end_size + 1` positions. Each count covers both strands and both ends.
+    let caps: Vec<usize> = budgets.iter().map(|b| b.k_end).collect();
+    let near = family_budgets(
+        adapters,
+        classes.searchable,
+        sites,
+        &caps,
+        4.0 * (FLANK_SLACK + 1) as f64,
+        TERMINAL_CHANCE_HITS_PER_READ,
+    );
+    let far = family_budgets(
+        adapters,
+        classes.searchable,
+        sites,
+        &near,
+        4.0 * (end_size + 1) as f64,
+        TERMINAL_CHANCE_HITS_PER_READ,
+    );
+    for ((budget, k_end), k_far) in budgets.iter_mut().zip(near).zip(far) {
+        budget.k_end = k_end;
+        budget.k_far = k_far;
+    }
+    // A whole split primer anchored at a trim boundary starts at one of
+    // `ANCHORED_POSITIONS` per read, and the split entries share the terminal
+    // chance target over them.
+    let caps: Vec<usize> = budgets.iter().map(|b| b.k_anchor).collect();
+    let anchored = family_budgets(
+        adapters,
+        classes.split,
+        sites,
+        &caps,
+        ANCHORED_POSITIONS,
+        TERMINAL_CHANCE_HITS_PER_READ,
+    );
+    for (budget, k_anchor) in budgets.iter_mut().zip(anchored) {
+        budget.k_anchor = k_anchor;
+    }
+    // Interior budgets do not increase with the read-length class.
+    for class in 0..INTERIOR_CLASSES {
+        let caps: Vec<usize> = budgets.iter().map(|b| b.k_mid[class]).collect();
+        let splitting_here: Vec<bool> = classes.split_classes.iter().map(|&c| c > class).collect();
+        let edits = family_budgets(
+            adapters,
+            &splitting_here,
+            sites,
+            &caps,
+            interior_positions(class),
+            INTERIOR_CHANCE_HITS_PER_READ,
+        );
+        for (budget, k) in budgets.iter_mut().zip(edits) {
+            let previous = class.checked_sub(1).map_or(usize::MAX, |c| budget.k_mid[c]);
+            budget.k_mid[class] = k.min(previous);
+        }
+    }
+    // Pair budgets are bounded per read-length class over the pairs of the
+    // set, and do not increase with the class.
+    let caps: Vec<usize> = budgets.iter().map(|b| b.k_end).collect();
+    for class in 0..INTERIOR_CLASSES {
+        let edits = pair_budgets(
+            adapters,
+            classes.paired,
+            sites,
+            &caps,
+            interior_positions(class),
+            INTERIOR_CHANCE_HITS_PER_READ,
+        );
+        for ((budget, k), &paired) in budgets.iter_mut().zip(edits).zip(classes.paired) {
+            let previous = class
+                .checked_sub(1)
+                .map_or(usize::MAX, |c| budget.k_pair[c]);
+            budget.k_pair[class] = if paired { k.min(previous) } else { 0 };
+        }
+    }
+    budgets
 }
 
 impl CandidateIndex {
-    /// Builds the index for `adapters` searched over end zones of `end_size`
-    /// bases; interior seeds are built only when `include_interior`, and
-    /// only for roles that split.
+    /// `with_split` for a set without split sheet primers.
+    #[cfg(test)]
     pub(super) fn new(
         adapters: &[Adapter],
         error_rate: f64,
         end_size: usize,
         include_interior: bool,
+    ) -> Self {
+        Self::with_split(adapters, error_rate, end_size, include_interior, &[])
+    }
+
+    /// Builds the index for `adapters` searched over end zones of `end_size`
+    /// bases; interior seeds are built only when `include_interior`, and
+    /// only for roles that split. `split[i]` is `Some(opens)` for an entry
+    /// that is a split sheet primer, where `opens` gives the strands on which
+    /// its hits read into the insert. A split entry is `paired` whatever its
+    /// role, with that sense in place of `marker_primer_opens`. An empty
+    /// `split` marks no entry.
+    pub(super) fn with_split(
+        adapters: &[Adapter],
+        error_rate: f64,
+        end_size: usize,
+        include_interior: bool,
+        split: &[Option<Opens>],
     ) -> Self {
         // A pattern below `MIN_PATTERN_LEN` takes part in no search: it gets
         // no seeds, no batch and no singleton search.
@@ -279,35 +522,35 @@ impl CandidateIndex {
             .iter()
             .map(|adapter| adapter.seq.len() >= MIN_PATTERN_LEN)
             .collect();
-        let mut budgets: Vec<Budget> = adapters
+        // The marker primer each searchable entry matches. The entries of one
+        // marker-primer site form one chance family; a UMI, whose degenerate
+        // bases align to a primer, is no variant of it.
+        let marker_hits: Vec<Option<(&'static [u8], bool)>> = adapters
             .iter()
-            .map(|adapter| Budget::new(&adapter.seq, error_rate, end_size))
+            .zip(&searchable)
+            .map(|(adapter, &searchable)| {
+                searchable
+                    .then(|| marker_primer_of(&adapter.seq, error_rate))
+                    .flatten()
+            })
             .collect();
-        // A hit anchored at the read end or at an accepted hit starts within
-        // `FLANK_SLACK` of it; a hit anywhere in the zone may start at any of
-        // its `end_size + 1` positions. Each count covers both strands and
-        // both ends.
-        let caps: Vec<usize> = budgets.iter().map(|b| b.k_end).collect();
-        let near = family_budgets(
-            adapters,
-            &searchable,
-            &caps,
-            4.0 * (FLANK_SLACK + 1) as f64,
-            TERMINAL_CHANCE_HITS_PER_READ,
-        );
-        let far = family_budgets(
-            adapters,
-            &searchable,
-            &near,
-            4.0 * (end_size + 1) as f64,
-            TERMINAL_CHANCE_HITS_PER_READ,
-        );
-        for ((budget, k_end), k_far) in budgets.iter_mut().zip(near).zip(far) {
-            budget.k_end = k_end;
-            budget.k_far = k_far;
-        }
+        // Only a primer-role entry or a split primer joins a site family,
+        // the same check `senses` below uses to pair; a barcode or adapter
+        // whose sequence falls within a marker primer's budget by chance
+        // keeps its own family.
+        let sites: Vec<Option<usize>> = adapters
+            .iter()
+            .zip(&marker_hits)
+            .enumerate()
+            .map(|(adapter_idx, (adapter, hit))| {
+                let joins_family = adapter.role == Role::Primer
+                    || split.get(adapter_idx).copied().flatten().is_some();
+                hit.filter(|_| joins_family && !is_umi(adapter))
+                    .map(|(primer, _)| super::catalog::marker_site(primer))
+            })
+            .collect();
         // The interior chance bound covers the splitting entries, per
-        // read-length class; budgets do not increase with the class.
+        // read-length class.
         let flanked = adapters.iter().any(bounds_barcode);
         let split_classes: Vec<usize> = adapters
             .iter()
@@ -331,49 +574,54 @@ impl CandidateIndex {
             })
             .collect();
         let splitting: Vec<bool> = split_classes.iter().map(|&c| c > 0).collect();
-        for class in 0..INTERIOR_CLASSES {
-            let caps: Vec<usize> = budgets.iter().map(|b| b.k_mid[class]).collect();
-            let splitting_here: Vec<bool> = split_classes.iter().map(|&c| c > class).collect();
-            let edits = family_budgets(
-                adapters,
-                &splitting_here,
-                &caps,
-                interior_positions(class),
-                INTERIOR_CHANCE_HITS_PER_READ,
-            );
-            for (budget, k) in budgets.iter_mut().zip(edits) {
-                let previous = class.checked_sub(1).map_or(usize::MAX, |c| budget.k_mid[c]);
-                budget.k_mid[class] = k.min(previous);
-            }
-        }
-        // A marker primer pairs with a partner beside it under the pair
-        // budget, bounded per read-length class over the pairs of the set.
-        let senses: Vec<Option<bool>> = adapters
+        // A marker primer or a split primer pairs with a partner beside it
+        // under the pair budget.
+        let senses: Vec<Option<Opens>> = adapters
             .iter()
             .zip(&searchable)
-            .map(|(adapter, &searchable)| {
-                if searchable && adapter.role == Role::Primer {
-                    marker_primer_opens(&adapter.seq, error_rate)
+            .enumerate()
+            .map(|(adapter_idx, (adapter, &searchable))| {
+                if !searchable {
+                    None
+                } else if let Some(opens) = split.get(adapter_idx).copied().flatten() {
+                    Some(opens)
+                } else if adapter.role == Role::Primer {
+                    marker_hits[adapter_idx].map(|(_, opens)| Opens::from_given(opens))
                 } else {
                     None
                 }
             })
             .collect();
         let paired: Vec<bool> = senses.iter().map(Option::is_some).collect();
-        let caps: Vec<usize> = budgets.iter().map(|b| b.k_end).collect();
-        for class in 0..INTERIOR_CLASSES {
-            let edits = pair_budgets(
+        let split_entries: Vec<bool> = searchable
+            .iter()
+            .enumerate()
+            .map(|(adapter_idx, &searchable)| {
+                searchable && split.get(adapter_idx).copied().flatten().is_some()
+            })
+            .collect();
+        let classes = BudgetClasses {
+            searchable: &searchable,
+            split_classes: &split_classes,
+            paired: &paired,
+            split: &split_entries,
+        };
+        let mut budgets = set_budgets(adapters, error_rate, end_size, &classes, &sites);
+        // A site's primers keep no more than the budgets they get with each
+        // variant counted as a sequence of its own, which bounds the chance
+        // hits of the site's own variants together.
+        if sites.iter().any(Option::is_some) {
+            let separate = set_budgets(
                 adapters,
-                &paired,
-                &caps,
-                interior_positions(class),
-                INTERIOR_CHANCE_HITS_PER_READ,
+                error_rate,
+                end_size,
+                &classes,
+                &vec![None; adapters.len()],
             );
-            for ((budget, k), &paired) in budgets.iter_mut().zip(edits).zip(&paired) {
-                let previous = class
-                    .checked_sub(1)
-                    .map_or(usize::MAX, |c| budget.k_pair[c]);
-                budget.k_pair[class] = if paired { k.min(previous) } else { 0 };
+            for ((budget, separate), site) in budgets.iter_mut().zip(&separate).zip(&sites) {
+                if site.is_some() {
+                    *budget = budget.stricter(separate);
+                }
             }
         }
         let plain: Vec<bool> = adapters
@@ -412,11 +660,10 @@ impl CandidateIndex {
             None
         };
 
-        // Sassy packs equal-length patterns across SIMD lanes, one pattern per
-        // 64-bit limb. Only barcodes are batched: the barcode sets are where
-        // equal lengths occur in numbers. Singletons stay on the
-        // ordinary search path: a batch of one has no pattern-level
-        // parallelism and is slower over these terminal windows.
+        // Sassy's tiled search packs equal-length patterns across SIMD lanes.
+        // The barcodes of one length form a batch under the panel gate. A
+        // group of one stays on the single-pattern search: it has no
+        // pattern-level parallelism.
         let mut by_len: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (adapter_idx, adapter) in adapters.iter().enumerate() {
             let len = adapter.seq.len();
@@ -431,23 +678,38 @@ impl CandidateIndex {
         let mut singletons = searchable.clone();
         for (len, adapter_indices) in by_len {
             if adapter_indices.len() >= 2 {
-                let patterns: Vec<Vec<u8>> = adapter_indices
-                    .iter()
-                    .map(|&idx| adapters[idx].seq.clone())
-                    .collect();
                 for &adapter_idx in &adapter_indices {
                     singletons[adapter_idx] = false;
                 }
-                terminal_batches.push(TerminalBatch {
-                    k_end: adapter_indices
-                        .iter()
-                        .map(|&idx| budgets[idx].k_end)
-                        .max()
-                        .unwrap_or(0),
+                terminal_batches.push(TerminalBatch::new(adapters, &budgets, adapter_indices, len));
+            }
+        }
+        // The remaining entries group by length and terminal budget, which
+        // fix the end windows and the search budget, so the tiled search of a
+        // group covers the texts and the budget of each member's own search.
+        let mut by_window: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+        for (adapter_idx, adapter) in adapters.iter().enumerate() {
+            let len = adapter.seq.len();
+            if singletons[adapter_idx] && len <= MAX_TILED_PATTERN_LEN {
+                by_window
+                    .entry((len, budgets[adapter_idx].k_end))
+                    .or_default()
+                    .push(adapter_idx);
+            }
+        }
+        let mut singleton_batches = Vec::new();
+        let mut singleton_batch_of = vec![None; adapters.len()];
+        for ((len, _), adapter_indices) in by_window {
+            if adapter_indices.len() >= 2 {
+                for &adapter_idx in &adapter_indices {
+                    singleton_batch_of[adapter_idx] = Some(singleton_batches.len());
+                }
+                singleton_batches.push(TerminalBatch::new(
+                    adapters,
+                    &budgets,
                     adapter_indices,
-                    encoded: encode_patterns(&patterns),
                     len,
-                });
+                ));
             }
         }
 
@@ -489,35 +751,55 @@ impl CandidateIndex {
             unfiltered,
             terminal_batches,
             singletons,
+            singleton_batches,
+            singleton_batch_of,
             end_seeds,
             end_reach,
             panel_gates: adapters.iter().map(bounds_barcode).collect(),
             split_classes,
-            opens: senses.iter().map(|sense| sense == &Some(true)).collect(),
+            opens: senses
+                .iter()
+                .map(|sense| sense.unwrap_or(Opens::Reversed))
+                .collect(),
             whole_primers: vec![None; adapters.len()],
             paired,
         }
     }
 
-    /// Builds the index for the adapter set and search settings of `cfg`,
-    /// with the whole marker primers of its `paired` entries when `cfg` is
-    /// an amplicon library.
+    /// Builds the index for the adapter set, split sheet primers and search
+    /// settings of `cfg`, with the whole marker primers of its `paired`
+    /// entries when `cfg` is an amplicon library. A split entry gets no whole
+    /// primer.
     pub(super) fn for_config(cfg: &AdapterConfig) -> Self {
-        let mut index = Self::new(&cfg.adapters, cfg.error_rate, cfg.end_size, cfg.split);
+        let split: Vec<Option<Opens>> = cfg
+            .split_of
+            .iter()
+            .zip(&cfg.split_opens)
+            .map(|(primer, &opens)| primer.map(|_| opens))
+            .collect();
+        let mut index = Self::with_split(
+            &cfg.adapters,
+            cfg.error_rate,
+            cfg.end_size,
+            cfg.split,
+            &split,
+        );
         if cfg.amplicon {
+            let whole = |seq: Vec<u8>| {
+                let k_mid = Budget::new(&seq, cfg.error_rate, cfg.end_size).k_mid;
+                WholePrimer { seq, k_mid }
+            };
             for (adapter_idx, adapter) in cfg.adapters.iter().enumerate() {
-                if !index.paired[adapter_idx] {
+                if !index.paired[adapter_idx] || cfg.is_split(adapter_idx) {
                     continue;
                 }
                 index.whole_primers[adapter_idx] = marker_primer_of(&adapter.seq, cfg.error_rate)
                     .map(|(primer, opens)| {
-                        let seq = if opens {
+                        whole(if opens {
                             primer.to_vec()
                         } else {
                             reverse_complement(primer)
-                        };
-                        let k_mid = Budget::new(&seq, cfg.error_rate, cfg.end_size).k_mid;
-                        WholePrimer { seq, k_mid }
+                        })
                     });
             }
         }

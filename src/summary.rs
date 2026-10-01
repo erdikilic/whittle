@@ -11,6 +11,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::config::{Config, FastqTags};
+use crate::split::{SplitStats, Splitter};
 use crate::trim::QualityMethod;
 use crate::workflow::Stats;
 
@@ -36,6 +37,9 @@ pub struct Summary {
     bases: Bases,
     segments_dropped: SegmentsDropped,
     warnings: Warnings,
+    /// `--split-by` per-key counts; absent without `--split-by`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    split: Option<SplitSummary>,
 }
 
 /// The run's resolved settings, after defaults and clamping. Reading these back,
@@ -162,6 +166,89 @@ struct Warnings {
     barcode_tag_unverified_reads: u64,
 }
 
+/// The `split` object: `--split-by`'s resolved settings and per-key counts.
+/// Every sheet key appears in `keys`, in `Keys::names` order, zero counts
+/// included.
+#[derive(Debug, Serialize)]
+struct SplitSummary {
+    /// The `--split-by` values as given, in order.
+    spec: Vec<String>,
+    /// `either`, `both`, `fwd`, or `rev`.
+    require: &'static str,
+    /// `trim` or `retain`.
+    action: &'static str,
+    lead: usize,
+    keys: Vec<KeySummary>,
+    unassigned: UnassignedSummary,
+    /// Segments with two or more keys tied for cheapest, or none beating the
+    /// runner-up by `lead`.
+    ambiguous: u64,
+    /// Unassigned or ambiguous segments dropped by `--split-discard` rather
+    /// than written.
+    discarded: u64,
+}
+
+/// One sheet key's counts: read and base totals, the end and strand
+/// breakdown of its assigned segments.
+#[derive(Debug, Serialize)]
+struct KeySummary {
+    key: String,
+    reads: u64,
+    bases: u64,
+    both_ends: u64,
+    five_only: u64,
+    three_only: u64,
+    plus: u64,
+    minus: u64,
+}
+
+/// Unassigned segments, by reason.
+#[derive(Debug, Serialize)]
+struct UnassignedSummary {
+    no_primer: u64,
+    require: u64,
+    orientation: u64,
+    length: u64,
+}
+
+impl SplitSummary {
+    /// Builds the `split` object from the resolved splitter, for its keys'
+    /// names and its resolved settings, and its snapshotted counters.
+    fn new(splitter: &Splitter, stats: &SplitStats) -> Self {
+        let keys = splitter
+            .keys
+            .names
+            .iter()
+            .zip(&stats.keys)
+            .map(|(name, k)| KeySummary {
+                key: name.clone(),
+                reads: k.reads,
+                bases: k.bases,
+                both_ends: k.both_ends,
+                five_only: k.five_only,
+                three_only: k.three_only,
+                plus: k.plus,
+                minus: k.minus,
+            })
+            .collect();
+        SplitSummary {
+            spec: splitter.opts.spec.clone(),
+            require: splitter.opts.rules.require.label(),
+            action: splitter.opts.action.label(),
+            lead: splitter.opts.rules.lead,
+            keys,
+            unassigned: UnassignedSummary {
+                no_primer: stats.unassigned[0],
+                require: stats.unassigned[1],
+                orientation: stats.unassigned[2],
+                length: stats.unassigned[3],
+            },
+            ambiguous: stats.ambiguous,
+            discarded: stats.discarded,
+        }
+    }
+}
+
 impl Summary {
     /// Builds the summary from a finished run. `command` is the shell-quoted
     /// invocation (see `crate::command_line`), `output` the output path or
@@ -213,6 +300,11 @@ impl Summary {
                 barcode_tag_malformed_reads: stats.barcode_tag_malformed_reads,
                 barcode_tag_unverified_reads: stats.barcode_tag_unverified_reads,
             },
+            split: cfg
+                .splitter
+                .as_deref()
+                .zip(stats.split.as_ref())
+                .map(|(splitter, split_stats)| SplitSummary::new(splitter, split_stats)),
         }
     }
 
@@ -350,6 +442,7 @@ mod tests {
             segments_dropped_high_qual: 0,
             segments_dropped_expected_errors: 4,
             segments_dropped_gc: 0,
+            split: None,
         }
     }
 
@@ -416,6 +509,8 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         });
         c.adapter_sample = 5_000;
         c.adapters_configured = Some(124);

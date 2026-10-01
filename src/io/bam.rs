@@ -172,8 +172,6 @@ pub enum BamSink {
     Blocks {
         /// The output, positioned after the header blocks.
         inner: BufferedOutput,
-        /// The BGZF DEFLATE level the render workers compress at.
-        level: u8,
     },
 }
 
@@ -201,7 +199,6 @@ pub fn writer(
     }
     Ok(BamSink::Blocks {
         inner: w.into_inner().into_inner()?,
-        level,
     })
 }
 
@@ -281,14 +278,6 @@ impl BamSink {
             BamSink::Single(_) => Err(io::Error::other(
                 "a record sink takes records, not compressed blocks",
             )),
-        }
-    }
-
-    /// The BGZF level the render workers compress at, for a `Blocks` sink.
-    pub fn block_level(&self) -> Option<u8> {
-        match self {
-            BamSink::Blocks { level, .. } => Some(*level),
-            BamSink::Single(_) => None,
         }
     }
 

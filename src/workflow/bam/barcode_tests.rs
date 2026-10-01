@@ -279,6 +279,8 @@ fn cfg_barcodes() -> Config {
         min_piece: 20,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     });
     cfg
 }

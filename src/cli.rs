@@ -11,6 +11,7 @@ use crate::config::{
 use crate::filter::FilterConfig;
 use crate::io::Format;
 use crate::qual::QualMode;
+use crate::split::{Action, KeyLevel, Require, Rules, Sheet, SplitOptions, Template};
 use crate::trim::{QualityMethod, QualityOp, TrimPlan};
 
 #[derive(Parser, Debug)]
@@ -32,7 +33,8 @@ struct Cli {
     #[arg(short = 'i', long, value_name = "PATH", help_heading = "Setup")]
     input: Option<PathBuf>,
     /// Output file, whose extension selects the format; - means stdout.
-    /// Defaults to stdout.
+    /// Defaults to stdout. Under --split-by, a path holding {target},
+    /// {group} or {barcode} is a template with one file per split key.
     #[arg(short = 'o', long, value_name = "PATH", help_heading = "Setup")]
     output: Option<PathBuf>,
     /// Force the input format instead of detecting it from the path or stream.
@@ -318,6 +320,74 @@ struct Cli {
     /// FASTA to stdout and exit without read output or a JSON summary.
     #[arg(long = "adapter-report", help_heading = "Adapter trimming")]
     adapter_report: bool,
+
+    /// Assign every output read or segment to a primer target from the
+    /// primers at its ends and tag it wt:Z with the target, unassigned or
+    /// ambiguous. Repeatable; each SPEC adds a source, merged into one
+    /// sheet. SPEC is an existing sheet file (TSV or annotated FASTA), the
+    /// preset mab114 (also enables --adapter-preset mab114 unless -a or
+    /// --adapter-preset is given), or an inline target
+    /// NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]. A target holds a primer mix:
+    /// any of its forward primers pairs with any of its reverse primers.
+    /// Further pairs after a comma (,F:...:R:...) form a pool of targets
+    /// NAME.1, NAME.2, ... in group NAME. Split primers are
+    /// trimmed with the adapters. An -o template such as
+    /// out/{barcode}.{target}.fastq.gz writes each key to its own file:
+    /// {target} or {group} names the key (unassigned and ambiguous
+    /// included), {barcode} the BC:Z barcode call (unclassified without
+    /// one); without a placeholder every read goes to the one output.
+    #[arg(long = "split-by", value_name = "SPEC", help_heading = "Split")]
+    split_by: Vec<String>,
+    /// Which read ends need a located primer for an assignment.
+    #[arg(
+        long = "split-require",
+        value_enum,
+        value_name = "RULE",
+        default_value_t = Require::Either,
+        requires = "split_by",
+        help_heading = "Split"
+    )]
+    split_require: Require,
+    /// Whether located split primers are trimmed or kept in the output.
+    #[arg(
+        long = "split-action",
+        value_enum,
+        value_name = "ACTION",
+        default_value_t = Action::Trim,
+        requires = "split_by",
+        help_heading = "Split"
+    )]
+    split_action: Action,
+    /// Minimum edit-cost lead of the best target over the best different
+    /// target; a smaller lead is ambiguous.
+    #[arg(
+        long = "split-lead",
+        value_name = "N",
+        default_value_t = 2,
+        requires = "split_by",
+        help_heading = "Split"
+    )]
+    split_lead: usize,
+    /// Drop these bins instead of writing them, comma-separated: unassigned,
+    /// ambiguous.
+    #[arg(
+        long = "split-discard",
+        value_enum,
+        value_name = "BINS",
+        value_delimiter = ',',
+        requires = "split_by",
+        help_heading = "Split"
+    )]
+    split_discard: Vec<SplitBin>,
+}
+
+/// A `--split-discard` bin.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+enum SplitBin {
+    /// Reads and segments no target is assigned to.
+    Unassigned,
+    /// Reads and segments with two targets within --split-lead.
+    Ambiguous,
 }
 
 /// The examples block at the end of `--help`.
@@ -369,9 +439,14 @@ pub fn parse() -> anyhow::Result<Config> {
     let quality = resolve_quality(&c)?;
 
     let mut advisories: Vec<Advisory> = Vec::new();
+    let split_opts = resolve_split(&mut c)?;
     let adapter_infer = resolve_infer(&c, &mut advisories)?;
     let adapters = resolve_adapters(&c, adapter_infer, &mut advisories)?;
     let adapter_sample = resolve_sample(&c, adapter_infer, &mut advisories)?;
+    let split_search = match split_opts {
+        Some(_) => Some(search_config(&c, Vec::new())?),
+        None => None,
+    };
 
     let ncpu = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -428,6 +503,9 @@ pub fn parse() -> anyhow::Result<Config> {
         trim_classes: [false; 3],
         remove_tags,
         tag_filters,
+        split_opts,
+        split_search,
+        splitter: None,
     };
 
     // Only an explicit `--input-format` or a known extension decides the input
@@ -607,17 +685,35 @@ fn resolve_adapters(
         adapter_seqs.extend(from_fasta);
     }
 
+    // `--split-by` searches its primers with the adapter settings, so the
+    // tuning flags apply to it without another source.
     if adapter_seqs.is_empty() && adapter_infer == AdapterInfer::Off {
-        require_adapter_source(c)?;
-        if c.adapter_ends_only {
-            advisories.push(Advisory::warn(
-                "--adapter-ends-only has no effect without --adapter-fasta, --adapter-preset or \
-                 --adapter-discover",
+        if c.split_by.is_empty() {
+            require_adapter_source(c)?;
+            if c.adapter_ends_only {
+                advisories.push(Advisory::warn(
+                    "--adapter-ends-only has no effect without --adapter-fasta, --adapter-preset or \
+                     --adapter-discover",
+                ));
+            }
+        } else if c.adapter_sample.is_some() {
+            advisories.push(Advisory::info(
+                "--adapter-sample-reads has no effect with --split-by alone (presence detection \
+                 applies to --adapter-preset, and sampling to --adapter-discover)",
             ));
         }
         return Ok(None);
     }
+    search_config(c, adapter_seqs).map(Some)
+}
 
+/// Builds the adapter search settings for `adapters` from
+/// `--adapter-error-rate`, `--adapter-end-search`, `--adapter-ends-only` and
+/// `--min-length`, validating the first two.
+fn search_config(
+    c: &Cli,
+    adapters: Vec<crate::adapter::Adapter>,
+) -> anyhow::Result<crate::adapter::AdapterConfig> {
     let error_rate = c.adapter_error_rate.unwrap_or(DEFAULT_ADAPTER_ERROR_RATE);
     if !(0.0..=1.0).contains(&error_rate) {
         anyhow::bail!("--adapter-error-rate ({error_rate}) must be between 0 and 1");
@@ -626,14 +722,74 @@ fn resolve_adapters(
     if end_size == 0 {
         anyhow::bail!("--adapter-end-search must be >= 1");
     }
-    Ok(Some(crate::adapter::AdapterConfig {
-        adapters: adapter_seqs,
+    Ok(crate::adapter::AdapterConfig {
+        adapters,
         error_rate,
         end_size,
         split: !c.adapter_ends_only,
         min_piece: c.min_length,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
+    })
+}
+
+/// Resolves `--split-by` and its options, or `None` without `--split-by`:
+/// loads every given value, merges them into one sheet (`Sheet::load_all`),
+/// and validates it against `--split-require`. A `mab114` source also
+/// selects `--adapter-preset mab114` when neither `-a` nor
+/// `--adapter-preset` is given; a sheet file or inline target enables no
+/// adapters. A `-o` path holding placeholders is the output template, whose
+/// key placeholder sets the key level (`{target}` over `{group}`) and whose
+/// placeholders require every sheet name they take to be one path
+/// component; without one the run is tag-only with one key per target and
+/// names are unrestricted. Output placeholders without `--split-by` are an
+/// error.
+fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
+    if c.split_by.is_empty() {
+        if let Some(out) = c.output.as_deref()
+            && Template::has_placeholder(out)
+        {
+            anyhow::bail!(
+                "-o {}: the placeholders {{target}}, {{group}} and {{barcode}} name split \
+                 outputs and require --split-by",
+                out.display()
+            );
+        }
+        return Ok(None);
+    }
+    let specs = c.split_by.clone();
+    let template = match c.output.as_deref() {
+        Some(out) => Template::parse(out)?,
+        None => None,
+    };
+    let sheet = Sheet::load_all(&specs)?;
+    sheet.validate(c.split_require)?;
+    if let Some(template) = &template {
+        template.check_names(&sheet)?;
+    }
+    let preset = specs.iter().find(|spec| {
+        !std::path::Path::new(spec.as_str()).is_file() && Sheet::preset(spec).is_some()
+    });
+    if let Some(preset) = preset
+        && c.adapter_fasta.is_none()
+        && c.adapter_preset.is_none()
+    {
+        c.adapter_preset = Some(preset.to_ascii_lowercase());
+    }
+    Ok(Some(SplitOptions {
+        sheet,
+        level: template.as_ref().map_or(KeyLevel::Target, Template::key),
+        rules: Rules {
+            require: c.split_require,
+            lead: c.split_lead,
+        },
+        action: c.split_action,
+        discard_unassigned: c.split_discard.contains(&SplitBin::Unassigned),
+        discard_ambiguous: c.split_discard.contains(&SplitBin::Ambiguous),
+        spec: specs,
+        template,
     }))
 }
 

@@ -105,22 +105,49 @@ pub struct TrimPlan {
     pub quality: Option<QualityOp>,
 }
 
-/// Searches the original read for adapters, intersects each retained segment
-/// with `barcode`, crops each intersection once, and applies the quality
-/// operation. Quality splitting can produce multiple intervals per adapter
-/// segment. The result is flattened in original-coordinate order for final
-/// numbering and filtering by length, quality and GC.
+/// One resulting piece of a read after adapter, barcode, crop and quality
+/// processing: a kept `[start, end)` span in original read coordinates, with
+/// the primer loci of the adapter segment it came from, if the split sheet
+/// located any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Piece {
+    /// Piece start.
+    pub start: usize,
+    /// Piece end, exclusive.
+    pub end: usize,
+    /// The source adapter segment's 5' primer locus, if one was located.
+    pub five: Option<crate::adapter::Locus>,
+    /// The source adapter segment's 3' primer locus, if one was located.
+    pub three: Option<crate::adapter::Locus>,
+}
+
+/// Shared core of `apply` and `apply_pieces`: searches the original read for
+/// adapters, widens each segment under `retain`, intersects it with
+/// `barcode`, crops the intersection once, applies the quality operation,
+/// and emits every kept `[start, end)` interval to `emit` in
+/// original-coordinate order, with the source segment's primer loci.
+/// Quality splitting can emit multiple intervals per adapter segment, each
+/// carrying that segment's loci unchanged.
 ///
 /// `barcode` is the retained interval resolved from the original record's
-/// verified `bi` spans. `None` retains the whole read. An unmatched
-/// read enters barcode restriction and cropping as one full-length segment.
-pub fn apply(
+/// verified `bi` spans. `None` retains the whole read. An unmatched read
+/// enters barcode restriction and cropping as one full-length interval with
+/// no loci.
+///
+/// With `retain`, each adapter segment is widened before barcode
+/// restriction and cropping: its start moves back to its five locus's start
+/// when one is located, and its end moves out to its three locus's end when
+/// one is located. A read with no adapters is one segment with no loci, so
+/// `retain` changes nothing for it.
+fn apply_with(
     seq: &[u8],
     phred: &[u8],
     plan: &TrimPlan,
     adapters: Option<&crate::adapter::AdapterConfig>,
     barcode: Option<(usize, usize)>,
-) -> Vec<(usize, usize)> {
+    retain: bool,
+    mut emit: impl FnMut(usize, usize, Option<crate::adapter::Locus>, Option<crate::adapter::Locus>),
+) {
     debug_assert_eq!(
         seq.len(),
         phred.len(),
@@ -132,10 +159,13 @@ pub fn apply(
         None => (0, seq_len),
     };
     if outer_start >= outer_end {
-        return vec![];
+        return;
     }
 
-    let process_segment = |s: usize, e: usize, out: &mut Vec<(usize, usize)>| {
+    let mut process_segment = |s: usize,
+                               e: usize,
+                               five: Option<crate::adapter::Locus>,
+                               three: Option<crate::adapter::Locus>| {
         let s = s.max(outer_start);
         let e = e.min(outer_end);
         if s >= e {
@@ -147,26 +177,85 @@ pub fn apply(
             return;
         }
         let wp = &phred[s..e];
-        let offset = |v: Vec<(usize, usize)>, out: &mut Vec<(usize, usize)>| {
-            out.extend(v.into_iter().map(|(is, ie)| (is + s, ie + s)));
-        };
         match &plan.quality {
-            None => out.push((s, e)),
-            Some(op) => offset(op.apply(wp), out),
+            None => emit(s, e, five, three),
+            Some(op) => {
+                for (is, ie) in op.apply(wp) {
+                    emit(is + s, ie + s, five, three);
+                }
+            },
         }
     };
 
-    let mut out = Vec::new();
     match adapters {
-        None => {
-            process_segment(0, seq_len, &mut out);
-        },
+        None => process_segment(0, seq_len, None, None),
         Some(cfg) => {
-            for (s, e) in crate::adapter::adapter_segments(seq, cfg) {
-                process_segment(s, e, &mut out);
+            for seg in crate::adapter::adapter_segments_annotated(seq, cfg) {
+                let (s, e) = if retain {
+                    (
+                        seg.five.map_or(seg.start, |l| l.start),
+                        seg.three.map_or(seg.end, |l| l.end),
+                    )
+                } else {
+                    (seg.start, seg.end)
+                };
+                process_segment(s, e, seg.five, seg.three);
             }
         },
     }
+}
+
+/// `apply_with`, collecting each emitted interval into a `Piece` that
+/// carries its source segment's primer loci.
+pub fn apply_pieces(
+    seq: &[u8],
+    phred: &[u8],
+    plan: &TrimPlan,
+    adapters: Option<&crate::adapter::AdapterConfig>,
+    barcode: Option<(usize, usize)>,
+    retain: bool,
+) -> Vec<Piece> {
+    let mut out = Vec::new();
+    apply_with(
+        seq,
+        phred,
+        plan,
+        adapters,
+        barcode,
+        retain,
+        |start, end, five, three| {
+            out.push(Piece {
+                start,
+                end,
+                five,
+                three,
+            });
+        },
+    );
+    out
+}
+
+/// `apply_with` with `retain` false, collecting each emitted interval's
+/// `[start, end)` span directly, without building a `Piece` for it.
+pub fn apply(
+    seq: &[u8],
+    phred: &[u8],
+    plan: &TrimPlan,
+    adapters: Option<&crate::adapter::AdapterConfig>,
+    barcode: Option<(usize, usize)>,
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    apply_with(
+        seq,
+        phred,
+        plan,
+        adapters,
+        barcode,
+        false,
+        |s, e, _five, _three| {
+            out.push((s, e));
+        },
+    );
     out
 }
 
@@ -187,6 +276,8 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         }
     }
 
@@ -485,6 +576,8 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         };
         assert_eq!(apply(&seq, &phred, &plan, Some(&ac), None), vec![(15, 23)]);
     }
@@ -534,5 +627,185 @@ mod barcode_tests {
         };
         let kept = apply(&seq, &phred, &plan, None, Some((5, 15)));
         assert!(kept.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod piece_tests {
+    use super::*;
+    use crate::adapter::{AdapterConfig, reverse_complement};
+    use crate::split::Primer;
+
+    /// Generates deterministic SplitMix64 bases.
+    fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                b"ACGT"[((z >> 62) & 0b11) as usize]
+            })
+            .collect()
+    }
+
+    /// Builds `left`, then `mid`, then `right`.
+    fn joined(left: &[u8], mid: &[u8], right: &[u8]) -> Vec<u8> {
+        let mut out = left.to_vec();
+        out.extend_from_slice(mid);
+        out.extend_from_slice(right);
+        out
+    }
+
+    /// A one-target split configuration naming `fwd` and `rev` as the
+    /// target's forward and reverse primer, with no other adapters.
+    fn split_config(fwd: &[u8], rev: &[u8]) -> AdapterConfig {
+        let primers = vec![
+            Primer {
+                name: "fA".into(),
+                seq: fwd.to_vec(),
+            },
+            Primer {
+                name: "rA".into(),
+                seq: rev.to_vec(),
+            },
+        ];
+        let mut cfg = AdapterConfig {
+            adapters: Vec::new(),
+            error_rate: 0.2,
+            end_size: 150,
+            split: true,
+            min_piece: 1,
+            candidate_index: std::sync::OnceLock::new(),
+            amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
+        };
+        cfg.attach_split(&primers);
+        cfg
+    }
+
+    const FA: &[u8] = b"ACGGTTCAGCATTGACCGTA";
+    const RA: &[u8] = b"TTGCACGGTAACCTGATCGA";
+
+    /// `apply` and `apply_pieces(.., false)` agree on the spans they
+    /// produce over planted reads whose quality splits a segment into
+    /// several pieces, both with a split adapter configuration (the
+    /// `Some(cfg)` branch of `apply_with`) and without one (the `None`
+    /// branch).
+    #[test]
+    fn apply_matches_apply_pieces_spans() {
+        let cfg = split_config(FA, RA);
+        let mut insert = splitmix_dna(701, 300);
+        insert[50..60].fill(b'A');
+        insert[150..165].fill(b'A');
+        let with_primers = joined(FA, &insert, &reverse_complement(RA));
+        let mut phred_with_primers = vec![40u8; with_primers.len()];
+        phred_with_primers[FA.len() + 50..FA.len() + 60].fill(2);
+        phred_with_primers[FA.len() + 150..FA.len() + 165].fill(2);
+
+        let without_primers = splitmix_dna(702, 300);
+        let mut phred_without_primers = vec![40u8; without_primers.len()];
+        phred_without_primers[50..60].fill(2);
+        phred_without_primers[150..165].fill(2);
+
+        let plan = TrimPlan {
+            head: 2,
+            tail: 3,
+            quality: Some(QualityOp::runs(10, 5)),
+        };
+
+        let cases: [(&[u8], &[u8], Option<&crate::adapter::AdapterConfig>); 2] = [
+            (&with_primers, &phred_with_primers, Some(&cfg)),
+            (&without_primers, &phred_without_primers, None),
+        ];
+        for (seq, phred, adapters) in cases {
+            let spans = apply(seq, phred, &plan, adapters, None);
+            let piece_spans: Vec<(usize, usize)> =
+                apply_pieces(seq, phred, &plan, adapters, None, false)
+                    .into_iter()
+                    .map(|p| (p.start, p.end))
+                    .collect();
+            assert!(
+                spans.len() >= 3,
+                "expected the two low-quality runs to split into at least 3 pieces: {spans:?}"
+            );
+            assert_eq!(spans, piece_spans);
+        }
+    }
+
+    /// `fA` + insert + `rc(rA)`: trimming gives the span between the two
+    /// primers; retaining widens it back to the whole read, over both
+    /// located loci.
+    #[test]
+    fn retain_widens_over_primers() {
+        let cfg = split_config(FA, RA);
+        let insert = splitmix_dna(701, 400);
+        let read = joined(FA, &insert, &reverse_complement(RA));
+        let n = read.len();
+        let phred = vec![40u8; n];
+        let plan = TrimPlan::default();
+
+        let trimmed = apply_pieces(&read, &phred, &plan, Some(&cfg), None, false);
+        assert_eq!(trimmed.len(), 1, "{trimmed:?}");
+        assert_eq!((trimmed[0].start, trimmed[0].end), (FA.len(), n - RA.len()));
+
+        let retained = apply_pieces(&read, &phred, &plan, Some(&cfg), None, true);
+        assert_eq!(retained.len(), 1, "{retained:?}");
+        assert_eq!((retained[0].start, retained[0].end), (0, n));
+        assert_eq!(retained[0].five, trimmed[0].five);
+        assert_eq!(retained[0].three, trimmed[0].three);
+    }
+
+    /// Every piece a quality split produces from one adapter segment carries
+    /// that segment's primer loci.
+    #[test]
+    fn quality_split_pieces_inherit_segment_loci() {
+        let cfg = split_config(FA, RA);
+        let mut insert = splitmix_dna(702, 200);
+        insert[80..90].fill(b'A');
+        let read = joined(FA, &insert, &reverse_complement(RA));
+        let mut phred = vec![40u8; read.len()];
+        phred[FA.len() + 80..FA.len() + 90].fill(2);
+        let plan = TrimPlan {
+            head: 0,
+            tail: 0,
+            quality: Some(QualityOp::runs(10, 5)),
+        };
+
+        let pieces = apply_pieces(&read, &phred, &plan, Some(&cfg), None, false);
+        assert_eq!(pieces.len(), 2, "{pieces:?}");
+        for piece in &pieces {
+            assert_eq!(
+                piece.five,
+                Some(crate::adapter::Locus {
+                    start: 0,
+                    end: FA.len(),
+                    outer_open: false,
+                    boundary: false,
+                    site: Some(crate::adapter::PrimerSite {
+                        entry: 0,
+                        rc: false,
+                        cost: 0,
+                    }),
+                })
+            );
+            assert_eq!(
+                piece.three,
+                Some(crate::adapter::Locus {
+                    start: read.len() - RA.len(),
+                    end: read.len(),
+                    outer_open: false,
+                    boundary: false,
+                    site: Some(crate::adapter::PrimerSite {
+                        entry: 1,
+                        rc: true,
+                        cost: 0,
+                    }),
+                })
+            );
+        }
     }
 }

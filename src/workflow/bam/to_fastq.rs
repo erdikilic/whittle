@@ -2,6 +2,7 @@
 //! body of each output window.
 
 use super::*;
+use crate::workflow::{TARGET_TAG, push_fastq_target};
 
 /// Appends the TAB-prefixed aux-tag block for one window to `tags`: carried
 /// non-mod tags in source order with the `window_tag_updates` rewrites applied
@@ -9,7 +10,8 @@ use super::*;
 /// rebuilt MM/ML/MN block, then the added tags. Nothing is appended when
 /// nothing is carried (the record then has a plain header). A `Malformed`
 /// block is omitted. A tag named by `remove` is left out of the header, after
-/// the rewrite, exactly as on BAM output.
+/// the rewrite, exactly as on BAM output. With `retarget`, an input target
+/// tag is left out, since the caller writes the record's own.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_fastq_tags(
     tags: &mut Vec<u8>,
@@ -22,6 +24,7 @@ pub(super) fn push_fastq_tags(
     platform: Platform,
     remove: &TagRemoval,
     trim_classes: [bool; 3],
+    retarget: bool,
 ) {
     // A run that carries no tags writes a plain header, so the rewrites are
     // not computed.
@@ -48,7 +51,7 @@ pub(super) fn push_fastq_tags(
             .iter()
             .position(|(u, _)| *u == tag)
             .map(|i| updates.remove(i).1);
-        if !sel.carries(&t) || remove.contains(&t) {
+        if !sel.carries(&t) || remove.contains(&t) || (retarget && t == TARGET_TAG) {
             continue;
         }
         let value: Cow<Value> = match rewritten {
@@ -94,8 +97,10 @@ pub(super) fn push_fastq_tags(
 
 /// Appends one surviving window of a decoded record to `out` as a FASTQ
 /// record: the platform's segment name (`segment_name`), the selected aux
-/// tags, then the sliced bases and qualities. The header is assembled in
-/// place, so the tag text is formatted once, into the output buffer.
+/// tags, the target tag, the reason tag, then the sliced bases and
+/// qualities. The target tag is written whatever `sel` carries. The header
+/// is assembled in place, so the tag text is formatted once, into the output
+/// buffer.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_fastq_window(
     out: &mut Vec<u8>,
@@ -108,6 +113,7 @@ pub(super) fn render_fastq_window(
     sel: &FastqTags,
     remove: &TagRemoval,
     trim_classes: [bool; 3],
+    target: Option<&str>,
     reason: Option<Reason>,
 ) {
     let Window { start, end, .. } = window;
@@ -133,7 +139,11 @@ pub(super) fn render_fastq_window(
         platform,
         remove,
         trim_classes,
+        target.is_some(),
     );
+    if let Some(label) = target {
+        push_fastq_target(out, label);
+    }
     if let Some(reason) = reason {
         reject::push_fastq_tag(out, reason);
     }
@@ -141,60 +151,70 @@ pub(super) fn render_fastq_window(
 }
 
 /// Renders one decoded record for FASTQ output: every surviving window is
-/// appended to `buf`. The buffer is shared across records within a batch.
+/// appended to the part of its output key. The parts are shared across
+/// records within a batch.
 pub(super) fn render_bam_fastq_read(
     rec: &RecordBuf,
     cfg: &Config,
     counters: &Counters,
-    buf: &mut Vec<u8>,
+    parts: &mut Parts<u8>,
     description: &[u8],
 ) -> anyhow::Result<()> {
     let platform = platform(rec);
-    render_windows(rec, cfg, counters, |window, mod_block, indexed, reason| {
-        let mut rejected = Vec::new();
-        let out = if reason.is_some() {
-            &mut rejected
-        } else {
-            &mut *buf
-        };
-        render_fastq_window(
-            out,
-            rec,
-            description,
-            window,
-            mod_block,
-            indexed,
-            platform,
-            &cfg.fastq_tags,
-            &cfg.remove_tags,
-            cfg.trim_classes,
-            reason,
-        );
-        if reason.is_some() {
-            counters.reject(RejectItem::Fastq(rejected))?;
-        }
-        Ok(())
-    })
+    render_windows(
+        rec,
+        cfg,
+        counters,
+        |window, mod_block, indexed, reason, target| {
+            let mut rejected = Vec::new();
+            let out = if reason.is_some() {
+                &mut rejected
+            } else {
+                parts.part(target.map_or(0, |(_, key)| key))
+            };
+            render_fastq_window(
+                out,
+                rec,
+                description,
+                window,
+                mod_block,
+                indexed,
+                platform,
+                &cfg.fastq_tags,
+                &cfg.remove_tags,
+                cfg.trim_classes,
+                target.map(|(label, _)| label),
+                reason,
+            );
+            if reason.is_some() {
+                counters.reject(RejectItem::Fastq(rejected))?;
+            }
+            Ok(())
+        },
+    )
 }
 
-/// Decodes and renders BAM records as FASTQ, reusing a buffer per batch.
+/// Decodes and renders BAM records as FASTQ, reusing the per-key buffers of
+/// a batch. Sequentially, each record's output is written to the writers of
+/// its keys; otherwise `level` is the writers' BGZF level, as
+/// `run_bytes_parallel` takes it.
 pub(crate) fn run_bam_to_fastq<W: BatchSink>(
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
-    writer: &mut W,
+    writers: &mut KeyedSinks<W>,
+    level: Option<u8>,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
     if cfg.threads <= 1 {
-        let mut buf = Vec::new();
+        let mut parts = Parts::default();
         for rec in records {
             let rec = decode_raw_record(&rec?)?;
             counters.input_reads.fetch_add(1, Ordering::Relaxed);
             counters
                 .input_bases
                 .fetch_add(rec.sequence().len() as u64, Ordering::Relaxed);
-            buf.clear();
-            render_bam_fastq_read(&rec, cfg, counters, &mut buf, &[])?;
-            writer.write_all(&buf)?;
+            render_bam_fastq_read(&rec, cfg, counters, &mut parts, &[])?;
+            parts.drain_each(|key, bytes| Ok(writers.get(key)?.write_all(bytes)?))?;
         }
         return Ok(counters.snapshot());
     }
@@ -203,18 +223,22 @@ pub(crate) fn run_bam_to_fastq<W: BatchSink>(
         BAM_BATCH,
         |rec| rec.sequence().len(),
         cfg,
-        writer,
-        |rec, cfg, buf| render_bam_fastq_read(&decode_raw_record(&rec)?, cfg, counters, buf, &[]),
+        writers,
+        level,
+        |rec, cfg, parts| {
+            render_bam_fastq_read(&decode_raw_record(&rec)?, cfg, counters, parts, &[])
+        },
         counters,
     )
 }
 
-/// Appends a tagged FASTQ read's output while preserving its header description.
+/// Appends a tagged FASTQ read's output to the parts of its output keys,
+/// preserving its header description.
 pub(crate) fn render_tagged_fastq_read(
     rec: crate::record::ReadRecord,
     cfg: &Config,
     counters: &Counters,
-    buf: &mut Vec<u8>,
+    parts: &mut Parts<u8>,
 ) -> anyhow::Result<()> {
     let head_end = rec
         .name
@@ -227,5 +251,5 @@ pub(crate) fn render_tagged_fastq_read(
         .unwrap_or(head_end);
     let description = rec.name[id_end..head_end].to_vec();
     let rec = crate::io::tagged::record_from_tagged(rec)?;
-    render_bam_fastq_read(&rec, cfg, counters, buf, &description)
+    render_bam_fastq_read(&rec, cfg, counters, parts, &description)
 }

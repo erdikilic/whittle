@@ -14,13 +14,14 @@ use noodles_sam::{self as sam};
 
 use super::reject::{self, Reason, RejectItem};
 use super::{
-    BAM_BATCH, BatchSink, Counters, Rejection, Stats, process_read_segments, run_bytes_parallel,
-    run_parallel,
+    BAM_BATCH, BatchSink, Counters, KeyId, KeyedSinks, Parts, Rejection, Routing, Stats,
+    process_read_segments, run_bytes_parallel, run_parallel,
 };
 use crate::config::{Config, FastqTags, TagRemoval};
+use crate::io::bam::BamSink;
 use crate::io::fastq::{push_aux_field, push_mods_aux, push_record_body};
+use crate::mods;
 use crate::mods::reconstruct::IndexedMods;
-use crate::{mods, trim};
 
 mod barcode;
 mod build;
@@ -84,17 +85,19 @@ pub(crate) fn tag_filtered_bam_fastq(
         &cfg.remove_tags,
         // A read the tag filter rejects is not trimmed; its `tm` is copied.
         [false; 3],
+        None,
         Some(Reason::TagFilter),
     );
     Ok(RejectItem::Fastq(out))
 }
 
 /// Runs the single-threaded uBAM workflow: refuses aligned reads, trims, filters
-/// each produced segment and writes the reconstructed survivors.
+/// each produced segment and writes each reconstructed survivor to the sink of
+/// its key.
 fn run_bam_seq(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<bam::Record>>,
-    sink: &mut crate::io::bam::BamSink,
+    sinks: &mut KeyedSinks<BamSink>,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
@@ -105,9 +108,13 @@ fn run_bam_seq(
         counters
             .input_bases
             .fetch_add(rec.sequence().as_ref().len() as u64, Ordering::Relaxed);
-        render_bam_read(header, &raw, &rec, cfg, counters, |out| match out {
-            Some(bytes) => sink.write_record_bytes(header, &bytes),
-            None => sink.write_raw_record(header, &raw),
+        render_bam_read(header, &raw, &rec, cfg, counters, |key, out| {
+            let sink = sinks.get(key)?;
+            match out {
+                Some(bytes) => sink.write_record_bytes(header, &bytes)?,
+                None => sink.write_raw_record(header, &raw)?,
+            }
+            Ok(())
         })?;
     }
     Ok(counters.snapshot())
@@ -115,12 +122,12 @@ fn run_bam_seq(
 
 /// Runs `workflow::run_parallel` for BAM input: decodes each raw record on the
 /// pool and hands the raw record and its decoded form to `render`, which
-/// appends output items to the batch buffer. The per-segment filter and
-/// counters are updated inside `render` by `process_read_segments`.
+/// appends output items to the batch's per-key parts. The per-segment filter
+/// and counters are updated inside `render` by `process_read_segments`.
 fn run_bam_parallel<T, P, S, Render, Pack, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
     cfg: &Config,
-    sink: &mut S,
+    sinks: &mut KeyedSinks<S>,
     render: Render,
     pack: Pack,
     write_one: WriteOne,
@@ -130,16 +137,16 @@ where
     T: Send,
     P: Send,
     S: Send,
-    Render: Fn(bam::Record, &RecordBuf, &Config, &mut Vec<T>) -> anyhow::Result<()> + Sync,
+    Render: Fn(bam::Record, &RecordBuf, &Config, &mut Parts<T>) -> anyhow::Result<()> + Sync,
     Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
-    WriteOne: Fn(&mut S, &P) -> std::io::Result<()> + Send,
+    WriteOne: Fn(&mut S, KeyId, &P) -> std::io::Result<()> + Send,
 {
     run_parallel(
         records,
         BAM_BATCH,
         |record: &bam::Record| record.sequence().len(),
         cfg,
-        sink,
+        sinks,
         |rec, cfg, out| {
             let decoded = decode_raw_record(&rec)?;
             render(rec, &decoded, cfg, out)
@@ -173,12 +180,15 @@ fn pack_bam_blocks(
 /// Runs the uBAM workflow on raw records from a production reader. Full-window
 /// runs filter and write unchanged records without building an owned
 /// `RecordBuf`; any configuration that can alter sequence or tags is routed to
-/// `run_bam`, tag removal included, since a record that would otherwise pass
-/// through untouched still has to be rebuilt without the removed tags.
-pub fn run_raw_bam(
+/// `run_bam`, tag removal and `--split-by` included, since a record that would
+/// otherwise pass through untouched still has to be rebuilt without the
+/// removed tags or with its target tag. `level` is the sinks' BGZF level,
+/// at which a parallel run compresses its blocks on the pool.
+pub(crate) fn run_raw_bam(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
-    sink: &mut crate::io::bam::BamSink,
+    sinks: &mut KeyedSinks<BamSink>,
+    level: u8,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
@@ -186,60 +196,61 @@ pub fn run_raw_bam(
         && cfg.trim.tail == 0
         && cfg.trim.quality.is_none()
         && cfg.adapters.is_none()
+        && cfg.splitter.is_none()
         && cfg.remove_tags.is_empty();
     if !full_window {
-        return run_bam(header, records, sink, cfg, counters);
+        return run_bam(header, records, sinks, level, cfg, counters);
     }
+    let sink = sinks.get(0)?;
     if cfg.threads <= 1 {
         run_raw_bam_full_window_seq(header, records, sink, cfg, counters)
     } else {
-        run_raw_bam_full_window_parallel(header, records, sink, cfg, counters)
+        run_raw_bam_full_window_parallel(header, records, sink, level, cfg, counters)
     }
 }
 
 /// Runs the uBAM workflow: decodes, refuses aligned reads, trims, filters and
 /// reconstructs. Sequential for `cfg.threads <= 1`; otherwise renders on a
-/// rayon pool and drains the `RecordBuf`s through `run_bam_parallel`'s bounded
-/// channel to the writer, in input order under `cfg.ordered` and in completion
-/// order otherwise.
+/// rayon pool, compresses each key's records at `level` there, and drains the
+/// blocks through `run_bam_parallel`'s bounded channel to the writer, in
+/// input order under `cfg.ordered` and in completion order otherwise.
 pub(crate) fn run_bam(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
-    sink: &mut crate::io::bam::BamSink,
+    sinks: &mut KeyedSinks<BamSink>,
+    level: u8,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
     if cfg.threads <= 1 {
-        return run_bam_seq(header, records, sink, cfg, counters);
+        return run_bam_seq(header, records, sinks, cfg, counters);
     }
-    let level = sink
-        .block_level()
-        .expect("A parallel run writes through a block sink");
     run_bam_parallel(
         records,
         cfg,
-        sink,
-        // Render: the survivors of one record. An untouched record is
-        // written from its raw input without re-encoding; it is the read's
-        // only window, so the record is moved in once rendering ends.
-        |raw, rec, cfg, items| {
+        sinks,
+        // Render: the survivors of one record, each in the part of its key.
+        // An untouched record is written from its raw input without
+        // re-encoding; it is the read's only window, so the record is moved
+        // into key 0 once rendering ends.
+        |raw, rec, cfg, parts| {
             let mut unchanged = false;
-            render_bam_read(header, &raw, rec, cfg, counters, |out| {
+            render_bam_read(header, &raw, rec, cfg, counters, |key, out| {
                 match out {
-                    Some(bytes) => items.push(BamOutputRecord::Built(bytes)),
+                    Some(bytes) => parts.part(key).push(BamOutputRecord::Built(bytes)),
                     None => unchanged = true,
                 }
                 Ok(())
             })?;
             if unchanged {
-                items.push(BamOutputRecord::Raw(raw));
+                parts.part(0).push(BamOutputRecord::Raw(raw));
             }
             Ok(())
         },
         // Pack: encode and compress the batch on the pool.
         |records| pack_bam_blocks(header, level, records),
         // Write: the compressed blocks, on the writer thread.
-        |sink, blocks: &Vec<u8>| sink.write_blocks(blocks),
+        |sink, _key, blocks: &Vec<u8>| sink.write_blocks(blocks),
         counters,
     )
 }

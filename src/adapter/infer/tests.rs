@@ -29,6 +29,8 @@ fn infer_with_known(reads: &[Vec<u8>], known: Vec<Adapter>) -> Vec<InferredAdapt
             min_piece: 20,
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         },
     )
 }
@@ -413,6 +415,22 @@ fn name_against_matches_catalog_entry() {
     assert!((hits[0].1 - 100.0).abs() < 1e-3);
 }
 
+/// A consensus that matches a primer mix and one of its variants at the same
+/// identity is named after the mix, the primer listed first in
+/// `catalog::MARKER_PRIMERS`, and not after the alphabetically first name.
+#[test]
+fn name_against_breaks_identity_ties_by_marker_primer_order() {
+    let refs = crate::adapter::preset::preset(crate::adapter::preset::Kit::ALL);
+    let hits = name_against(b"AGAGTTTGATCATGGCTCAG", &refs, 0.2);
+    let tied: Vec<&str> = hits
+        .iter()
+        .filter(|(_, pct)| (pct - hits[0].1).abs() < 1e-3)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(tied.len() >= 2, "{hits:?}");
+    assert_eq!(hits[0].0, "16S_mix_F", "{hits:?}");
+}
+
 /// On a 20 bp reference with a budget of floor(0.2 * 20) = 4 edits, two
 /// substitutions (90 percent) name it, three (85 percent) still do, and
 /// four (80 percent) do not.
@@ -467,6 +485,8 @@ fn discovered_adapters_are_named_by_order_with_catalog_annotation() {
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     let found = discover(&sample, &base);
     assert!(!found.is_empty(), "The planted adapter is discovered");
@@ -508,6 +528,8 @@ fn discover_finds_nothing_in_ambiguity_runs() {
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     let found = discover(&sample, &base);
     assert!(
@@ -555,6 +577,8 @@ fn discover_recovers_planted_adapter_under_error() {
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     let found = discover(&sample, &base);
     assert!(!found.is_empty(), "At least one adapter discovered");
@@ -626,6 +650,8 @@ fn discover_dual_end_adapter_gets_max_support() {
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     let found = discover(&sample, &base);
 
@@ -685,6 +711,8 @@ fn discover_finds_nothing_in_clean_reads() {
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     let found = discover(&sample, &base);
     assert!(
@@ -768,6 +796,8 @@ fn discover_is_not_order_biased_by_recount_window_cap() {
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     let found = discover(&sample, &base);
     assert!(
@@ -816,6 +846,8 @@ fn discover_recovers_planted_adapter_from_lowercase_reads() {
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     let found = discover(&sample, &base);
     assert!(
@@ -935,6 +967,8 @@ fn discovers_barcode_layer_between_flanks() {
         min_piece: 20,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     for read in reads.iter().take(16) {
         let segments = crate::adapter::adapter_segments(read, &cfg);
@@ -1333,6 +1367,8 @@ fn discovery_trims_a_random_tag_behind_a_primer() {
         min_piece: 20,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     for i in 0..16u64 {
         let mut read = head.clone();
@@ -1440,6 +1476,8 @@ fn trimming_with(found: Vec<InferredAdapter>) -> AdapterConfig {
         min_piece: 20,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     }
 }
 

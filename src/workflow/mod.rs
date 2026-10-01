@@ -2,6 +2,7 @@
 
 pub(crate) mod bam;
 mod fastq;
+mod keyed;
 #[cfg(feature = "paraseq")]
 mod paraseq;
 pub(crate) mod reject;
@@ -14,7 +15,8 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use rayon::prelude::*;
 
 pub(crate) use bam::run_bam_to_fastq;
-pub use bam::run_raw_bam;
+pub(crate) use bam::run_raw_bam;
+pub(crate) use keyed::{KeyId, KeyedSinks, Parts};
 
 /// Wraps a record stream so that only reads `keep` accepts pass on. A rejected
 /// read is counted here as input and as tag-filtered, since no workflow sees
@@ -132,30 +134,27 @@ where
 }
 
 /// A sink of rendered text batches: plain bytes, or BGZF blocks the render
-/// workers compressed.
-pub(crate) trait BatchSink: Write + Send {
-    /// The BGZF level when the sink takes blocks compressed on the render
-    /// pool; `None` for a sink that takes the rendered bytes as they are.
-    fn block_level(&self) -> Option<u8> {
-        None
-    }
-}
+/// workers compressed at the level the driver is given
+/// (`io::fastq::block_level`).
+pub(crate) trait BatchSink: Write + Send {}
 
 impl BatchSink for Vec<u8> {}
 
-impl BatchSink for crate::io::fastq::FastqOut {
-    fn block_level(&self) -> Option<u8> {
-        crate::io::fastq::FastqOut::block_level(self)
-    }
-}
+impl<W: BatchSink + ?Sized> BatchSink for &mut W {}
 
-/// Renders directly into a batch buffer and compresses block output on the pool.
+impl BatchSink for crate::io::fastq::FastqOut {}
+
+/// Renders directly into per-key batch buffers and compresses block output on
+/// the pool. `level` is the BGZF level of sinks that take compressed blocks
+/// (`FastqOut::Blocks`), `None` for sinks that take the rendered bytes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_bytes_parallel<R, W, Weight, Render>(
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
     policy: BatchPolicy,
     weight: Weight,
     cfg: &Config,
-    writer: &mut W,
+    writers: &mut KeyedSinks<W>,
+    level: Option<u8>,
     render: Render,
     counters: &Counters,
 ) -> anyhow::Result<Stats>
@@ -163,21 +162,20 @@ where
     R: Send,
     W: BatchSink,
     Weight: Fn(&R) -> usize + Sync,
-    Render: Fn(R, &Config, &mut Vec<u8>) -> anyhow::Result<()> + Sync,
+    Render: Fn(R, &Config, &mut Parts<u8>) -> anyhow::Result<()> + Sync,
 {
-    let level = writer.block_level();
     run_parallel(
         records,
         policy,
         weight,
         cfg,
-        writer,
+        writers,
         render,
         |bytes: Vec<u8>| match level {
             Some(level) => crate::io::fastq::encode_blocks(level, &bytes),
             None => Ok(bytes),
         },
-        |writer, bytes: &Vec<u8>| writer.write_all(bytes),
+        |writer, _key, bytes: &Vec<u8>| writer.write_all(bytes),
         counters,
     )
 }
@@ -294,18 +292,21 @@ where
 /// order, and a batch is handed out only while a bounded window of batches
 /// separates it from the next one to write; otherwise in completion order.
 ///
-/// `render` appends each record's output to the batch accumulator; `pack`
-/// turns the accumulator into the unit the writer takes, on
-/// the pool, so a compressing sink has its blocks compressed by the render
-/// workers. The read-level counters are updated inside `render` by
-/// `process_read_segments`; this driver counts input reads and bases only.
+/// `render` appends each record's output to the part of the batch's `Parts`
+/// for the record's key; `pack` turns each non-empty part into the unit the
+/// writer takes, on the pool, so a compressing sink has its blocks compressed
+/// by the render workers. The writer takes a batch's packed parts in
+/// ascending key order and hands each to `write_one` with the sink for its
+/// key, opened through `sinks` on first use. The read-level counters are
+/// updated inside `render` by `process_read_segments`; this driver counts
+/// input reads and bases only.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_parallel<R, T, P, S, Weight, Render, Pack, WriteOne>(
     records: impl Iterator<Item = anyhow::Result<R>> + Send,
     policy: BatchPolicy,
     weight: Weight,
     cfg: &Config,
-    sink: &mut S,
+    sinks: &mut KeyedSinks<S>,
     render: Render,
     pack: Pack,
     write_one: WriteOne,
@@ -313,24 +314,24 @@ pub(crate) fn run_parallel<R, T, P, S, Weight, Render, Pack, WriteOne>(
 ) -> anyhow::Result<Stats>
 where
     R: Send,
-    T: Default + Send,
+    T: Send,
     P: Send,
     S: Send,
     Weight: Fn(&R) -> usize + Sync,
-    Render: Fn(R, &Config, &mut T) -> anyhow::Result<()> + Sync,
-    Pack: Fn(T) -> std::io::Result<P> + Sync,
-    WriteOne: Fn(&mut S, &P) -> std::io::Result<()> + Send,
+    Render: Fn(R, &Config, &mut Parts<T>) -> anyhow::Result<()> + Sync,
+    Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
+    WriteOne: Fn(&mut S, KeyId, &P) -> std::io::Result<()> + Send,
 {
     let render_workers = render_pool_size(cfg);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(render_workers)
         .build()?;
     let queue = (render_workers * policy.queue_per_worker).max(2);
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, P)>(queue);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<(KeyId, P)>)>(queue);
     let ordered = cfg.ordered;
     let aborted = AtomicBool::new(false);
     let render_err: FirstError<anyhow::Error> = FirstError::new();
-    let write_err: FirstError<std::io::Error> = FirstError::new();
+    let write_err: FirstError<anyhow::Error> = FirstError::new();
     let window = ReorderWindow::new(queue + render_workers);
 
     let aborted_ref = &aborted;
@@ -349,13 +350,18 @@ where
         let write_err = &write_err;
         s.spawn(move || {
             let mut next = 0usize;
-            let mut pending: BTreeMap<usize, P> = BTreeMap::new();
+            let mut pending: BTreeMap<usize, Vec<(KeyId, P)>> = BTreeMap::new();
             let mut errored = false;
-            let mut write_batch = |batch: &P| -> bool {
-                if let Err(e) = write_one(sink, batch) {
-                    write_err.record(e, aborted_ref);
-                    window_ref.release();
-                    return false;
+            let mut write_batch = |batch: &[(KeyId, P)]| -> bool {
+                for (key, part) in batch {
+                    let written = sinks
+                        .get(*key)
+                        .and_then(|sink| Ok(write_one(sink, *key, part)?));
+                    if let Err(e) = written {
+                        write_err.record(e, aborted_ref);
+                        window_ref.release();
+                        return false;
+                    }
                 }
                 true
             };
@@ -397,7 +403,7 @@ where
                 Some((handed_out - 1, batch))
             });
             let render_batch = |(idx, batch): (usize, Vec<anyhow::Result<R>>)| {
-                let mut out = T::default();
+                let mut out = Parts::default();
                 let mut input_reads = 0u64;
                 let mut input_bases = 0u64;
                 for rec in batch {
@@ -427,7 +433,11 @@ where
                 counters
                     .input_bases
                     .fetch_add(input_bases, Ordering::Relaxed);
-                let packed = match pack(out) {
+                let packed = match out
+                    .into_nonempty()
+                    .map(|(key, part)| Ok((key, pack(part)?)))
+                    .collect::<std::io::Result<Vec<_>>>()
+                {
                     Ok(packed) => packed,
                     Err(e) => {
                         render_err.record(e.into(), &aborted);
@@ -452,7 +462,7 @@ where
         return Err(e);
     }
     if let Some(e) = write_err.take() {
-        return Err(e.into());
+        return Err(e);
     }
     Ok(counters.snapshot())
 }
@@ -500,6 +510,9 @@ pub struct Counters {
     /// The `--rejected-output` channel, set before the first record is read when
     /// the flag is given; unset otherwise.
     pub(crate) rejects: OnceLock<reject::Rejects>,
+    /// Per-key `--split-by` counters, set in `settle` once the run's `Splitter`
+    /// exists, sized by `Keys::names`; unset without `--split-by`.
+    pub(crate) split: OnceLock<crate::split::SplitCounters>,
     /// Input reads that produced at least one surviving output segment,
     /// bumped once per input read (not once per segment, unlike
     /// `output_reads`, which a quality-split read can bump several times).
@@ -512,9 +525,10 @@ pub struct Counters {
     /// `reads_with_output` and `reads_all_filtered` in the invariant below.
     pub reads_trimmed_to_nothing: AtomicU64,
     /// Input reads that produced at least one segment, but every one was
-    /// rejected by post-trim `filter::check`. Read-level, paired with
-    /// `reads_with_output` and `reads_trimmed_to_nothing` in the invariant
-    /// below.
+    /// either rejected by post-trim `filter::check` or, under `--split-by`,
+    /// written nowhere because a run's splitter discarded it
+    /// (`--split-discard`). Read-level, paired with `reads_with_output` and
+    /// `reads_trimmed_to_nothing` in the invariant below.
     pub reads_all_filtered: AtomicU64,
     /// Segments dropped as `TooShort`. This and the five counters below are
     /// segment-level: one bump per segment (not read) that `filter::check`
@@ -581,7 +595,8 @@ impl Counters {
 
         // Every input read lands in exactly one of the four read-level buckets: it
         // was rejected by the tag filter, produced surviving segments, produced
-        // none at all, or produced some and lost them all to `filter::check`.
+        // none at all, or produced some but wrote none, lost to
+        // `filter::check` or, under `--split-by`, to `--split-discard`.
         // Segment-level drops are excluded, since a read can shed segments and
         // still survive. The assertion catches an early return that skips one.
         debug_assert_eq!(
@@ -611,6 +626,7 @@ impl Counters {
             segments_dropped_high_qual,
             segments_dropped_expected_errors,
             segments_dropped_gc,
+            split: self.split.get().map(crate::split::SplitCounters::snapshot),
         }
     }
 }
@@ -629,14 +645,99 @@ pub(crate) fn read_span(name: &[u8]) -> tracing::Span {
     }
 }
 
+/// The aux tag naming a segment's `--split-by` bin.
+pub(crate) const TARGET_TAG: [u8; 2] = *b"wt";
+
+/// Trims one read under `cfg`: the kept `[start, end)` spans in original-read
+/// order and, under `--split-by`, the pieces carrying their primer loci, one per
+/// span; without a splitter the pieces are empty and the spans come from
+/// `trim::apply`. `barcode` is the retained barcode interval, as
+/// `trim::apply` takes it.
+pub(crate) fn trim_read(
+    seq: &[u8],
+    qual: &[u8],
+    cfg: &Config,
+    barcode: Option<(usize, usize)>,
+) -> (Vec<(usize, usize)>, Vec<crate::trim::Piece>) {
+    let adapters = cfg.adapters.as_ref();
+    match cfg.splitter.as_deref() {
+        None => (
+            crate::trim::apply(seq, qual, &cfg.trim, adapters, barcode),
+            Vec::new(),
+        ),
+        Some(splitter) => {
+            let retain = splitter.opts.action == crate::split::Action::Retain;
+            let pieces = crate::trim::apply_pieces(seq, qual, &cfg.trim, adapters, barcode, retain);
+            (pieces.iter().map(|p| (p.start, p.end)).collect(), pieces)
+        },
+    }
+}
+
+/// How one surviving segment is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Routing<'a> {
+    /// Written to key 0 without a target tag; the run has no splitter.
+    Untagged,
+    /// Written to the output key with the target tag holding the bin name.
+    Tagged(&'a str, KeyId),
+    /// Dropped by `--split-discard`.
+    Discarded,
+}
+
+/// Calls surviving segment `idx` of the read `seq` with the run's splitter
+/// and names its output key (`Splitter::output_key`). `pieces` is the
+/// read's `trim_read` output; the call rescores the full read at the piece's
+/// primer loci, which are in read coordinates. `bases` is the segment's
+/// length, recorded against an assigned key. `barcode` is the read's `BC:Z`
+/// barcode call, `None` for a read without one. The call is tallied into
+/// `counters`' split counters (when the run has a splitter) whatever the
+/// outcome, so a discarded segment is still counted, just not written.
+pub(crate) fn route<'a>(
+    cfg: &'a Config,
+    seq: &[u8],
+    pieces: &[crate::trim::Piece],
+    idx: usize,
+    bases: u64,
+    barcode: Option<&[u8]>,
+    counters: &Counters,
+) -> anyhow::Result<Routing<'a>> {
+    let Some(splitter) = cfg.splitter.as_deref() else {
+        return Ok(Routing::Untagged);
+    };
+    let call = splitter.call(seq, &pieces[idx]);
+    let discarded = splitter.discards(&call);
+    if let Some(split_counters) = counters.split.get() {
+        split_counters.record(&call, bases, discarded);
+    }
+    if discarded {
+        return Ok(Routing::Discarded);
+    }
+    Ok(Routing::Tagged(
+        splitter.label(&call),
+        splitter.output_key(&call, barcode)?,
+    ))
+}
+
+/// Appends the target tag, `\twt:Z:<label>`, to a FASTQ header.
+pub(crate) fn push_fastq_target(out: &mut Vec<u8>, label: &str) {
+    out.push(b'\t');
+    out.extend_from_slice(&TARGET_TAG);
+    out.extend_from_slice(b":Z:");
+    out.extend_from_slice(label.as_bytes());
+}
+
 /// Filters produced segments and updates segment- and read-level counters for
 /// all workflows. `seq` and `qual` contain the complete input read and
 /// `produced` contains the final ranges from adapter and quality processing
 /// in original-coordinate order. Segment numbers index this flattened list
 /// before filtering; they do not restart at adapter boundaries. For each survivor,
-/// `render` receives `(idx, total, start, end)`; for each rejected segment and
-/// for a read that produced none, `reject` receives the `Rejection`. A render
-/// error stops processing before the read-level outcome counter is updated.
+/// `render` receives `(idx, total, start, end)` and returns whether it wrote
+/// the segment: `false` means a run's splitter discarded it
+/// (`--split-discard`), and it is left out of `output_reads`/`output_bases`.
+/// A run without a splitter always writes, so its behavior is unchanged. For
+/// each rejected segment and for a read that produced none, `reject`
+/// receives the `Rejection`. A render error stops processing before the
+/// read-level outcome counter is updated.
 pub(crate) fn process_read_segments<Rn, Rj>(
     produced: &[(usize, usize)],
     seq: &[u8],
@@ -647,11 +748,11 @@ pub(crate) fn process_read_segments<Rn, Rj>(
     mut reject: Rj,
 ) -> anyhow::Result<()>
 where
-    Rn: FnMut(usize, usize, usize, usize) -> anyhow::Result<()>,
+    Rn: FnMut(usize, usize, usize, usize) -> anyhow::Result<bool>,
     Rj: FnMut(Rejection) -> anyhow::Result<()>,
 {
     let total = produced.len();
-    let mut survived = 0usize;
+    let mut written = 0usize;
     for (idx, &(s, e)) in produced.iter().enumerate() {
         if let Some(reason) = crate::filter::check(&seq[s..e], &qual[s..e], filter_cfg) {
             // The per-segment verdict attributes a missing read to a specific
@@ -683,12 +784,13 @@ where
             len = e - s,
             "Segment kept"
         );
-        render(idx, total, s, e)?;
-        counters.output_reads.fetch_add(1, Ordering::Relaxed);
-        counters
-            .output_bases
-            .fetch_add((e - s) as u64, Ordering::Relaxed);
-        survived += 1;
+        if render(idx, total, s, e)? {
+            counters.output_reads.fetch_add(1, Ordering::Relaxed);
+            counters
+                .output_bases
+                .fetch_add((e - s) as u64, Ordering::Relaxed);
+            written += 1;
+        }
     }
     if produced.is_empty() {
         tracing::trace!("Read produced no segments");
@@ -696,7 +798,10 @@ where
             .reads_trimmed_to_nothing
             .fetch_add(1, Ordering::Relaxed);
         reject(Rejection::Whole)?;
-    } else if survived == 0 {
+    } else if written == 0 {
+        // Every produced segment was either filtered out above or, having
+        // passed the filter, discarded by the splitter: either way the read
+        // wrote nothing.
         tracing::trace!(produced = total, "Every segment filtered");
         counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -727,7 +832,7 @@ pub(crate) enum Rejection {
 }
 
 /// End-of-run counters, snapshotted from `Counters`.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct Stats {
     /// Input reads consumed.
     pub input_reads: u64,
@@ -760,7 +865,8 @@ pub struct Stats {
     /// never ran.
     pub reads_trimmed_to_nothing: u64,
     /// Read-level: input reads that produced at least one segment, but every
-    /// one of them was rejected by post-trim `filter::check`.
+    /// one of them was rejected by post-trim `filter::check` or, under
+    /// `--split-by`, discarded (`--split-discard`).
     pub reads_all_filtered: u64,
     /// Read-level: input reads rejected by `--tag-filter` before trimming.
     pub reads_tag_filtered: u64,
@@ -779,6 +885,8 @@ pub struct Stats {
     /// Segment-level: segments dropped by post-trim `filter::check` for GC fraction
     /// outside `[min_gc, max_gc]`.
     pub segments_dropped_gc: u64,
+    /// Snapshotted `--split-by` counters; `None` without `--split-by`.
+    pub split: Option<crate::split::SplitStats>,
 }
 
 #[cfg(test)]
@@ -888,7 +996,7 @@ mod tests {
                 &counters,
                 |idx, total, s, e| {
                     calls.push((idx, total, s, e));
-                    Ok(())
+                    Ok(true)
                 },
                 |_| Ok(()),
             )
@@ -916,7 +1024,7 @@ mod tests {
                 &counters,
                 |idx, total, s, e| {
                     calls.push((idx, total, s, e));
-                    Ok(())
+                    Ok(true)
                 },
                 |_| Ok(()),
             )
@@ -943,7 +1051,7 @@ mod tests {
                 &counters,
                 |idx, total, s, e| {
                     calls.push((idx, total, s, e));
-                    Ok(())
+                    Ok(true)
                 },
                 |_| Ok(()),
             )
@@ -954,6 +1062,41 @@ mod tests {
             assert_eq!(counters.reads_with_output.load(Ordering::Relaxed), 1);
             assert_eq!(counters.output_reads.load(Ordering::Relaxed), 2);
             assert_eq!(counters.output_bases.load(Ordering::Relaxed), 6);
+        }
+
+        // Discarded: one produced segment that passes the filter but whose
+        // `render` reports it was not written (the run's splitter dropped
+        // it). `output_reads`/`output_bases` are not bumped, and the read
+        // counts as all-filtered, not with-output.
+        {
+            let counters = Counters::default();
+            let seq = b"AAA";
+            let qual = b"III";
+            let mut calls: Vec<(usize, usize, usize, usize)> = Vec::new();
+            process_read_segments(
+                &[(0, 3)],
+                seq,
+                qual,
+                &filter_cfg,
+                &counters,
+                |idx, total, s, e| {
+                    calls.push((idx, total, s, e));
+                    Ok(false)
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                calls,
+                vec![(0, 1, 0, 3)],
+                "render still runs for the segment"
+            );
+            assert_eq!(counters.reads_trimmed_to_nothing.load(Ordering::Relaxed), 0);
+            assert_eq!(counters.reads_all_filtered.load(Ordering::Relaxed), 1);
+            assert_eq!(counters.reads_with_output.load(Ordering::Relaxed), 0);
+            assert_eq!(counters.output_reads.load(Ordering::Relaxed), 0);
+            assert_eq!(counters.output_bases.load(Ordering::Relaxed), 0);
+            assert_eq!(counters.segments_dropped_short.load(Ordering::Relaxed), 0);
         }
     }
 
@@ -979,17 +1122,17 @@ mod tests {
             },
             |_: &usize| 1,
             &cfg,
-            &mut sink,
-            |n, _cfg, out: &mut Vec<usize>| {
+            &mut KeyedSinks::single(&mut sink),
+            |n, _cfg, out: &mut Parts<usize>| {
                 if n % 2 == 1 {
                     std::thread::sleep(std::time::Duration::from_micros(200));
                 }
                 counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-                out.push(n);
+                out.part(0).push(n);
                 Ok(())
             },
             Ok,
-            |sink, batch: &Vec<usize>| {
+            |sink, _, batch: &Vec<usize>| {
                 sink.extend_from_slice(batch);
                 Ok(())
             },
@@ -1033,8 +1176,8 @@ mod tests {
                 },
                 |_| 1,
                 &cfg,
-                &mut output,
-                |n, _, out: &mut Vec<usize>| {
+                &mut KeyedSinks::single(&mut output),
+                |n, _, out: &mut Parts<usize>| {
                     if n == 0 {
                         release_rx
                             .lock()
@@ -1045,11 +1188,11 @@ mod tests {
                         ready_tx.send(()).unwrap();
                     }
                     counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
-                    out.push(n);
+                    out.part(0).push(n);
                     Ok(())
                 },
                 Ok,
-                |out, batch: &Vec<usize>| {
+                |out, _, batch: &Vec<usize>| {
                     out.extend_from_slice(batch);
                     Ok(())
                 },
@@ -1073,13 +1216,13 @@ mod tests {
             },
             |_| 1,
             &cfg,
-            &mut (),
-            |n, _, out: &mut Vec<usize>| {
-                out.push(n);
+            &mut KeyedSinks::single(()),
+            |n, _, out: &mut Parts<usize>| {
+                out.part(0).push(n);
                 Ok(())
             },
             Ok,
-            |_, _: &Vec<usize>| Err(std::io::Error::other("sink failed")),
+            |_, _, _: &Vec<usize>| Err(std::io::Error::other("sink failed")),
             &Counters::default(),
         )
         .unwrap_err();
@@ -1101,9 +1244,9 @@ mod tests {
             },
             |_| 1,
             &cfg,
-            &mut Vec::new(),
-            |n, _, out: &mut Vec<usize>| {
-                out.push(n);
+            &mut KeyedSinks::single(Vec::new()),
+            |n, _, out: &mut Parts<usize>| {
+                out.part(0).push(n);
                 Ok(())
             },
             |batch: Vec<usize>| {
@@ -1112,7 +1255,7 @@ mod tests {
                 }
                 Ok(batch)
             },
-            |out: &mut Vec<usize>, batch: &Vec<usize>| {
+            |out: &mut Vec<usize>, _, batch: &Vec<usize>| {
                 out.extend_from_slice(batch);
                 Ok(())
             },
@@ -1126,6 +1269,89 @@ mod tests {
     fn ordered_driver_writes_in_input_order() {
         let out = run_driver(true);
         assert_eq!(out, (0..200).collect::<Vec<_>>());
+    }
+
+    /// Records routed to three keys in mixed batches: each key's sink holds
+    /// its records in input order, and the sinks come back in key order.
+    #[test]
+    fn run_parallel_routes_keys_in_order() {
+        let cfg = driver_cfg(4, true);
+        let mut sinks: KeyedSinks<Vec<usize>> =
+            KeyedSinks::with_opener(Box::new(|_| Ok(Vec::new())));
+        let counters = Counters::default();
+        run_parallel(
+            (0..300usize).map(anyhow::Ok),
+            BatchPolicy {
+                target_weight: 5,
+                max_items: 5,
+                queue_per_worker: 1,
+            },
+            |_: &usize| 1,
+            &cfg,
+            &mut sinks,
+            |n, _cfg, parts: &mut Parts<usize>| {
+                if n % 10 < 5 {
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                }
+                counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
+                parts.part((n % 3) as KeyId).push(n);
+                Ok(())
+            },
+            Ok,
+            |sink, key, part: &Vec<usize>| {
+                assert!(part.iter().all(|n| n % 3 == key as usize));
+                sink.extend_from_slice(part);
+                Ok(())
+            },
+            &counters,
+        )
+        .unwrap();
+        let sinks = sinks.into_sinks();
+        assert_eq!(sinks.iter().map(|(k, _)| *k).collect::<Vec<_>>(), [0, 1, 2]);
+        for (key, sink) in sinks {
+            let expected: Vec<usize> = (0..300).filter(|n| n % 3 == key as usize).collect();
+            assert_eq!(sink, expected, "key {key}");
+        }
+    }
+
+    /// An opener failing for one key under `ordered` with a small queue ends
+    /// the run with the opener's error rather than waiting on the reorder
+    /// window.
+    #[test]
+    fn ordered_driver_ends_on_an_opener_error() {
+        let cfg = driver_cfg(4, true);
+        let mut sinks: KeyedSinks<Vec<usize>> = KeyedSinks::with_opener(Box::new(|key| {
+            if key == 1 {
+                anyhow::bail!("cannot open the output of key 1");
+            }
+            Ok(Vec::new())
+        }));
+        let error = run_parallel(
+            (0..10_000usize).map(anyhow::Ok),
+            BatchPolicy {
+                target_weight: 1,
+                max_items: 1,
+                queue_per_worker: 1,
+            },
+            |_: &usize| 1,
+            &cfg,
+            &mut sinks,
+            |n, _cfg, parts: &mut Parts<usize>| {
+                parts.part(if n == 40 { 1 } else { 0 }).push(n);
+                Ok(())
+            },
+            Ok,
+            |sink, _, part: &Vec<usize>| {
+                sink.extend_from_slice(part);
+                Ok(())
+            },
+            &Counters::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "cannot open the output of key 1");
+        let sinks = sinks.into_sinks();
+        assert_eq!(sinks.len(), 1, "Key 1 was never opened");
+        assert!(sinks[0].1.len() < 10_000, "The run stopped after the error");
     }
 
     #[test]
@@ -1167,13 +1393,13 @@ mod tests {
             FASTQ_BATCH,
             |_: &usize| 1,
             &cfg,
-            &mut sink,
-            |n, _cfg, out: &mut Vec<usize>| {
-                out.push(n);
+            &mut KeyedSinks::single(&mut sink),
+            |n, _cfg, out: &mut Parts<usize>| {
+                out.part(0).push(n);
                 Ok(())
             },
             Ok,
-            |sink, batch: &Vec<usize>| {
+            |sink, _, batch: &Vec<usize>| {
                 sink.extend_from_slice(batch);
                 Ok(())
             },
@@ -1201,17 +1427,17 @@ mod tests {
             },
             |_: &usize| 1,
             &cfg,
-            &mut sink,
-            |n, _cfg, out: &mut Vec<usize>| {
+            &mut KeyedSinks::single(&mut sink),
+            |n, _cfg, out: &mut Parts<usize>| {
                 rendered.fetch_add(1, Ordering::Relaxed);
                 if n == 10 {
                     anyhow::bail!("record 10 is malformed");
                 }
-                out.push(n);
+                out.part(0).push(n);
                 Ok(())
             },
             Ok,
-            |sink, batch: &Vec<usize>| {
+            |sink, _, batch: &Vec<usize>| {
                 sink.extend_from_slice(batch);
                 Ok(())
             },

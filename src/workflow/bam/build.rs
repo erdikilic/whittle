@@ -45,6 +45,9 @@ pub(super) struct RecordEdit<'a> {
     pub(super) updates: TagUpdates,
     /// The tags `--remove-tag` drops, applied after the rewrites.
     pub(super) remove: &'a TagRemoval,
+    /// The `--split-by` bin name, written as the `wt:Z` tag after the input
+    /// tags, in place of an input `wt`.
+    pub(super) target: Option<Vec<u8>>,
     /// The rejection reason, written as the `wr:Z` tag.
     pub(super) reason: Option<Reason>,
 }
@@ -59,6 +62,7 @@ impl<'a> RecordEdit<'a> {
             name: None,
             updates: Vec::new(),
             remove,
+            target: None,
             reason: None,
         }
     }
@@ -241,7 +245,7 @@ fn insert(fields: &mut Vec<([u8; 2], FieldBytes)>, tag: [u8; 2], bytes: FieldByt
 /// Collects the output aux fields of `edit` over the input aux block `aux`:
 /// input fields in order, each removed, replaced by its update, cut to the
 /// window (a per-base array of a trimmed read) or copied verbatim, then the
-/// updates the input lacks and the rejection reason.
+/// updates the input lacks, the target tag and the rejection reason.
 fn edit_fields(
     aux: &[u8],
     orig_len: usize,
@@ -309,6 +313,15 @@ fn edit_fields(
             let bytes = encode_field(scratch, tag, &value)?;
             insert(&mut fields, tag, FieldBytes::Encoded(bytes));
         }
+    }
+    if let Some(target) = edit.target.take() {
+        let value = Value::String(target.into());
+        let bytes = encode_field(scratch, crate::workflow::TARGET_TAG, &value)?;
+        insert(
+            &mut fields,
+            crate::workflow::TARGET_TAG,
+            FieldBytes::Encoded(bytes),
+        );
     }
     if let Some(reason) = edit.reason {
         let tag = <[u8; 2]>::from(reject::REASON_TAG);

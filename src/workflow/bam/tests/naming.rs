@@ -23,7 +23,8 @@ fn split_sets_rn_to_minus_one_without_update_moves() {
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
         [Ok(raw_record(&src))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -233,6 +234,8 @@ fn adapter_and_quality_splits_retain_original_barcode_and_pacbio_coordinates() {
         min_piece: 20,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     });
     let (stats, recs) = bam2bam(vec![src.clone()], &cfg);
     assert_eq!(stats.output_reads, 3);

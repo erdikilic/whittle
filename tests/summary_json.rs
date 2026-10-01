@@ -3,6 +3,9 @@
 //! can show: that the file is written on every dispatch path, that it survives
 //! `--quiet`, and that its counters agree with the reads written.
 
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 
@@ -411,4 +414,296 @@ fn inference_reports_zero_configured_adapters() {
     let a = summary(dir.path())["params"]["adapters"].clone();
     assert_eq!(a["configured"], 0, "Inference configures nothing up front");
     assert_eq!(a["infer"], "discover");
+}
+
+/// Generates deterministic SplitMix64 bases, for `--split-by` fixtures.
+fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
+    (0..len)
+        .map(|_| {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            b"ACGT"[((z >> 62) & 0b11) as usize]
+        })
+        .collect()
+}
+
+/// Reverse complement of an ACGT sequence.
+fn rc(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&b| match b {
+            b'A' => b'T',
+            b'C' => b'G',
+            b'G' => b'C',
+            _ => b'A',
+        })
+        .collect()
+}
+
+/// Concatenates sequence parts.
+fn cat(parts: &[&[u8]]) -> Vec<u8> {
+    parts.concat()
+}
+
+/// The insert of split fixture read `i`.
+fn split_insert(i: u64) -> Vec<u8> {
+    splitmix_dna(7000 + i, 400)
+}
+
+/// Forward and reverse primers of two split targets, `16S` and `ITS`.
+struct SplitPrimers {
+    f16: Vec<u8>,
+    r16: Vec<u8>,
+    fits: Vec<u8>,
+    rits: Vec<u8>,
+}
+
+fn split_primers() -> SplitPrimers {
+    SplitPrimers {
+        f16: splitmix_dna(7901, 20),
+        r16: splitmix_dna(7902, 22),
+        fits: splitmix_dna(7903, 21),
+        rits: splitmix_dna(7904, 20),
+    }
+}
+
+/// Writes the two-target TSV sheet (`16S`, `ITS`) to `dir/sheet.tsv`.
+fn write_split_sheet(dir: &Path, p: &SplitPrimers) -> PathBuf {
+    let path = dir.join("sheet.tsv");
+    let s = |v: &[u8]| String::from_utf8(v.to_vec()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "target\tfwd\trev\n16S\t{}\t{}\nITS\t{}\t{}\n",
+            s(&p.f16),
+            s(&p.r16),
+            s(&p.fits),
+            s(&p.rits)
+        ),
+    )
+    .unwrap();
+    path
+}
+
+fn write_split_fastq(path: &Path, reads: &[(String, Vec<u8>)]) {
+    let mut f = std::fs::File::create(path).unwrap();
+    for (name, seq) in reads {
+        writeln!(
+            f,
+            "@{name}\n{}\n+\n{}",
+            String::from_utf8_lossy(seq),
+            "I".repeat(seq.len())
+        )
+        .unwrap();
+    }
+}
+
+/// 3 `16S` reads (2 on the plus strand, 1 on the minus strand), 2 `ITS` reads
+/// (plus strand), and 4 primer-free reads.
+fn split_pool(p: &SplitPrimers) -> Vec<(String, Vec<u8>)> {
+    let mut reads = Vec::new();
+    for i in 0..2u64 {
+        reads.push((
+            format!("s16p{i}"),
+            cat(&[&p.f16, &split_insert(i), &rc(&p.r16)]),
+        ));
+    }
+    reads.push((
+        "s16m".to_string(),
+        cat(&[&p.r16, &split_insert(10), &rc(&p.f16)]),
+    ));
+    for i in 0..2u64 {
+        reads.push((
+            format!("sits{i}"),
+            cat(&[&p.fits, &split_insert(20 + i), &rc(&p.rits)]),
+        ));
+    }
+    for i in 0..4u64 {
+        reads.push((format!("none{i}"), split_insert(30 + i)));
+    }
+    reads
+}
+
+/// The `split` object carries the resolved settings and per-key counts that
+/// match the planted pool: 3 `16S` reads, 2 `ITS` reads, 4 primer-free reads.
+#[test]
+fn summary_split_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = split_primers();
+    let sheet = write_split_sheet(dir.path(), &p);
+    let input = dir.path().join("in.fastq");
+    write_split_fastq(&input, &split_pool(&p));
+    let out = dir.path().join("out.fastq");
+    let json = dir.path().join("summary.json");
+
+    whittle()
+        .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
+        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let v = summary(dir.path());
+    assert_eq!(v["schema_version"], 2);
+    let split = &v["split"];
+    assert_eq!(split["spec"], serde_json::json!([sheet.to_str().unwrap()]));
+    assert_eq!(split["require"], "either");
+    assert_eq!(split["action"], "trim");
+    assert_eq!(split["lead"], 2);
+
+    let keys = split["keys"].as_array().unwrap();
+    let key16 = keys.iter().find(|k| k["key"] == "16S").unwrap();
+    assert_eq!(key16["reads"], 3);
+    assert_eq!(key16["plus"], 2);
+    assert_eq!(key16["minus"], 1);
+    assert_eq!(key16["both_ends"], 3);
+    let key_its = keys.iter().find(|k| k["key"] == "ITS").unwrap();
+    assert_eq!(key_its["reads"], 2);
+
+    assert_eq!(
+        split["unassigned"]["no_primer"], 4,
+        "The 4 primer-free reads are unassigned no_primer"
+    );
+    assert_eq!(split["unassigned"]["require"], 0);
+    assert_eq!(split["unassigned"]["orientation"], 0);
+    assert_eq!(split["unassigned"]["length"], 0);
+    assert_eq!(split["ambiguous"], 0);
+    assert_eq!(split["discarded"], 0);
+}
+
+/// `split.spec` is an array of every `--split-by` value, in the order given,
+/// not a single string.
+#[test]
+fn summary_split_spec_is_an_array_of_every_split_by_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = split_primers();
+    let sheet = write_split_sheet(dir.path(), &p);
+    let input = dir.path().join("in.fastq");
+    write_split_fastq(&input, &split_pool(&p));
+    let out = dir.path().join("out.fastq");
+    let json = dir.path().join("summary.json");
+    let inline = "V34:F:CCTACGGGNGGCWGCAG:R:GACTACHVGGGTATCTAATCC";
+
+    whittle()
+        .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
+        .args(["--split-by", sheet.to_str().unwrap()])
+        .args(["--split-by", inline])
+        .args(["-t", "1", "--summary-json", json.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let v = summary(dir.path());
+    assert_eq!(
+        v["split"]["spec"],
+        serde_json::json!([sheet.to_str().unwrap(), inline])
+    );
+}
+
+/// Without `--split-by`, the summary carries no `split` key at all (not a `null`
+/// value): the object is additive and absent otherwise.
+#[test]
+fn summary_without_split_has_no_split_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let json = dir.path().join("summary.json");
+
+    whittle()
+        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .write_stdin(reads())
+        .assert()
+        .success();
+
+    let v = summary(dir.path());
+    assert!(
+        v.get("split").is_none(),
+        "split must be entirely absent without --split-by: {v}"
+    );
+}
+
+/// Every sheet key appears in `keys`, zeros included, even a target with no
+/// matching reads at all.
+#[test]
+fn zero_count_key_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = split_primers();
+    let sheet = write_split_sheet(dir.path(), &p);
+    let input = dir.path().join("in.fastq");
+    // Only a 16S read; ITS has no reads in this run.
+    let reads = vec![(
+        "s16".to_string(),
+        cat(&[&p.f16, &split_insert(0), &rc(&p.r16)]),
+    )];
+    write_split_fastq(&input, &reads);
+    let out = dir.path().join("out.fastq");
+    let json = dir.path().join("summary.json");
+
+    whittle()
+        .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
+        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let v = summary(dir.path());
+    let keys = v["split"]["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 2, "Both sheet keys are listed: {keys:?}");
+    let key_its = keys.iter().find(|k| k["key"] == "ITS").unwrap();
+    assert_eq!(key_its["reads"], 0);
+    assert_eq!(key_its["bases"], 0);
+    assert_eq!(key_its["both_ends"], 0);
+    assert_eq!(key_its["five_only"], 0);
+    assert_eq!(key_its["three_only"], 0);
+    assert_eq!(key_its["plus"], 0);
+    assert_eq!(key_its["minus"], 0);
+}
+
+/// `assigned + unassigned + ambiguous == output segments + discarded`, over a
+/// run that discards its unassigned bin so the discarded term is exercised
+/// too, not just left at zero.
+#[test]
+fn accounting_invariant() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = split_primers();
+    let sheet = write_split_sheet(dir.path(), &p);
+    let input = dir.path().join("in.fastq");
+    write_split_fastq(&input, &split_pool(&p));
+    let out = dir.path().join("out.fastq");
+    let json = dir.path().join("summary.json");
+
+    whittle()
+        .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
+        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--split-discard", "unassigned"])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let v = summary(dir.path());
+    let assigned: u64 = v["split"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["reads"].as_u64().unwrap())
+        .sum();
+    let unassigned: u64 = ["no_primer", "require", "orientation", "length"]
+        .iter()
+        .map(|f| v["split"]["unassigned"][f].as_u64().unwrap())
+        .sum();
+    let ambiguous = v["split"]["ambiguous"].as_u64().unwrap();
+    let discarded = v["split"]["discarded"].as_u64().unwrap();
+    let output = v["reads"]["output"].as_u64().unwrap();
+
+    assert_eq!(assigned, 5, "3 16S + 2 ITS reads are assigned");
+    assert_eq!(unassigned, 4, "The 4 primer-free reads are unassigned");
+    assert_eq!(discarded, 4, "--split-discard unassigned drops them all");
+    assert_eq!(
+        assigned + unassigned + ambiguous,
+        output + discarded,
+        "assigned {assigned} + unassigned {unassigned} + ambiguous {ambiguous} must equal \
+         output {output} + discarded {discarded}"
+    );
 }

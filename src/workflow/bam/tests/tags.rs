@@ -173,7 +173,8 @@ fn integer_qs_and_qe_follow_the_window() {
     let mut fastq = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&src))].into_iter(),
-        &mut fastq,
+        &mut KeyedSinks::single(&mut fastq),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -195,7 +196,8 @@ fn integer_qs_and_qe_follow_the_window() {
     let mut fastq = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&src))].into_iter(),
-        &mut fastq,
+        &mut KeyedSinks::single(&mut fastq),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -246,7 +248,8 @@ fn fixed_size_pacbio_arrays_are_not_sliced() {
     let mut out = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&two))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )

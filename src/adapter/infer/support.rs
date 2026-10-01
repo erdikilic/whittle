@@ -112,11 +112,20 @@ pub(super) fn same_adapter(a: &[u8], b: &[u8], error_rate: f64) -> bool {
 
 /// Returns the best catalog matches for `seq` as `(name, percent_identity)`,
 /// sorted by identity descending, at most three, and only at or above
-/// `NAME_IDENTITY_MIN`. The result annotates an inferred adapter with the
+/// `NAME_IDENTITY_MIN`. Ties go to the reference listed first in
+/// `catalog::MARKER_PRIMERS`, as a primer mix comes before its variants,
+/// and then by name. The result annotates an inferred adapter with the
 /// catalog entry it corresponds to.
 pub(super) fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f32)> {
+    let marker_rank = |r: &Adapter| {
+        let upper = r.seq.to_ascii_uppercase();
+        crate::adapter::catalog::MARKER_PRIMERS
+            .iter()
+            .position(|&primer| primer == upper.as_slice())
+            .unwrap_or(usize::MAX)
+    };
     let mut s = new_ambiguous_searcher();
-    let mut named: Vec<(String, f32)> = Vec::new();
+    let mut named: Vec<(String, f32, usize)> = Vec::new();
     // A barcode construct's `N` block matches any sequence and names nothing.
     for r in refs.iter().filter(|r| !crate::adapter::is_construct(r)) {
         let (short, long) = if seq.len() <= r.seq.len() {
@@ -134,13 +143,21 @@ pub(super) fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec
         {
             let pct = 100.0 * (1.0 - h.cost as f32 / short.len() as f32);
             if pct >= NAME_IDENTITY_MIN {
-                named.push((r.name.clone(), pct));
+                named.push((r.name.clone(), pct, marker_rank(r)));
             }
         }
     }
-    named.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
-    named.truncate(3);
+    named.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap()
+            .then(a.2.cmp(&b.2))
+            .then(a.0.cmp(&b.0))
+    });
     named
+        .into_iter()
+        .take(3)
+        .map(|(name, pct, _)| (name, pct))
+        .collect()
 }
 
 /// Samples at most `cap` windows deterministically, spread across the whole
@@ -292,6 +309,8 @@ pub(super) fn untrimmed_other_end(
         min_piece: 1,
         candidate_index: std::sync::OnceLock::new(),
         amplicon: false,
+        split_of: Vec::new(),
+        split_opens: Vec::new(),
     };
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     candidates

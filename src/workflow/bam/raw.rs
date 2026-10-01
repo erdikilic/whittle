@@ -268,25 +268,24 @@ pub(super) fn run_raw_bam_full_window_parallel(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
     sink: &mut crate::io::bam::BamSink,
+    level: u8,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
-    let level = sink
-        .block_level()
-        .expect("A parallel run writes through a block sink");
     run_parallel(
         records,
         BAM_BATCH,
         |record: &bam::Record| record.sequence().len(),
         cfg,
-        sink,
-        |record, cfg, out: &mut Vec<BamOutputRecord>| {
+        &mut KeyedSinks::single(sink),
+        |record, cfg, out: &mut Parts<BamOutputRecord>| {
             ensure_raw_trimmable(&record)?;
-            out.extend(process_raw_full_window(record, cfg, counters)?);
+            out.part(0)
+                .extend(process_raw_full_window(record, cfg, counters)?);
             Ok(())
         },
         |records| pack_bam_blocks(header, level, records),
-        |sink, blocks: &Vec<u8>| sink.write_blocks(blocks),
+        |sink, _key, blocks: &Vec<u8>| sink.write_blocks(blocks),
         counters,
     )
 }

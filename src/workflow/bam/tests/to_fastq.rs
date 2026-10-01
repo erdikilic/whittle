@@ -12,7 +12,8 @@ fn bam2fq_keeps_empty_mod_group_after_a_crop() {
     let mut out = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&rec))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -30,7 +31,8 @@ fn bam2fq_all_carries_rg_and_reconstructed_mods() {
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
         [Ok(raw_record(&read2_with_mods_and_rg()))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -52,7 +54,8 @@ fn bam2fq_only_mm_ml_drops_rg() {
     let mut out = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&read2_with_mods_and_rg()))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -71,7 +74,8 @@ fn bam2fq_none_is_plain_fastq() {
     let mut out = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&read2_with_mods_and_rg()))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -92,7 +96,8 @@ fn bam2fq_split_suffixes_and_segments_mods() {
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
         [Ok(raw_record(&rec))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -122,7 +127,8 @@ fn bam2fq_no_mods_read_is_plain() {
     let mut out = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&rec))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -148,7 +154,8 @@ fn bam2fq_mm_without_ml_omits_ml_field() {
     let mut out = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&rec))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -174,7 +181,8 @@ fn malformed_mod_block_is_omitted_and_counted_on_fastq_output() {
             let mut out = Vec::new();
             let stats = run_bam_to_fastq(
                 [Ok(raw_record(&malformed_mod_record(variant)))].into_iter(),
-                &mut out,
+                &mut KeyedSinks::single(&mut out),
+                None,
                 &cfg,
                 &Arc::new(Counters::default()),
             )
@@ -205,7 +213,8 @@ fn bam2fq_slices_kinetics_in_header() {
     let mut out = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&rec))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )
@@ -223,7 +232,8 @@ fn bam2fq_slices_reverse_strand_kinetics_from_the_other_end() {
     let mut out = Vec::new();
     run_bam_to_fastq(
         [Ok(raw_record(&pacbio_kinetics_record()))].into_iter(),
-        &mut out,
+        &mut KeyedSinks::single(&mut out),
+        None,
         &cfg,
         &Arc::new(Counters::default()),
     )

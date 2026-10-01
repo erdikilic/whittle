@@ -6,61 +6,79 @@ use std::sync::atomic::Ordering;
 
 use super::reject::{self, Reason, RejectItem};
 use super::{
-    BatchSink, Counters, FASTQ_BATCH, Rejection, Stats, process_read_segments, run_bytes_parallel,
+    BatchSink, Counters, FASTQ_BATCH, KeyedSinks, Parts, Rejection, Routing, Stats,
+    process_read_segments, push_fastq_target, route, run_bytes_parallel, trim_read,
 };
 use crate::config::Config;
-use crate::io::fastq::write_segment;
+use crate::io::fastq::{write_body, write_head, write_segment};
 use crate::record::ReadRecord;
-use crate::trim;
 
 /// Runs the single-threaded FASTQ workflow: trims, filters each produced segment
-/// and writes the survivors straight to `writer`.
+/// and writes each record's survivors straight to the writers of their keys.
 fn run_fastq_seq<W: Write>(
     records: impl Iterator<Item = anyhow::Result<ReadRecord>>,
-    writer: &mut W,
+    writers: &mut KeyedSinks<W>,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
-    let mut buf = Vec::new();
+    let mut parts = Parts::default();
     for rec in records {
         let rec = rec?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
             .fetch_add(rec.seq.len() as u64, Ordering::Relaxed);
-        buf.clear();
-        render_record(rec, cfg, counters, &mut buf)?;
-        writer.write_all(&buf)?;
+        render_record(rec, cfg, counters, &mut parts)?;
+        parts.drain_each(|key, bytes| Ok(writers.get(key)?.write_all(bytes)?))?;
     }
     Ok(counters.snapshot())
 }
 
 /// Trims one record, filters each produced segment through
-/// `process_read_segments`, and appends survivors to the reusable output buffer.
+/// `process_read_segments`, and appends each survivor to the part of its
+/// output key.
 pub(super) fn render_record(
     rec: ReadRecord,
     cfg: &Config,
     counters: &Counters,
-    w: &mut Vec<u8>,
+    parts: &mut Parts<u8>,
 ) -> anyhow::Result<()> {
     if crate::io::tagged::has_aux_tags(&rec.name) {
         if !counters.tagged_fastq.swap(true, Ordering::Relaxed) {
             tracing::info!("FASTQ headers carry SAM aux tags; tags are rewritten per segment");
         }
-        return super::bam::render_tagged_fastq_read(rec, cfg, counters, w);
+        return super::bam::render_tagged_fastq_read(rec, cfg, counters, parts);
     }
     let _read = super::read_span(&rec.name);
     let _read = _read.enter();
-    let produced = trim::apply(&rec.seq, &rec.qual, &cfg.trim, cfg.adapters.as_ref(), None);
+    let (produced, pieces) = trim_read(&rec.seq, &rec.qual, cfg, None);
     process_read_segments(
         &produced,
         &rec.seq,
         &rec.qual,
         &cfg.filter,
         counters,
-        |idx, total, s, e| {
-            write_segment(w, &rec.name, &rec.seq[s..e], &rec.qual[s..e], total, idx)?;
-            Ok(())
+        |idx, total, s, e| match route(cfg, &rec.seq, &pieces, idx, (e - s) as u64, None, counters)?
+        {
+            Routing::Untagged => {
+                write_segment(
+                    parts.part(0),
+                    &rec.name,
+                    &rec.seq[s..e],
+                    &rec.qual[s..e],
+                    total,
+                    idx,
+                )?;
+                Ok(true)
+            },
+            Routing::Tagged(label, key) => {
+                let w = parts.part(key);
+                write_head(w, &rec.name, total, idx)?;
+                push_fastq_target(w, label);
+                write_body(w, &rec.seq[s..e], &rec.qual[s..e])?;
+                Ok(true)
+            },
+            Routing::Discarded => Ok(false),
         },
         |rejection| {
             if !counters.wants_rejects() {
@@ -114,11 +132,12 @@ pub(crate) fn tag_filtered_fastq(rec: &ReadRecord) -> Vec<u8> {
 /// Runs the FASTQ workflow: sequential when `cfg.threads <= 1`; otherwise
 /// records render on a rayon pool and drain through `run_parallel`, in input
 /// order under `cfg.ordered` and in completion order otherwise. A writer that
-/// takes compressed blocks (see `BatchSink::block_level`) has each batch
-/// compressed on the pool.
+/// takes compressed blocks has each batch compressed on the pool at `level`,
+/// the writers' BGZF level (`None` for writers that take rendered bytes).
 pub(crate) fn run_fastq<W, I>(
     records: I,
-    writer: &mut W,
+    writers: &mut KeyedSinks<W>,
+    level: Option<u8>,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats>
@@ -127,15 +146,16 @@ where
     I: Iterator<Item = anyhow::Result<ReadRecord>> + Send,
 {
     if cfg.threads <= 1 {
-        return run_fastq_seq(records, writer, cfg, counters);
+        return run_fastq_seq(records, writers, cfg, counters);
     }
     run_bytes_parallel(
         records,
         FASTQ_BATCH,
         |rec| rec.seq.len(),
         cfg,
-        writer,
-        |rec, cfg, buf| render_record(rec, cfg, counters, buf),
+        writers,
+        level,
+        |rec, cfg, parts| render_record(rec, cfg, counters, parts),
         counters,
     )
 }
@@ -177,7 +197,13 @@ mod tests {
         let recs = vec![Ok(rec("r1", b"ACGT", vec![40, 40, 40, 40]))];
         let mut out = Vec::new();
         let counters = Arc::new(Counters::default());
-        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg, &counters).unwrap();
+        let stats = run_fastq_seq(
+            recs.into_iter(),
+            &mut KeyedSinks::single(&mut out),
+            &cfg,
+            &counters,
+        )
+        .unwrap();
         assert_eq!((stats.input_reads, stats.output_reads), (1, 1));
         assert_eq!(
             counters
@@ -205,7 +231,7 @@ mod tests {
         let mut out = Vec::new();
         let stats = run_fastq_seq(
             recs.into_iter(),
-            &mut out,
+            &mut KeyedSinks::single(&mut out),
             &cfg,
             &Arc::new(Counters::default()),
         )
@@ -225,7 +251,7 @@ mod tests {
         let mut out = Vec::new();
         let stats = run_fastq_seq(
             recs.into_iter(),
-            &mut out,
+            &mut KeyedSinks::single(&mut out),
             &cfg,
             &Arc::new(Counters::default()),
         )
@@ -245,7 +271,7 @@ mod tests {
         let mut out = Vec::new();
         let stats = run_fastq_seq(
             recs.into_iter(),
-            &mut out,
+            &mut KeyedSinks::single(&mut out),
             &cfg,
             &Arc::new(Counters::default()),
         )
@@ -263,7 +289,13 @@ mod tests {
         let recs = vec![Ok(rec("short", b"ACGT", vec![40; 4]))];
         let mut out = Vec::new();
         let counters = Arc::new(Counters::default());
-        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg, &counters).unwrap();
+        let stats = run_fastq_seq(
+            recs.into_iter(),
+            &mut KeyedSinks::single(&mut out),
+            &cfg,
+            &counters,
+        )
+        .unwrap();
         assert_eq!(stats.segments_dropped_short, 1);
         assert_eq!(stats.reads_all_filtered, 1);
         assert_eq!(stats.reads_trimmed_to_nothing, 0);
@@ -284,7 +316,7 @@ mod tests {
         let mut out = Vec::new();
         let stats = run_fastq_seq(
             recs.into_iter(),
-            &mut out,
+            &mut KeyedSinks::single(&mut out),
             &cfg,
             &Arc::new(Counters::default()),
         )
@@ -312,7 +344,13 @@ mod tests {
         let recs = vec![Ok(rec("r1", b"AAAAAAAAAA", phred))];
         let mut out = Vec::new();
         let counters = Arc::new(Counters::default());
-        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg, &counters).unwrap();
+        let stats = run_fastq_seq(
+            recs.into_iter(),
+            &mut KeyedSinks::single(&mut out),
+            &cfg,
+            &counters,
+        )
+        .unwrap();
         assert_eq!(out, b"@r1\nAAAAAA\n+\nIIIIII\n");
         assert_eq!(stats.output_reads, 1);
         assert_eq!(
@@ -360,11 +398,19 @@ mod tests {
             min_piece: 1,
             candidate_index: std::sync::OnceLock::new(),
             amplicon: false,
+            split_of: Vec::new(),
+            split_opens: Vec::new(),
         });
         let recs = vec![Ok(rec("r1", &seq, phred))];
         let mut out = Vec::new();
         let counters = Arc::new(Counters::default());
-        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg, &counters).unwrap();
+        let stats = run_fastq_seq(
+            recs.into_iter(),
+            &mut KeyedSinks::single(&mut out),
+            &cfg,
+            &counters,
+        )
+        .unwrap();
 
         assert_eq!(stats.output_reads, 1, "Only the long flank survives");
         assert_eq!(
@@ -399,7 +445,13 @@ mod tests {
         let recs = vec![Ok(rec("empty", b"", vec![]))];
         let mut out = Vec::new();
         let counters = Arc::new(Counters::default());
-        let stats = run_fastq_seq(recs.into_iter(), &mut out, &cfg, &counters).unwrap();
+        let stats = run_fastq_seq(
+            recs.into_iter(),
+            &mut KeyedSinks::single(&mut out),
+            &cfg,
+            &counters,
+        )
+        .unwrap();
         assert!(out.is_empty());
         assert_eq!(stats.input_reads, 1);
         assert_eq!(stats.output_reads, 0);
@@ -430,7 +482,8 @@ mod tests {
         let mut seq_out = Vec::new();
         run_fastq(
             recs.clone().into_iter().map(anyhow::Ok),
-            &mut seq_out,
+            &mut KeyedSinks::single(&mut seq_out),
+            None,
             &mk(1),
             &Arc::new(Counters::default()),
         )
@@ -439,7 +492,8 @@ mod tests {
         let mut par_out = Vec::new();
         run_fastq(
             recs.into_iter().map(anyhow::Ok),
-            &mut par_out,
+            &mut KeyedSinks::single(&mut par_out),
+            None,
             &mk(4),
             &Arc::new(Counters::default()),
         )
@@ -491,7 +545,8 @@ mod tests {
         };
         let res = run_fastq(
             recs.into_iter().map(anyhow::Ok),
-            &mut w,
+            &mut KeyedSinks::single(&mut w),
+            None,
             &cfg,
             &Arc::new(Counters::default()),
         );
@@ -512,7 +567,13 @@ mod tests {
             .chain(std::iter::once(Err(anyhow::anyhow!("bad record"))));
 
         let mut out = Vec::new();
-        let res = run_fastq(recs, &mut out, &cfg, &Arc::new(Counters::default()));
+        let res = run_fastq(
+            recs,
+            &mut KeyedSinks::single(&mut out),
+            None,
+            &cfg,
+            &Arc::new(Counters::default()),
+        );
         assert!(
             res.is_err(),
             "A malformed record must not be dropped on the parallel path"

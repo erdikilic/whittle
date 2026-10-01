@@ -44,31 +44,39 @@ fn run_bam_parallel_matches_sequential_as_multiset() {
     // t1: single-threaded BGZF sink, written to a temporary file.
     let dir = tempfile::tempdir().unwrap();
     let p1 = dir.path().join("t1.bam");
-    let mut sink1 = crate::io::bam::writer(Some(&p1), &header, false, 6).unwrap();
+    let mut sinks1 =
+        KeyedSinks::single(crate::io::bam::writer(Some(&p1), &header, false, 6).unwrap());
     run_bam(
         &header,
         recs.iter().map(|r| Ok(raw_record(r))),
-        &mut sink1,
+        &mut sinks1,
+        6,
         &mk(1),
         &Arc::new(Counters::default()),
     )
     .unwrap();
-    sink1.finish().unwrap();
+    for (_, sink) in sinks1.into_sinks() {
+        sink.finish().unwrap();
+    }
     let b1 = std::fs::read(&p1).unwrap();
 
     // t8: multithreaded sink to a temporary file (the multithreaded writer
     // needs an owned `Write + Send`).
     let p8 = dir.path().join("t8.bam");
-    let mut sink8 = crate::io::bam::writer(Some(&p8), &header, true, 6).unwrap();
+    let mut sinks8 =
+        KeyedSinks::single(crate::io::bam::writer(Some(&p8), &header, true, 6).unwrap());
     run_bam(
         &header,
         recs.iter().map(|r| Ok(raw_record(r))),
-        &mut sink8,
+        &mut sinks8,
+        6,
         &mk(8),
         &Arc::new(Counters::default()),
     )
     .unwrap();
-    sink8.finish().unwrap();
+    for (_, sink) in sinks8.into_sinks() {
+        sink.finish().unwrap();
+    }
     let b8 = std::fs::read(&p8).unwrap();
 
     assert_eq!(
@@ -104,13 +112,13 @@ fn run_bam_parallel_surfaces_write_error_without_deadlock() {
     let res = run_bam_parallel(
         recs.into_iter(),
         &cfg,
-        &mut sink,
-        |_raw, _rec, _cfg, out: &mut Vec<()>| {
-            out.push(());
+        &mut KeyedSinks::single(&mut sink),
+        |_raw, _rec, _cfg, out: &mut Parts<()>| {
+            out.part(0).push(());
             Ok(())
         },
         Ok,
-        |sink, batch: &Vec<()>| -> io::Result<()> {
+        |sink, _, batch: &Vec<()>| -> io::Result<()> {
             if sink.written >= sink.limit {
                 return Err(io::Error::new(io::ErrorKind::BrokenPipe, "boom"));
             }
@@ -149,13 +157,13 @@ fn run_bam_parallel_surfaces_parse_error_instead_of_dropping_it() {
     let res = run_bam_parallel(
         recs,
         &cfg,
-        &mut sink,
-        |_raw, _rec, _cfg, out: &mut Vec<()>| {
-            out.push(());
+        &mut KeyedSinks::single(&mut sink),
+        |_raw, _rec, _cfg, out: &mut Parts<()>| {
+            out.part(0).push(());
             Ok(())
         },
         Ok,
-        |_sink: &mut NullSink, _batch: &Vec<()>| -> io::Result<()> { Ok(()) },
+        |_sink: &mut &mut NullSink, _, _batch: &Vec<()>| -> io::Result<()> { Ok(()) },
         &Arc::new(Counters::default()),
     );
     assert!(
@@ -203,7 +211,8 @@ fn run_bam_to_fastq_parallel_matches_sequential_as_multiset() {
     let mut a = Vec::new();
     run_bam_to_fastq(
         recs.iter().map(|r| Ok(raw_record(r))),
-        &mut a,
+        &mut KeyedSinks::single(&mut a),
+        None,
         &mk(1),
         &Arc::new(Counters::default()),
     )
@@ -211,7 +220,8 @@ fn run_bam_to_fastq_parallel_matches_sequential_as_multiset() {
     let mut b = Vec::new();
     run_bam_to_fastq(
         recs.iter().map(|r| Ok(raw_record(r))),
-        &mut b,
+        &mut KeyedSinks::single(&mut b),
+        None,
         &mk(8),
         &Arc::new(Counters::default()),
     )

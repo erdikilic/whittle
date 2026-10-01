@@ -79,7 +79,7 @@ pub(super) fn barcode_interval(
 
 /// Returns the record's barcode call (`BC`), the value dorado writes as
 /// `<kit>_barcodeNN`.
-pub(super) fn barcode_call(rec: &RecordBuf) -> Option<&[u8]> {
+pub(crate) fn barcode_call(rec: &RecordBuf) -> Option<&[u8]> {
     match rec.data().get(&Tag::new(b'B', b'C'))? {
         Value::String(value) => Some(value.as_ref()),
         _ => None,

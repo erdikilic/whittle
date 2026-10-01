@@ -10,7 +10,7 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use paraseq::prelude::*;
 
 use super::fastq::render_record;
-use super::{BatchSink, Counters, FirstError, Stats};
+use super::{BatchSink, Counters, FirstError, Parts, Stats};
 use crate::config::Config;
 use crate::record::ReadRecord;
 
@@ -33,8 +33,8 @@ pub(crate) fn selected() -> bool {
     std::env::var_os(PARSER_VAR).is_some_and(|v| v == "paraseq")
 }
 
-/// One worker's state: its render buffer, its counts since the last hand-off
-/// and the writer channel.
+/// One worker's state: its render parts (key 0 only, since a paraseq run has
+/// no `--split-by`), its counts since the last hand-off and the writer channel.
 #[derive(Clone)]
 struct Processor {
     cfg: Arc<Config>,
@@ -43,7 +43,7 @@ struct Processor {
     level: Option<u8>,
     ordered: bool,
     aborted: Arc<AtomicBool>,
-    buf: Vec<u8>,
+    parts: Parts<u8>,
     reads: u64,
     bases: u64,
 }
@@ -78,7 +78,7 @@ impl<Rf: Record> ParallelProcessor<Rf> for Processor {
         let rec = to_read_record(&record)?;
         self.reads += 1;
         self.bases += rec.seq.len() as u64;
-        render_record(rec, &self.cfg, &self.counters, &mut self.buf)?;
+        render_record(rec, &self.cfg, &self.counters, &mut self.parts)?;
         Ok(())
     }
 
@@ -91,7 +91,11 @@ impl<Rf: Record> ParallelProcessor<Rf> for Processor {
             .fetch_add(self.bases, Ordering::Relaxed);
         self.reads = 0;
         self.bases = 0;
-        let bytes = std::mem::take(&mut self.buf);
+        debug_assert!(
+            self.parts.only_first(),
+            "a paraseq run renders to key 0 only"
+        );
+        let bytes = std::mem::take(self.parts.part(0));
         let packed = match self.level {
             Some(level) => crate::io::fastq::encode_blocks(level, &bytes)?,
             None => bytes,
@@ -110,10 +114,13 @@ impl<Rf: Record> ParallelProcessor<Rf> for Processor {
 
 /// Runs the FASTQ workflow over `input` on `render_pool_size(cfg)` paraseq
 /// workers, writing rendered sets through one writer thread. Under
-/// `cfg.ordered` the sets are handed off in input order.
+/// `cfg.ordered` the sets are handed off in input order. `level` is the
+/// writer's BGZF level when it takes compressed blocks, `None` when it takes
+/// the rendered bytes.
 pub(crate) fn run_fastq_paraseq<W: BatchSink>(
     input: Box<dyn Read + Send>,
     writer: &mut W,
+    level: Option<u8>,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
@@ -129,10 +136,10 @@ pub(crate) fn run_fastq_paraseq<W: BatchSink>(
         cfg: Arc::new(cfg.clone()),
         counters: Arc::clone(counters),
         tx,
-        level: writer.block_level(),
+        level,
         ordered: cfg.ordered,
         aborted: Arc::clone(&aborted),
-        buf: Vec::new(),
+        parts: Parts::default(),
         reads: 0,
         bases: 0,
     };
