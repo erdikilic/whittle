@@ -764,6 +764,11 @@ fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
         Some(out) => Template::parse(out)?,
         None => None,
     };
+    let sources = specs
+        .iter()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect();
     let sheet = Sheet::load_all(&specs)?;
     sheet.validate(c.split_require)?;
     if let Some(template) = &template {
@@ -789,6 +794,7 @@ fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
         discard_unassigned: c.split_discard.contains(&SplitBin::Unassigned),
         discard_ambiguous: c.split_discard.contains(&SplitBin::Ambiguous),
         spec: specs,
+        sources,
         template,
     }))
 }

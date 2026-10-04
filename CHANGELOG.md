@@ -180,6 +180,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Retained primer bases count toward the final segment length filter for
+  internal amplicons.
+- Primer junction pairs split reads within the terminal search zones.
+- Equally supported targets in one group prefer a compatible length window.
+- Output collision checks protect split source files and detect hard links
+  between split outputs.
+- Rejected BAM and FASTQ records omit input target tags.
 - Discovery on amplicon libraries ends each primer where the insert begins
   and no longer learns the conserved start or end of the amplified gene, or
   sequences of single templates behind it, as technical layers. The start of

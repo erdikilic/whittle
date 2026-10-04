@@ -125,6 +125,9 @@ pub(crate) fn guard_output_collisions(
     if let Some(ac) = cfg.adapter_fasta.as_deref() {
         reads.push(("--adapter-fasta", ac));
     }
+    if let Some(opts) = &cfg.split_opts {
+        reads.extend(opts.sources.iter().map(|p| ("--split-by", p.as_path())));
+    }
     for p in extra_inputs {
         reads.push(("an input file in the directory", p.as_path()));
     }

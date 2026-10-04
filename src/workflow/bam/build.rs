@@ -271,7 +271,10 @@ fn edit_fields(
             return Err(invalid_data("duplicate aux tag"));
         }
         seen.push(tag);
-        if tag == CIGAR_TAG || remove.contains(&tag) {
+        if tag == CIGAR_TAG
+            || remove.contains(&tag)
+            || (edit.reason.is_some() && tag == crate::workflow::TARGET_TAG)
+        {
             continue;
         }
         if let Some(i) = updates.iter().position(|(t, _)| <[u8; 2]>::from(*t) == tag) {

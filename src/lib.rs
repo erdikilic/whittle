@@ -1073,7 +1073,7 @@ fn guard_split_outputs(cfg: &Config, members: &[PathBuf]) -> anyhow::Result<()> 
 
 /// The files a split output must not overwrite, each with the description
 /// an error names it by: the input file or the folder's read files
-/// `members`, `--adapter-fasta`, the rejected output and the summary file.
+/// `members`, adapter and split sources, the rejected output and the summary file.
 fn protected_paths(cfg: &Config, members: &[PathBuf]) -> Vec<(String, PathBuf)> {
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     if let Some(p) = cfg.io.input.as_deref().filter(|p| !p.is_dir()) {
@@ -1081,6 +1081,13 @@ fn protected_paths(cfg: &Config, members: &[PathBuf]) -> Vec<(String, PathBuf)> 
     }
     for p in members {
         out.push(("an input file in the directory".into(), p.clone()));
+    }
+    if let Some(opts) = &cfg.split_opts {
+        out.extend(
+            opts.sources
+                .iter()
+                .map(|p| ("a --split-by file".into(), p.clone())),
+        );
     }
     for (what, path) in [
         ("the --adapter-fasta file", cfg.adapter_fasta.as_deref()),

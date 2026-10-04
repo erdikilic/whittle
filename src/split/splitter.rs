@@ -5,7 +5,7 @@
 use crate::adapter::{AdapterConfig, Locus};
 use crate::trim::Piece;
 
-use super::classify::{Bounds, Call, KeyLevel, Keys, Rules, check_length, classify_at};
+use super::classify::{Bounds, Call, KeyLevel, Keys, Rules, classify_at_length};
 use super::route::{KeyTable, Owner, Template, UNCLASSIFIED, barcode_name};
 use super::score::{End, Scorer};
 use super::sheet::Sheet;
@@ -50,6 +50,8 @@ pub struct SplitOptions {
     /// The `--split-by` values as given, in order, carried through to the
     /// report.
     pub spec: Vec<String>,
+    /// File sources loaded into the sheet, protected from output writes.
+    pub sources: Vec<std::path::PathBuf>,
     /// The `-o` output template, or `None` in tag-only mode, where every
     /// record goes to the one output.
     pub template: Option<Template>,
@@ -192,7 +194,7 @@ impl Splitter {
         let five = score(piece.five, End::Five);
         let three = score(piece.three, End::Three);
         let boundary = |locus: Option<Locus>| locus.is_some_and(|l| l.boundary);
-        let call = classify_at(
+        classify_at_length(
             &self.opts.sheet,
             &self.keys,
             &self.bounds,
@@ -200,8 +202,8 @@ impl Splitter {
             &five,
             &three,
             [boundary(piece.five), boundary(piece.three)],
-        );
-        check_length(&self.opts.sheet, call, piece.end - piece.start)
+            Some(piece.end - piece.start),
+        )
     }
 
     /// The bin name of `call`: the assigned key's name, `"unassigned"`, or
@@ -300,6 +302,7 @@ mod tests {
             discard_unassigned: false,
             discard_ambiguous: false,
             spec: vec!["sheet.tsv".into()],
+            sources: Vec::new(),
             template: None,
         }
     }

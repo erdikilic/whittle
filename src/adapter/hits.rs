@@ -472,9 +472,9 @@ impl<'a> Keep<'a> {
     /// Excises both hits of a junction pair: `closing`, of the entry at
     /// `closing_idx`, reads out of the insert before it, and `opening`, of the
     /// entry at `opening_idx`, reads into the insert after it; see
-    /// `search_pairs`. A pair splits only when both hits lie outside both end
-    /// zones and the flank slack of either read end, and when each aligns
-    /// whole, leaving fewer than `MIN_OVERLAP` bases to clip.
+    /// `search_pairs`. Both hits must leave a flank beyond the slack of
+    /// either read end and align whole, with fewer than `MIN_OVERLAP`
+    /// bases to clip. Junction hits do not also trim terminal segments.
     pub(super) fn accept_pair(
         &mut self,
         (closing_idx, closing): (usize, Hit),
@@ -483,13 +483,15 @@ impl<'a> Keep<'a> {
         let interior = |hit: &Hit| {
             hit.start > FLANK_SLACK
                 && self.n - hit.end > FLANK_SLACK
-                && classify_terminal(hit.start, hit.end, self.n, self.end_size) == Terminal::None
                 && hit.clip_start + hit.clip_end < MIN_OVERLAP
         };
         if !self.split || !interior(&closing) || !interior(&opening) {
             return;
         }
         for (adapter_idx, hit) in [(closing_idx, closing), (opening_idx, opening)] {
+            self.held.retain(|h| {
+                h.adapter_idx != adapter_idx || h.start >= hit.end || h.end <= hit.start
+            });
             self.apply(
                 adapter_idx,
                 hit.start,

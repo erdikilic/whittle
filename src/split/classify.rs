@@ -121,7 +121,8 @@ pub enum Call {
         /// Index into `Keys::names`.
         key: usize,
         /// Index into `Sheet::targets`: the cheapest of `key`'s consistent
-        /// targets, ties broken by the lower target index.
+        /// targets. Equal ranks prefer a compatible length window when a
+        /// length is supplied, then the lower target index.
         target: usize,
         /// The strand the target was found on.
         strand: Strand,
@@ -354,7 +355,7 @@ struct Candidate {
 impl Candidate {
     /// The order of candidates within one key: matched at every used end
     /// first, then cheaper, then with a scored role primer. Equal ranks keep
-    /// the first candidate tried.
+    /// the first candidate tried unless a length window breaks the tie.
     fn rank(&self) -> (bool, usize, bool) {
         (self.penalised, self.cost, !self.scored)
     }
@@ -429,6 +430,23 @@ pub fn classify_at(
     three: &[Score],
     boundary: [bool; 2],
 ) -> Call {
+    classify_at_length(sheet, keys, bounds, rules, five, three, boundary, None)
+}
+
+/// Classifies primer evidence with a final segment length. Equal-rank
+/// targets within one key prefer a compatible length window. The selected
+/// target's length window is checked after competition between keys.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn classify_at_length(
+    sheet: &Sheet,
+    keys: &Keys,
+    bounds: &Bounds,
+    rules: Rules,
+    five: &[Score],
+    three: &[Score],
+    boundary: [bool; 2],
+    len: Option<usize>,
+) -> Call {
     let ends = match (!five.is_empty(), !three.is_empty()) {
         (true, true) => Ends::Both,
         (true, false) => Ends::Five,
@@ -438,6 +456,13 @@ pub fn classify_at(
     let five = Evidence::new(five, bounds, boundary[0]);
     let three = Evidence::new(three, bounds, boundary[1]);
 
+    let length_fits = |target: usize| {
+        len.is_none_or(|len| {
+            sheet.targets[target]
+                .len
+                .is_none_or(|(min, max)| (min..=max).contains(&len))
+        })
+    };
     let mut structurally_consistent = false;
     let mut best: Vec<Option<Candidate>> = vec![None; keys.names.len()];
 
@@ -475,7 +500,10 @@ pub fn classify_at(
                 strand,
             };
             let slot = &mut best[key];
-            if slot.is_none_or(|current| candidate.rank() < current.rank()) {
+            if slot.is_none_or(|current| {
+                (candidate.rank(), !length_fits(candidate.target))
+                    < (current.rank(), !length_fits(current.target))
+            }) {
                 *slot = Some(candidate);
             }
         }
@@ -520,12 +548,13 @@ pub fn classify_at(
     if !winner.scored || !leads {
         return Call::Ambiguous;
     }
-    Call::Assigned {
+    let call = Call::Assigned {
         key,
         target: winner.target,
         strand: winner.strand,
         ends,
-    }
+    };
+    len.map_or(call, |len| check_length(sheet, call, len))
 }
 
 /// Narrows an `Assigned` call to `Unassigned(Length)` when `len` falls
@@ -1608,5 +1637,46 @@ mod tests {
             Call::Unassigned(Unassigned::Length)
         );
         assert_eq!(check_length(&sheet, assigned, 500), assigned);
+    }
+
+    #[test]
+    fn length_windows_do_not_override_stronger_primer_evidence() {
+        let mut sheet = fixture();
+        sheet.targets[0].len = Some((100, 200));
+        sheet.targets[2].len = Some((300, 500));
+        let keys = Keys::new(&sheet, KeyLevel::Group);
+        let call = classify_at_length(
+            &sheet,
+            &keys,
+            &bounds(&sheet, &keys),
+            rules(Require::Both, 2),
+            &[score(0, 0)],
+            &[score(1, 0), score(4, 1)],
+            [false; 2],
+            Some(400),
+        );
+        assert_eq!(call, Call::Unassigned(Unassigned::Length));
+    }
+
+    #[test]
+    fn length_windows_do_not_resolve_competing_keys() {
+        let sheet = Sheet::parse_tsv(
+            "target\tfwd\trev\tmin_len\tmax_len\n\
+             A\tAAAAAAAAAAA\tCCCCCCCCCCC\t100\t200\n\
+             B\tAAAAAAAAAAA\tCCCCCCCCCCC\t300\t500\n",
+        )
+        .unwrap();
+        let keys = Keys::new(&sheet, KeyLevel::Target);
+        let call = classify_at_length(
+            &sheet,
+            &keys,
+            &bounds(&sheet, &keys),
+            rules(Require::Both, 2),
+            &[score(0, 0)],
+            &[score(1, 0)],
+            [false; 2],
+            Some(400),
+        );
+        assert_eq!(call, Call::Ambiguous);
     }
 }

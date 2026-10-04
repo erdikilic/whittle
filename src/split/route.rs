@@ -506,7 +506,11 @@ impl OpenGuard {
             );
         }
         let resolved = crate::guards::resolve(path).unwrap_or_else(|| path.to_path_buf());
-        if let Some((_, earlier)) = self.opened.iter().find(|(r, _)| *r == resolved) {
+        if let Some((_, earlier)) = self
+            .opened
+            .iter()
+            .find(|(r, earlier)| *r == resolved || crate::guards::same_path(earlier, path))
+        {
             anyhow::bail!(
                 "the -o template expands two keys to the same file ({} and {}); make each \
                  key's path distinct",

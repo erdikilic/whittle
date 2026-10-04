@@ -10,8 +10,8 @@ use crate::workflow::{TARGET_TAG, push_fastq_target};
 /// rebuilt MM/ML/MN block, then the added tags. Nothing is appended when
 /// nothing is carried (the record then has a plain header). A `Malformed`
 /// block is omitted. A tag named by `remove` is left out of the header, after
-/// the rewrite, exactly as on BAM output. With `retarget`, an input target
-/// tag is left out, since the caller writes the record's own.
+/// the rewrite, exactly as on BAM output. With `strip_target`, an input
+/// target tag is left out.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_fastq_tags(
     tags: &mut Vec<u8>,
@@ -24,7 +24,7 @@ pub(super) fn push_fastq_tags(
     platform: Platform,
     remove: &TagRemoval,
     trim_classes: [bool; 3],
-    retarget: bool,
+    strip_target: bool,
 ) {
     // A run that carries no tags writes a plain header, so the rewrites are
     // not computed.
@@ -51,7 +51,7 @@ pub(super) fn push_fastq_tags(
             .iter()
             .position(|(u, _)| *u == tag)
             .map(|i| updates.remove(i).1);
-        if !sel.carries(&t) || remove.contains(&t) || (retarget && t == TARGET_TAG) {
+        if !sel.carries(&t) || remove.contains(&t) || (strip_target && t == TARGET_TAG) {
             continue;
         }
         let value: Cow<Value> = match rewritten {
@@ -139,7 +139,7 @@ pub(super) fn render_fastq_window(
         platform,
         remove,
         trim_classes,
-        target.is_some(),
+        target.is_some() || reason.is_some(),
     );
     if let Some(label) = target {
         push_fastq_target(out, label);

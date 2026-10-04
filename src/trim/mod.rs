@@ -190,7 +190,12 @@ fn apply_with(
     match adapters {
         None => process_segment(0, seq_len, None, None),
         Some(cfg) => {
-            for seg in crate::adapter::adapter_segments_annotated(seq, cfg) {
+            let segments = if retain {
+                crate::adapter::adapter_segments_retained(seq, cfg)
+            } else {
+                crate::adapter::adapter_segments_annotated(seq, cfg)
+            };
+            for seg in segments {
                 let (s, e) = if retain {
                     (
                         seg.five.map_or(seg.start, |l| l.start),

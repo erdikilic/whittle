@@ -472,7 +472,10 @@ A cell of one primer names it `<target>_fwd` or `<target>_rev`, a list
 under `{group}`. A primer sequence may appear in more than one row; whittle
 stores it once and shares it among the targets that name it. `min_len` and
 `max_len` bound the final segment length, inclusive; a segment outside the
-window is unassigned (`length`).
+window is unassigned (`length`). Equally supported targets within one group
+prefer a target whose window includes the segment length. Length windows
+do not resolve ambiguity between different keys or override stronger primer
+evidence.
 
 An annotated FASTA extends the existing adapter-FASTA header parse with
 `key=value` fields:
@@ -677,8 +680,9 @@ Tag-only mode accepts any such name, since it never becomes a path. A
 checked per record as the record is routed, and a call that is not one path
 component is an error. Placeholders may appear in directory and file components, and whittle
 creates the directories. Each expanded path is
-checked before its file is opened, against the input path, against
-`--rejected-output`, and against every other key's path, so two keys
+checked before its file is opened, against the input path, adapter and split
+source files, `--rejected-output`, `--summary-json`, and every other key's
+path, including hard links, so two keys
 expanding to the same file are refused rather than one silently
 overwriting the other. A run opening more than 512 files is warned once.
 Files exist only for keys that received at least one record; the report

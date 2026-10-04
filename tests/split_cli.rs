@@ -1750,3 +1750,263 @@ fn reverse_primer_equal_to_reverse_complemented_forward_opens_both_ends() {
     assert_eq!(x["plus"], 3);
     assert_eq!(x["minus"], 3);
 }
+
+#[test]
+fn retained_internal_segments_pass_the_final_length_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let sheet = write_sheet(dir.path(), &p);
+    let amplicons: Vec<Vec<u8>> = [400, 350, 400]
+        .into_iter()
+        .enumerate()
+        .map(|(i, len)| cat(&[&p.f16, &splitmix_dna(8200 + i as u64, len), &rc(&p.r16)]))
+        .collect();
+    let input = dir.path().join("in.fq");
+    write_fastq(&input, &[("concatemer".into(), amplicons.concat())]);
+    let output = dir.path().join("out.fq");
+    whittle()
+        .arg("-i")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .arg("--split-by")
+        .arg(&sheet)
+        .args([
+            "--split-action",
+            "retain",
+            "--min-length",
+            "375",
+            "--adapter-error-rate",
+            "0",
+        ])
+        .assert()
+        .success();
+    let records = fastq_records(&std::fs::read_to_string(output).unwrap());
+    assert_eq!(records.len(), amplicons.len());
+    for ((name, seq), expected) in records.iter().zip(&amplicons) {
+        assert!(name.ends_with("\twt:Z:16S"), "{name}");
+        assert_eq!(seq.as_bytes(), expected);
+    }
+}
+
+#[test]
+fn junctions_in_end_zones_split_on_both_strands() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let sheet = write_sheet(dir.path(), &p);
+    let input = dir.path().join("in.fq");
+    let output = dir.path().join("out.fq");
+    for len in [50, 100, 130] {
+        for same_target in [false, true] {
+            for outer_primer in [false, true] {
+                for reverse in [false, true] {
+                    let short = splitmix_dna(8300, len);
+                    let long = splitmix_dna(8301, 400);
+                    let (forward, reverse_primer, label) = if same_target {
+                        (&p.f16, &p.r16, "16S")
+                    } else {
+                        (&p.fits, &p.rits, "ITS")
+                    };
+                    let first = if outer_primer { p.f16.as_slice() } else { &[] };
+                    let seq = cat(&[
+                        first,
+                        &short,
+                        &rc(&p.r16),
+                        forward,
+                        &long,
+                        &rc(reverse_primer),
+                    ]);
+                    let (seq, expected) = if reverse {
+                        (rc(&seq), vec![(label, rc(&long)), ("16S", rc(&short))])
+                    } else {
+                        (seq, vec![("16S", short), (label, long)])
+                    };
+                    write_fastq(&input, &[("concatemer".into(), seq)]);
+                    whittle()
+                        .arg("-i")
+                        .arg(&input)
+                        .arg("-o")
+                        .arg(&output)
+                        .arg("--split-by")
+                        .arg(&sheet)
+                        .args(["--adapter-error-rate", "0", "--preserve-order"])
+                        .assert()
+                        .success();
+                    let records = fastq_records(&std::fs::read_to_string(&output).unwrap());
+                    assert_eq!(
+                        records.len(),
+                        2,
+                        "length {len}, outer {outer_primer}, reverse {reverse}: {records:?}"
+                    );
+                    for ((name, seq), (label, insert)) in records.iter().zip(expected) {
+                        assert!(name.ends_with(&format!("\twt:Z:{label}")), "{name}");
+                        assert_eq!(seq.as_bytes(), insert);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn group_length_windows_are_independent_of_row_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let sheet = dir.path().join("sheet.tsv");
+    let input = dir.path().join("in.fq");
+    let seq = cat(&[&p.f16, &insert(1), &rc(&p.r16)]);
+    write_fastq(&input, &[("read".into(), seq)]);
+    let rows = [("short", 100, 200), ("long", 300, 500)];
+    for order in [[0, 1], [1, 0]] {
+        let mut text = "target\tfwd\trev\tgroup\tmin_len\tmax_len\n".to_string();
+        for i in order {
+            let (name, min, max) = rows[i];
+            text.push_str(&format!(
+                "{name}\t{}\t{}\tG\t{min}\t{max}\n",
+                String::from_utf8_lossy(&p.f16),
+                String::from_utf8_lossy(&p.r16)
+            ));
+        }
+        std::fs::write(&sheet, text).unwrap();
+        let output_dir = dir.path().join(format!("order{}", order[0]));
+        whittle()
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg(output_dir.join("{group}.fq"))
+            .arg("--split-by")
+            .arg(&sheet)
+            .args(["--adapter-error-rate", "0"])
+            .assert()
+            .success();
+        let records = fastq_records(&std::fs::read_to_string(output_dir.join("G.fq")).unwrap());
+        assert_eq!(
+            records,
+            [("read\twt:Z:G".into(), String::from_utf8(insert(1)).unwrap())]
+        );
+        assert!(!output_dir.join("unassigned.fq").exists());
+    }
+}
+
+#[test]
+fn split_sources_are_protected_from_every_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let sheet = write_sheet(dir.path(), &p);
+    let original = std::fs::read(&sheet).unwrap();
+    let input = dir.path().join("in.fq");
+    write_fastq(&input, &three_reads(&p));
+    for flag in ["-o", "--summary-json", "--rejected-output"] {
+        let mut cmd = whittle();
+        cmd.arg("-i").arg(&input).arg("--split-by").arg(&sheet);
+        if flag != "-o" {
+            cmd.arg("-o").arg(dir.path().join("out.fq"));
+        }
+        cmd.arg(flag)
+            .arg(&sheet)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("--split-by"));
+        assert_eq!(std::fs::read(&sheet).unwrap(), original);
+    }
+    let template_source = dir.path().join("16S.fq");
+    std::fs::write(&template_source, &original).unwrap();
+    whittle()
+        .arg("-i")
+        .arg(&input)
+        .arg("-o")
+        .arg(dir.path().join("{target}.fq"))
+        .arg("--split-by")
+        .arg(&template_source)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--split-by"));
+    assert_eq!(std::fs::read(&template_source).unwrap(), original);
+}
+
+#[test]
+fn hard_linked_split_outputs_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let sheet = write_sheet(dir.path(), &p);
+    let input = dir.path().join("in.fq");
+    write_fastq(&input, &three_reads(&p));
+    for barcode in [false, true] {
+        let prefix = if barcode { "unclassified." } else { "" };
+        let first = dir.path().join(format!("{prefix}16S.fq"));
+        let second = dir.path().join(format!("{prefix}ITS.fq"));
+        std::fs::write(&first, b"original").unwrap();
+        std::fs::hard_link(&first, &second).unwrap();
+        let template = if barcode {
+            "{barcode}.{target}.fq"
+        } else {
+            "{target}.fq"
+        };
+        whittle()
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg(dir.path().join(template))
+            .arg("--split-by")
+            .arg(&sheet)
+            .args(["-t", "1"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("same file"));
+        if !barcode {
+            assert_eq!(std::fs::read(&first).unwrap(), b"original");
+        }
+    }
+}
+
+#[test]
+fn rejected_records_omit_input_target_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let sheet = write_sheet(dir.path(), &p);
+    let input_bam = dir.path().join("in.bam");
+    write_ubam(&input_bam, &[("none".into(), insert(1))]);
+    let input_fastq = dir.path().join("in.fq");
+    write_fastq(
+        &input_fastq,
+        &[("none\txx:Z:keep\twt:Z:old".into(), insert(1))],
+    );
+    for (input, extension) in [
+        (&input_bam, "bam"),
+        (&input_bam, "fq"),
+        (&input_fastq, "fq"),
+    ] {
+        for (flag, value, reason) in [
+            ("--min-length", "1000", "too_short"),
+            ("--trim-front", "1000", "trimmed_to_nothing"),
+            ("--tag-filter", "[xx]==\"drop\"", "tag_filter"),
+        ] {
+            let output = dir.path().join(format!("out.{extension}"));
+            let rejected = dir.path().join(format!("rejected.{extension}"));
+            whittle()
+                .arg("-i")
+                .arg(input)
+                .arg("-o")
+                .arg(output)
+                .arg("--rejected-output")
+                .arg(&rejected)
+                .arg("--split-by")
+                .arg(&sheet)
+                .args([flag, value])
+                .assert()
+                .success();
+            if extension == "bam" {
+                let records = bam_records(&rejected);
+                assert_eq!(records.len(), 1);
+                assert_eq!(
+                    records[0].2,
+                    [("xx".into(), "keep".into()), ("wr".into(), reason.into())]
+                );
+            } else {
+                let records = fastq_records(&std::fs::read_to_string(rejected).unwrap());
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].0, format!("none\txx:Z:keep\twr:Z:{reason}"));
+            }
+        }
+    }
+}

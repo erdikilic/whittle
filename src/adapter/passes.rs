@@ -738,8 +738,8 @@ fn whole_primer_over(
     })
 }
 
-/// Searches the `CandidateIndex::paired` entries over the interior of the
-/// read at their pair budget and excises every junction pair: a hit that
+/// Searches the `CandidateIndex::paired` entries over the read at their
+/// pair budget and excises every junction pair: a hit that
 /// reads out of the insert before it, followed by a hit that reads into the
 /// insert after it, starting within `FLANK_SLACK` bases of its end or
 /// overlapping it by at most as many. A chimera junction joins the end of one
@@ -759,18 +759,15 @@ pub(super) fn search_pairs(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut
             if !paired {
                 continue;
             }
-            let Budget { len, k_end, .. } = ctx.index.budgets[adapter_idx];
-            let reach = len + k_end;
-            let start = (keep.end_size + 1).saturating_sub(reach);
-            let end = (n.saturating_sub(keep.end_size + 1) + reach).min(n);
-            if end <= start || end - start < len {
+            let len = ctx.index.budgets[adapter_idx].len;
+            if n < len {
                 continue;
             }
             let opens = ctx.index.opens[adapter_idx];
             let pattern = &ctx.cfg.adapters[adapter_idx].seq;
-            let text = ctx.read.strands(start, end);
+            let text = ctx.read.strands(0, n);
             let k = ctx.index.budgets[adapter_idx].pair(n);
-            let accept = |h: Hit| found.push((adapter_idx, shifted(h, start)));
+            let accept = |h: Hit| found.push((adapter_idx, h));
             if opens == Opens::Both {
                 if closing {
                     search(engine, ctx.index, adapter_idx, pattern, text, k, accept);
@@ -987,6 +984,7 @@ pub(super) fn segments_tallied(
     window: &[u8],
     cfg: &AdapterConfig,
     acted: Option<&mut [bool]>,
+    min_piece: usize,
 ) -> Vec<Segment> {
     let n = window.len();
     if n == 0 {
@@ -995,7 +993,9 @@ pub(super) fn segments_tallied(
     if cfg.adapters.is_empty() {
         return vec![Segment::located(0, n, &[])];
     }
-    with_engine(window, cfg, |ctx, engine| segments_with(ctx, engine, acted))
+    with_engine(window, cfg, |ctx, engine| {
+        segments_with(ctx, engine, acted, min_piece)
+    })
 }
 
 /// Runs `f` over the context of `window` under `cfg` and this thread's
@@ -1076,6 +1076,7 @@ pub(super) fn segments_with(
     ctx: Context<'_>,
     engine: &mut Engine<'_>,
     mut acted: Option<&mut [bool]>,
+    min_piece: usize,
 ) -> Vec<Segment> {
     let cfg = ctx.cfg;
     let n = ctx.read.window.len();
@@ -1101,7 +1102,7 @@ pub(super) fn segments_with(
     debug_assert_sites(ctx.read.window, cfg, &keep.primer_hits);
     keep.settle();
     tally(&keep);
-    let (lo, hi, cuts, mut hits) = keep.into_cuts(cfg.min_piece);
+    let (lo, hi, cuts, mut hits) = keep.into_cuts(min_piece);
     if lo >= hi {
         return vec![];
     }

@@ -363,14 +363,20 @@ const FLANK_SLACK: usize = MIN_PATTERN_LEN;
 ///
 /// Returns `[start, end)` spans in `window` coordinates.
 pub fn adapter_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)> {
-    spans(segments_tallied(window, cfg, None))
+    spans(segments_tallied(window, cfg, None, cfg.min_piece))
 }
 
 /// `adapter_segments` with the split primer located at each end of every
 /// segment (`Segment::five`, `Segment::three`). Without an attached split
 /// sheet (`AdapterConfig::attach_split`) every locus is `None`.
 pub fn adapter_segments_annotated(window: &[u8], cfg: &AdapterConfig) -> Vec<Segment> {
-    segments_tallied(window, cfg, None)
+    segments_tallied(window, cfg, None, cfg.min_piece)
+}
+
+/// Locates segments without merging inserts by the output length threshold.
+/// Retained primer bases contribute to the final length filter.
+pub(crate) fn adapter_segments_retained(window: &[u8], cfg: &AdapterConfig) -> Vec<Segment> {
+    segments_tallied(window, cfg, None, 0)
 }
 
 /// `adapter_segments` that also marks in `acted` every adapter whose hit
@@ -380,7 +386,7 @@ pub(crate) fn adapter_segments_tallied(
     cfg: &AdapterConfig,
     acted: &mut [bool],
 ) -> Vec<(usize, usize)> {
-    spans(segments_tallied(window, cfg, Some(acted)))
+    spans(segments_tallied(window, cfg, Some(acted), cfg.min_piece))
 }
 
 /// Returns the `[start, end)` span of each segment.
