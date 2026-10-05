@@ -469,6 +469,15 @@ impl<'a> Keep<'a> {
         }
     }
 
+    /// Returns whether a whole hit leaves a flank beyond the slack of both
+    /// read ends and can participate in a junction pair.
+    pub(super) fn pair_candidate(&self, hit: &Hit) -> bool {
+        self.split
+            && hit.start > FLANK_SLACK
+            && self.n - hit.end > FLANK_SLACK
+            && hit.clip_start + hit.clip_end < MIN_OVERLAP
+    }
+
     /// Excises both hits of a junction pair: `closing`, of the entry at
     /// `closing_idx`, reads out of the insert before it, and `opening`, of the
     /// entry at `opening_idx`, reads into the insert after it; see
@@ -480,12 +489,7 @@ impl<'a> Keep<'a> {
         (closing_idx, closing): (usize, Hit),
         (opening_idx, opening): (usize, Hit),
     ) {
-        let interior = |hit: &Hit| {
-            hit.start > FLANK_SLACK
-                && self.n - hit.end > FLANK_SLACK
-                && hit.clip_start + hit.clip_end < MIN_OVERLAP
-        };
-        if !self.split || !interior(&closing) || !interior(&opening) {
+        if !self.pair_candidate(&closing) || !self.pair_candidate(&opening) {
             return;
         }
         for (adapter_idx, hit) in [(closing_idx, closing), (opening_idx, opening)] {

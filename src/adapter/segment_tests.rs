@@ -2206,6 +2206,155 @@ fn split_cfg() -> AdapterConfig {
     c
 }
 
+/// Searches both strands of every paired entry over the full read and
+/// applies every undominated pair in adapter and strand order.
+fn full_read_pairs(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
+    let n = ctx.read.window.len();
+    let mut hits = Vec::new();
+    for (idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
+        if ctx.index.paired[idx] && n >= adapter.seq.len() {
+            search(
+                engine,
+                ctx.index,
+                idx,
+                &adapter.seq,
+                ctx.read.strands(0, n),
+                ctx.index.budgets[idx].pair(n),
+                |hit| hits.push((idx, hit)),
+            );
+        }
+    }
+    let best: Vec<_> = hits
+        .iter()
+        .copied()
+        .filter(|&(idx, h)| {
+            !hits.iter().any(|&(other, g)| {
+                idx == other
+                    && h.rc == g.rc
+                    && g.cost < h.cost
+                    && g.start < h.end
+                    && h.start < g.end
+            })
+        })
+        .collect();
+    for &(ci, c) in &best {
+        for &(oi, o) in &best {
+            if ctx.index.opens[ci].reads_out(c.rc)
+                && ctx.index.opens[oi].reads_in(o.rc)
+                && o.start > c.start
+                && o.end > c.end
+                && o.start.abs_diff(c.end) <= FLANK_SLACK
+            {
+                keep.accept_pair((ci, c), (oi, o));
+            }
+        }
+    }
+}
+
+#[test]
+fn junction_search_matches_full_read_search() {
+    use super::preset::{Kit, preset};
+    let mut kit = cfg_with(preset(&[Kit::Mab114]), 0.2, 150, true);
+    kit.attach_split(&crate::split::Sheet::preset("mab114").unwrap().primers);
+    let mut primers = split_primers();
+    primers.push(Primer {
+        name: "rB_rc".into(),
+        seq: reverse_complement(&primers[3].seq),
+    });
+    let mut reversed = cfg_with(
+        vec![ad("fA_rc", &reverse_complement(&primers[0].seq))],
+        0.2,
+        150,
+        true,
+    );
+    reversed.attach_split(&primers);
+    let index = CandidateIndex::for_config(&reversed);
+    assert!(index.opens.contains(&Opens::Reversed));
+    assert!(index.opens.contains(&Opens::Both));
+    let mut rng = Lcg(0x6a75_6e63_7469_6f6e);
+    for c in [split_cfg(), kit, reversed] {
+        let index = CandidateIndex::for_config(&c);
+        let paired: Vec<_> = (0..c.adapters.len()).filter(|&i| index.paired[i]).collect();
+        let mut reads = planted_primer_reads(100);
+        for case in 0..400 {
+            let head = match case % 4 {
+                0 => FLANK_SLACK,
+                1 => FLANK_SLACK + 1,
+                _ => rng.below(2000),
+            };
+            let mut read = rng.dna(head);
+            for closing in [true, false] {
+                let idx = paired[rng.below(paired.len())];
+                let mut seq: Vec<_> = c.adapters[idx]
+                    .seq
+                    .iter()
+                    .map(|&b| {
+                        let bases = iupac_bases(b).unwrap();
+                        bases[rng.below(bases.len())]
+                    })
+                    .collect();
+                for _ in 0..rng.below(4) {
+                    let at = rng.below(seq.len());
+                    match rng.below(3) {
+                        0 => seq[at] = b"ACGT"[rng.below(4)],
+                        1 => {
+                            seq.remove(at);
+                        },
+                        _ => seq.insert(at, b"ACGT"[rng.below(4)]),
+                    }
+                }
+                if index.opens[idx].reads_out(false) != closing {
+                    seq = reverse_complement(&seq);
+                }
+                read.extend(seq);
+                if closing {
+                    let gap = rng.below(2 * FLANK_SLACK + 3);
+                    if gap < FLANK_SLACK {
+                        read.truncate(read.len() - gap);
+                    } else {
+                        read.extend(rng.dna(gap - FLANK_SLACK));
+                    }
+                }
+            }
+            let tail = match case % 5 {
+                0 => 0,
+                1 => FLANK_SLACK,
+                2 => FLANK_SLACK + 1,
+                _ => rng.below(2000),
+            };
+            read.extend(rng.dna(tail));
+            if case % 3 == 0 {
+                let at = rng.below(read.len());
+                read[at] = b'N';
+            }
+            reads.push(read.clone());
+            reads.push(reverse_complement(&read));
+        }
+        let mut excised = 0;
+        for (i, read) in reads.iter().enumerate() {
+            let run = |reference| {
+                with_engine(read, &c, |ctx, engine| {
+                    let mut keep = Keep::new(&c, ctx.index, read.len(), true);
+                    search_terminal(ctx, (0, read.len()), engine, &mut keep);
+                    search_interior(ctx, engine, &mut keep);
+                    if reference {
+                        full_read_pairs(ctx, engine, &mut keep);
+                    } else {
+                        search_pairs(ctx, engine, &mut keep);
+                    }
+                    keep.place_split();
+                    keep.settle();
+                    (keep.acted.clone(), keep.into_cuts(1))
+                })
+            };
+            let expected = run(true);
+            excised += usize::from(!expected.1.2.is_empty());
+            assert_eq!(run(false), expected, "read {i}");
+        }
+        assert!(excised > 50, "{excised} reads excised");
+    }
+}
+
 /// The anchored budgets rescoring takes for a sheet (`anchored_budgets`)
 /// are those the candidate index gives the sheet's split entries, whatever
 /// else the adapter set holds: the MAB114 preset with the `mab114` sheet,

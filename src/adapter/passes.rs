@@ -747,13 +747,14 @@ fn whole_primer_over(
 /// each other in that orientation, whichever primers they are; the sites of a
 /// marker gene in a genome lie a gene apart and face each other. Of the
 /// overlapping hits of one entry, the cheapest stands for the occurrence.
-/// The hits are those of a two-strand search of each entry, in its order.
+/// Pairs retain the adapter and strand order of a full-read two-strand search.
 pub(super) fn search_pairs(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut Keep<'_>) {
     let n = ctx.read.window.len();
     // A pair needs a hit that reads out of an insert, so the strand on which
     // each entry reads out is searched first, and the other strand only in
-    // a read that holds such a hit.
+    // a read that holds a hit eligible for a junction.
     let mut found: Vec<(usize, Hit)> = Vec::new();
+    let mut first_closing_end = None;
     for closing in [true, false] {
         for (adapter_idx, &paired) in ctx.index.paired.iter().enumerate() {
             if !paired {
@@ -765,9 +766,15 @@ pub(super) fn search_pairs(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut
             }
             let opens = ctx.index.opens[adapter_idx];
             let pattern = &ctx.cfg.adapters[adapter_idx].seq;
-            let text = ctx.read.strands(0, n);
             let k = ctx.index.budgets[adapter_idx].pair(n);
-            let accept = |h: Hit| found.push((adapter_idx, h));
+            // An opening starts at most FLANK_SLACK bases before a closing
+            // ends. Two alignment lengths preserve overlapping cheaper
+            // hits and their search context at the start of the window.
+            let start = first_closing_end.map_or(0, |end: usize| {
+                end.saturating_sub(FLANK_SLACK + 2 * (len + k))
+            });
+            let text = ctx.read.strands(start, n);
+            let accept = |h: Hit| found.push((adapter_idx, shifted(h, start)));
             if opens == Opens::Both {
                 if closing {
                     search(engine, ctx.index, adapter_idx, pattern, text, k, accept);
@@ -781,8 +788,15 @@ pub(super) fn search_pairs(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &mut
                 for_each_hit_on_strand(engine.ambiguous_fwd, pattern, &text, rc, k, accept);
             }
         }
-        if found.is_empty() {
-            return;
+        if closing {
+            first_closing_end = found
+                .iter()
+                .filter(|(_, hit)| keep.pair_candidate(hit))
+                .map(|(_, hit)| hit.end)
+                .min();
+            if first_closing_end.is_none() {
+                return;
+            }
         }
     }
     // The hits of each entry in the order of a two-strand search, the

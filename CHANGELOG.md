@@ -92,6 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a field that does not parse as a SAM tag fails the run and names the read.
 
 ### Changed
+- Primer junction searches skip the opening strand when no closing hit can
+  form a junction and otherwise search only the suffix that can hold a
+  partner, including the context needed to preserve overlapping matches.
 - Library API: `workflow::run_raw_bam` is no longer public,
   `obs::ProgressHandle::finish` takes `&Config`, `Stats` is no longer
   `Copy`, `Config::write_targets` yields its paths as `Cow<Path>`,
