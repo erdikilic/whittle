@@ -23,7 +23,7 @@ jobs:
   commit-message:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Validate commit messages
@@ -67,13 +67,13 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cargo fmt --all --check
 
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install HTSlib build deps
         run: sudo apt-get update && sudo apt-get install -y
              build-essential autoconf automake zlib1g-dev libbz2-dev
@@ -84,7 +84,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install HTSlib build deps
         run: sudo apt-get update && sudo apt-get install -y
              build-essential autoconf automake zlib1g-dev libbz2-dev
@@ -107,7 +107,7 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: "1.91.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install 1.91.0 --profile minimal
       - name: Install HTSlib build deps
         run: sudo apt-get update && sudo apt-get install -y
@@ -119,5 +119,5 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
