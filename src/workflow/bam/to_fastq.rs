@@ -9,9 +9,12 @@ use crate::workflow::{TARGET_TAG, push_fastq_target};
 /// in place and the removed ones skipped, per-base arrays sliced, then the
 /// rebuilt MM/ML/MN block, then the added tags. Nothing is appended when
 /// nothing is carried (the record then has a plain header). A `Malformed`
-/// block is omitted. A tag named by `remove` is left out of the header, after
-/// the rewrite, exactly as on BAM output. With `strip_target`, an input
-/// target tag is left out.
+/// block is omitted. Under `Absent`, an `ML` or `MN` on its own and a
+/// non-string `MM` are copied verbatim in source order, as on BAM output. A
+/// tag named by `remove` is left out of the header, after the rewrite,
+/// exactly as on BAM output. With `strip_target`, an input target tag is
+/// left out, and with `strip_reason` an input reason tag, so the tag the
+/// caller appends is the only one.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_fastq_tags(
     tags: &mut Vec<u8>,
@@ -25,6 +28,7 @@ pub(super) fn push_fastq_tags(
     remove: &TagRemoval,
     trim_classes: [bool; 3],
     strip_target: bool,
+    strip_reason: bool,
 ) {
     // A run that carries no tags writes a plain header, so the rewrites are
     // not computed.
@@ -44,14 +48,19 @@ pub(super) fn push_fastq_tags(
     }
     for (tag, value) in src.data().iter() {
         let t = <[u8; 2]>::from(tag);
-        if matches!(&t, b"MM" | b"ML" | b"MN") {
+        let mod_tag = matches!(&t, b"MM" | b"ML" | b"MN");
+        if mod_tag && mod_block != ModBlock::Absent {
             continue; // handled by the rebuilt block below
         }
         let rewritten = updates
             .iter()
             .position(|(u, _)| *u == tag)
             .map(|i| updates.remove(i).1);
-        if !sel.carries(&t) || remove.contains(&t) || (strip_target && t == TARGET_TAG) {
+        if !sel.carries(&t)
+            || remove.contains(&t)
+            || (strip_target && t == TARGET_TAG)
+            || (strip_reason && tag == reject::REASON_TAG)
+        {
             continue;
         }
         let value: Cow<Value> = match rewritten {
@@ -66,7 +75,7 @@ pub(super) fn push_fastq_tags(
                     }),
                 _ => Cow::Borrowed(value),
             },
-            None => match trimmed
+            None => match (trimmed && !mod_tag)
                 .then(|| windowed_value(t, value, orig_len, start, end))
                 .flatten()
             {
@@ -140,6 +149,7 @@ pub(super) fn render_fastq_window(
         remove,
         trim_classes,
         target.is_some() || reason.is_some(),
+        reason.is_some(),
     );
     if let Some(label) = target {
         push_fastq_target(out, label);

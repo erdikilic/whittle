@@ -267,3 +267,49 @@ fn removal_drops_the_tag_from_a_fastq_header() {
     assert!(header.contains("MM:Z:"), "{header}");
     assert!(header.contains("RG:Z:run1"), "{header}");
 }
+
+/// Without an `MM:Z` block, a lone `MN` and the tags of a non-string `MM`
+/// are copied into the FASTQ header as BAM output copies them, and a
+/// selection that leaves them out drops them.
+#[test]
+fn bam2fq_copies_mod_tags_without_a_string_mm() {
+    let record = |name: &[u8], tags: Vec<(Tag, Value)>| {
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
+        *rec.name_mut() = Some(name.into());
+        *rec.sequence_mut() = b"ACGT".to_vec().into();
+        *rec.quality_scores_mut() = vec![40; 4].into();
+        for (tag, value) in tags {
+            rec.data_mut().insert(tag, value);
+        }
+        rec
+    };
+    let lone = record(
+        b"r1",
+        vec![(Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(4))],
+    );
+    let odd = record(
+        b"r2",
+        vec![
+            (Tag::BASE_MODIFICATIONS, Value::Int32(5)),
+            (
+                Tag::BASE_MODIFICATION_PROBABILITIES,
+                Value::Array(Array::UInt8(vec![1, 2, 3])),
+            ),
+            (Tag::BASE_MODIFICATION_SEQUENCE_LENGTH, Value::Int32(4)),
+        ],
+    );
+    let cfg = cfg_bam2fq(None, 1, FastqTags::All);
+    let (_stats, text) = bam2fq(vec![lone.clone(), odd.clone()], &cfg);
+    let headers: Vec<&str> = text.lines().step_by(4).collect();
+    assert_eq!(
+        headers,
+        ["@r1\tMN:i:4", "@r2\tMM:i:5\tML:B:C,1,2,3\tMN:i:4"],
+        "{text}"
+    );
+
+    let cfg = cfg_bam2fq(None, 1, FastqTags::parse("ML").unwrap());
+    let (_stats, text) = bam2fq(vec![lone, odd], &cfg);
+    let headers: Vec<&str> = text.lines().step_by(4).collect();
+    assert_eq!(headers, ["@r1", "@r2\tML:B:C,1,2,3"], "{text}");
+}

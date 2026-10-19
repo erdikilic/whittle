@@ -432,10 +432,12 @@ pub(super) fn with_variable_layer(
     }
     tracing::debug!(anchor = %String::from_utf8_lossy(&candidates[anchor].0), anchor_depth, members = members.len(), "Variable layer");
     let sequences: Vec<Vec<u8>> = members.iter().map(|c| c.0.clone()).collect();
+    // A candidate without a measurable depth is dropped along with the
+    // fragments in the gap.
     let kept: Vec<Candidate> = candidates
         .into_iter()
         .zip(depths)
-        .filter(|(_, depth)| depth + MIN_PATTERN_LEN > anchor_depth)
+        .filter(|(_, depth)| *depth != usize::MAX && depth + MIN_PATTERN_LEN > anchor_depth)
         .map(|(c, _)| c)
         .chain(members)
         .collect();

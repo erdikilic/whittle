@@ -238,6 +238,10 @@ pub struct Config {
     /// and 6 for BGZF and validates an explicit value to 0..=9. Plain FASTQ
     /// output ignores it.
     pub compression_level: u8,
+    /// Whether `-c` set `compression_level`. Without it, the rejected output
+    /// takes the default level of its own format
+    /// (`io::default_compression_level`).
+    pub compression_level_explicit: bool,
     /// Whether ONT signal tags are kept consistent through trimming: the `mv`
     /// move table is sliced and `ts`/`ns`/`sp`/`pi` are updated (BAM-to-BAM
     /// only, see `workflow::bam`). When false, a trimmed read drops
@@ -311,6 +315,7 @@ impl Default for Config {
             render_workers: 0,
             adapter_sample: 0,
             compression_level: 6,
+            compression_level_explicit: false,
             update_moves: false,
             remove_tags: TagRemoval::default(),
             tag_filters: crate::tagfilter::TagFilters::default(),

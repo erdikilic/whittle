@@ -246,7 +246,9 @@ impl AdapterConfig {
     /// Returns whether a barcode sequence matches the read at `[start, end)`
     /// within the error budget: a barcode-role entry of the configured set,
     /// or a catalog barcode with the number of the barcode call `call`. The
-    /// span is widened by `BARCODE_SPAN_SLACK` bases on each side.
+    /// span is widened by `BARCODE_SPAN_SLACK` bases on each side and read
+    /// as every search reads a read (`passes::normalize_into`), so an
+    /// uncalled base costs an edit.
     pub(crate) fn barcode_span_verified(
         &self,
         seq: &[u8],
@@ -259,7 +261,8 @@ impl AdapterConfig {
         if hi <= lo {
             return false;
         }
-        let text = seq[lo..hi].to_ascii_uppercase();
+        let mut buf = Vec::new();
+        let (text, _) = passes::normalize_into(&seq[lo..hi], &mut buf);
         let number = call.and_then(barcode_number);
         let named = catalog_barcodes().iter().filter(|entry| {
             number.is_some_and(|n| barcode_number(entry.name.as_bytes()) == Some(n))
@@ -273,7 +276,7 @@ impl AdapterConfig {
             .any(|entry| {
                 let pattern = entry.seq.to_ascii_uppercase();
                 let k = edit_budget(self.error_rate, pattern.len());
-                !search::hits(&mut searcher, &pattern, &text, k).is_empty()
+                !search::hits(&mut searcher, &pattern, text, k).is_empty()
             })
     }
 }

@@ -381,6 +381,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FASTQ-to-BAM output and `--update-moves` on FASTQ input are rejected at parse
   time; `--qual-split-window`, `--adapter-infer-policy` and `-t 0` errors name
   the flag.
+- Adapter discovery reads lowercase and mixed-case FASTQ as uppercase: it no
+  longer panics when it clusters a barcode panel from lowercase reads, and it
+  finds the same sequences as in the uppercased reads.
+- `--adapter-discover-only` leaves the `--rejected-output` path alone: the
+  file is no longer created or truncated, and its format family is not
+  checked against the input.
+- With `--adapter-discover` and `--adapter-preset` or `--adapter-fasta`, an
+  input of fewer than 100 reads is trimmed with the configured sequences
+  instead of being written untrimmed. The warning names what the run does
+  instead of discovery.
+- A `--targets` TSV sheet with a header but no target rows, a row whose
+  `min_len` exceeds its `max_len`, and a FASTA entry with an empty `target=`
+  are errors, instead of runs that leave every segment unassigned or create
+  an unnamed target. An empty `group=` leaves the target in its own group.
+- A `--targets` sheet file that starts with a UTF-8 byte order mark loads,
+  and a sheet read through a pipe or process substitution (`/dev/stdin`,
+  `<(...)`) loads as a file does.
+- A `--target-margin` larger than the sheet sequences is applied at once,
+  with the pairs and calls of any margin above their lengths, instead of
+  hanging or exhausting memory in the close-pair search.
+- A `--tag-filter` reject of a BAM record without base qualities (`*` QUAL)
+  is written to a BAM `--rejected-output` as read, and a FASTQ
+  `--rejected-output` run fails with the error that names such a read,
+  instead of panicking.
+- A failed write to `--rejected-output`, such as on a full disk, reports the
+  file and the system error instead of "the rejected-record writer stopped".
+- `--tag-filter` refuses an expression that joins a literal with `&&` or `||`,
+  or compares a condition, such as `[qs] && 5` or `([qs]>10) == 1`, when it
+  is parsed, instead of failing at the first read that reaches the operand.
+- A recorded `bi` barcode span is verified with each `N` or other uncalled
+  base costing an edit, as in every other adapter search, so a span masked
+  with `N` is left untrimmed and counted as unverified instead of matching
+  any barcode.
+- `--adapter-discover-only` output cut off by a closed pipe exits 0 without a
+  message, and a failed write to stdout is an error, instead of a panic.
+- Under `-t > 1` a BAM `--rejected-output` is marked `SO:unsorted`, with or
+  without `--preserve-order`, since rejected records are written in
+  completion order.
+- A read rejected whole on the BAM path that copies records without trimming
+  them is written with its modification block rewritten as on the trimming
+  path: a malformed `MM`/`ML` block is removed and a missing `MN` is added.
+- A rejected FASTQ record whose input header holds a `wr` tag carries one
+  `wr`, the new reason, instead of two, which made the file unreadable as
+  tagged FASTQ.
+- BAM-to-FASTQ output copies an `ML` or `MN` that a read carries without an
+  `MM:Z` block, and the tags of a non-string `MM`, into the header as BAM
+  output does, instead of dropping them.
+- `--input-format fastq-gz` reads a stream that opens with a BGZF block as
+  plain gzip, so a stream joined from BGZF and plain gzip files decodes whole
+  instead of failing at the first plain member.
+- An empty gzip input, a 0-byte `.gz` file or an empty stream under
+  `--input-format fastq-gz`, is read as zero reads, as an empty plain FASTQ
+  is, instead of failing with "unexpected end of file".
+- A ChEBI modification code in `MM` is written back as the input spells it,
+  instead of being rewritten when it has leading zeros or exceeds 4294967295.
+- SAM text input, such as `samtools view -h` output, is refused with a message
+  that names it instead of a FASTQ parse error, and a stream whose format is
+  not detected is described, without advice to pass the `--input-format` a
+  forced run already names.
+- With `--targets` and no adapter source, the summary reports
+  `params.adapters.configured` and `sample` as 0, since no adapter is
+  configured and no read is sampled, instead of the sheet sequence count and
+  2000; `--adapter-sample-reads` is no longer range-checked there, as it has
+  no effect.
+- Without `-c`, `--rejected-output` is compressed at the default level of its
+  own format (4 for `.fastq.gz`, 6 for `.fastq.bgz` and BAM) instead of the
+  main output's.
 
 ### Changed
 - Modification occurrences and signal boundaries are indexed once per read

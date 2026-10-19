@@ -25,12 +25,6 @@ pub(super) fn assemble(
     if windows.len() < 3 {
         return Vec::new();
     }
-    // K-mer encoding and approximate matching operate on uppercase DNA.
-    // Inference owns normalized copies and does not modify pipeline records.
-    let upper: Vec<Vec<u8>> = windows.iter().map(|w| w.to_ascii_uppercase()).collect();
-    let windows: Vec<&[u8]> = upper.iter().map(Vec::as_slice).collect();
-    let windows = windows.as_slice();
-
     let assembly_windows: Vec<&[u8]> = windows
         .iter()
         .map(|w| match end {

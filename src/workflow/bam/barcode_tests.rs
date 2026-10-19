@@ -234,6 +234,39 @@ fn spans_are_trimmed_only_when_a_barcode_is_found_at_them() {
     );
 }
 
+/// An uncalled base in a recorded span matches no barcode base, so a span
+/// masked with `N` is left alone and counted as unverified, while a
+/// lowercase barcode is found as an uppercase one is.
+#[test]
+fn spans_masked_with_n_are_not_verified() {
+    let counters = Counters::default();
+    let cfg = cfg_barcodes();
+    let mut masked = barcoded_record(true);
+    let mut seq = masked.sequence().as_ref().to_vec();
+    let n = seq.len();
+    seq[..24].fill(b'N');
+    seq[n - 24..].fill(b'N');
+    *masked.sequence_mut() = seq.into();
+    assert_eq!(
+        prepare_read(&masked, &cfg, &counters).unwrap().barcode,
+        None
+    );
+    assert_eq!(
+        counters
+            .barcode_tag_unverified_reads
+            .load(Ordering::Relaxed),
+        1
+    );
+
+    let mut lower = barcoded_record(true);
+    let seq = lower.sequence().as_ref().to_ascii_lowercase();
+    *lower.sequence_mut() = seq.into();
+    assert_eq!(
+        prepare_read(&lower, &cfg, &counters).unwrap().barcode,
+        Some((24, 36))
+    );
+}
+
 use super::tests::BC01;
 
 /// A 60-base record whose `bi` records 24-base barcodes at both ends and

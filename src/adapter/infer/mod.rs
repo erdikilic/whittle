@@ -176,6 +176,21 @@ type Ranked = (Vec<u8>, f64, Vec<bool>, usize, bool, End, u64);
 /// pattern. Catalog and supplied FASTA entries provide names only after the
 /// inferred boundaries are fixed.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
+    // K-mer codes, consensus columns and base tallies read uppercase ACGT, so
+    // reads holding a lowercase base are folded once and every step reads the
+    // folded views. Uppercase reads are borrowed as given.
+    let folded: Vec<std::borrow::Cow<[u8]>> = sample
+        .iter()
+        .map(|read| {
+            if read.iter().any(u8::is_ascii_lowercase) {
+                std::borrow::Cow::Owned(read.to_ascii_uppercase())
+            } else {
+                std::borrow::Cow::Borrowed(*read)
+            }
+        })
+        .collect();
+    let sample: Vec<&[u8]> = folded.iter().map(|read| read.as_ref()).collect();
+    let sample = sample.as_slice();
     let mut bounds = Boundaries::new(sample);
     let known: Vec<Vec<u8>> = base
         .adapters
@@ -594,11 +609,11 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     // oriented inward from either physical end.
     let oriented: Vec<Vec<u8>> = five_phys
         .iter()
-        .map(|w| w.to_ascii_uppercase())
+        .map(|w| w.to_vec())
         .chain(
             three_phys
                 .iter()
-                .map(|w| crate::adapter::reverse_complement(&w.to_ascii_uppercase())),
+                .map(|w| crate::adapter::reverse_complement(w)),
         )
         .collect();
     let oriented: Vec<&[u8]> = oriented.iter().map(Vec::as_slice).collect();

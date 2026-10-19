@@ -62,6 +62,29 @@ fn bgzf_stream_under_gz_extension_is_read() {
         .stdout(TRIMMED);
 }
 
+/// A gzip stream whose first member is BGZF and whose later member is plain
+/// gzip, as `cat` of a BGZF and a plain `.gz` file writes, is read whole under
+/// `--input-format fastq-gz`, which decodes every gzip member.
+#[test]
+fn bgzf_then_plain_gzip_members_read_under_forced_fastq_gz() {
+    let mut bytes = bgzf_bytes();
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(INPUT).unwrap();
+    bytes.extend(enc.finish().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("joined.fastq.gz");
+    std::fs::write(&input, &bytes).unwrap();
+
+    whittle()
+        .arg("-i")
+        .arg(&input)
+        .args(["--input-format", "fastq-gz"])
+        .args(["-H", "1", "-T", "1", "-t", "2", "--quiet"])
+        .assert()
+        .success()
+        .stdout([TRIMMED, TRIMMED].concat());
+}
+
 /// The 28-byte BGZF EOF marker (an empty gzip block). samtools and bgzip require
 /// it to treat a `.bgz` stream as complete; a writer that omits it makes
 /// `bgzip -t` report truncation even when every data block is intact.

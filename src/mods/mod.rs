@@ -14,8 +14,10 @@ pub use serialize::serialize;
 pub enum ModCode {
     /// Single-letter code, e.g. `m`.
     Char(u8),
-    /// Numeric ChEBI identifier.
-    Chebi(u32),
+    /// Numeric ChEBI identifier, as its digits are written. Windowing never
+    /// reads the value, so the code is written back unchanged, leading zeros
+    /// and any length included.
+    Chebi(Vec<u8>),
 }
 
 /// One `MM` group, e.g. `C+m?,5,12`, with its slice of `ML` bytes.

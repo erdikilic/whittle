@@ -321,7 +321,10 @@ fn fit(
         .scored
         .iter()
         .any(|s| bounds.keys[s.primer].iter().any(|&k| k != key));
-    let within_margin = end.scored.iter().all(|s| s.cost + margin > end.penalty);
+    let within_margin = end
+        .scored
+        .iter()
+        .all(|s| s.cost.saturating_add(margin) > end.penalty);
     if !role.is_empty() && !own && foreign && within_margin {
         Fit::Penalised(end.penalty)
     } else {
@@ -542,7 +545,7 @@ pub(crate) fn classify_at_length(
         return Call::Ambiguous;
     }
     let leads = match entries.get(1) {
-        Some((_, second)) => winner.cost + rules.margin <= second.cost,
+        Some((_, second)) => winner.cost.saturating_add(rules.margin) <= second.cost,
         None => true,
     };
     if !winner.scored || !leads {
@@ -779,6 +782,25 @@ mod tests {
                 ends: Ends::Both,
             }
         );
+    }
+
+    /// A margin no lead can reach calls every competing pair ambiguous
+    /// rather than overflowing the lead and penalty sums.
+    #[test]
+    fn margin_beyond_every_cost_is_ambiguous() {
+        let sheet = fixture();
+        let keys = Keys::new(&sheet, KeyLevel::Target);
+        for five in [&[score(1, 1), score(2, 3)][..], &[score(0, 0), score(1, 1)]] {
+            let call = classify(
+                &sheet,
+                &keys,
+                &bounds(&sheet, &keys),
+                rules(Require::Either, usize::MAX),
+                five,
+                &[],
+            );
+            assert_eq!(call, Call::Ambiguous, "{five:?}");
+        }
     }
 
     #[test]

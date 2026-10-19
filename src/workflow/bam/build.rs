@@ -460,7 +460,13 @@ pub(super) fn build_record(src: &bam::Record, mut edit: RecordEdit<'_>) -> io::R
         return Err(invalid_input("read length-sequence length mismatch"));
     }
 
-    let qual = &src.quality_scores().as_bytes()[start..end];
+    // noodles reads a QUAL of `0xFF` bytes, a `*` QUAL, as empty, and its
+    // encoder writes `0xFF` for every base of a record without qualities.
+    let qualities = src.quality_scores();
+    let qual = match qualities.as_bytes() {
+        [] => &[][..],
+        all => &all[start..end],
+    };
     if qual.iter().any(|&q| q > MAX_QUALITY) {
         return Err(invalid_input("invalid base quality"));
     }
@@ -505,7 +511,11 @@ pub(super) fn build_record(src: &bam::Record, mut edit: RecordEdit<'_>) -> io::R
     dst.push(0);
     dst.extend_from_slice(cigar);
     push_packed_bases(&mut dst, sequence.as_bytes(), start, end);
-    dst.extend_from_slice(qual);
+    if qual.is_empty() {
+        dst.extend(std::iter::repeat_n(0xFF, base_count));
+    } else {
+        dst.extend_from_slice(qual);
+    }
     for (_, bytes) in &fields {
         match bytes {
             FieldBytes::Source(r) => dst.extend_from_slice(&aux[r.clone()]),

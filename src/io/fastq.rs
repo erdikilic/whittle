@@ -1,7 +1,7 @@
 //! FASTQ reading and writing: streaming record iterators over plain, gzip and BGZF input, and segment writers with optional SAM-style header tags.
 
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
 use anyhow::Context;
 
@@ -46,7 +46,14 @@ pub fn byte_stream(
     }
     // `bufread::MultiGzDecoder` over an explicit buffer; the `read` variant
     // wraps its source in an 8 KiB `BufReader`.
-    let decoder = MultiGzDecoder::new(BufReader::with_capacity(INPUT_BUFFER_CAPACITY, inner));
+    let mut buffered = BufReader::with_capacity(INPUT_BUFFER_CAPACITY, inner);
+    // An empty stream holds no member and so no records, as an empty plain
+    // stream does; the decoder would report a truncated header. A read error
+    // is left to the decoder, which reports it on the first read.
+    if buffered.fill_buf().is_ok_and(|bytes| bytes.is_empty()) {
+        return Box::new(io::empty());
+    }
+    let decoder = MultiGzDecoder::new(buffered);
     if inflate_thread {
         Box::new(InflateThread::spawn(decoder))
     } else {

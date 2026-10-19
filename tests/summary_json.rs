@@ -587,6 +587,32 @@ fn summary_split_object() {
     assert_eq!(targets["discarded"], 0);
 }
 
+/// `--targets` without an adapter source configures no adapters and samples
+/// no reads: the summary reports `configured` and `sample` as `0` beside the
+/// sheet sequences it searches.
+#[test]
+fn targets_alone_configure_no_adapters() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = split_primers();
+    let sheet = write_split_sheet(dir.path(), &p);
+    let input = dir.path().join("in.fastq");
+    write_split_fastq(&input, &split_pool(&p));
+    let json = dir.path().join("summary.json");
+
+    whittle()
+        .args(["-i", input.to_str().unwrap()])
+        .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--summary-json", json.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let a = summary(dir.path())["params"]["adapters"].clone();
+    assert_eq!(a["configured"], 0, "{a}");
+    assert_eq!(a["sample"], 0, "{a}");
+    assert_eq!(a["count"], 4, "{a}");
+}
+
 /// `split.spec` is an array of every `--targets` value, in the order given,
 /// not a single string.
 #[test]

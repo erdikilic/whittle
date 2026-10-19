@@ -846,6 +846,38 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
     }
 }
 
+/// A sample too small for discovery keeps the configured preset: the reads
+/// are trimmed as they are without `--adapter-discover`.
+#[test]
+fn infer_on_tiny_input_trims_with_the_configured_preset() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq(dir.path(), 20);
+    let run = |extra: &[&str]| {
+        let assert = Command::cargo_bin("whittle")
+            .unwrap()
+            .env_remove("WHITTLE_LOG")
+            .args(["-i", fq.to_str().unwrap(), "--adapter-preset", "lsk114"])
+            .args(["-t", "1"])
+            .args(extra)
+            .assert()
+            .success();
+        let out = assert.get_output();
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (plain, _) = run(&[]);
+    assert!(!plain.contains(&PLANTED_ADAPTER[4..]), "{plain}");
+    let (discovered, stderr) = run(&["--adapter-discover"]);
+    assert_eq!(discovered, plain);
+    assert!(stderr.contains("too few"), "{stderr}");
+    assert!(
+        stderr.contains("trimming with the configured adapters only"),
+        "{stderr}"
+    );
+}
+
 /// Discover-only writes no records when discovery is skipped for insufficient
 /// input reads.
 #[test]
@@ -917,6 +949,84 @@ fn infer_discover_only_does_not_clobber_output_file() {
         contents, sentinel,
         "Discover-only leaves a pre-existing -o file untouched"
     );
+}
+
+/// Discover-only writes no records, so a pre-existing `--rejected-output`
+/// file is left untouched, and a rejected-output path whose format family
+/// differs from the input's is not checked.
+#[test]
+fn infer_discover_only_does_not_clobber_rejected_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq(dir.path(), 500);
+    let rejected = dir.path().join("rejected.fastq");
+    let sentinel = "SENTINEL: pre-existing file contents, must survive\n";
+    std::fs::write(&rejected, sentinel).unwrap();
+    let foreign = dir.path().join("rejected.bam");
+    for path in [&rejected, &foreign] {
+        Command::cargo_bin("whittle")
+            .unwrap()
+            .env_remove("WHITTLE_LOG")
+            .args([
+                "-i",
+                fq.to_str().unwrap(),
+                "--adapter-discover-only",
+                "--rejected-output",
+                path.to_str().unwrap(),
+                "-t",
+                "1",
+            ])
+            .assert()
+            .success();
+    }
+    assert_eq!(std::fs::read_to_string(&rejected).unwrap(), sentinel);
+    assert!(
+        !foreign.exists(),
+        "discover-only creates no rejected output"
+    );
+}
+
+/// Discover-only output cut off by a closed pipe exits 0 without a message,
+/// and a failed write to stdout is an error, not a panic.
+#[cfg(unix)]
+#[test]
+fn infer_discover_only_handles_a_closed_or_failing_stdout() {
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fq = write_adapted_fastq(dir.path(), 500);
+    let run = |stdout: Stdio| {
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("whittle"))
+            .env_remove("WHITTLE_LOG")
+            .args([
+                "-i",
+                fq.to_str().unwrap(),
+                "--adapter-discover-only",
+                "-t",
+                "1",
+            ])
+            .stdout(stdout)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(!stderr.contains("panicked"), "{stderr}");
+        (output.status.code(), stderr)
+    };
+    let (code, stderr) = run(Stdio::piped());
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("Failed after"), "{stderr}");
+    #[cfg(target_os = "linux")]
+    {
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let (code, stderr) = run(Stdio::from(full));
+        assert_eq!(code, Some(1), "{stderr}");
+        assert!(stderr.contains("(os error 28)"), "{stderr}");
+    }
 }
 
 /// The same input run twice through `--adapter-discover` at `-t 1` produces

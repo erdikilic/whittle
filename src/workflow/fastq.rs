@@ -118,13 +118,14 @@ pub(super) fn rejected_fastq(rec: &ReadRecord, rejection: Rejection) -> Vec<u8> 
     out
 }
 
-/// Renders a FASTQ read rejected by the tag filter without a target tag.
+/// Renders a FASTQ read rejected by the tag filter without a target tag, and
+/// with its reason tag in place of an input one.
 pub(crate) fn tag_filtered_fastq(rec: &ReadRecord) -> Vec<u8> {
     let mut out = Vec::new();
     let mut fields = rec.name.split(|&b| b == b'\t');
     crate::io::fastq::write_head(&mut out, fields.next().unwrap_or_default(), 1, 0)
         .expect("Writing to a Vec does not fail");
-    for field in fields.filter(|field| !field.starts_with(b"wt:")) {
+    for field in fields.filter(|field| !field.starts_with(b"wt:") && !field.starts_with(b"wr:")) {
         out.push(b'\t');
         out.extend_from_slice(field);
     }

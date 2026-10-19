@@ -376,3 +376,42 @@ fn bulk_decode_matches_the_noodles_conversions() {
     assert!(decode_raw_record(&raw).is_err());
     assert!(noodles_sam::alignment::record_buf::Data::try_from(raw.data()).is_err());
 }
+
+/// A record without base qualities, as `*` QUAL encodes it, with a
+/// string tag the tag filter can test.
+fn record_without_qualities() -> RecordBuf {
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = Flags::UNMAPPED;
+    *rec.name_mut() = Some(b"r1".into());
+    *rec.sequence_mut() = b"ACGT".to_vec().into();
+    rec.data_mut()
+        .insert(Tag::new(b'e', b'r'), Value::String(b"x".as_slice().into()));
+    rec
+}
+
+/// A tag-filter reject of a record without base qualities keeps its `0xFF`
+/// QUAL bytes, as the noodles encoding of the record with the reason does.
+#[test]
+fn tag_filtered_record_without_qualities_matches_noodles() {
+    let mut rec = record_without_qualities();
+    let RejectItem::Bam(bytes) = tag_filtered_bam(&raw_record(&rec)).unwrap() else {
+        panic!("a BAM reject");
+    };
+    rec.data_mut().insert(
+        reject::REASON_TAG,
+        Value::String(b"tag_filter".as_slice().into()),
+    );
+    assert_eq!(bytes, noodles_bytes(&rec));
+}
+
+/// FASTQ cannot hold a read without base qualities, so its tag-filter
+/// reject is refused with the error a trimmed read of it gets.
+#[test]
+fn tag_filtered_record_without_qualities_is_refused_for_fastq() {
+    let cfg = cfg_bam2fq(None, 0, FastqTags::All);
+    let err = tag_filtered_bam_fastq(&raw_record(&record_without_qualities()), &cfg)
+        .err()
+        .expect("a FASTQ reject of a record without qualities is refused")
+        .to_string();
+    assert!(err.contains("records without per-base quality"), "{err}");
+}

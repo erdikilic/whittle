@@ -13,12 +13,14 @@
 //! primary := "(" expr ")" | "[" TAG "]" | "exists" "(" "[" TAG "]" ")" | NUMBER | STRING
 //! ```
 //!
-//! A tag in a boolean position is true when the tag is present. Comparisons
-//! are numeric between numbers and bytewise between strings; a comparison
-//! with a missing tag is false, whatever the operator, as in samtools. A
-//! comparison between a number and a string, or one involving an array, is
-//! an error that names the tag, since a typo must not silently select or
-//! drop every read.
+//! A tag in a boolean position is true when the tag is present. The operands
+//! of `!`, `&&` and `||` are conditions and those of a comparison are values
+//! (a tag, a number or a string); any other operand fails the parse.
+//! Comparisons are numeric between numbers and bytewise between strings; a
+//! comparison with a missing tag is false, whatever the operator, as in
+//! samtools. A comparison between a number and a string, or one involving an
+//! array, is an error that names the tag, since a typo must not silently
+//! select or drop every read.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -400,6 +402,8 @@ impl Parser {
         while self.peek() == Some(&Token::Or) {
             self.pos += 1;
             let right = self.and()?;
+            require_condition(&left)?;
+            require_condition(&right)?;
             left = Expr::Or(Box::new(left), Box::new(right));
         }
         Ok(left)
@@ -410,6 +414,8 @@ impl Parser {
         while self.peek() == Some(&Token::And) {
             self.pos += 1;
             let right = self.not()?;
+            require_condition(&left)?;
+            require_condition(&right)?;
             left = Expr::And(Box::new(left), Box::new(right));
         }
         Ok(left)
@@ -443,6 +449,12 @@ impl Parser {
         if let Some(Token::Cmp(op)) = self.peek().cloned() {
             self.pos += 1;
             let right = self.primary()?;
+            let value = |e: &Expr| matches!(e, Expr::Tag(_) | Expr::Num(_) | Expr::Str(_));
+            if !value(&left) || !value(&right) {
+                return Err(
+                    "a comparison takes a tag, a number or a string on each side".to_string(),
+                );
+            }
             if matches!(left, Expr::Num(_) | Expr::Str(_))
                 && matches!(right, Expr::Num(_) | Expr::Str(_))
             {
@@ -807,6 +819,17 @@ mod tests {
             ("length([qs])", "unsupported word"),
             ("10 == 10", "needs a tag"),
             ("![qs] == 1", ""),
+            ("[qs] && 5", "a literal is not a condition"),
+            ("\"x\" || [qs]", "a literal is not a condition"),
+            (
+                "([qs]>10) == 1",
+                "a comparison takes a tag, a number or a string",
+            ),
+            (
+                "[qs] == ([dx] && [er])",
+                "a comparison takes a tag, a number or a string",
+            ),
+            ("([qs]) == 1 && ([dx] || ![er])", ""),
         ] {
             let res = TagFilter::parse(expr);
             if needle.is_empty() {

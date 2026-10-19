@@ -25,11 +25,7 @@ impl GroupHead<'_> {
     /// The group's codes as `ModCode`s.
     fn mod_codes(&self) -> Vec<ModCode> {
         if self.chebi {
-            // Saturating: a corrupt over-long id clamps instead of overflowing.
-            let id = self.codes.iter().fold(0u32, |id, &d| {
-                id.saturating_mul(10).saturating_add(u32::from(d - b'0'))
-            });
-            vec![ModCode::Chebi(id)]
+            vec![ModCode::Chebi(self.codes.to_vec())]
         } else {
             self.codes.iter().map(|&c| ModCode::Char(c)).collect()
         }
@@ -246,7 +242,7 @@ mod tests {
     #[test]
     fn chebi_numeric_code() {
         let m = parse(b"C+16061,2;", &[99]);
-        assert_eq!(m.groups[0].codes, vec![ModCode::Chebi(16061)]);
+        assert_eq!(m.groups[0].codes, vec![ModCode::Chebi(b"16061".to_vec())]);
         assert_eq!(m.groups[0].deltas, vec![2]);
     }
 
@@ -268,14 +264,17 @@ mod tests {
         assert!(g.ml.is_empty());
     }
 
-    /// A corrupt 20-digit ChEBI id or delta overflows `u32`/`usize` under
-    /// `n * 10 + d`; saturating arithmetic clamps instead of panicking (debug
-    /// builds panic on overflow).
+    /// A corrupt 20-digit delta overflows `usize` under `n * 10 + d`;
+    /// saturating arithmetic clamps instead of panicking (debug builds panic
+    /// on overflow). A ChEBI id of any length is kept as written.
     #[test]
     fn over_long_numeric_fields_saturate_without_panicking() {
         let m = parse(b"C+99999999999999999999,88888888888888888888;", &[1]);
         assert_eq!(m.groups.len(), 1);
-        assert_eq!(m.groups[0].codes, vec![ModCode::Chebi(u32::MAX)]);
+        assert_eq!(
+            m.groups[0].codes,
+            vec![ModCode::Chebi(b"99999999999999999999".to_vec())]
+        );
         assert_eq!(m.groups[0].deltas, vec![usize::MAX]);
     }
 

@@ -153,9 +153,32 @@ pub(super) fn raw_gc_fraction(record: &bam::Record) -> f64 {
     gc as f64 / sequence.len() as f64
 }
 
+/// Returns the edit of a raw record's full window that the decoded workflow
+/// applies to its modification block (`window_edit`): `MN` added to a block
+/// without it, a malformed block removed. `None` for any other block, whose
+/// record is its own output.
+fn full_window_mod_edit<'a>(
+    record: &bam::Record,
+    mod_block: ModBlock,
+    remove: &'a TagRemoval,
+) -> anyhow::Result<Option<RecordEdit<'a>>> {
+    if !matches!(mod_block, ModBlock::MissingMn | ModBlock::Malformed) {
+        return Ok(None);
+    }
+    let decoded = decode_raw_record(record)?;
+    let window = Window {
+        start: 0,
+        end: record.sequence().len(),
+        idx: 0,
+        total: 1,
+    };
+    Ok(window_edit(&decoded, window, mod_block, None, None, remove))
+}
+
 /// Filters one raw record over its full window and decides its output: the raw
 /// record itself when nothing changes, a rebuild when `MN` is missing or the
-/// modification block is malformed, nothing when the filter drops it.
+/// modification block is malformed, nothing when the filter drops it. A
+/// rejected record gets the same rebuild, with its reason.
 /// A malformed modification block or per-base tag is counted.
 ///
 /// Tag removal never reaches here: `run_raw_bam` excludes it from the
@@ -169,15 +192,12 @@ pub(super) fn process_raw_full_window(
     let seq_len = record.sequence().len();
     let qualities = record.quality_scores();
     let qual = qualities.as_ref();
-    if qual.len() != seq_len || crate::io::bam::quality_absent(qual) {
-        anyhow::bail!(
-            "read {}: BAM record SEQ length {} != QUAL length {} \
-             (records without per-base quality are not supported)",
-            crate::io::bam::display_name(record.name().map(AsRef::as_ref)),
-            seq_len,
-            qual.len()
-        );
-    }
+    require_qualities(seq_len, qual).map_err(|e| {
+        e.context(format!(
+            "read {}",
+            crate::io::bam::display_name(record.name().map(AsRef::as_ref))
+        ))
+    })?;
 
     let (mod_block, malformed_perbase) = raw_full_window_metadata(&record)?;
     if mod_block == ModBlock::Malformed {
@@ -205,10 +225,9 @@ pub(super) fn process_raw_full_window(
     };
     if let Some(reason) = rejected {
         if counters.wants_rejects() {
-            let edit = RecordEdit {
-                reason: Some(reason),
-                ..RecordEdit::unchanged(seq_len, &cfg.remove_tags)
-            };
+            let mut edit = full_window_mod_edit(&record, mod_block, &cfg.remove_tags)?
+                .unwrap_or_else(|| RecordEdit::unchanged(seq_len, &cfg.remove_tags));
+            edit.reason = Some(reason);
             counters.reject(RejectItem::Bam(build_record(&record, edit)?))?;
         }
         return Ok(None);
@@ -221,21 +240,9 @@ pub(super) fn process_raw_full_window(
         .fetch_add(seq_len as u64, Ordering::Relaxed);
     counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
 
-    let output = match mod_block {
-        ModBlock::Absent | ModBlock::Consistent => BamOutputRecord::Raw(record),
-        ModBlock::MissingMn | ModBlock::Malformed => {
-            let decoded = decode_raw_record(&record)?;
-            let window = Window {
-                start: 0,
-                end: seq_len,
-                idx: 0,
-                total: 1,
-            };
-            match window_edit(&decoded, window, mod_block, None, None, &cfg.remove_tags) {
-                Some(edit) => BamOutputRecord::Built(build_record(&record, edit)?),
-                None => BamOutputRecord::Raw(record),
-            }
-        },
+    let output = match full_window_mod_edit(&record, mod_block, &cfg.remove_tags)? {
+        Some(edit) => BamOutputRecord::Built(build_record(&record, edit)?),
+        None => BamOutputRecord::Raw(record),
     };
     Ok(Some(output))
 }

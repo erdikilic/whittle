@@ -81,9 +81,10 @@ pub fn from_extension(path: &Path) -> Option<Format> {
 }
 
 /// Detects the input format from the first bytes of a stream whose extension
-/// does not decide it, or stdin: gzip magic is gzipped FASTQ and `@` is FASTQ.
-/// The caller has already ruled out a BGZF header, which BAM and BGZF FASTQ
-/// share; only the decoded first block tells them apart (`detect_bgzf_block`).
+/// does not decide it, or stdin: gzip magic is gzipped FASTQ and `@` is FASTQ,
+/// except for the `@HD` and `@SQ` lines that open SAM text. The caller has
+/// already ruled out a BGZF header, which BAM and BGZF FASTQ share; only the
+/// decoded first block tells them apart (`detect_bgzf_block`).
 pub fn detect_input(sniff: &[u8]) -> anyhow::Result<Format> {
     if sniff.starts_with(&[0x1f, 0x8b]) {
         Ok(Format::FastqGz)
@@ -95,11 +96,22 @@ pub fn detect_input(sniff: &[u8]) -> anyhow::Result<Format> {
             "input looks like an uncompressed (non-BGZF) BAM stream; a BGZF-compressed BAM \
              is required (re-compress with `samtools view -b`)"
         )
+    } else if sniff.starts_with(b"@HD\tVN:") || sniff.starts_with(b"@SQ\tSN:") {
+        anyhow::bail!(
+            "input looks like SAM text; whittle reads unaligned BAM (convert with samtools view -b)"
+        )
     } else if sniff.first() == Some(&b'@') {
         Ok(Format::Fastq)
     } else {
-        anyhow::bail!("cannot determine input format; pass --input-format")
+        anyhow::bail!("the input starts with neither '@' (FASTQ) nor gzip or BGZF magic")
     }
+}
+
+/// Returns the compression level of `format` output without `-c`: 4 for gzip
+/// FASTQ, which libdeflate compresses faster than level 6 for about 2% more
+/// output, and 6 for BGZF (BAM and `.bgz`), the BGZF writer default.
+pub fn default_compression_level(format: Format) -> u8 {
+    if format == Format::FastqGz { 4 } else { 6 }
 }
 
 /// Returns true when a stream detected as `detected` may be read under a
@@ -293,8 +305,21 @@ mod tests {
         // gzip magic `1f 8b` is `FastqGz`; `@` is `Fastq`.
         assert_eq!(detect_input(&[0x1f, 0x8b, 0x08]).unwrap(), Format::FastqGz);
         assert_eq!(detect_input(b"@read").unwrap(), Format::Fastq);
-        let err = detect_input(b"").unwrap_err().to_string();
-        assert!(err.contains("--input-format"), "Got: {err}");
+        let err = detect_input(b">r1").unwrap_err().to_string();
+        assert!(err.contains("neither '@'"), "Got: {err}");
+        assert!(!err.contains("--input-format"), "Got: {err}");
+    }
+
+    /// SAM text opens with a header line, not a FASTQ record, and is refused
+    /// by name; a FASTQ read whose name starts with the same letters is not.
+    #[test]
+    fn sam_text_is_rejected_by_name() {
+        for sniff in [&b"@HD\tVN:1.6\tSO:unsorted\n"[..], b"@SQ\tSN:chr1\tLN:9"] {
+            let err = detect_input(sniff).unwrap_err().to_string();
+            assert!(err.contains("SAM text"), "Got: {err}");
+            assert!(err.contains("samtools view -b"), "Got: {err}");
+        }
+        assert_eq!(detect_input(b"@HD1 VN:1").unwrap(), Format::Fastq);
     }
 
     /// A bare `BAM\x01` stream (no BGZF framing) cannot be read by the

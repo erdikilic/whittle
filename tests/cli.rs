@@ -788,6 +788,31 @@ fn empty_input_warns() {
         .stderr(predicate::str::contains("Input contained no reads"));
 }
 
+/// An empty gzip input, a 0-byte `.gz` file or an empty stream under
+/// `--input-format fastq-gz`, is zero input reads, as an empty plain or BGZF
+/// FASTQ is, at one thread and at several.
+#[test]
+fn empty_gzip_input_is_empty_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("empty.fastq.gz");
+    std::fs::write(&input, b"").unwrap();
+    for threads in ["1", "4"] {
+        whittle()
+            .arg("-i")
+            .arg(&input)
+            .args(["-t", threads])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("Input contained no reads"));
+        whittle()
+            .args(["--input-format", "fastq-gz", "-t", threads])
+            .write_stdin("")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("Input contained no reads"));
+    }
+}
+
 #[test]
 fn sequential_threads_label_for_dash_t_1() {
     let input = "@r1\nACGT\n+\nIIII\n";
@@ -899,6 +924,33 @@ fn forced_in_format_is_checked_against_the_stream() {
         .assert()
         .success()
         .stdout("");
+}
+
+/// A stream detection cannot classify is described in the error: SAM text
+/// by name, and any other stream by its first byte, without advice to pass
+/// the `--input-format` that a forced run already names.
+#[test]
+fn undetectable_streams_are_described() {
+    whittle()
+        .write_stdin("@HD\tVN:1.6\tSO:unsorted\nr1\t4\t*\t0\t0\t*\t*\t0\t0\tACGT\tIIII\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("input looks like SAM text"))
+        .stderr(predicates::str::contains("samtools view -b"));
+    whittle()
+        .args(["--input-format", "fastq"])
+        .write_stdin(">r1\nACGT\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("does not look like FASTQ"))
+        .stderr(predicates::str::contains("neither '@'"))
+        .stderr(predicates::str::contains("pass --input-format").not());
+    whittle()
+        .write_stdin(">r1\nACGT\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot determine input format"))
+        .stderr(predicates::str::contains("neither '@'"));
 }
 
 #[test]

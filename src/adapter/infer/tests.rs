@@ -905,8 +905,18 @@ fn known_adapter_precedes_a_discovered_primer_layer() {
     assert_eq!(found[0].layer, 0);
 }
 
-#[test]
-fn discovers_barcode_layer_between_flanks() {
+/// Reads holding an adapter, a flank, one of eight barcodes and a second
+/// flank in front of a random insert, with the parts they are built from.
+struct FlankedBarcodes {
+    reads: Vec<Vec<u8>>,
+    adapter: Vec<u8>,
+    flank1: Vec<u8>,
+    flank2: Vec<u8>,
+    barcodes: Vec<Vec<u8>>,
+}
+
+/// The reads of `discovers_barcode_layer_between_flanks`.
+fn flanked_barcode_reads() -> FlankedBarcodes {
     let adapter = random_bases(6011, 30);
     let flank1 = random_bases(6023, 16);
     let flank2 = random_bases(6031, 32);
@@ -921,6 +931,24 @@ fn discovers_barcode_layer_between_flanks() {
             read
         })
         .collect();
+    FlankedBarcodes {
+        reads,
+        adapter,
+        flank1,
+        flank2,
+        barcodes,
+    }
+}
+
+#[test]
+fn discovers_barcode_layer_between_flanks() {
+    let FlankedBarcodes {
+        reads,
+        adapter,
+        flank1,
+        flank2,
+        barcodes,
+    } = flanked_barcode_reads();
     let found = infer_owned(&reads);
     for d in &found {
         let technical = barcodes.iter().any(|b| {
@@ -974,6 +1002,56 @@ fn discovers_barcode_layer_between_flanks() {
         let segments = crate::adapter::adapter_segments(read, &cfg);
         assert_eq!(segments, vec![(102, read.len())], "{segments:?}");
     }
+}
+
+/// Lowercase reads resolve a variable layer to the same sequences as the
+/// uppercase reads, including the clustered barcode panel.
+#[test]
+fn lowercase_reads_resolve_the_barcode_layer() {
+    let reads = flanked_barcode_reads().reads;
+    let lower: Vec<Vec<u8>> = reads.iter().map(|r| r.to_ascii_lowercase()).collect();
+    let sequences = |found: Vec<InferredAdapter>| -> Vec<(Vec<u8>, Role, usize)> {
+        found
+            .into_iter()
+            .map(|d| (d.adapter.seq, d.adapter.role, d.layer))
+            .collect()
+    };
+    let upper = sequences(infer_owned(&reads));
+    assert!(upper.iter().any(|d| d.1 == Role::Barcode), "{upper:?}");
+    assert_eq!(sequences(infer_owned(&lower)), upper);
+}
+
+/// A candidate held by too few sample windows to measure its depth is
+/// dropped with the fragments in the gap of a variable layer.
+#[test]
+fn variable_layer_drops_a_candidate_without_depth() {
+    let flank = random_bases(6031, 32);
+    let barcodes: Vec<Vec<u8>> = (0..4).map(|i| random_bases(6100 + i, 24)).collect();
+    let reads: Vec<Vec<u8>> = (0..400)
+        .map(|i| {
+            let mut read = barcodes[i % 4].clone();
+            read.extend_from_slice(&flank);
+            read.extend(random_bases(9000 + i as u64, 150));
+            read
+        })
+        .collect();
+    let windows: Vec<&[u8]> = reads.iter().map(|r| &r[..200]).collect();
+    let absent = random_bases(7777, 24);
+    let candidates: Vec<Candidate> = vec![
+        (flank.clone(), 1.0, false, 1000, false, Vec::new()),
+        (absent.clone(), 0.05, false, 10, false, Vec::new()),
+    ];
+    let (kept, members) = with_variable_layer(
+        &mut new_ambiguous_searcher(),
+        candidates,
+        &windows,
+        &windows,
+        End::Five,
+        0.2,
+    );
+    assert_eq!(members.len(), 4, "{members:?}");
+    assert!(kept.iter().any(|c| c.0 == flank));
+    assert!(!kept.iter().any(|c| c.0 == absent));
 }
 
 #[test]

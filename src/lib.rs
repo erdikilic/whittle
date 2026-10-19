@@ -105,9 +105,12 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
                 )
             })?;
             source = replayed;
+            // A BGZF stream accepted under `fastq-gz` is read as plain gzip:
+            // the multi-member gzip decoder reads BGZF and plain members
+            // alike, so a stream that joins both kinds decodes whole.
             match detected {
                 None => forced,
-                Some(d) if io::forced_format_accepts(forced, d) => d,
+                Some(d) if io::forced_format_accepts(forced, d) => forced,
                 Some(d) => anyhow::bail!(
                     "--input-format {} but the input is {}; drop the flag or pass --input-format {}",
                     forced.label(),
@@ -122,7 +125,8 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
             Some(Format::FastqGz) => io::probe_gz(&mut source)?,
             Some(f) => f,
             None => {
-                let (fmt, replayed) = detect_format(in_path, source)?;
+                let (fmt, replayed) =
+                    detect_format(in_path, source).context("cannot determine input format")?;
                 source = replayed;
                 fmt.ok_or_else(|| {
                     anyhow::anyhow!("cannot determine input format; pass --input-format")
@@ -660,24 +664,39 @@ impl Session {
     /// Opens the rejected output when `--rejected-output` is set, registers its
     /// channel with the counters and returns the writer to finish after the
     /// run. Called before the first record is read, so tag-filtered reads
-    /// reach it too.
+    /// reach it too. Discover-only mode writes no records, so it neither opens
+    /// nor checks the path.
     fn start_rejects(
         &self,
         cfg: &Config,
         out_fmt: Format,
         header: Option<&noodles_sam::Header>,
     ) -> anyhow::Result<Option<workflow::reject::RejectWriter>> {
-        let Some(path) = cfg.rejected_output.as_deref() else {
+        let Some(path) = cfg
+            .rejected_output
+            .as_deref()
+            .filter(|_| !cfg.adapter_infer.is_discover_only())
+        else {
             return Ok(None);
         };
         let format = workflow::reject::resolve_format(path, out_fmt)?;
-        let (rejects, writer) = workflow::reject::RejectWriter::start(
-            path,
-            format,
-            cfg.compression_level,
-            header.cloned(),
-            cfg.threads.max(1),
-        )?;
+        // Rejected records reach the file as they are produced, which keeps
+        // the input order on one thread only, whatever `--preserve-order`
+        // does for the main output.
+        let mut header = header.cloned();
+        if cfg.threads > 1
+            && let Some(header) = header.as_mut()
+        {
+            io::bam::mark_unsorted(header);
+        }
+        // Without `-c`, the file takes the default level of its own format.
+        let level = if cfg.compression_level_explicit {
+            cfg.compression_level
+        } else {
+            io::default_compression_level(format)
+        };
+        let (rejects, writer) =
+            workflow::reject::RejectWriter::start(path, format, level, header, cfg.threads.max(1))?;
         self.counters
             .rejects
             .set(rejects)
@@ -837,10 +856,18 @@ where
     cfg.adapters_configured = cfg.adapters.as_ref().map(|a| a.adapters.len());
     cfg.adapters = resolved.adapters;
     if let Some(opts) = cfg.split_opts.clone() {
-        let mut adapters = match cfg.adapters.take().or_else(|| cfg.split_search.clone()) {
+        let mut adapters = match cfg.adapters.take() {
             Some(adapters) => adapters,
-            None => {
-                anyhow::bail!("--targets requires adapter search settings (Config::split_search)")
+            // The sheet sequences alone are searched, and no adapter was
+            // configured.
+            None => match cfg.split_search.clone() {
+                Some(search) => {
+                    cfg.adapters_configured = Some(0);
+                    search
+                },
+                None => anyhow::bail!(
+                    "--targets requires adapter search settings (Config::split_search)"
+                ),
             },
         };
         adapters.attach_split(&opts.sheet.primers);

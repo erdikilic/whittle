@@ -68,19 +68,16 @@ pub(super) fn degenerate_layer(
     // Each text runs from the start of its window's hit to `DEGENERATE_SPAN`
     // bases past the hit, plus the edit budget of the longest query.
     let reach = DEGENERATE_SPAN + edit_budget(error_rate, pattern.len() + DEGENERATE_SPAN) + 1;
-    let texts: Vec<Vec<u8>> = windows
+    let texts: Vec<&[u8]> = windows
         .iter()
         .zip(&best)
         .filter_map(|(window, hit)| {
-            hit.map(|(_, start, end)| {
-                window[start..window.len().min(end + reach)].to_ascii_uppercase()
-            })
+            hit.map(|(_, start, end)| &window[start..window.len().min(end + reach)])
         })
         .collect();
     if texts.len() < floor {
         return None;
     }
-    let texts: Vec<&[u8]> = texts.iter().map(Vec::as_slice).collect();
     let mut layer: Vec<u8> = Vec::new();
     // The base each text holds at each position of the layer.
     let mut observed: Vec<Vec<Option<u8>>> = vec![Vec::new(); texts.len()];

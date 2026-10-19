@@ -16,7 +16,7 @@ pub fn serialize(mods: &Mods) -> (Vec<u8>, Vec<u8>) {
         for code in &g.codes {
             match code {
                 ModCode::Char(c) => mm.push(*c),
-                ModCode::Chebi(id) => push_u64(&mut mm, u64::from(*id)),
+                ModCode::Chebi(digits) => mm.extend_from_slice(digits),
             }
         }
         if let Some(s) = g.status {
@@ -43,6 +43,16 @@ mod tests {
         let (mm, ml) = serialize(&parse(b"C+m?,5,12,0;", &[200, 10, 128]));
         assert_eq!(mm, b"C+m?,5,12,0;");
         assert_eq!(ml, vec![200, 10, 128]);
+    }
+
+    /// A ChEBI id is written back as the input spells it, leading zeros and
+    /// digits beyond any integer width included.
+    #[test]
+    fn chebi_ids_roundtrip_as_written() {
+        let input = b"C+016061,0;A+99999999999999999999,1;".as_slice();
+        let (mm, ml) = serialize(&parse(input, &[1, 2]));
+        assert_eq!(mm, input);
+        assert_eq!(ml, vec![1, 2]);
     }
 
     #[test]

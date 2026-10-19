@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
 use noodles_sam::alignment::record::data::field::Tag;
@@ -67,14 +68,18 @@ pub(crate) enum RejectItem {
 #[derive(Clone)]
 pub(crate) struct Rejects {
     tx: SyncSender<RejectItem>,
+    /// The writer's error, stored before the writer closes the channel.
+    failure: Arc<OnceLock<String>>,
 }
 
 impl Rejects {
-    /// Queues one rejected record; an error means the writer stopped.
+    /// Queues one rejected record; an error means the writer stopped, and
+    /// carries the writer's error when it failed.
     pub(crate) fn send(&self, item: RejectItem) -> anyhow::Result<()> {
-        self.tx
-            .send(item)
-            .map_err(|_| anyhow::anyhow!("the rejected-record writer stopped"))
+        self.tx.send(item).map_err(|_| match self.failure.get() {
+            Some(cause) => anyhow::anyhow!("{cause}"),
+            None => anyhow::anyhow!("the rejected-record writer stopped"),
+        })
     }
 }
 
@@ -95,6 +100,21 @@ impl RejectWriter {
         workers: usize,
     ) -> anyhow::Result<(Rejects, RejectWriter)> {
         let (tx, rx) = sync_channel::<RejectItem>((workers * QUEUE_PER_WORKER).max(4));
+        let failure = Arc::new(OnceLock::new());
+        // The writer's error names the file and is stored for the producers
+        // before `rx` drops at the end of the thread, which closes the
+        // channel to them.
+        let fail = {
+            let failure = Arc::clone(&failure);
+            let context = format!("writing the rejected output {}", path.display());
+            move |result: anyhow::Result<()>| {
+                result.map_err(|e| {
+                    let e = e.context(context);
+                    let _ = failure.set(format!("{e:#}"));
+                    e
+                })
+            }
+        };
         let handle = match format {
             Format::Bam => {
                 let header = header.expect("BAM rejected output is given its header");
@@ -102,16 +122,21 @@ impl RejectWriter {
                 std::thread::Builder::new()
                     .name("rejected-writer".into())
                     .spawn(move || {
-                        for item in rx.iter() {
-                            match item {
-                                RejectItem::Bam(rec) => sink.write_record_bytes(&header, &rec)?,
-                                RejectItem::Fastq(_) => {
-                                    anyhow::bail!("a FASTQ record reached the BAM rejected output")
-                                },
-                                RejectItem::End => break,
+                        let result = (|| {
+                            for item in rx.iter() {
+                                match item {
+                                    RejectItem::Bam(rec) => {
+                                        sink.write_record_bytes(&header, &rec)?
+                                    },
+                                    RejectItem::Fastq(_) => anyhow::bail!(
+                                        "a FASTQ record reached the BAM rejected output"
+                                    ),
+                                    RejectItem::End => break,
+                                }
                             }
-                        }
-                        sink.finish()
+                            sink.finish()
+                        })();
+                        fail(result)
                     })?
             },
             Format::Fastq | Format::FastqGz | Format::FastqBgzf => {
@@ -120,20 +145,27 @@ impl RejectWriter {
                     .name("rejected-writer".into())
                     .spawn(move || {
                         use std::io::Write;
-                        for item in rx.iter() {
-                            match item {
-                                RejectItem::Fastq(bytes) => sink.write_all(&bytes)?,
-                                RejectItem::Bam(_) => {
-                                    anyhow::bail!("a BAM record reached the FASTQ rejected output")
-                                },
-                                RejectItem::End => break,
+                        let result = (|| {
+                            for item in rx.iter() {
+                                match item {
+                                    RejectItem::Fastq(bytes) => sink.write_all(&bytes)?,
+                                    RejectItem::Bam(_) => anyhow::bail!(
+                                        "a BAM record reached the FASTQ rejected output"
+                                    ),
+                                    RejectItem::End => break,
+                                }
                             }
-                        }
-                        sink.finish()
+                            sink.finish()
+                        })();
+                        fail(result)
                     })?
             },
         };
-        Ok((Rejects { tx: tx.clone() }, RejectWriter { tx, handle }))
+        let rejects = Rejects {
+            tx: tx.clone(),
+            failure,
+        };
+        Ok((rejects, RejectWriter { tx, handle }))
     }
 
     /// Sends the end marker, waits for the writer and returns its result.

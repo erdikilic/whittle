@@ -297,6 +297,19 @@ impl BamSink {
     }
 }
 
+/// Sets `@HD SO:` to `unsorted` and removes `GO` and `SS`, for records written
+/// in completion order. A header without an `@HD` line is left as is.
+pub(crate) fn mark_unsorted(header: &mut sam::Header) {
+    use sam::header::record::value::map::header::tag as header_tag;
+
+    if let Some(hd) = header.header_mut() {
+        let fields = hd.other_fields_mut();
+        fields.insert(header_tag::SORT_ORDER, "unsorted".into());
+        fields.shift_remove(&header_tag::GROUP_ORDER);
+        fields.shift_remove(&header_tag::SUBSORT_ORDER);
+    }
+}
+
 /// Returns the output header: the input header with an `@PG` provenance record
 /// (`ID:whittle`, program name and version) appended, and with `@HD SO:` set to
 /// `unsorted` (and `GO`/`SS` removed) when `order_kept` is false, since a
@@ -314,14 +327,10 @@ pub(crate) fn provenance_header(
 ) -> sam::Header {
     use sam::header::record::value::Map;
     use sam::header::record::value::map::Program;
-    use sam::header::record::value::map::header::tag as header_tag;
     use sam::header::record::value::map::program::tag;
 
-    if let (false, Some(hd)) = (order_kept, header.header_mut()) {
-        let fields = hd.other_fields_mut();
-        fields.insert(header_tag::SORT_ORDER, "unsorted".into());
-        fields.shift_remove(&header_tag::GROUP_ORDER);
-        fields.shift_remove(&header_tag::SUBSORT_ORDER);
+    if !order_kept {
+        mark_unsorted(&mut header);
     }
 
     if has_dangling_program_chain(&header) {

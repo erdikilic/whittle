@@ -221,6 +221,28 @@ fn tag_only_fastq_labels_every_read() {
     }
 }
 
+/// A sheet read through a pipe loads as a sheet file does.
+#[cfg(unix)]
+#[test]
+fn sheet_read_through_a_pipe_labels_every_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let sheet = std::fs::read(write_sheet(dir.path(), &p)).unwrap();
+    let input = dir.path().join("in.fastq");
+    write_fastq(&input, &three_reads(&p));
+    let out = dir.path().join("out.fastq");
+    whittle()
+        .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
+        .args(["--targets", "/dev/stdin", "-t", "1"])
+        .write_stdin(sheet)
+        .assert()
+        .success();
+    let text = std::fs::read_to_string(&out).unwrap();
+    let recs = fastq_records(&text);
+    assert_eq!(by_name(&recs, "plus16").0, "plus16\twt:Z:16S");
+    assert_eq!(by_name(&recs, "minusits").0, "minusits\twt:Z:ITS");
+}
+
 /// A tagged FASTQ header keeps its tags; the target tag follows them.
 #[test]
 fn tagged_fastq_appends_the_target_after_the_input_tags() {

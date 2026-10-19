@@ -247,9 +247,18 @@ const MAB114: [PresetTarget; 2] = [
     ),
 ];
 
+/// Whether a `--targets` value names a readable sheet: an existing path
+/// that is not a directory. A pipe or process substitution
+/// (`/dev/stdin`, `/dev/fd/N`) counts, as a regular file does.
+pub(crate) fn is_sheet_file(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| !m.is_dir())
+}
+
 /// Minimum IUPAC edit distance of the shorter sequence aligned within the
 /// longer, searched up to `k` edits, or `None` when no alignment scores
-/// within that budget.
+/// within that budget. The search budget is capped at the shorter length:
+/// aligning it against an empty span costs its length, so no minimum
+/// exceeds that, and a larger budget only grows the search.
 fn edit_distance(
     searcher: &mut search::AmbiguousSearcher,
     a: &[u8],
@@ -257,7 +266,7 @@ fn edit_distance(
     k: usize,
 ) -> Option<usize> {
     let (pattern, text) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    search::hits(searcher, pattern, text, k)
+    search::hits(searcher, pattern, text, k.min(pattern.len()))
         .into_iter()
         .map(|hit| hit.cost)
         .min()
@@ -282,21 +291,24 @@ impl Sheet {
 }
 
 impl Sheet {
-    /// Loads a sheet from one `--targets` value: an existing file path first
-    /// (FASTA when its first non-blank byte is `>`, TSV otherwise), then a
-    /// preset token, then the inline form (`parse_inline`).
+    /// Loads a sheet from one `--targets` value: an existing path that is
+    /// not a directory first (`is_sheet_file`; FASTA when its first
+    /// non-blank byte is `>`, TSV otherwise), then a preset token, then the
+    /// inline form (`parse_inline`).
     pub fn load(spec: &str) -> anyhow::Result<Sheet> {
         let path = std::path::Path::new(spec);
-        if path.is_file() {
+        if is_sheet_file(path) {
             let bytes = std::fs::read(path)
                 .with_context(|| format!("reading --targets sheet {}", path.display()))?;
+            // A leading UTF-8 byte order mark is not part of the first line.
+            let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
             return if bytes.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'>') {
-                Sheet::parse_fasta(&bytes)
+                Sheet::parse_fasta(bytes)
             } else {
-                let text = String::from_utf8(bytes).with_context(|| {
+                let text = std::str::from_utf8(bytes).with_context(|| {
                     format!("--targets sheet {} is not valid UTF-8", path.display())
                 })?;
-                Sheet::parse_tsv(&text)
+                Sheet::parse_tsv(text)
             };
         }
         if let Some(sheet) = Sheet::preset(spec) {
@@ -567,6 +579,9 @@ impl Sheet {
                     })
                     .transpose()?
                     .unwrap_or(usize::MAX);
+                if min > max {
+                    bail!("target {name:?}: min_len ({min}) exceeds max_len ({max})");
+                }
                 Some((min, max))
             } else {
                 None
@@ -579,6 +594,9 @@ impl Sheet {
                 len,
             });
         }
+        if targets.is_empty() {
+            bail!("target sheet has a header but no target rows");
+        }
         Sheet::checked(table.primers, targets)
     }
 
@@ -586,9 +604,9 @@ impl Sheet {
     /// are split primers, named as the record head's first word; `end=fwd` or
     /// `end=rev` places the primer. Several entries may share one `target=`
     /// and `end=`; each adds a primer to that list. `group=` overrides the
-    /// default group (the
-    /// target name); it may appear on any entry of the target, and two
-    /// entries of one target giving different `group=` values is an error.
+    /// default group (the target name), and an empty `group=` value gives
+    /// none; it may appear on any entry of the target, and two entries of
+    /// one target giving different `group=` values is an error.
     /// Entries without a `target=` field are ignored, and belong to the
     /// caller's other adapter-FASTA handling instead.
     pub fn parse_fasta(bytes: &[u8]) -> anyhow::Result<Sheet> {
@@ -625,7 +643,7 @@ impl Sheet {
                     match k.to_ascii_lowercase().as_str() {
                         "target" => target_field = Some(v),
                         "end" => end_field = Some(v),
-                        "group" => group_field = Some(v),
+                        "group" => group_field = Some(v).filter(|g| !g.is_empty()),
                         _ => {},
                     }
                 }
@@ -633,6 +651,9 @@ impl Sheet {
             let Some(target_name) = target_field else {
                 continue;
             };
+            if target_name.is_empty() {
+                bail!("entry {name:?}: target= has an empty target name");
+            }
             let end = end_field.ok_or_else(|| {
                 anyhow::anyhow!("entry {name:?}: target={target_name:?} needs end=fwd or end=rev")
             })?;
@@ -855,6 +876,35 @@ mod tests {
         assert_eq!(s.targets[0].len, Some((300, 1000)));
     }
 
+    /// A header without target rows, or with every row commented out, is
+    /// an error rather than a sheet of no targets.
+    #[test]
+    fn tsv_header_without_rows_is_error() {
+        for text in [
+            "target\tfwd\trev\n",
+            "target\tfwd\trev\n# 16S\tAGRGTTYGATYMTGGCTCAG\t\n",
+        ] {
+            let err = Sheet::parse_tsv(text).unwrap_err().to_string();
+            assert!(err.contains("no target rows"), "{err}");
+        }
+    }
+
+    /// A length window whose minimum exceeds its maximum admits no segment
+    /// and is refused.
+    #[test]
+    fn tsv_rejects_min_len_above_max_len() {
+        let err = Sheet::parse_tsv(
+            "target\tfwd\trev\tmin_len\tmax_len\n\
+             A\tAGRGTTYGATYMTGGCTCAG\tCGGTTACCTTGTTACGACTT\t1000\t300\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("min_len (1000) exceeds max_len (300)"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn tsv_rejects_missing_header_column() {
         let err = Sheet::parse_tsv(
@@ -988,6 +1038,20 @@ mod tests {
         assert_eq!(s.targets.len(), 1);
         assert_eq!((s.targets[0].fwd.len(), s.targets[0].rev.len()), (1, 1));
         assert_eq!(s.primers[0].name, "27F");
+    }
+
+    /// An empty `target=` value names no target, and an empty `group=`
+    /// value leaves the target in its own group.
+    #[test]
+    fn fasta_empty_target_and_group_values() {
+        let err = Sheet::parse_fasta(b">27F primer target= end=fwd\nAGRGTTYGATYMTGGCTCAG\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty target name"), "{err}");
+        let s =
+            Sheet::parse_fasta(b">27F primer target=16S end=fwd group=\nAGRGTTYGATYMTGGCTCAG\n")
+                .unwrap();
+        assert_eq!(s.targets[0].group, "16S");
     }
 
     #[test]
@@ -1271,6 +1335,21 @@ mod tests {
         );
     }
 
+    /// A margin beyond the primer lengths reports every pair of different
+    /// keys at its edit distance, as a margin just above them does.
+    #[test]
+    fn close_pairs_take_a_margin_beyond_the_primer_lengths() {
+        let s = Sheet::parse_tsv(
+            "target\tfwd\trev\n\
+             A\tAGRGTTYGATYMTGGCTCAG\tCGGTTACCTTGTTACGACTT\n\
+             B\tCTTGGTCATTTAGAGGAAGTAA\tTCCTCCGCTTATTGATATGC\n",
+        )
+        .unwrap();
+        let reference = s.close_pairs(23, false);
+        assert_eq!(reference.len(), 4, "{reference:?}");
+        assert_eq!(s.close_pairs(usize::MAX, false), reference);
+    }
+
     /// A forward primer of one key and a reverse primer of another key
     /// compete at the same end too (rescoring aligns every sheet primer at
     /// every end), so `close_pairs` must flag a close pair across roles, not
@@ -1309,6 +1388,28 @@ mod tests {
 
         let s = Sheet::load("mab114").unwrap();
         assert_eq!(s.targets.len(), 2, "falls back to the mab114 preset");
+    }
+
+    /// A UTF-8 byte order mark in front of a TSV or FASTA sheet file is
+    /// skipped.
+    #[test]
+    fn load_skips_a_byte_order_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in [
+            (
+                "sheet.tsv",
+                "\u{feff}target\tfwd\trev\n16S\tAGRGTTYGATYMTGGCTCAG\tCGGTTACCTTGTTACGACTT\n",
+            ),
+            (
+                "sheet.fasta",
+                "\u{feff}>27F primer target=16S end=fwd\nAGRGTTYGATYMTGGCTCAG\n",
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            let s = Sheet::load(path.to_str().unwrap()).unwrap();
+            assert_eq!(s.targets[0].name, "16S", "{name}");
+        }
     }
 
     /// Returns the (name, sequence) of the only primer of `list`.

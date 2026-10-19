@@ -67,6 +67,8 @@ pub(crate) fn tag_filtered_bam_fastq(
 ) -> anyhow::Result<RejectItem> {
     let rec = decode_raw_record(record)?;
     let seq_len = rec.sequence().len();
+    // `workflow::filter_by_tags` names the read.
+    require_qualities(seq_len, rec.quality_scores().as_ref())?;
     let mut out = Vec::new();
     render_fastq_window(
         &mut out,

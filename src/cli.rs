@@ -433,7 +433,12 @@ pub fn parse() -> anyhow::Result<Config> {
     let split_opts = resolve_split(&mut c)?;
     let adapter_infer = resolve_infer(&c, &mut advisories)?;
     let adapters = resolve_adapters(&c, adapter_infer, &mut advisories)?;
-    let adapter_sample = resolve_sample(&c, adapter_infer, &mut advisories)?;
+    // Without an adapter source no reads are sampled, `--targets` alone
+    // included.
+    let adapter_sample = match adapters {
+        Some(_) => resolve_sample(&c, adapter_infer, &mut advisories)?,
+        None => 0,
+    };
     let split_search = match split_opts {
         Some(_) => Some(search_config(&c, Vec::new())?),
         None => None,
@@ -480,6 +485,7 @@ pub fn parse() -> anyhow::Result<Config> {
         render_workers: 0,
         adapter_sample,
         compression_level,
+        compression_level_explicit: c.compression_level.is_some(),
         update_moves: c.update_moves,
         ordered: c.ordered,
         verbosity: c.verbose,
@@ -584,17 +590,15 @@ fn validate_filters(c: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolves the compression level. An explicit `-c` wins; otherwise gzip FASTQ
-/// output uses level 4, which libdeflate compresses faster than level 6 for
-/// about 2% more output, and BGZF (BAM and `.bgz`) uses level 6, the BGZF
-/// writer default.
+/// Resolves the compression level. An explicit `-c` wins; otherwise the
+/// output format's default applies (`io::default_compression_level`), and an
+/// output format not known yet takes the BGZF default.
 fn compression_level_for(c: &Cli) -> u8 {
-    let out_is_gz = match c.out_format {
-        Some(Format::FastqGz) => true,
-        Some(_) => false,
-        None => c.output.as_deref().and_then(crate::io::from_extension) == Some(Format::FastqGz),
-    };
-    c.compression_level.unwrap_or(if out_is_gz { 4 } else { 6 })
+    let out = c
+        .out_format
+        .or_else(|| c.output.as_deref().and_then(crate::io::from_extension));
+    c.compression_level
+        .unwrap_or_else(|| out.map_or(6, crate::io::default_compression_level))
 }
 
 /// Resolves `--quality-trim`, `--quality-cutoff`, `--min-low-quality-run` and
@@ -770,7 +774,7 @@ fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
     let sources = specs
         .iter()
         .map(std::path::PathBuf::from)
-        .filter(|path| path.is_file())
+        .filter(|path| crate::split::sheet::is_sheet_file(path))
         .collect();
     let sheet = Sheet::load_all(&specs)?;
     sheet.validate(c.target_require)?;
@@ -778,7 +782,8 @@ fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
         template.check_names(&sheet)?;
     }
     let preset = specs.iter().find(|spec| {
-        !std::path::Path::new(spec.as_str()).is_file() && Sheet::preset(spec).is_some()
+        !crate::split::sheet::is_sheet_file(std::path::Path::new(spec.as_str()))
+            && Sheet::preset(spec).is_some()
     });
     if let Some(preset) = preset
         && c.adapter_fasta.is_none()

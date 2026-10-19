@@ -5,6 +5,9 @@
 //! returns the record stream with the sampled prefix chained in front of it.
 
 use std::borrow::Cow;
+use std::io::{self, Write};
+
+use anyhow::Context;
 
 use super::{detect, infer};
 use crate::config::{AdapterInfer, Config};
@@ -92,15 +95,19 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
 }
 
 /// Prints inferred adapters as FASTA with support and the best catalog match.
-/// Numbering follows the final discovery order used by the status log.
-pub(crate) fn print_discovered_fasta(discovered: &[infer::InferredAdapter]) {
+/// Numbering follows the final discovery order used by the status log. A
+/// failed write is returned, so a closed pipe ends the run as any other
+/// output does.
+pub(crate) fn print_discovered_fasta(discovered: &[infer::InferredAdapter]) -> io::Result<()> {
+    let mut out = io::stdout().lock();
     for (i, d) in discovered.iter().enumerate() {
         let n = i + 1;
         let name_suffix = match d.name_hits.first() {
             Some((name, pct)) => format!(" [\u{2248} {name} ({pct:.0}%)]"),
             None => String::new(),
         };
-        println!(
+        writeln!(
+            out,
             ">inferred_{n} layer={} role={} support={:.2} boundary={} assembled_length={} uncertain_bases={}{name_suffix}",
             d.layer + 1,
             d.adapter.role.label(),
@@ -112,9 +119,10 @@ pub(crate) fn print_discovered_fasta(discovered: &[infer::InferredAdapter]) {
             },
             d.assembled_seq.len(),
             d.uncertain_bases(),
-        );
-        println!("{}", String::from_utf8_lossy(&d.adapter.seq));
+        )?;
+        writeln!(out, "{}", String::from_utf8_lossy(&d.adapter.seq))?;
     }
+    out.flush()
 }
 
 /// Runs `f` over the sampled sequences as plain slices. The decoded views are
@@ -237,19 +245,34 @@ where
             };
         if s < detect::MIN_SAMPLE_FOR_DETECTION {
             // Discover-only mode writes no output when the sample is too small.
-            tracing::warn!(
-                reads = s,
-                minimum = detect::MIN_SAMPLE_FOR_DETECTION,
-                "Adapter inference: too few reads to infer reliably; keeping reads untrimmed"
-            );
+            // A trimming run keeps the configured set, as presence detection
+            // does for a sample of this size.
             if cfg.adapter_infer.is_discover_only() {
+                tracing::warn!(
+                    reads = s,
+                    minimum = detect::MIN_SAMPLE_FOR_DETECTION,
+                    "Adapter inference: too few reads to infer reliably; no adapters discovered"
+                );
                 return Ok(None);
             }
-            let mut reduced = base;
-            reduced.replace_adapters(Vec::new());
+            if base.adapters.is_empty() {
+                tracing::warn!(
+                    reads = s,
+                    minimum = detect::MIN_SAMPLE_FOR_DETECTION,
+                    "Adapter inference: too few reads to infer reliably; keeping reads untrimmed"
+                );
+            } else {
+                tracing::warn!(
+                    reads = s,
+                    minimum = detect::MIN_SAMPLE_FOR_DETECTION,
+                    configured = base.adapters.len(),
+                    "Adapter inference: too few reads to infer reliably; trimming with the \
+                     configured adapters only"
+                );
+            }
             return Ok(Some(Resolved {
                 records: chain(sample, records),
-                adapters: Some(reduced),
+                adapters: Some(base),
             }));
         }
 
@@ -260,7 +283,8 @@ where
             // Discover-only mode prints the inferred FASTA and writes no
             // records. `cli::parse` warns about every write target this leaves
             // unused.
-            print_discovered_fasta(&discovered);
+            print_discovered_fasta(&discovered)
+                .context("writing the discovered adapters to stdout")?;
             return Ok(None);
         }
 

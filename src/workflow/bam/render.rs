@@ -217,6 +217,22 @@ pub(super) struct PreparedRead<'a> {
     pub(super) barcode: Option<(usize, usize)>,
 }
 
+/// Refuses a record without one quality per base: a QUAL length other than
+/// the SEQ length, which includes the empty QUAL noodles reads for `*`, or a
+/// QUAL of `0xFF` bytes. Trimming and FASTQ output need every quality. The
+/// caller names the read.
+pub(super) fn require_qualities(seq_len: usize, qual: &[u8]) -> anyhow::Result<()> {
+    if qual.len() != seq_len || crate::io::bam::quality_absent(qual) {
+        anyhow::bail!(
+            "BAM record SEQ length {} != QUAL length {} \
+             (records without per-base quality are not supported)",
+            seq_len,
+            qual.len()
+        );
+    }
+    Ok(())
+}
+
 /// Runs the per-read guards and bookkeeping shared by the decoded workflows:
 /// refuses aligned reads and legacy mod tags, requires full per-base quality,
 /// classifies the modification block, counting a malformed one, counts a
@@ -230,15 +246,12 @@ pub(super) fn prepare_read<'a>(
     crate::io::bam::ensure_trimmable(rec)?;
     let seq = rec.sequence().as_ref();
     let qual = rec.quality_scores().as_ref();
-    if qual.len() != seq.len() || crate::io::bam::quality_absent(qual) {
-        anyhow::bail!(
-            "read {}: BAM record SEQ length {} != QUAL length {} \
-             (records without per-base quality are not supported)",
-            crate::io::bam::display_name(rec.name().map(AsRef::as_ref)),
-            seq.len(),
-            qual.len()
-        );
-    }
+    require_qualities(seq.len(), qual).map_err(|e| {
+        e.context(format!(
+            "read {}",
+            crate::io::bam::display_name(rec.name().map(AsRef::as_ref))
+        ))
+    })?;
     let mod_block = inspect_mod_block(rec, seq.len());
     if mod_block == ModBlock::Malformed {
         counters.malformed_mod_reads.fetch_add(1, Ordering::Relaxed);

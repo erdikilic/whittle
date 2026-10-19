@@ -15,7 +15,10 @@ format, except that compressed FASTQ input yields plain FASTQ. Compressed output
 is produced only when requested by a `.gz`/`.bgz` extension or the format flag.
 FASTQ-to-BAM is not supported: a FASTQ read carries no header from which to
 build a BAM record. BGZF streams are recognized by their decompressed payload,
-so BAM and FASTQ.bgz on stdin need no format flag.
+so BAM and FASTQ.bgz on stdin need no format flag. A gzip stream that opens
+with a BGZF block is read as BGZF, block-parallel; `--input-format fastq-gz`
+reads it as plain gzip on one inflate thread instead, which also decodes a
+stream joined from BGZF and plain gzip files (`cat a.fastq.bgz b.fastq.gz`).
 
 When a downstream reader closes the pipe (`whittle ... | head`), whittle stops
 writing and exits 0.
@@ -286,7 +289,10 @@ or tagged FASTQ input.
 The syntax is the aux-tag subset of `samtools view -e`: `[tag]` names a tag,
 the comparisons are `==`, `!=`, `<`, `<=`, `>`, `>=`, the connectives are `!`,
 `&&`, `||` and parentheses, string literals are double-quoted, and `[tag]`
-alone (or `exists([tag])`) tests presence.
+alone (or `exists([tag])`) tests presence. The connectives join conditions
+and a comparison joins values (a tag, a number or a string), so an operand of
+the other kind, such as `[qs] && 5` or `([qs]>10) == 1`, is an error before
+any read is processed.
 
 ```bash
 # Drop dorado's adaptive-sampling rejects.
@@ -414,8 +420,10 @@ rewritten tags). Each record carries a `wr:Z` tag with one of `tag_filter`,
 
 The file takes the output's format family, BAM for BAM output and FASTQ for
 FASTQ output, with compression from its own extension (`.bam`, `.fastq`,
-`.fastq.gz`, `.fastq.bgz`), and is written by one extra thread. Counts in the
-summary are unchanged by the flag.
+`.fastq.gz`, `.fastq.bgz`) at that format's default level unless `-c` sets
+one, and is written by one extra thread. Under `-t > 1` its records are in
+completion order, with or without `--preserve-order`, and a BAM rejected file
+is marked `SO:unsorted`. Counts in the summary are unchanged by the flag.
 
 ```bash
 whittle -i reads.bam -o kept.bam --rejected-output rejected.bam -l 500 -q 10 --tag-filter '[dx]==1'
@@ -432,7 +440,8 @@ either), barcodes, or adapters. Any forward sequence pairs with any reverse
 sequence, as in a kit that ships several primer variants in one tube. The
 flag is repeatable; each `SPEC` adds a source, and every source merges into
 one sheet. `SPEC` resolves in this order: an existing file path (a TSV or
-annotated FASTA sheet), the preset token `mab114`, or, when neither
+annotated FASTA sheet; a pipe such as `/dev/stdin` or a process
+substitution counts), the preset token `mab114`, or, when neither
 matches, the inline form (below). Sheet sequences are located and trimmed
 alongside the other sequences of the adapter search: at each end, the
 outermost sheet sequence in the orientation valid for that end is located
@@ -445,8 +454,9 @@ sequences join the engine.
 
 ### Sheet formats
 
-A TSV sheet has a header row and requires the columns `target`, `fwd` and
-`rev`; `group`, `min_len` and `max_len` are optional.
+A TSV sheet has a header row and at least one target row, and requires the
+columns `target`, `fwd` and `rev`; `group`, `min_len` and `max_len` are
+optional. A leading UTF-8 byte order mark is skipped.
 
 ```
 target	fwd	rev	group
@@ -471,11 +481,11 @@ A cell of one sequence names it `<target>_fwd` or `<target>_rev`, a list
 `group` defaults to the target name and is the key an `-o` template names
 under `{group}`. A sequence may appear in more than one row; whittle
 stores it once and shares it among the targets that name it. `min_len` and
-`max_len` bound the final segment length, inclusive; a segment outside the
-window is unassigned (`length`). Equally supported targets within one group
-prefer a target whose window includes the segment length. Length windows
-do not resolve ambiguity between different keys or override stronger sequence
-evidence.
+`max_len` bound the final segment length, inclusive, and `min_len` may not
+exceed `max_len`; a segment outside the window is unassigned (`length`).
+Equally supported targets within one group prefer a target whose window
+includes the segment length. Length windows do not resolve ambiguity between
+different keys or override stronger sequence evidence.
 
 An annotated FASTA extends the existing adapter-FASTA header parse with
 `key=value` fields:
@@ -487,12 +497,13 @@ AGRGTTYGATYMTGGCTCAG
 TACGGYTACCTTGTTACGACTT
 ```
 
-`target=` assigns an entry to the named target; `end=fwd`
-or `end=rev` places it. Several entries may share one `target=` and `end=`;
-each adds a sequence to that list. `group=` overrides the default group and
-may appear on any entry of a target; two entries of one target giving
-different `group=` values is an error. Entries with no `target=` field keep
-their existing meaning as `-a` entries.
+`target=` assigns an entry to the named target, whose name may not be
+empty; `end=fwd` or `end=rev` places it. Several entries may share one
+`target=` and `end=`; each adds a sequence to that list. A non-empty
+`group=` overrides the default group and may appear on any entry of a
+target; two entries of one target giving different `group=` values is an
+error. Entries with no `target=` field keep their existing meaning as `-a`
+entries.
 
 The preset `mab114` defines two targets, `16S` and `ITS`, holding the primer
 mixes of the ONT Microbial Amplicon Barcoding kit (SQK-MAB114.24) under
@@ -763,7 +774,9 @@ Under `params.adapters`, `configured` is the set requested (preset and/or FASTA)
 and `count` is the set searched, after presence detection narrowed it or
 inference replaced it. The two are equal when neither ran. The startup banner
 prints `configured`. Under `--adapter-discover` nothing is configured up front,
-so `configured` is `0`. `--adapter-discover-only` writes no summary.
+so `configured` is `0`. Under `--targets` without an adapter source, the sheet
+sequences alone are searched: `configured` and `sample` are `0` and `count` is
+the number of sheet sequences. `--adapter-discover-only` writes no summary.
 
 `schema_version` is incremented only when an existing field changes meaning or
 disappears. New fields may appear without an increment, so consumers should

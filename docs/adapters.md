@@ -240,7 +240,10 @@ stays, and `--adapter-discover-only` is unaffected.
 `--adapter-discover` discovers recurrent sequences from the first
 `--adapter-sample-reads` reads (default 40000), then trims and splits with the
 supported sequences. Sampling requires at least 100 reads;
-a count of 0 is rejected. Reporting and trimming use the same automatic boundary
+a count of 0 is rejected. An input of fewer than 100 reads is too small to
+discover from: it is trimmed with the `--adapter-preset` and `--adapter-fasta`
+sequences alone, or kept untrimmed without them, and `--adapter-discover-only`
+prints no sequences. Reporting and trimming use the same automatic boundary
 rule. There is no conservative/aggressive policy switch.
 
 Discovery proceeds in layers. Sequences from `--adapter-preset` or
