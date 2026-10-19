@@ -78,8 +78,11 @@ these treatments:
   (default 150) trims that end together with everything outboard of it.
 - **Partial adapters.** An adapter, primer or barcode cut short by the read
   end (a truncated rear adapter, a front adapter or barcode missing its first
-  bases) is trimmed when at least 10 of its bases align flush with the end. Those 10 bases must match exactly;
-  the error rate applies to the remainder.
+  bases) is trimmed when at least 10 of its bases align flush with the end.
+  The error rate applies to the bases beyond the first 9, so a 10-base
+  overlap must match exactly. A partial hit is searched for only when the
+  read end holds an exact 9-base stretch of the sequence, which a hit
+  whose edits are spread across it can lack.
 - **Chimera splitting.** An interior adapter, primer or barcode marks a
   junction. The read is split there, the sequence is excised, and both sides
   are kept. Each side is searched
@@ -267,9 +270,9 @@ neither divides a layer. A homopolymer run of at least 8 bases at the inner
 end of a candidate, such as the poly(A) tail behind an oligo(dT) primer,
 varies in length between reads and is left to the insert. A variable layer is resolved from
 the reads rather than the graph: when the best supported candidate lies at
-least 12 bases past the boundary and every candidate at the boundary is
+least 11 bases past the boundary and every candidate at the boundary is
 fourfold rarer, the stretch before it holds one member per read, and those
-members are clustered by edit distance into families of at least 1% of the
+members are clustered by edit distance into families of at least 0.1% of the
 windows and 20 reads. This recovers each barcode of a panel between its
 flanks, from four to 96 barcodes, and reports them with the barcode role.
 Layers stop when no candidate passes the checks below, after at most eight
@@ -410,7 +413,7 @@ approximate repeats are rejected; candidate prevalence must exceed that in
 adjacent interior windows by more than fourfold. These checks allow minority
 families without treating any recurrent sequence as an adapter. Rare families,
 large barcode panels, distant adapters and insufficient samples can still be
-missed. The bounded graph considers up to 12 paths per end; a weak fragment
+missed. The bounded graph considers up to 128 paths per end; a weak fragment
 does not terminate the search for other families.
 
 Related candidates and reverse complements are merged after prioritizing

@@ -147,7 +147,7 @@ pub fn unknown_extension_warning(path: Option<&Path>, resolved: Format) -> Optio
 /// `--output-format fastq` on an `out.fastq.gz` path. `None` when there is no
 /// forced format, the path has no recognized extension, the path is
 /// stdin/stdout (`None`), or the two agree. `flag` names the CLI flag for the
-/// message.
+/// message. See `input_format_mismatch_warning` for the input check.
 pub fn format_mismatch_warning(
     flag: &str,
     forced: Option<Format>,
@@ -162,6 +162,22 @@ pub fn format_mismatch_warning(
             detected.label()
         )
     })
+}
+
+/// Returns advisory text when `--input-format` (`forced`) disagrees with the
+/// input path's extension, as `format_mismatch_warning` does, except that
+/// gzip and BGZF FASTQ agree with each other: bgzip writes BGZF under `.gz`,
+/// `fastq-gz` reads a BGZF stream, and the stream check in `run` refuses
+/// plain gzip under `fastq-bgz`.
+pub fn input_format_mismatch_warning(
+    forced: Option<Format>,
+    path: Option<&Path>,
+) -> Option<String> {
+    let gzip = |format: Format| matches!(format, Format::FastqGz | Format::FastqBgzf);
+    match (forced, path.and_then(from_extension)) {
+        (Some(forced), Some(detected)) if gzip(forced) && gzip(detected) => None,
+        _ => format_mismatch_warning("--input-format", forced, path),
+    }
 }
 
 /// Returns true if `sniff` begins with a BGZF block header: gzip magic, deflate
@@ -381,6 +397,27 @@ mod tests {
         assert_eq!(
             format_mismatch_warning("--input-format", Some(Format::Bam), None),
             None
+        );
+    }
+
+    /// Gzip and BGZF FASTQ agree with each other in the input check, in both
+    /// directions; any other disagreement warns as the general check does.
+    #[test]
+    fn input_format_mismatch_warning_accepts_gzip_and_bgzf_pairs() {
+        for (forced, path) in [
+            (Format::FastqBgzf, "x.fastq.gz"),
+            (Format::FastqGz, "x.fastq.bgz"),
+        ] {
+            assert_eq!(
+                input_format_mismatch_warning(Some(forced), Some(Path::new(path))),
+                None,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            input_format_mismatch_warning(Some(Format::Fastq), Some(Path::new("x.fastq.gz")))
+                .as_deref(),
+            Some("--input-format FASTQ but the file extension looks like FASTQ.gz")
         );
     }
 

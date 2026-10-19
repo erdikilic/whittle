@@ -54,8 +54,8 @@ pub fn is_plain_acgt(seq: &[u8]) -> bool {
 /// Returns the plain bases an IUPAC code stands for, or `None` if the byte is
 /// not a nucleotide code.
 ///
-/// `U` is absent: callers fold it to `T` before it reaches here, because sassy
-/// treats `U` as a fifth base that matches nothing in a DNA read.
+/// `U` is absent: callers fold it to `T` before it reaches here, since the
+/// seed tables and the chance model read these codes and have no `U`.
 pub fn iupac_bases(code: u8) -> Option<&'static [u8]> {
     Some(match code.to_ascii_uppercase() {
         b'A' => b"A",
@@ -362,7 +362,7 @@ const SCAN_BLOCK: usize = 64;
 /// without overhang alignment: the text and the longest overhang past its
 /// end, which is at most the pattern, fit the block.
 ///
-/// This relies on how sassy 0.2.6 (`Searcher::search_prep`, the exact
+/// This relies on how sassy 0.3.0 (`Searcher::search_prep`, the exact
 /// version `Cargo.toml` pins) lays a text out over its SIMD lanes: a
 /// single-pattern search cuts one text, with its overhang padding, into one
 /// chunk of whole 64-base blocks per lane, overlapping by the blocks of one

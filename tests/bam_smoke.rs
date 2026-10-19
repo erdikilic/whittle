@@ -1094,3 +1094,124 @@ fn bam_modification_validation_and_query_names_cover_both_paths() {
         }
     }
 }
+
+/// An input `@PG` chain whose `PP` names a missing record cannot be extended:
+/// the output header keeps the input programs without whittle's `@PG` record,
+/// and a warning says so.
+#[test]
+fn dangling_program_chain_is_kept_with_a_warning() {
+    use noodles_sam::header::record::value::Map;
+    use noodles_sam::header::record::value::map::Program;
+    use noodles_sam::header::record::value::map::program::tag;
+
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("in.bam");
+    let out_path = dir.path().join("out.bam");
+    let program = Map::<Program>::builder()
+        .insert(tag::PREVIOUS_PROGRAM_ID, "basecaller")
+        .build()
+        .unwrap();
+    let header = sam::Header::builder()
+        .add_program("samtools", program)
+        .build();
+    let mut writer = bam::io::Writer::new(std::fs::File::create(&in_path).unwrap());
+    writer.write_header(&header).unwrap();
+    let mut read = RecordBuf::default();
+    *read.flags_mut() = Flags::UNMAPPED;
+    *read.name_mut() = Some(b"read1".into());
+    *read.sequence_mut() = b"ACGTACGTAC".to_vec().into();
+    *read.quality_scores_mut() = vec![40; 10].into();
+    writer.write_alignment_record(&header, &read).unwrap();
+    writer.try_finish().unwrap();
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["--trim-front", "2", "-i"])
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "The @PG provenance record was not added",
+        ));
+
+    let mut reader = bam::io::Reader::new(std::fs::File::open(&out_path).unwrap());
+    let header = reader.read_header().unwrap();
+    let programs = header.programs();
+    assert!(programs.as_ref().contains_key(&b"samtools"[..]));
+    assert!(!programs.as_ref().contains_key(&b"whittle"[..]));
+}
+
+/// A rebuild error names its read: a 250-character name that the segment
+/// suffix of a quality split takes past the 254-character BAM limit fails
+/// the run with an error naming the read, sequentially and on the pool.
+#[test]
+fn rebuild_error_names_the_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("in.bam");
+    let name = "r".repeat(250);
+    let header = sam::Header::default();
+    let mut writer = bam::io::Writer::new(std::fs::File::create(&in_path).unwrap());
+    writer.write_header(&header).unwrap();
+    let mut read = RecordBuf::default();
+    *read.flags_mut() = Flags::UNMAPPED;
+    *read.name_mut() = Some(name.as_bytes().into());
+    *read.sequence_mut() = b"ACGT".repeat(60).into();
+    let mut qualities = vec![30; 240];
+    qualities[100..140].fill(2);
+    *read.quality_scores_mut() = qualities.into();
+    writer.write_alignment_record(&header, &read).unwrap();
+    writer.try_finish().unwrap();
+
+    for threads in ["1", "2"] {
+        Command::cargo_bin("whittle")
+            .unwrap()
+            .env_remove("WHITTLE_LOG")
+            .args(["--quality-trim", "segments", "--quality-cutoff", "10"])
+            .args(["-t", threads, "-i"])
+            .arg(&in_path)
+            .arg("-o")
+            .arg(dir.path().join(format!("out{threads}.bam")))
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(format!(
+                "read {name}: invalid read name"
+            )));
+    }
+}
+
+/// A filter-only run copies records on the raw path and traces each decision
+/// at `-vv` as the trimming path does.
+#[test]
+fn raw_path_traces_segment_decisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("in.bam");
+    write_fixture(&in_path);
+    let output = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args(["-l", "9", "-vv", "-t", "1", "-i"])
+        .arg(&in_path)
+        .arg("-o")
+        .arg(dir.path().join("out.bam"))
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&output);
+    assert!(
+        stderr.contains("Segment kept segment=1 of=1 start=0 end=10 len=10"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Segment dropped segment=1 of=1 start=0 end=8 len=8 reason=\"too short\""),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Every segment filtered produced=1"),
+        "{stderr}"
+    );
+}

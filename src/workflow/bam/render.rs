@@ -461,13 +461,17 @@ pub(super) fn render_bam_read(
                         edit.unwrap_or_else(|| RecordEdit::unchanged(seq.len(), &cfg.remove_tags));
                     edit.target = target.map(|(label, _)| label.as_bytes().to_vec());
                     let key = target.map_or(0, |(_, key)| key);
-                    emit(key, Some(build_record(raw, edit)?))
+                    emit(
+                        key,
+                        Some(build_record(raw, edit).with_context(read_context(raw))?),
+                    )
                 },
                 (edit, Some(reason)) => {
                     let mut edit =
                         edit.unwrap_or_else(|| RecordEdit::unchanged(seq.len(), &cfg.remove_tags));
                     edit.reason = Some(reason);
-                    counters.reject(RejectItem::Bam(build_record(raw, edit)?))
+                    let rejected = build_record(raw, edit).with_context(read_context(raw))?;
+                    counters.reject(RejectItem::Bam(rejected))
                 },
             }
         },

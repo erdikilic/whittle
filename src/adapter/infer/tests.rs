@@ -391,7 +391,7 @@ fn peel_extracts_two_distinct_adapters() {
         mk(b"ACGT", 100),
         mk(b"CGTA", 99),
         mk(b"GTAC", 98),
-        // Adapter 2: TTGGTTG..., lower weight but above 25% of 297.
+        // Adapter 2: TTGGTTG..., lower weight.
         mk(b"TTGG", 90),
         mk(b"TGGT", 89),
         mk(b"GGTT", 88),
@@ -582,8 +582,7 @@ fn discover_recovers_planted_adapter_under_error() {
     };
     let found = discover(&sample, &base);
     assert!(!found.is_empty(), "At least one adapter discovered");
-    // The top candidate is a 5' or both-end adapter close to the planted
-    // sequence.
+    // The top candidate is close to the planted sequence.
     let top = &found[0];
     assert!(top.adapter.seq.len() >= MIN_PATTERN_LEN);
     // Near-match to the planted adapter; recovery is approximate.
@@ -598,10 +597,9 @@ fn discover_recovers_planted_adapter_under_error() {
 
 /// `adapter` is planted at the 5' end with heavy substitutions (weak
 /// recovery) and its exact reverse complement at the 3' end (strong
-/// recovery) of every read, so `merge_both_ends` folds the two per-end
-/// discoveries into a single `End::Both` entry (per `same_adapter`). The
-/// noisy 5' and exact 3' assemblies are fuzzy-equivalent, so the merged
-/// adapter inherits the stronger 3' support.
+/// recovery) of every read. The noisy 5' and exact 3' reconstructions are
+/// one family, which discovery reports once, with the support of the
+/// stronger 3' end.
 #[test]
 fn discover_dual_end_adapter_gets_max_support() {
     let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT"; // 28bp
@@ -673,9 +671,7 @@ fn discover_dual_end_adapter_gets_max_support() {
     );
 
     // The reported support reflects the stronger 3' end, not the weaker 5'
-    // end alone (about 0.18). The unmerged `Five` entries this fixture also
-    // produces carry that value and are dropped independently because
-    // 0.18 < `KEEP_SUPPORT`.
+    // end alone (about 0.18).
     assert!(
         near[0].support > 0.7,
         "Merged adapter's support ({}) must reflect the max across ends \

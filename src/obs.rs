@@ -345,7 +345,8 @@ impl Drop for ProgressHandle {
 /// `-v`/`-vv`; otherwise the level follows `verbosity`. A `WHITTLE_LOG` that does
 /// not parse falls back to the verbosity level and returns an advisory naming it,
 /// since a lossy parse would enable nothing and hide even the ERROR line of a
-/// failing run.
+/// failing run. A `WHITTLE_LOG` that names only targets takes the verbosity
+/// level for every other target, which it would otherwise disable.
 fn log_filter(
     whittle_log: Option<&str>,
     verbosity: u8,
@@ -359,6 +360,9 @@ fn log_filter(
         return (fallback(), None);
     };
     match spec.parse::<Targets>() {
+        Ok(filter) if filter.default_level().is_none() => {
+            (filter.with_default(level_from(verbosity, false)), None)
+        },
         Ok(filter) => (filter, None),
         Err(e) => {
             let level = level_from(verbosity, false);
@@ -587,6 +591,8 @@ fn segments_dropped_line(stats: &Stats) -> Option<String> {
 /// split snapshot. `key_names` is `Keys::names`, so it and `split.keys` are
 /// the same length and order.
 fn target_lines(stats: &Stats, key_names: Option<&[String]>) -> Vec<String> {
+    use crate::split::Unassigned;
+
     let (Some(key_names), Some(split)) = (key_names, stats.split.as_ref()) else {
         return Vec::new();
     };
@@ -608,13 +614,22 @@ fn target_lines(stats: &Stats, key_names: Option<&[String]>) -> Vec<String> {
         })
         .collect();
     let unassigned_total: u64 = split.unassigned.iter().sum();
+    // `SplitStats::unassigned` counts the reasons in this order.
+    let reasons = [
+        Unassigned::NoMatch,
+        Unassigned::MissingEnd,
+        Unassigned::Orientation,
+        Unassigned::Length,
+    ];
+    let by_reason: Vec<String> = reasons
+        .iter()
+        .zip(&split.unassigned)
+        .map(|(reason, n)| format!("{} {}", reason.label(), commas(*n)))
+        .collect();
     lines.push(format!(
-        "Target unassigned: {} segments (no_match {}, missing_end {}, orientation {}, length {})",
+        "Target unassigned: {} segments ({})",
         commas(unassigned_total),
-        commas(split.unassigned[0]),
-        commas(split.unassigned[1]),
-        commas(split.unassigned[2]),
-        commas(split.unassigned[3]),
+        by_reason.join(", ")
     ));
     lines.push(format!(
         "Target ambiguous: {} segments",
@@ -848,6 +863,27 @@ mod tests {
         let (filter, advisory) = log_filter(Some("debug"), 0, true);
         assert!(advisory.is_none());
         assert_eq!(filter.to_string(), "warn");
+    }
+
+    /// A `WHITTLE_LOG` that names only targets keeps the verbosity level for
+    /// every other target, so errors, warnings and the banner still print; a
+    /// bare level in the value stays the default.
+    #[test]
+    fn log_filter_gives_a_target_only_whittle_log_the_verbosity_default() {
+        let (filter, advisory) = log_filter(Some("whittle::adapter=trace"), 0, false);
+        assert!(advisory.is_none());
+        assert_eq!(filter.default_level(), Some(LevelFilter::INFO));
+        assert!(
+            filter
+                .iter()
+                .any(|(target, level)| target == "whittle::adapter" && level == LevelFilter::TRACE)
+        );
+
+        let (filter, _) = log_filter(Some("whittle::adapter=trace"), 1, false);
+        assert_eq!(filter.default_level(), Some(LevelFilter::DEBUG));
+
+        let (filter, _) = log_filter(Some("warn,whittle::adapter=trace"), 2, false);
+        assert_eq!(filter.default_level(), Some(LevelFilter::WARN));
     }
 
     #[test]

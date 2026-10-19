@@ -5,6 +5,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use anyhow::Context;
 use noodles_bam as bam;
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::data::field::Tag;
@@ -43,10 +44,22 @@ pub(crate) use tags::*;
 pub(crate) use to_fastq::*;
 
 /// ONT signal-mapping tags: the `mv` move table plus the `ts`/`ns` sample counts
-/// and the `sp`/`pi` split linkage. On a trimmed read these are either rewritten
-/// (`--update-moves`) or dropped (default), never left stale. Handled by
+/// and the `sp`/`pi` split linkage. On a trimmed read these are rewritten
+/// (`--update-moves`) or dropped, never left stale, except that a crop keeps
+/// `sp` and `pi`, which place the raw signal in its parent. Handled by
 /// `signal_tag_updates`, not the per-base pass.
 pub(crate) use crate::config::SIGNAL_TAGS;
+
+/// Returns the context `read <name>` of an error about the raw record
+/// `record`, for the decode and rebuild errors that do not name the read.
+pub(super) fn read_context(record: &bam::Record) -> impl FnOnce() -> String + '_ {
+    move || {
+        format!(
+            "read {}",
+            crate::io::bam::display_name(record.name().map(AsRef::as_ref))
+        )
+    }
+}
 
 /// Renders a raw record rejected by the tag filter for BAM output: the whole
 /// record with the reason tag.
@@ -105,7 +118,7 @@ fn run_bam_seq(
 ) -> anyhow::Result<Stats> {
     for raw in records {
         let raw = raw?;
-        let rec = decode_raw_record(&raw)?;
+        let rec = decode_raw_record(&raw).with_context(read_context(&raw))?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
             .input_bases
@@ -150,7 +163,7 @@ where
         cfg,
         sinks,
         |rec, cfg, out| {
-            let decoded = decode_raw_record(&rec)?;
+            let decoded = decode_raw_record(&rec).with_context(read_context(&rec))?;
             render(rec, &decoded, cfg, out)
         },
         pack,
@@ -160,6 +173,8 @@ where
 }
 
 /// Compresses a batch of output records into BGZF blocks at the sink's level.
+/// The batch is encoded into memory, so an encoding error is a fault of the
+/// record, and the error of a raw record names its read.
 fn pack_bam_blocks(
     header: &sam::Header,
     level: u8,
@@ -168,7 +183,10 @@ fn pack_bam_blocks(
     let mut w = bam::io::Writer::from(Vec::new());
     for rec in &records {
         match rec {
-            BamOutputRecord::Raw(record) => w.write_record(header, record)?,
+            BamOutputRecord::Raw(record) => w.write_record(header, record).map_err(|e| {
+                let name = crate::io::bam::display_name(record.name().map(AsRef::as_ref));
+                io::Error::new(e.kind(), format!("read {name}: {e}"))
+            })?,
             BamOutputRecord::Built(bytes) => {
                 crate::io::bam::write_record_bytes(w.get_mut(), header, bytes)?
             },

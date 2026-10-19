@@ -50,7 +50,8 @@ struct Processor {
 
 /// Copies a parsed record into an owned record with raw Phred qualities.
 fn to_read_record<Rf: Record>(record: &Rf) -> anyhow::Result<ReadRecord> {
-    let qual = crate::io::fastq::phred_from_ascii(record.id(), record.qual().unwrap_or_default())?;
+    let id = crate::io::fastq::read_id(record.id());
+    let qual = crate::io::fastq::phred_from_ascii(id, record.qual().unwrap_or_default())?;
     Ok(ReadRecord {
         name: record.id().to_vec(),
         seq: record.seq_raw().to_vec(),

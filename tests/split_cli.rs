@@ -805,6 +805,57 @@ fn end_of_run_log_reports_the_split_table() {
     assert!(stderr.contains("Target discarded: 0 segments"), "{stderr}");
 }
 
+/// Under `-vv` each kept segment's call is traced, an unassigned one with its
+/// reason.
+#[test]
+fn segment_calls_are_traced() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let sheet = write_sheet(dir.path(), &p);
+    let input = dir.path().join("in.fastq");
+    write_fastq(&input, &three_reads(&p));
+    let out = dir.path().join("out.fastq");
+    let output = whittle()
+        .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1", "-vv"])
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&output);
+    assert!(
+        stderr.contains("Segment called segment=1 call=\"16S\""),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Segment called segment=1 call=\"unassigned\" reason=\"no_match\""),
+        "{stderr}"
+    );
+}
+
+/// A sheet sequence with more ambiguity than specificity is reported by name,
+/// as a highly degenerate `-a` entry is, and the run goes on.
+#[test]
+fn highly_degenerate_sheet_sequence_is_warned() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let input = dir.path().join("in.fastq");
+    write_fastq(&input, &three_reads(&p));
+    let out = dir.path().join("out.fastq");
+    let reverse = String::from_utf8(p.r16.clone()).unwrap();
+    whittle()
+        .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
+        .args(["--targets", &format!("A:F:NNNNNNNNNNNNNNNN:R:{reverse}")])
+        .args(["-t", "1"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("Target sequence is highly degenerate")
+                .and(predicate::str::contains("name=\"A_F\"")),
+        );
+}
+
 /// Without `--targets`, the end-of-run log has no target table at all.
 #[test]
 fn end_of_run_log_has_no_target_table_without_targets() {

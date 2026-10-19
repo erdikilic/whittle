@@ -44,9 +44,7 @@ pub(super) fn render_record(
     parts: &mut Parts<u8>,
 ) -> anyhow::Result<()> {
     if crate::io::tagged::has_aux_tags(&rec.name) {
-        if !counters.tagged_fastq.swap(true, Ordering::Relaxed) {
-            tracing::info!("FASTQ headers carry SAM aux tags; tags are rewritten per segment");
-        }
+        counters.note_tagged_fastq();
         return super::bam::render_tagged_fastq_read(rec, cfg, counters, parts);
     }
     let _read = super::read_span(&rec.name);

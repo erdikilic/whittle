@@ -158,7 +158,8 @@ fn tag_filter_type_mismatch_is_an_error() {
 }
 
 /// Tagged FASTQ carries the same tags in its headers and is filtered the same
-/// way; a plain FASTQ has no tags to read and the run is refused.
+/// way, and the run reports the tagged headers as one without the filter
+/// does; a plain FASTQ has no tags to read and the run is refused.
 #[test]
 fn tag_filter_on_tagged_and_plain_fastq() {
     let dir = tempfile::tempdir().unwrap();
@@ -181,7 +182,10 @@ fn tag_filter_on_tagged_and_plain_fastq() {
         .args(["-i", tagged.to_str().unwrap(), "-o", out.to_str().unwrap()])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Tag filtered: 1 input reads"));
+        .stderr(
+            predicate::str::contains("Tag filtered: 1 input reads")
+                .and(predicate::str::contains("FASTQ headers carry SAM aux tags")),
+        );
     let text = std::fs::read_to_string(&out).unwrap();
     assert!(
         text.starts_with("@kept\t") && text.contains("\n@simplex\t"),

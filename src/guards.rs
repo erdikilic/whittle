@@ -77,11 +77,11 @@ pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::
     Ok(())
 }
 
-/// Rejects the flags that remove aux tags when the input carries none:
-/// `--remove-tag` names tags. BAM records and tagged
-/// FASTQ headers carry tags; a plain FASTQ does not, so there the flags would
-/// be accepted and silently do nothing.
-/// `run` applies this after the complete FASTQ stream has been inspected.
+/// Rejects `--tag-filter` and `--remove-tag` on input without aux tags. BAM
+/// records and tagged FASTQ headers carry tags; a plain FASTQ does not, so
+/// there a filter would judge every read without its tags and a removal
+/// would remove nothing. `run` applies this after the complete FASTQ stream
+/// has been inspected.
 pub(crate) fn guard_tag_flags(
     cfg: &Config,
     in_fmt: io::Format,

@@ -432,9 +432,6 @@ fn reverse_complement_uses_the_full_iupac_table() {
     assert_eq!(reverse_complement(b"AACG"), b"CGTT");
 }
 
-/// `edit_budget` does not round an integral product down through
-/// floating-point error, and `partial_budget` allows no edit at the
-/// shortest overlaps.
 /// More distinct seed prefixes than a `u16` slot numbers shorten the
 /// prefix instead of failing, and every seed is still found.
 #[test]
@@ -466,6 +463,9 @@ fn overhang_discount_matches_the_charged_cost() {
     assert_eq!(overhang_cost(0.2, 4, 6), 1);
 }
 
+/// `edit_budget` does not round an integral product down through
+/// floating-point error, and `partial_budget` allows no edit at the
+/// shortest overlaps.
 #[test]
 fn budgets_are_integral_and_partial_budget_is_strict() {
     assert_eq!(edit_budget(0.29, 100), 29);

@@ -715,10 +715,10 @@ impl CandidateIndex {
 
         // End seeds: every k-mer of every partial-matching entry on both
         // strands. Every entry matches partially except a barcode construct,
-        // whose `N` block would align a truncated construct at no cost. A
-        // partial hit within its budget keeps at least one intact k-mer (see
-        // `END_SEED_LEN`), so an end window without a seed of an entry cannot
-        // hold a partial hit of it and skips the overhang search.
+        // whose `N` block would align a truncated construct at no cost. An
+        // end window without a seed of an entry holds no partial hit of it
+        // that keeps an intact k-mer, and skips the overhang search; see
+        // `END_SEED_LEN` for the hits within budget that keep none.
         let mut end_seeds: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
         let mut end_reach = 0;
         for (adapter_idx, adapter) in adapters.iter().enumerate() {
@@ -1043,7 +1043,9 @@ pub(super) fn expand_iupac(piece: &[u8]) -> Option<Vec<Vec<u8>>> {
 /// hit keeps at least `MIN_OVERLAP` intact bases and always passes the gate. A
 /// partial hit with edits keeps an intact stretch of at least
 /// `(o - e) / (e + 1)` bases for `o` aligned bases and `e` edits, which under
-/// `partial_budget` falls below this length only for the shortest overlaps
-/// with an edit near their middle; those are given up for the gate, which
-/// spares the overhang search on most read ends without an adapter.
+/// `partial_budget` at the default rate falls below this length for every
+/// overlap with an edit. A hit whose edits leave no intact run of this length
+/// fails the gate: one edit near the middle of a short overlap, or two or
+/// more edits spread over a longer one. Those hits are given up for the gate,
+/// which spares the overhang search on most read ends without an adapter.
 pub(super) const END_SEED_LEN: usize = 9;

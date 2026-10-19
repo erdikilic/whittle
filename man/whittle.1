@@ -188,7 +188,7 @@ Run the same discovery as \-\-adapter\-discover, print the discovered FASTA to s
 .SH TARGETS
 .TP
 \fB\-\-targets\fR \fI<SPEC>\fR
-Assign every output read or segment to a target from the sequences at its ends and tag it wt:Z with the target, unassigned or ambiguous. A target holds a list of forward and a list of reverse sequences, such as primers, barcodes or adapters; any forward sequence pairs with any reverse sequence. Repeatable; each SPEC adds a source, merged into one sheet. SPEC is an existing sheet file (TSV or annotated FASTA), the preset mab114 (also enables \-\-adapter\-preset mab114 unless \-a or \-\-adapter\-preset is given), or an inline target NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]. Further pairs after a comma (,F:...:R:...) form a pool of targets NAME.1, NAME.2, ... in group NAME. The located sequences are trimmed with the adapters, or kept under \-\-target\-action retain. An \-o template such as out/{barcode}.{target}.fastq.gz writes each key to its own file: {target} or {group} names the key (unassigned and ambiguous included), {barcode} the BC:Z barcode call (unclassified without one); without a placeholder every read goes to the one output
+Assign every output read or segment to a target from the sequences at its ends and tag it wt:Z with its key (the target, or its group under a {group} template), unassigned or ambiguous. A target holds a list of forward and a list of reverse sequences, such as primers, barcodes or adapters; any forward sequence pairs with any reverse sequence. Repeatable; each SPEC adds a source, merged into one sheet. SPEC is an existing sheet file (TSV or annotated FASTA), the preset mab114 (also enables \-\-adapter\-preset mab114 unless \-a or \-\-adapter\-preset is given), or an inline target NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]. Further pairs after a comma (,F:...:R:...) form a pool of targets NAME.1, NAME.2, ... in group NAME. The located sequences are trimmed with the adapters, or kept under \-\-target\-action retain. An \-o template such as out/{barcode}.{target}.fastq.gz writes each key to its own file: {target} or {group} names the key (unassigned and ambiguous included), {barcode} the BC:Z barcode call (unclassified without one); without a placeholder every read goes to the one output
 .TP
 \fB\-\-target\-require\fR \fI<RULE>\fR [default: either]
 Which ends of a segment need a located sequence for an assignment
@@ -233,7 +233,7 @@ Drop these bins instead of writing them, comma\-separated: unassigned, ambiguous
 .IP \(bu 2
 unassigned: Reads and segments no target is assigned to
 .IP \(bu 2
-ambiguous: Reads and segments with two targets within \-\-target\-margin
+ambiguous: Reads and segments whose ends fit two targets within \-\-target\-margin, or no single target
 .RE
 .SH EXTRA
 Examples:

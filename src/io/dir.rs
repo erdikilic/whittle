@@ -161,7 +161,8 @@ pub fn fastq_records(
                 .with_context(|| format!("opening {}", p.display()));
             let reader = counted.and_then(|mut inner| {
                 let format = match from_extension(&p) {
-                    Some(Format::FastqGz) => crate::io::probe_gz(&mut inner)?,
+                    Some(Format::FastqGz) => crate::io::probe_gz(&mut inner)
+                        .with_context(|| format!("reading {}", p.display()))?,
                     Some(other) => other,
                     None => unreachable!("`classify` admits only files with a read-file extension"),
                 };
@@ -210,22 +211,26 @@ pub fn bam_reader(
         .ok_or_else(|| anyhow::anyhow!("no BAM files to read"))?;
     // See `fastq_records`: counting wraps the file, so BGZF bytes are measured
     // compressed, matching the summed file sizes the progress percentage is
-    // computed against.
-    let counted = |p: &Path, counters: Arc<Counters>| -> anyhow::Result<Box<dyn Read + Send>> {
-        let f = std::fs::File::open(p).with_context(|| format!("opening {}", p.display()))?;
-        Ok(Box::new(crate::io::counting::CountingReader::new(
-            f, counters,
-        )))
-    };
-    let (header, first_records) =
-        crate::io::bam::reader_from(counted(first, counters.clone())?, workers)?;
+    // computed against. Header and record errors name the member file they
+    // arose in.
+    let open =
+        move |p: &Path, counters: Arc<Counters>| -> anyhow::Result<(sam::Header, BamRecordIter)> {
+            let f = std::fs::File::open(p).with_context(|| format!("opening {}", p.display()))?;
+            let inner = Box::new(crate::io::counting::CountingReader::new(f, counters));
+            let (header, records) = crate::io::bam::reader_from(inner, workers)
+                .with_context(|| format!("reading {}", p.display()))?;
+            let path = p.to_path_buf();
+            let records: BamRecordIter = Box::new(
+                records.map(move |r| r.with_context(|| format!("reading {}", path.display()))),
+            );
+            Ok((header, records))
+        };
+    let (header, first_records) = open(first, counters.clone())?;
     let first_path = first.clone();
     let first_read_groups = header.read_groups().clone();
     let rest = rest.to_vec();
     let rest_records = rest.into_iter().flat_map(move |p| -> BamRecordIter {
-        match counted(&p, counters.clone())
-            .and_then(|inner| crate::io::bam::reader_from(inner, workers))
-        {
+        match open(&p, counters.clone()) {
             Ok((hdr, recs)) => {
                 if check_read_groups && hdr.read_groups() != &first_read_groups {
                     return Box::new(std::iter::once(Err(anyhow::anyhow!(

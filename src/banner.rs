@@ -1,9 +1,9 @@
 //! The startup banner and the `Command:` line.
 //!
-//! Every line whittle prints before processing starts is built here, as a pure
-//! `String` from resolved config, so each one is unit-testable without a run.
-//! `obs` owns the end-of-run counterparts; both use the same `output_desc`
-//! text.
+//! The banner lines derived from the resolved config are built here, each as
+//! a pure `String`, so each one is unit-testable without a run; the `Input:`,
+//! `Rejected:` and `Tag filter:` lines are built in `lib.rs`. `obs` owns the
+//! end-of-run counterparts; both use the same `output_desc` text.
 
 use crate::config::AdapterInfer;
 use crate::{config, filter, io, trim};
@@ -43,7 +43,7 @@ pub(crate) fn output_banner_line(
 
 /// The startup banner's `Threads: ...` line: the resolved worker count, then
 /// the pool that trims and compresses and the decode workers ahead of it, as
-/// `Threads: 8 (trim and compress 8, decode 2)`. `threads <= 1` prints
+/// `Threads: 8 (trim and compress 6, decode 2)`. `threads <= 1` prints
 /// `Threads: 1 (sequential)`.
 pub(crate) fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> String {
     if threads <= 1 {
@@ -59,7 +59,8 @@ pub(crate) fn threads_banner_line(threads: usize, b: config::ThreadBudget) -> St
 /// appear, so an all-defaults run reads `Filters: none; trim: none` rather than
 /// every no-op threshold. A bound appears only when it differs from its default:
 /// length from `min_length > 1` or `max_length != usize::MAX`, quality from
-/// `min_qual > 0.0` or `max_qual < 1000.0`, GC from either bound being set.
+/// `min_qual > 0.0` or `max_qual < 1000.0`, expected errors from
+/// `max_expected_errors` being set, GC from either bound being set.
 pub(crate) fn filters_and_trim_line(
     filter: &filter::FilterConfig,
     trim: &trim::TrimPlan,

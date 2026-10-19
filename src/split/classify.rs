@@ -102,7 +102,8 @@ pub enum Unassigned {
 }
 
 impl Unassigned {
-    /// The wording used for this reason in the report and the `wt:Z` tag.
+    /// The wording used for this reason in the end-of-run report and the
+    /// per-segment trace line.
     pub fn label(self) -> &'static str {
         match self {
             Unassigned::NoMatch => "no_match",
@@ -131,8 +132,10 @@ pub enum Call {
     },
     /// Not assigned, for the given reason.
     Unassigned(Unassigned),
-    /// Two or more keys tied for cheapest, or none beat the runner-up by
-    /// `Rules::margin`.
+    /// Two or more keys tied for cheapest; the cheapest did not beat the
+    /// runner-up by `Rules::margin` or was matched only through close
+    /// primers of another key; or no target fit the primers scored at the
+    /// two ends, as for a chimera of exact primers of two keys.
     Ambiguous,
 }
 

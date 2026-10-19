@@ -358,12 +358,14 @@ fn lex(text: &str) -> Result<Vec<Token>, String> {
     Ok(out)
 }
 
-/// A recursive-descent parser over the token list.
 /// Deepest nesting of negations and parentheses an expression may use. The
 /// parser, the evaluator and the drop of the expression tree recurse once per
-/// level, so deeper nesting is a parse error rather than a stack overflow.
+/// level, so deeper nesting is a parse error rather than a stack overflow. A
+/// chain of `&&` or `||` is parsed iteratively into a left-deep tree, as deep
+/// as the chain is long, which this limit does not bound.
 const MAX_NESTING: usize = 100;
 
+/// A recursive-descent parser over the token list.
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,

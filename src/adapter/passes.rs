@@ -4,10 +4,10 @@
 
 use super::*;
 
-/// One thread's searchers and per-read buffers. Each buffer keeps its
-/// capacity across reads, so the adapter stage itself allocates only the
-/// segments it returns; the remaining per-read allocations are sassy's own,
-/// inside each search call.
+/// One thread's searchers and per-read buffers. The searchers and the
+/// normalized, reversed, window, mask, flag and pooled-hit buffers keep their
+/// capacity across reads; the small per-read hit and cut lists are allocated
+/// per read.
 pub(super) struct ThreadState {
     /// The fast all-ACGT searcher. Used only when both the pattern and the
     /// searched text are plain ACGT; see `is_plain_acgt`.
@@ -445,7 +445,7 @@ pub(super) fn search_singletons(
 /// checks that they give every adapter the same sites and hits in the same
 /// order, on planted entries with edits and homopolymer indels, reads with
 /// `N`, spans shorter than a pattern, chimeras and random reads, under
-/// sassy 0.2.6, the exact version `Cargo.toml` pins.
+/// sassy 0.3.0, the exact version `Cargo.toml` pins.
 pub(super) fn singleton_hits(
     ctx: Context<'_>,
     span: Span,
@@ -488,10 +488,11 @@ pub(super) fn singleton_hits(
 /// Searches the partial-matching entries with overhang alignment over each
 /// end window of the span that the whole-pattern pass left untrimmed, for
 /// the entries whose end seeds occur in that window. The end-seed flags are
-/// set only for the partial-matching entries (see `CandidateIndex::new`), so
-/// they gate the role as well as the seed. A partial hit flush with the read
-/// end trims it; see `Keep::partial_hit_is_valid`. An end is untrimmed as
-/// `Keep::five_open` and `Keep::three_open` judge it.
+/// set only for the partial-matching entries (see
+/// `CandidateIndex::with_split`), so they gate the role as well as the seed.
+/// A partial hit flush with the read end trims it; see
+/// `Keep::partial_hit_is_valid`. An end is untrimmed as `Keep::five_open`
+/// and `Keep::three_open` judge it.
 pub(super) fn search_partial(
     ctx: Context<'_>,
     span: Span,

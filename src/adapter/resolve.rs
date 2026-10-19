@@ -20,7 +20,7 @@ pub(crate) fn bam_seq(rec: &noodles_bam::Record) -> Cow<'_, [u8]> {
 }
 
 /// Support below which a discovered sequencing adapter is logged with a
-/// warning rather than a plain info line. Sparse families warrant review even
+/// warning in addition to its info line. Sparse families warrant review even
 /// when their consensus clears the minimum discovery support. End-only
 /// layers such as barcodes are sparse by design and are not warned about.
 pub(crate) const MARGINAL_SUPPORT: f64 = 0.45;

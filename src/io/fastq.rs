@@ -204,11 +204,19 @@ pub fn reader_from_bgzf(
 /// Highest raw Phred score a Phred+33 quality byte encodes (`~`, ASCII 126).
 const MAX_PHRED33: u8 = 126 - 33;
 
+/// The read id of a FASTQ header: the text before the first space or tab,
+/// which ends the id of a plain header and of a tagged one.
+pub(crate) fn read_id(head: &[u8]) -> &[u8] {
+    head.iter()
+        .position(|&b| b == b' ' || b == b'\t')
+        .map_or(head, |end| &head[..end])
+}
+
 struct RecordIter<R: Read> {
     reader: Reader<R>,
     /// Records yielded so far.
     count: u64,
-    /// Id of the last record yielded, kept for error context.
+    /// Id of the last record yielded (`read_id`), kept for error context.
     last_id: Vec<u8>,
 }
 
@@ -225,8 +233,20 @@ impl<R: Read> RecordIter<R> {
     /// `io::Error` and given stream-position context: seq_io's wrapper both
     /// displays and sources the same error, which prints its message twice
     /// under anyhow's alternate formatting. Parse errors already carry their
-    /// record and line.
-    fn describe(&self, e: seq_io::fastq::Error) -> anyhow::Error {
+    /// record and line; seq_io ends the record id at the first space only, so
+    /// the id of a tagged header is cut at its first tab, before the aux
+    /// fields.
+    fn describe(&self, mut e: seq_io::fastq::Error) -> anyhow::Error {
+        use seq_io::fastq::Error;
+        if let Error::UnequalLengths { pos, .. }
+        | Error::InvalidStart { pos, .. }
+        | Error::InvalidSep { pos, .. }
+        | Error::UnexpectedEnd { pos } = &mut e
+            && let Some(id) = pos.id.as_mut()
+            && let Some(tab) = id.find('\t')
+        {
+            id.truncate(tab);
+        }
         match e {
             seq_io::fastq::Error::Io(e) => {
                 let context = if self.count == 0 {
@@ -288,13 +308,14 @@ impl<R: Read> Iterator for RecordIter<R> {
             Ok(rec) => rec,
             Err(e) => return Some(Err(self.describe(e))),
         };
-        let qual = match phred_from_ascii(rec.id_bytes(), rec.qual()) {
+        let id = read_id(rec.head());
+        let qual = match phred_from_ascii(id, rec.qual()) {
             Ok(qual) => qual,
             Err(e) => return Some(Err(e)),
         };
         self.count += 1;
         self.last_id.clear();
-        self.last_id.extend_from_slice(rec.id_bytes());
+        self.last_id.extend_from_slice(id);
         Some(Ok(ReadRecord {
             name: rec.head().to_vec(),
             seq: rec.seq().to_vec(),
@@ -837,6 +858,28 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("record r2") && err.contains("0x7f"), "{err}");
+    }
+
+    /// A tagged header names its record by the read id alone: neither the
+    /// quality error nor a seq_io parse error repeats the aux fields.
+    #[test]
+    fn tagged_record_errors_name_the_read_id() {
+        let fq = b"@r1\tMM:Z:C+m,0;\tML:B:C,200\nAC\n+\n I\n";
+        let err = RecordIter::new(&fq[..])
+            .next()
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("record r1: quality byte 0x20"), "{err}");
+
+        let fq = b"@r1\tMM:Z:C+m,0;\nACGT\n+\nII\n";
+        let err = RecordIter::new(&fq[..])
+            .next()
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("record 'r1' at line 1"), "{err}");
+        assert!(!err.contains("MM:Z"), "{err}");
     }
 
     /// Serves `data` and fails every read past its end with `msg`.

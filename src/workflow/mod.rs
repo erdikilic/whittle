@@ -476,7 +476,8 @@ pub struct Counters {
     pub input_reads: AtomicU64,
     /// Output segments written (one per surviving segment).
     pub output_reads: AtomicU64,
-    /// Compressed bytes pulled from the input source.
+    /// Bytes pulled from the input source, compressed bytes for compressed
+    /// input.
     pub bytes_read: AtomicU64,
     /// Sum of SEQ lengths (bases) across every input read, regardless of
     /// whether it survives filtering/trimming.
@@ -486,7 +487,8 @@ pub struct Counters {
     /// Input reads carrying a known per-base tag (`ip`, `pw`, ...) whose array
     /// length disagrees with the sequence length, or an `sa` coverage array
     /// whose runs do not sum to it. The tag is left untouched and the count is
-    /// surfaced as a run-level advisory. Tracked by the BAM paths only.
+    /// surfaced as a run-level advisory. Tracked by the BAM and tagged FASTQ
+    /// paths.
     pub malformed_tag_reads: AtomicU64,
     /// Input reads whose `MM`/`ML`/`MN` block was malformed (an `MN` that
     /// disagrees with the sequence length, an `ML` whose length disagrees with
@@ -517,18 +519,20 @@ pub struct Counters {
     /// bumped once per input read (not once per segment, unlike
     /// `output_reads`, which a quality-split read can bump several times).
     /// Exists so `snapshot` can check that every input read is accounted for
-    /// by exactly one of the three read-level outcomes.
+    /// by exactly one of the four read-level outcomes.
     pub reads_with_output: AtomicU64,
     /// Input reads that produced zero segments: `trim::apply` returned no
     /// intervals for the per-segment filter (an empty read, a read fully
     /// consumed by adapter trimming, or an over-crop). Read-level, paired with
-    /// `reads_with_output` and `reads_all_filtered` in the invariant below.
+    /// `reads_with_output`, `reads_all_filtered` and `tag_filtered_reads` in
+    /// the invariant below.
     pub reads_trimmed_to_nothing: AtomicU64,
     /// Input reads that produced at least one segment, but every one was
     /// either rejected by post-trim `filter::check` or, under `--targets`,
     /// written nowhere because a run's splitter discarded it
-    /// (`--target-discard`). Read-level, paired with `reads_with_output` and
-    /// `reads_trimmed_to_nothing` in the invariant below.
+    /// (`--target-discard`). Read-level, paired with `reads_with_output`,
+    /// `reads_trimmed_to_nothing` and `tag_filtered_reads` in the invariant
+    /// below.
     pub reads_all_filtered: AtomicU64,
     /// Segments dropped as `TooShort`. This and the five counters below are
     /// segment-level: one bump per segment (not read) that `filter::check`
@@ -550,6 +554,17 @@ pub struct Counters {
 }
 
 impl Counters {
+    /// Records that a FASTQ header carries SAM aux fields, and logs it for the
+    /// first such header. The flag is read before it is set, so the headers
+    /// after the first do not write the shared counter cache line.
+    pub(crate) fn note_tagged_fastq(&self) {
+        if !self.tagged_fastq.load(Ordering::Relaxed)
+            && !self.tagged_fastq.swap(true, Ordering::Relaxed)
+        {
+            tracing::info!("FASTQ headers carry SAM aux tags; tags are rewritten per segment");
+        }
+    }
+
     /// Whether rejected records are written, so producers can skip rendering them.
     pub(crate) fn wants_rejects(&self) -> bool {
         self.rejects.get().is_some()
@@ -689,9 +704,10 @@ pub(crate) enum Routing<'a> {
 /// read's `trim_read` output; the call rescores the full read at the piece's
 /// primer loci, which are in read coordinates. `bases` is the segment's
 /// length, recorded against an assigned key. `barcode` is the read's `BC:Z`
-/// barcode call, `None` for a read without one. The call is tallied into
-/// `counters`' split counters (when the run has a splitter) whatever the
-/// outcome, so a discarded segment is still counted, just not written.
+/// barcode call, `None` for a read without one. The call is logged at trace
+/// level and tallied into `counters`' split counters (when the run has a
+/// splitter) whatever the outcome, so a discarded segment is still counted,
+/// just not written.
 pub(crate) fn route<'a>(
     cfg: &'a Config,
     seq: &[u8],
@@ -705,6 +721,15 @@ pub(crate) fn route<'a>(
         return Ok(Routing::Untagged);
     };
     let call = splitter.call(seq, &pieces[idx]);
+    tracing::trace!(
+        segment = idx + 1,
+        call = splitter.label(&call),
+        reason = match call {
+            crate::split::Call::Unassigned(reason) => Some(reason.label()),
+            _ => None,
+        },
+        "Segment called"
+    );
     let discarded = splitter.discards(&call);
     if let Some(split_counters) = counters.split.get() {
         split_counters.record(&call, bases, discarded);
@@ -730,14 +755,13 @@ pub(crate) fn push_fastq_target(out: &mut Vec<u8>, label: &str) {
 /// all workflows. `seq` and `qual` contain the complete input read and
 /// `produced` contains the final ranges from adapter and quality processing
 /// in original-coordinate order. Segment numbers index this flattened list
-/// before filtering; they do not restart at adapter boundaries. For each survivor,
-/// `render` receives `(idx, total, start, end)` and returns whether it wrote
-/// the segment: `false` means a run's splitter discarded it
+/// before filtering; they do not restart at adapter boundaries. For each
+/// survivor, `render` receives `(idx, total, start, end)` and returns whether
+/// it wrote the segment: `false` means a run's splitter discarded it
 /// (`--target-discard`), and it is left out of `output_reads`/`output_bases`.
-/// A run without a splitter always writes, so its behavior is unchanged. For
-/// each rejected segment and for a read that produced none, `reject`
-/// receives the `Rejection`. A render error stops processing before the
-/// read-level outcome counter is updated.
+/// A run without a splitter always writes. For each rejected segment and for
+/// a read that produced none, `reject` receives the `Rejection`. A render
+/// error stops processing before the read-level outcome counter is updated.
 pub(crate) fn process_read_segments<Rn, Rj>(
     produced: &[(usize, usize)],
     seq: &[u8],

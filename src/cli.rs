@@ -310,10 +310,11 @@ struct Cli {
     adapter_discover_only: bool,
 
     /// Assign every output read or segment to a target from the sequences at
-    /// its ends and tag it wt:Z with the target, unassigned or ambiguous. A
-    /// target holds a list of forward and a list of reverse sequences, such
-    /// as primers, barcodes or adapters; any forward sequence pairs with any
-    /// reverse sequence. Repeatable; each SPEC adds a source, merged into one
+    /// its ends and tag it wt:Z with its key (the target, or its group under
+    /// a {group} template), unassigned or ambiguous. A target holds a list of
+    /// forward and a list of reverse sequences, such as primers, barcodes or
+    /// adapters; any forward sequence pairs with any reverse sequence.
+    /// Repeatable; each SPEC adds a source, merged into one
     /// sheet. SPEC is an existing sheet file (TSV or annotated FASTA), the
     /// preset mab114 (also enables --adapter-preset mab114 unless -a or
     /// --adapter-preset is given), or an inline target
@@ -376,7 +377,8 @@ struct Cli {
 enum TargetBin {
     /// Reads and segments no target is assigned to.
     Unassigned,
-    /// Reads and segments with two targets within --target-margin.
+    /// Reads and segments whose ends fit two targets within --target-margin,
+    /// or no single target.
     Ambiguous,
 }
 
@@ -430,7 +432,7 @@ pub fn parse() -> anyhow::Result<Config> {
     let quality = resolve_quality(&c)?;
 
     let mut advisories: Vec<Advisory> = Vec::new();
-    let split_opts = resolve_split(&mut c)?;
+    let split_opts = resolve_split(&mut c, &mut advisories)?;
     let adapter_infer = resolve_infer(&c, &mut advisories)?;
     let adapters = resolve_adapters(&c, adapter_infer, &mut advisories)?;
     // Without an adapter source no reads are sampled, `--targets` alone
@@ -752,8 +754,12 @@ fn search_config(
 /// placeholders require every sheet name they take to be one path
 /// component; without one the run is tag-only with one key per target and
 /// names are unrestricted. Output placeholders without `--targets` are an
-/// error.
-fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
+/// error. A highly degenerate sheet sequence (`high_degeneracy`) is kept
+/// with a warning advisory.
+fn resolve_split(
+    c: &mut Cli,
+    advisories: &mut Vec<Advisory>,
+) -> anyhow::Result<Option<SplitOptions>> {
     if c.targets.is_empty() {
         if let Some(out) = c.output.as_deref()
             && Template::has_placeholder(out)
@@ -778,6 +784,16 @@ fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
         .collect();
     let sheet = Sheet::load_all(&specs)?;
     sheet.validate(c.target_require)?;
+    for primer in &sheet.primers {
+        if let Some(per_position) = high_degeneracy(&primer.seq) {
+            advisories.push(Advisory::warn(format!(
+                "Target sequence is highly degenerate and matches almost anywhere, which may \
+                 locate it in reads that do not hold it: name={:?}, \
+                 bases_per_position={per_position:.1}",
+                primer.name
+            )));
+        }
+    }
     if let Some(template) = &template {
         template.check_names(&sheet)?;
     }
@@ -897,13 +913,28 @@ fn fasta_role(head: &str) -> crate::adapter::Role {
     }
 }
 
+/// Returns the mean number of bases per position of the IUPAC pattern `seq`
+/// when it is two or more, or `None` for a more specific pattern or one
+/// holding a byte outside the IUPAC alphabet. A fully degenerate stretch
+/// matches anywhere, so a pattern with more ambiguity than specificity trims
+/// real insert; the caller still searches it and records a warning advisory.
+fn high_degeneracy(seq: &[u8]) -> Option<f64> {
+    let bases = seq
+        .iter()
+        .map(|&b| crate::adapter::search::iupac_degeneracy(b).map(u32::from))
+        .sum::<Option<u32>>()?;
+    (!seq.is_empty() && bases as usize >= seq.len() * 2)
+        .then(|| f64::from(bases) / seq.len() as f64)
+}
+
 /// Reads adapter sequences from a FASTA. Whitespace is removed, lowercase is
 /// uppercased, and `U` is folded to `T`. IUPAC ambiguity codes are kept and
 /// searched as the bases they stand for; an entry containing any other byte is
 /// skipped with a warning advisory, as is an entry shorter than
 /// `adapter::MIN_PATTERN_LEN`, the matcher's minimum pattern length. An entry
-/// averaging two or more bases per position is kept with a warning advisory.
-/// The header description selects the role; see `fasta_role`.
+/// averaging two or more bases per position is kept with a warning advisory
+/// (`high_degeneracy`). The header description selects the role; see
+/// `fasta_role`.
 fn read_adapter_fasta(
     path: &std::path::Path,
     advisories: &mut Vec<crate::config::Advisory>,
@@ -921,7 +952,8 @@ fn read_adapter_fasta(
             .map(u8::to_ascii_uppercase)
             .collect();
         // `U` is folded to `T`: RNA primers are written with `U`, DNA reads
-        // store `T`, and sassy treats `U` as a fifth base that matches nothing.
+        // store `T`, and `search::iupac_bases`, which the alphabet check, the
+        // seed tables and the chance model read, holds no `U`.
         let seq: Vec<u8> = seq
             .into_iter()
             .map(|b| if b == b'U' { b'T' } else { b })
@@ -936,11 +968,10 @@ fn read_adapter_fasta(
         // IUPAC ambiguity codes are searched as the bases they stand for, as a
         // degenerate primer requires. A byte outside the nucleotide alphabet
         // marks a malformed record.
-        let Some(degeneracy) = seq
+        if seq
             .iter()
-            .map(|&b| crate::adapter::search::iupac_degeneracy(b).map(u32::from))
-            .sum::<Option<u32>>()
-        else {
+            .any(|&b| crate::adapter::search::iupac_degeneracy(b).is_none())
+        {
             let bad: String = seq
                 .iter()
                 .filter(|&&b| crate::adapter::search::iupac_degeneracy(b).is_none())
@@ -951,7 +982,7 @@ fn read_adapter_fasta(
                  name={name:?}, chars={bad}"
             )));
             continue;
-        };
+        }
         if seq.len() < crate::adapter::MIN_PATTERN_LEN {
             advisories.push(crate::config::Advisory::warn(format!(
                 "Adapter entry skipped, shorter than the minimum match length: \
@@ -961,14 +992,10 @@ fn read_adapter_fasta(
             )));
             continue;
         }
-        // A fully degenerate stretch matches anywhere, so a pattern with more
-        // ambiguity than specificity trims real insert. The pattern is still
-        // searched; a warning advisory records the risk.
-        if degeneracy as usize >= seq.len() * 2 {
+        if let Some(per_position) = high_degeneracy(&seq) {
             advisories.push(crate::config::Advisory::warn(format!(
                 "Adapter entry is highly degenerate and matches almost anywhere, which may \
-                 trim real sequence: name={name:?}, bases_per_position={:.1}",
-                f64::from(degeneracy) / seq.len() as f64
+                 trim real sequence: name={name:?}, bases_per_position={per_position:.1}"
             )));
         }
 
@@ -1156,8 +1183,8 @@ mod tests {
         let names: Vec<&str> = adapters.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["plain_20bp", "degenerate_20bp", "rna_20bp"]);
         assert_eq!(adapters[1].seq, b"ACGTACGTYCGTACGTACGN".to_vec());
-        // `U` folds to `T`: a DNA read stores `T`, and sassy treats `U` as a
-        // fifth base that matches nothing.
+        // `U` folds to `T`: a DNA read stores `T`, and the IUPAC tables
+        // (`search::iupac_bases`) hold no `U`.
         assert_eq!(adapters[2].seq, b"ACGTACGTACGTACGTACGT".to_vec());
         assert!(
             advisories

@@ -95,12 +95,12 @@ struct QualityTrimParams {
 struct AdapterParams {
     /// Adapters configured before resolution: the preset, the FASTA, or both.
     /// This is the figure the startup banner prints, since it is all that is
-    /// known before reads have been sampled. `0` under inference, where the set
-    /// is discovered rather than configured.
+    /// known before reads have been sampled. `0` under `--adapter-discover`
+    /// without a preset or FASTA, and under `--targets` without an adapter
+    /// source.
     configured: usize,
-    /// Adapters trimmed against, after presence detection narrowed the
-    /// configured set or inference replaced it. Equal to `configured` when
-    /// neither ran.
+    /// Sequences searched, after presence detection narrowed the configured
+    /// set or discovery extended it. Equal to `configured` when neither ran.
     count: usize,
     error_rate: f64,
     /// `--adapter-end-search`: bases at each read end searched for a terminal
@@ -159,6 +159,7 @@ struct Warnings {
     malformed_tag_reads: u64,
     /// Reads whose `MM`/`ML`/`MN` block was malformed and removed.
     malformed_mod_reads: u64,
+    /// Trimmed reads whose PacBio undo blobs (`ds`, `ls`) were removed.
     undo_tags_dropped_reads: u64,
     /// Reads whose `bi` barcode tag was not a valid barcode window and were
     /// left untrimmed by that stage.
@@ -182,8 +183,10 @@ struct TargetsSummary {
     margin: usize,
     keys: Vec<KeySummary>,
     unassigned: UnassignedSummary,
-    /// Segments with two or more keys tied for cheapest, or none beating the
-    /// runner-up by `margin`.
+    /// Segments called ambiguous: two or more keys tied for cheapest, the
+    /// cheapest not beating the runner-up by `margin` or matched only through
+    /// close primers of another key, or no target fitting the primers at the
+    /// two ends.
     ambiguous: u64,
     /// Unassigned or ambiguous segments dropped by `--target-discard` rather
     /// than written.

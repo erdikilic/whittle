@@ -223,15 +223,19 @@ pub struct Config {
     pub filter: FilterConfig,
     /// Fixed crops and the quality-trim operation.
     pub trim: TrimPlan,
-    /// Adapter-trimming settings, or `None` when neither `--adapter-fasta` nor
-    /// `--adapter-preset` was given (adapter trimming off, no per-read cost).
+    /// Adapter-trimming settings, or `None` when no adapter source
+    /// (`--adapter-fasta`, `--adapter-preset`, `--adapter-discover` or
+    /// `--adapter-discover-only`) is given (adapter trimming off, no per-read
+    /// cost). Under `--targets`, `settle` attaches the sheet sequences, and
+    /// sets it to `split_search` when no adapter source is given.
     pub adapters: Option<crate::adapter::AdapterConfig>,
     /// Whether de novo adapter inference runs and whether inferred adapters
     /// are also used for trimming.
     pub adapter_infer: AdapterInfer,
     /// Resolved worker-thread count.
     pub threads: usize,
-    /// Aux tags carried into FASTQ headers on BAM-to-FASTQ output.
+    /// Aux tags carried into FASTQ headers on FASTQ output from BAM or tagged
+    /// FASTQ input.
     pub fastq_tags: FastqTags,
     /// Resolved render-pool size for this dispatch; `0` means the workflow falls
     /// back to `threads`. Set by `settle` from `thread_budget(..).render`
@@ -253,7 +257,8 @@ pub struct Config {
     /// Whether ONT signal tags are kept consistent through trimming: the `mv`
     /// move table is sliced and `ts`/`ns`/`sp`/`pi` are updated (BAM-to-BAM
     /// only, see `workflow::bam`). When false, a trimmed read drops
-    /// `mv`/`ts`/`ns`/`sp`/`pi`.
+    /// `mv`/`ts`/`ns`, and `sp`/`pi` unless it is a crop, which keeps them
+    /// since they place the raw signal in its parent.
     pub update_moves: bool,
     /// Aux tags removed from every output record (`--remove-tag`,
     /// its groups). Requires BAM or tagged FASTQ;
@@ -284,11 +289,12 @@ pub struct Config {
     /// The `--adapter-fasta` path, kept so `run` can refuse to overwrite it.
     /// The sequences themselves are already resolved into `adapters`.
     pub adapter_fasta: Option<PathBuf>,
-    /// How many adapters were configured before presence detection narrowed the
-    /// set or inference replaced it, so the run summary can report both figures.
-    /// Recorded by `settle`, the only thing that changes `adapters`. `None` when
-    /// adapter trimming is off, and `0` under inference, where the set is
-    /// discovered rather than configured.
+    /// How many preset and FASTA adapters were configured before presence
+    /// detection narrowed the set or discovery extended it, so the run summary
+    /// can report both figures. Recorded by `settle`, the only thing that
+    /// changes `adapters`. `None` when adapter trimming is off, and `0` under
+    /// `--adapter-discover` without a preset or FASTA and under `--targets`
+    /// without an adapter source.
     pub adapters_configured: Option<usize>,
     /// Whether the resolved adapter set trims adapters, primers and barcodes,
     /// in dorado's `tm` token order. Recorded by `settle` and merged into the

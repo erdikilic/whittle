@@ -3,7 +3,9 @@
 
 use super::*;
 
-/// Requires supporting alignments to concentrate near the physical read end.
+/// Returns the number of `windows` holding `seq` within `edits`, and the
+/// number whose best hit (lowest cost, then nearest the outer end) lies
+/// within `ANCHOR_SLACK` bases of the window's outer end at `end`.
 pub(super) fn terminal_support(
     seq: &[u8],
     windows: &[&[u8]],

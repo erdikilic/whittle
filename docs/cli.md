@@ -60,8 +60,11 @@ read-ahead until it is written.
 output in natural filename order (digit runs compared numerically). The files
 must share one format family (all FASTQ or all BAM); hidden files and
 subdirectories are ignored; a mixed or empty directory is an error. An output
-path inside the input directory is rejected, since it cannot be distinguished
-from an input on a later run.
+path that names an existing read file in the input directory is rejected,
+since a previous output cannot be told apart from an input. A new output path
+there is written, and the file it creates is then a read file of the
+directory: a rerun with the same `-o` is rejected, and any other run over the
+directory merges it as an input.
 
 BAM output requires identical read-group definitions across input headers.
 Conflicting definitions or different read-group sets fail the run. Only the
@@ -502,8 +505,8 @@ empty; `end=fwd` or `end=rev` places it. Several entries may share one
 `target=` and `end=`; each adds a sequence to that list. A non-empty
 `group=` overrides the default group and may appear on any entry of a
 target; two entries of one target giving different `group=` values is an
-error. Entries with no `target=` field keep their existing meaning as `-a`
-entries.
+error. `--targets` ignores entries with no `target=` field; they are
+searched as `-a` entries only when the same file is also given to `-a`.
 
 The preset `mab114` defines two targets, `16S` and `ITS`, holding the primer
 mixes of the ONT Microbial Amplicon Barcoding kit (SQK-MAB114.24) under
@@ -645,8 +648,10 @@ pieces gives each piece its own call:
   `--target-require` needs), `orientation` (a target's sequence scored at both
   ends, so no strand is consistent), or `length` (the segment length falls
   outside the assigned target's `min_len`/`max_len` window).
-- **Ambiguous**, when two keys tie for cheapest, or the cheapest does not
-  beat the runner-up by `--target-margin`.
+- **Ambiguous**, when two keys tie for cheapest, the cheapest does not beat
+  the runner-up by `--target-margin` or is matched only through a stand-in
+  sequence of another key (below), or no target fits the sequences at both
+  ends, as in a chimera with exact sequences of two keys at its two ends.
 
 A target is matched at an end when a sequence of the list its strand puts
 there scored at that end. A sequence of another key closer than
@@ -700,9 +705,10 @@ Files exist only for keys that received at least one record; the report
 still lists every sheet key.
 
 Filter drops still go to `--rejected-output` as usual. The `unassigned` and
-`ambiguous` bins hold only segments that passed the length, quality and GC
-filters. `--target-discard <unassigned,ambiguous>` drops those bins instead
-of writing them, and counts the dropped segments as `discarded`.
+`ambiguous` bins hold only segments that passed the length, quality,
+expected-error and GC filters. `--target-discard <unassigned,ambiguous>`
+drops those bins instead of writing them, and counts the dropped segments as
+`discarded`.
 
 ### Tag and report
 
@@ -748,7 +754,7 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
   "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 20, "tag_filtered": 10 },
   "bases": { "input": 10000000, "output": 9500000 },
   "segments_dropped": { "too_short": 12, "too_long": 0, "low_quality": 5, "high_quality": 0, "expected_errors": 0, "gc_out_of_range": 0 },
-  "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0, "barcode_tag_malformed_reads": 0, "barcode_tag_unverified_reads": 0 }
+  "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0, "undo_tags_dropped_reads": 0, "barcode_tag_malformed_reads": 0, "barcode_tag_unverified_reads": 0 }
 }
 ```
 
@@ -759,10 +765,12 @@ records in input order.
 Under `warnings`, `malformed_tag_reads` counts reads whose per-base tag length
 disagreed with the sequence and was left untouched, `malformed_mod_reads` counts
 reads whose `MM`/`ML`/`MN` block could not be parsed and was removed from the
-output, `barcode_tag_malformed_reads` counts reads whose `bi` positions did
-not describe a window inside the read, and `barcode_tag_unverified_reads`
-counts reads with a recorded barcode span at which no barcode sequence was
-found. All four are also reported on stderr at the end of the run.
+output, `undo_tags_dropped_reads` counts trimmed reads whose PacBio undo blobs
+(`ds`, `ls`) were removed, `barcode_tag_malformed_reads` counts reads whose
+`bi` positions did not describe a window inside the read, and
+`barcode_tag_unverified_reads` counts reads with a recorded barcode span at
+which no barcode sequence was found. All five are also reported on stderr at
+the end of the run.
 
 `reads.output` counts output segments, not input reads, so under
 `--quality-trim segments` or `runs`, or chimera splitting, it can exceed
@@ -772,11 +780,12 @@ found. All four are also reported on stderr at the end of the run.
 
 Under `params.adapters`, `configured` is the set requested (preset and/or FASTA)
 and `count` is the set searched, after presence detection narrowed it or
-inference replaced it. The two are equal when neither ran. The startup banner
-prints `configured`. Under `--adapter-discover` nothing is configured up front,
-so `configured` is `0`. Under `--targets` without an adapter source, the sheet
-sequences alone are searched: `configured` and `sample` are `0` and `count` is
-the number of sheet sequences. `--adapter-discover-only` writes no summary.
+discovery extended it. The two are equal when neither ran. The startup banner
+prints `configured`. Under `--adapter-discover` the preset and FASTA entries
+are configured up front, so `configured` is `0` without either. Under
+`--targets` without an adapter source, the sheet sequences alone are searched:
+`configured` and `sample` are `0` and `count` is the number of sheet
+sequences. `--adapter-discover-only` writes no summary.
 
 `schema_version` is incremented only when an existing field changes meaning or
 disappears. New fields may appear without an increment, so consumers should
@@ -834,13 +843,16 @@ Every line has the same shape: timestamp, level, the enclosing span with its
 identifying fields, a capitalized message, then structured fields. The message
 is prose and the field values are data, so a line can be filtered on either.
 The per-read lines record which adapter matched, over what span, at what cost,
-and the resulting action, or why a segment was dropped.
+and the resulting action, or why a segment was dropped, and under `--targets`
+the call of each kept segment, with the reason of an unassigned one.
 
 `WHITTLE_LOG` overrides the level with a `RUST_LOG`-style filter, for example
 `WHITTLE_LOG=whittle::adapter=trace` for adapter decisions without the
-per-segment lines. `--quiet` takes precedence over it. A value that does not
-parse is reported as a warning and the level falls back to the `-v`/`-vv`
-setting.
+per-segment lines. Targets the value does not name log at the `-v`/`-vv`
+level, unless the value also gives a bare level, as
+`warn,whittle::adapter=trace` does. `--quiet` takes precedence over it. A
+value that does not parse is reported as a warning and the level falls back
+to the `-v`/`-vv` setting.
 
 Progress is logged as an info line every 30 s, or every 10 s at debug and
 trace, on a terminal and in a redirected log alike:

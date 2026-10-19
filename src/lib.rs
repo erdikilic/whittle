@@ -67,11 +67,13 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     let in_path = cfg.io.input.clone();
     let in_path = in_path.as_deref();
 
-    // The total input byte count, known for a file, gives the periodic
-    // progress line its percentage and ETA; stdin has no size, so `None` leaves
-    // both out (see `obs::ProgressHandle::start`).
+    // The total input byte count, known for a regular file, gives the banner
+    // its input size and the periodic progress line its percentage and ETA;
+    // stdin, a pipe or a process substitution has no size, so `None` leaves
+    // them out (see `obs::ProgressHandle::start`).
     let total: Option<u64> = in_path
         .and_then(|p| std::fs::metadata(p).ok())
+        .filter(std::fs::Metadata::is_file)
         .map(|m| m.len());
 
     // Created before the reader so one `Arc` is shared by `CountingReader`, the
@@ -140,7 +142,7 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     // on an `out.fastq.gz` path) is reported as a warning. Skipped for stdin,
     // stdout, and paths without an extension. Only the check runs here; both
     // warnings are logged after the banner with the other advisories.
-    let mismatch_warn = io::format_mismatch_warning("--input-format", cfg.io.in_format, in_path);
+    let mismatch_warn = io::input_format_mismatch_warning(cfg.io.in_format, in_path);
     let out_mismatch_warn = io::format_mismatch_warning(
         "--output-format",
         cfg.io.out_format,
@@ -724,9 +726,7 @@ impl Session {
                 if !io::tagged::has_aux_tags(&rec.name) {
                     return filters.keeps(&tagfilter::NoTags);
                 }
-                counters
-                    .tagged_fastq
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                counters.note_tagged_fastq();
                 let fields = rec
                     .name
                     .iter()
@@ -1124,14 +1124,16 @@ const NO_OP_WARNING: &str =
     "No trimming or filtering options set; output will mostly mirror the input";
 
 /// Warns when `--fastq-tags` was set to a non-default value (`none` or an
-/// explicit list) on a path other than BAM-to-FASTQ, where it has no effect. An
-/// explicit `all` equals the default and is silent.
+/// explicit list) on a path other than FASTQ output from BAM or tagged FASTQ
+/// input, where it has no effect. An explicit `all` equals the default and is
+/// silent.
 fn note_tags_ignored(cfg: &Config, in_fmt: Format, out_fmt: Format) {
     if !matches!(cfg.fastq_tags, config::FastqTags::All) {
         tracing::warn!(
             input = in_fmt.label(),
             output = out_fmt.label(),
-            "--fastq-tags applies only to BAM-to-FASTQ output and is ignored"
+            "--fastq-tags applies only to FASTQ output from BAM or tagged FASTQ input and is \
+             ignored"
         );
     }
 }

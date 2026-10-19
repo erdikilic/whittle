@@ -2,7 +2,9 @@
 //!
 //! Exact k-mer graphs establish consensus boundaries. Batched approximate
 //! matching validates support and aligns primer extensions to conserved insert
-//! starts. Catalog sequences annotate discoveries without choosing their bases.
+//! starts. The catalog's marker-gene primers mark insert boundaries and supply
+//! their ambiguity codes to the discoveries that match them; every other
+//! catalog entry only names discoveries.
 
 use crate::adapter::search::{AmbiguousSearcher, hits, is_plain_acgt, new_ambiguous_searcher};
 use crate::adapter::{Adapter, AdapterConfig, MIN_PATTERN_LEN, Role, edit_budget};
@@ -130,9 +132,10 @@ const FAMILY_OVERLAP_PERCENT: usize = 60;
 const VARIANT_OVERLAP_PERCENT: usize = 80;
 
 /// Minimum percent identity for a catalog entry to be reported as the match
-/// of an inferred adapter. A 16 to 32 bp anchor searched against every catalog
-/// entry on both strands names something spurious well above the 60 percent
-/// that its trimming budget alone would allow.
+/// of an inferred adapter. The discovered sequence is searched against every
+/// catalog entry on both strands within the trimming budget of the shorter
+/// of the two, which at the default error rate admits 80 percent identity;
+/// the higher floor keeps a chance alignment from naming it.
 const NAME_IDENTITY_MIN: f32 = 85.0;
 
 /// One discovered adapter with inference metadata. The bare `Adapter` (without
@@ -162,7 +165,9 @@ type Ranked = (Vec<u8>, f64, Vec<bool>, usize, bool, End, u64);
 /// moves the boundary inward and the next layer is assembled from the
 /// unexplained sequence. A barcode construct is not a known sequence: its `N`
 /// block would explain any read end. Equivalent assemblies share one trimming
-/// pattern. Catalog and supplied FASTA entries provide names only after the
+/// pattern. The catalog's marker-gene primers mark insert boundaries and
+/// supply their ambiguity codes to the discoveries that match them; every
+/// other catalog and supplied FASTA entry only names discoveries, after the
 /// inferred boundaries are fixed.
 pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> {
     // K-mer codes, consensus columns and base tallies read uppercase ACGT, so

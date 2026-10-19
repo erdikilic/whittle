@@ -112,11 +112,11 @@ pub fn reader_from(
             inner,
         );
         let mut r = bam::io::Reader::from(mt);
-        let header = r.read_header()?;
+        let header = r.read_header().context("reading the BAM header")?;
         Ok((header, Box::new(RawRecordIterImpl { reader: r })))
     } else {
         let mut r = bam::io::Reader::new(inner);
-        let header = r.read_header()?;
+        let header = r.read_header().context("reading the BAM header")?;
         Ok((header, Box::new(RawRecordIterImpl { reader: r })))
     }
 }
@@ -162,8 +162,7 @@ pub enum BamSink {
 }
 
 /// Builds the sink with the header written: `Blocks` when `parallel`,
-/// `Single` otherwise. `level` is the BGZF DEFLATE compression level (0-9 per
-/// the CLI, though libdeflate accepts up to 12).
+/// `Single` otherwise. `level` is the BGZF DEFLATE compression level, 0 to 9.
 pub fn writer(
     output: Option<&Path>,
     header: &sam::Header,
@@ -287,8 +286,8 @@ pub(crate) fn mark_unsorted(header: &mut sam::Header) {
 /// The `@PG` record is best-effort: `Programs::add` fails on a duplicate ID and
 /// cannot walk a dangling `PP` chain (`samtools reset` leaves
 /// `@PG ID:samtools PP:basecaller` without an `ID:basecaller` record), in which
-/// case the programs are left unchanged. The `@PG` line never blocks record
-/// output.
+/// case the programs are left unchanged with a warning. The `@PG` line never
+/// blocks record output.
 pub(crate) fn provenance_header(
     mut header: sam::Header,
     order_kept: bool,
@@ -303,6 +302,10 @@ pub(crate) fn provenance_header(
     }
 
     if has_dangling_program_chain(&header) {
+        tracing::warn!(
+            "The @PG provenance record was not added: a PP in the input @PG chain names a \
+             missing record or forms a cycle"
+        );
         return header;
     }
 
@@ -424,8 +427,6 @@ mod tests {
     use noodles_sam::header::record::value::map::Program;
     use noodles_sam::header::record::value::map::program::tag;
 
-    /// A dangling `@PG PP:` reference leaves the header unchanged because
-    /// noodles requires every parent program ID to exist.
     /// Parses `text` as a SAM header and returns the `tm` field of each `@RG`.
     fn trim_modes(text: &str, trimmed: [bool; 3]) -> Vec<Option<String>> {
         use sam::header::record::value::map::tag::Other;
@@ -465,6 +466,8 @@ mod tests {
         );
     }
 
+    /// A dangling `@PG PP:` reference leaves the header unchanged, since
+    /// `Programs::add` cannot walk a chain whose parent program is missing.
     #[test]
     fn provenance_header_does_not_panic_on_dangling_pp_chain() {
         // `pg1` references a parent that is absent from the header.

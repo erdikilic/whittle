@@ -165,7 +165,7 @@ fn full_window_mod_edit<'a>(
     if !matches!(mod_block, ModBlock::MissingMn | ModBlock::Malformed) {
         return Ok(None);
     }
-    let decoded = decode_raw_record(record)?;
+    let decoded = decode_raw_record(record).with_context(read_context(record))?;
     let window = Window {
         start: 0,
         end: record.sequence().len(),
@@ -179,7 +179,8 @@ fn full_window_mod_edit<'a>(
 /// record itself when nothing changes, a rebuild when `MN` is missing or the
 /// modification block is malformed, nothing when the filter drops it. A
 /// rejected record gets the same rebuild, with its reason.
-/// A malformed modification block or per-base tag is counted.
+/// A malformed modification block or per-base tag is counted. The decision
+/// is traced as `process_read_segments` traces it on the decoded path.
 ///
 /// Tag removal never reaches here: `run_raw_bam` excludes it from the
 /// full-window shortcut, so a run that removes tags rebuilds every record
@@ -199,7 +200,8 @@ pub(super) fn process_raw_full_window(
         ))
     })?;
 
-    let (mod_block, malformed_perbase) = raw_full_window_metadata(&record)?;
+    let (mod_block, malformed_perbase) =
+        raw_full_window_metadata(&record).with_context(read_context(&record))?;
     if mod_block == ModBlock::Malformed {
         counters.malformed_mod_reads.fetch_add(1, Ordering::Relaxed);
     }
@@ -207,7 +209,10 @@ pub(super) fn process_raw_full_window(
         counters.malformed_tag_reads.fetch_add(1, Ordering::Relaxed);
     }
 
+    let read = crate::workflow::read_span(record.name().map_or(b"<unnamed>", |n| n.as_ref()));
+    let _read = read.enter();
     let rejected = if seq_len == 0 {
+        tracing::trace!("Read produced no segments");
         counters
             .reads_trimmed_to_nothing
             .fetch_add(1, Ordering::Relaxed);
@@ -216,11 +221,31 @@ pub(super) fn process_raw_full_window(
         match crate::filter::check_with_gc(seq_len, qual, || raw_gc_fraction(&record), &cfg.filter)
         {
             Some(reason) => {
+                tracing::trace!(
+                    segment = 1,
+                    of = 1,
+                    start = 0,
+                    end = seq_len,
+                    len = seq_len,
+                    reason = reason.label(),
+                    "Segment dropped"
+                );
+                tracing::trace!(produced = 1, "Every segment filtered");
                 counters.record_segment_drop(reason);
                 counters.reads_all_filtered.fetch_add(1, Ordering::Relaxed);
                 Some(Reason::Dropped(reason))
             },
-            None => None,
+            None => {
+                tracing::trace!(
+                    segment = 1,
+                    of = 1,
+                    start = 0,
+                    end = seq_len,
+                    len = seq_len,
+                    "Segment kept"
+                );
+                None
+            },
         }
     };
     if let Some(reason) = rejected {
@@ -228,7 +253,8 @@ pub(super) fn process_raw_full_window(
             let mut edit = full_window_mod_edit(&record, mod_block, &cfg.remove_tags)?
                 .unwrap_or_else(|| RecordEdit::unchanged(seq_len, &cfg.remove_tags));
             edit.reason = Some(reason);
-            counters.reject(RejectItem::Bam(build_record(&record, edit)?))?;
+            let rejected = build_record(&record, edit).with_context(read_context(&record))?;
+            counters.reject(RejectItem::Bam(rejected))?;
         }
         return Ok(None);
     }
@@ -241,7 +267,9 @@ pub(super) fn process_raw_full_window(
     counters.reads_with_output.fetch_add(1, Ordering::Relaxed);
 
     let output = match full_window_mod_edit(&record, mod_block, &cfg.remove_tags)? {
-        Some(edit) => BamOutputRecord::Built(build_record(&record, edit)?),
+        Some(edit) => {
+            BamOutputRecord::Built(build_record(&record, edit).with_context(read_context(&record))?)
+        },
         None => BamOutputRecord::Raw(record),
     };
     Ok(Some(output))

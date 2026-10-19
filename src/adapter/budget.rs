@@ -380,8 +380,8 @@ pub(super) fn overhang_cost(alpha: f32, left: usize, right: usize) -> usize {
 }
 
 /// Returns the edit budget of a partial hit whose `overlap` bases aligned
-/// inside the read. The first `MIN_OVERLAP` bases must match exactly and the
-/// rate applies to the remainder, so the shortest accepted overlaps carry no
+/// inside the read. The rate applies to the overlap beyond its first
+/// `MIN_OVERLAP - 1` bases, so an overlap of `MIN_OVERLAP` bases carries no
 /// tolerance and a random read end is not mistaken for adapter residue.
 pub(super) fn partial_budget(rate: f64, overlap: usize) -> usize {
     edit_budget(rate, overlap.saturating_sub(MIN_OVERLAP - 1))

@@ -45,8 +45,8 @@ thread_local! {
 
 /// What a catalog sequence is. Every role is trimmed at the read ends and
 /// splits a read at an interior hit, except a panel barcode of a set that
-/// carries its flanks (see `CandidateIndex::splits`); only an adapter is
-/// searched again with its end bases masked (`search_residue`).
+/// carries its flanks (see `CandidateIndex::split_classes`); only an adapter
+/// is searched again with its end bases masked (`search_residue`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// A sequencing adapter.

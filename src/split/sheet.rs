@@ -606,8 +606,8 @@ impl Sheet {
     /// default group (the target name), and an empty `group=` value gives
     /// none; it may appear on any entry of the target, and two entries of
     /// one target giving different `group=` values is an error.
-    /// Entries without a `target=` field are ignored, and belong to the
-    /// caller's other adapter-FASTA handling instead.
+    /// Entries without a `target=` field are ignored; they are searched only
+    /// when the same file is also given to `--adapter-fasta`.
     pub fn parse_fasta(bytes: &[u8]) -> anyhow::Result<Sheet> {
         use seq_io::fasta::{Reader, Record};
 

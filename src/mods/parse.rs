@@ -33,7 +33,7 @@ impl GroupHead<'_> {
 }
 
 /// Reads a group token's header. `None` when the token does not start with
-/// `[A-Za-z][+-]([a-z]+|[0-9]+)`.
+/// `[A-Za-z][+-]([A-Za-z]+|[0-9]+)`.
 fn group_head(token: &[u8]) -> Option<GroupHead<'_>> {
     let (&base, rest) = token.split_first()?;
     if !base.is_ascii_alphabetic() {
@@ -121,7 +121,7 @@ fn group_tokens(mm: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// string must have: one per listed position per mod code, summed over groups.
 /// Counts without allocating, so a caller can check `ML` on the hot path
 /// without building the groups. `None` when `mm` does not conform to the
-/// grammar `[A-Za-z][+-]([a-z]+|[0-9]+)[.?]?(,[0-9]+)*` to its end.
+/// grammar `[A-Za-z][+-]([A-Za-z]+|[0-9]+)[.?]?(,[0-9]+)*` to its end.
 pub fn expected_ml_len(mm: &[u8]) -> Option<usize> {
     let mut total = 0usize;
     for token in group_tokens(mm) {

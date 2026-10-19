@@ -218,7 +218,8 @@ pub(crate) fn run_bam_to_fastq<W: BatchSink>(
     if cfg.threads <= 1 {
         let mut parts = Parts::default();
         for rec in records {
-            let rec = decode_raw_record(&rec?)?;
+            let raw = rec?;
+            let rec = decode_raw_record(&raw).with_context(read_context(&raw))?;
             counters.input_reads.fetch_add(1, Ordering::Relaxed);
             counters
                 .input_bases
@@ -236,7 +237,8 @@ pub(crate) fn run_bam_to_fastq<W: BatchSink>(
         writers,
         level,
         |rec, cfg, parts| {
-            render_bam_fastq_read(&decode_raw_record(&rec)?, cfg, counters, parts, &[])
+            let decoded = decode_raw_record(&rec).with_context(read_context(&rec))?;
+            render_bam_fastq_read(&decoded, cfg, counters, parts, &[])
         },
         counters,
     )

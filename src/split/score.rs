@@ -39,12 +39,13 @@ struct Entry {
     forward: Vec<u8>,
     /// Pattern searched at `End::Three`: the reverse complement of `forward`.
     reverse: Vec<u8>,
-    /// Minimum cost at or below which a hit of this primer scores.
+    /// Terminal edit budget: the highest cost at which a hit of this primer
+    /// scores.
     budget: usize,
-    /// Minimum cost at or below which a whole hit of this primer scores at
-    /// a boundary locus (`Locus::boundary`): its anchored budget over the
-    /// sheet's primers together (`anchored_budgets`), the budget that located
-    /// the locus.
+    /// Anchored edit budget: the highest cost at which a whole hit of this
+    /// primer scores at a boundary locus (`Locus::boundary`), its anchored
+    /// budget over the sheet's primers together (`anchored_budgets`), the
+    /// budget that located the locus.
     anchored: usize,
 }
 

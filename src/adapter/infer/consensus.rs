@@ -122,14 +122,15 @@ pub(super) fn conserved(counts: [usize; 4], composition: [f64; 4]) -> bool {
 /// match, so gap placement cannot bias it toward the consensus.
 pub(super) struct FollowingBases {
     /// Every occurrence as the packed k-mer, the window, the distance of the
-    /// k-mer's outer edge from the physical end, and the code of the
-    /// following base, sorted.
+    /// k-mer's outer edge from the window's outer end (the layer boundary),
+    /// and the code of the following base, sorted.
     pub(super) occurrences: Vec<(u32, u32, u16, u8)>,
 }
 
 impl FollowingBases {
     /// Indexes the k-mers of `windows` whose outer edge lies within
-    /// `ANCHOR_SLACK + LMAX` of the physical `end`.
+    /// `ANCHOR_SLACK + LMAX` of the window's outer end at `end`, the layer
+    /// boundary.
     pub(super) fn new(windows: &[&[u8]], end: End) -> Self {
         let mut occurrences = Vec::new();
         for (idx, window) in windows.iter().enumerate() {
@@ -231,6 +232,8 @@ pub(super) fn trim_unconserved_inner_end(
 /// Extends a conserved insert anchor toward the physical read end. Each round
 /// aligns the current consensus before voting on the preceding base, allowing
 /// indels to shift the supporting reads without shifting the consensus.
+/// Returns the bases added in front of the anchor, without the anchor, or
+/// nothing once the extension turns repetitive.
 pub(super) fn upstream_consensus(anchor: &[u8], windows: &[&[u8]]) -> Vec<u8> {
     let mut seq = anchor.to_vec();
     let mut searcher = crate::adapter::search::new_searcher_fwd();

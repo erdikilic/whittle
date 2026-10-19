@@ -103,9 +103,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `io::bam::BamSink::block_level` is removed, the `level` field of
   `BamSink::Blocks` is removed, `io::bam::encode_blocks` and
   `io::bam::quality_absent` are removed, `io::fastq::reader_from_bgzf`
-  returns its record iterator without a `Result`, and
+  returns its record iterator without a `Result`,
   `adapter::infer::InferredAdapter` drops `assembled_seq` and
-  `uncertain_bases`, since the trimming sequence spans the whole consensus.
+  `uncertain_bases`, since the trimming sequence spans the whole consensus,
+  and `mods::ModCode::Chebi` holds the digits of the identifier as written
+  (`Vec<u8>`) instead of a `u32`.
 - Quality trimming is selected with one method and one cutoff:
   `--quality-trim <ends|best-segment|segments|runs>` with `--quality-cutoff <PHRED>`,
   which is required with it, and `--min-low-quality-run <BASES>` for `runs`.
@@ -197,6 +199,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and a recorded span is trimmed only where a barcode sequence is
   found at it. Unverified spans are counted under
   `warnings.barcode_tag_unverified_reads`.
+- `-vv` traces the target call of every kept segment under `--targets`, with
+  the reason of an unassigned one, and the filter decision of every read of
+  a BAM run that copies records without trimming them. The per-offset
+  `Mirror` lines of adapter discovery are logged at trace instead of debug.
 
 ### Removed
 - `--trim-barcodes`. Barcode positions apply automatically with an adapter
@@ -452,6 +458,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Without `-c`, `--rejected-output` is compressed at the default level of its
   own format (4 for `.fastq.gz`, 6 for `.fastq.bgz` and BAM) instead of the
   main output's.
+- A `WHITTLE_LOG` that names only targets, such as `whittle::adapter=trace`,
+  logs every other target at the `-v`/`-vv` level instead of dropping its
+  errors, warnings and banner.
+- Errors name their source: a BAM record that fails to decode or rebuild
+  names its read, an error in a member of a BAM folder names the file, an
+  unreadable BAM header is named as such, and a tagged FASTQ record is named
+  by its read id without the aux fields of its header.
+- A highly degenerate `--targets` sequence is reported with a warning that
+  names it, as a highly degenerate `--adapter-fasta` entry is.
+- Tagged FASTQ input under `--tag-filter` logs the line that reports its
+  tagged headers, as a run without the filter does.
+- When the input `@PG` chain has a `PP` that names a missing record or forms
+  a cycle, the warning that whittle's `@PG` record was not added is logged.
+- `--input-format fastq-bgz` on a `.gz` path and `fastq-gz` on a `.bgz` path
+  are accepted without an extension warning, since bgzip writes BGZF under
+  `.gz` and the stream check refuses plain gzip under `fastq-bgz`.
+- The startup banner gives the size of a regular input file only, instead of
+  `(0 B)` for a pipe or process substitution.
+- The `--fastq-tags` warning names FASTQ output from BAM or tagged FASTQ
+  input as the case the flag applies to.
 
 ### Changed
 - Modification occurrences and signal boundaries are indexed once per read
@@ -462,9 +488,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adapter trimming handles partial adapters, classifies hits by position, and
   cleans up chimeric junctions. A rear adapter cut short by the read end, or a
   front adapter missing its first bases, is trimmed when at least 10 of its
-  bases align flush with the end; the first 10 bases must match exactly and
-  the error rate applies to the rest. A hit in the head zone trims the 5' end
-  and a hit in the tail zone the 3' end, whichever catalog entry matched.
+  bases align flush with the end; the error rate applies to the bases beyond
+  the first 9, so a 10-base overlap must match exactly. A hit in the head
+  zone trims the 5' end and a hit in the tail zone the 3' end, whichever
+  catalog entry matched.
   Every piece an interior excision creates is searched again at its new end,
   so a primer, barcode, or truncated adapter next to a junction is trimmed as
   at a physical read end, and an adapter remnant followed by up to 36

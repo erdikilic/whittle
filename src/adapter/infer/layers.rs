@@ -73,11 +73,12 @@ pub(super) fn background_windows<'a>(
 
 /// Advances each boundary past the innermost hit of `patterns`, on either
 /// strand, that starts within `ANCHOR_SLACK` bases of it, and with `repeat`
-/// past every further hit the window holds. With `eroded`, a pattern may
-/// hang off the boundary by up to its edit budget in overhang cost, as an
-/// eroded adapter does at the physical read end, with at least
-/// `MIN_OVERLAP` aligned bases. Only reads flagged in `active` are searched.
-/// Returns the reads whose boundary moved, or an empty vector when none did.
+/// past each further hit that starts within `ANCHOR_SLACK` of the depth
+/// reached. With `eroded`, a pattern may hang off the boundary by up to its
+/// edit budget in overhang cost, as an eroded adapter does at the physical
+/// read end, with at least `MIN_OVERLAP` aligned bases. Only reads flagged in
+/// `active` are searched. Returns the reads whose boundary moved, or an empty
+/// vector when none did.
 pub(super) fn advance_boundaries(
     sample: &[&[u8]],
     bounds: &mut Boundaries,
@@ -335,7 +336,7 @@ pub(super) fn symmetry_cut(
             opposite_end,
             MIRROR_ERROR_RATE * error_rate,
         );
-        tracing::debug!(sequence = %String::from_utf8_lossy(seq), offset, own_depth, present, depth, found, "Mirror");
+        tracing::trace!(sequence = %String::from_utf8_lossy(seq), offset, own_depth, present, depth, found, "Mirror");
         if found >= MIN_SUPPORT_WINDOWS.max(present / MIRROR_SUPPORT_DIVISOR) {
             if depth.abs_diff(own_depth.saturating_sub(offset)) <= SYMMETRY_TOLERANCE {
                 break;
