@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn quality_below_raw_mean_but_above_trimmed_insert_survives() {
         let mut cfg = test_cfg(1);
-        cfg.filter.qual_mode = QualMode::Arithmetic;
+        cfg.filter.qual_mode = QualMode::PhredMean;
         cfg.filter.min_qual = 30.0;
         cfg.trim.head = 4;
         // Original mean: 24.8. Cropping four Q2 bases leaves six Q40 bases.

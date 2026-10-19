@@ -130,7 +130,7 @@ fn tagged_fastq_matches_the_bam_path_on_every_trim() {
             "-l",
             "1",
         ],
-        vec!["--quality-trim", "best", "--quality-cutoff", "36"],
+        vec!["--quality-trim", "best-segment", "--quality-cutoff", "36"],
         vec!["--adapter-preset", "lsk114", "-H", "1"],
         vec!["--remove-tag", "kinetics,RG", "-T", "5"],
         vec!["--fastq-tags", "MM,ML,MN", "-H", "2"],

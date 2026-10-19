@@ -59,9 +59,9 @@ exceptions:
 - An interior hit splits only when the whole sequence aligns: a hit whose
   alignment leaves 10 or more bases to clip at its ends is dropped, as at a
   genomic primer site matched by an adapter assembled with its primer.
-- A sheet primer of `--split-by` splits a read only at a junction pair or
+- A sheet primer of `--targets` splits a read only at a junction pair or
   beside an interior adapter or barcode, whatever its role and whatever the
-  library; see [Primer split](#primer-split).
+  library; see [Targets](#targets).
 - The PCS114 UMI does not split: the SSP beside it splits a junction. It
   trims an end where it follows the SSP.
 - A primer or barcode splits only reads short enough that its exact matches
@@ -233,7 +233,7 @@ assembles it from eroded read ends, therefore splits only where the whole
 primer is present. Primers outside the catalog split alone at a whole
 interior hit in every library, within the interior chance bound, as the
 other roles do. Outside an amplicon library the partner requirement above
-stays, and `--adapter-report` is unaffected.
+stays, and `--adapter-discover-only` is unaffected.
 
 ## Adapter discovery
 
@@ -436,7 +436,7 @@ role: they trim ends and can excise interior junctions. Use
 `--adapter-ends-only` to suppress adapter splitting, or an explicit FASTA with
 `primer` in its headers to restrict primer matches to the ends.
 
-`--adapter-report` runs the same discovery and prints the sequences trimming would use,
+`--adapter-discover-only` runs the same discovery and prints the sequences trimming would use,
 together with their support, length, and catalog or supplied-FASTA annotations,
 then exits without writing records or a JSON summary. Catalog entries provide
 names only; their sequences do not choose or extend an inferred consensus.
@@ -506,19 +506,19 @@ decides, then the first in the order above. The binding sites group them:
 (16S_mix_R, 16S_Bor_R, 16S_Chl_R, 1492R), ITS1 (ITS1, ITS1_Fus, ITS1_Mal),
 ITS4 (ITS4, ITS4_Pyt), and ITS1F.
 
-## Primer split
+## Targets
 
-`--split-by` ([cli.md](cli.md#primer-split)) hands the adapter engine a
-sheet of targets, each a list of forward and a list of reverse primers.
-Each sheet primer joins the search set in the primer
-role: it is matched by sequence, or by reverse complement, to an existing
+`--targets` ([cli.md](cli.md#targets)) hands the adapter engine a sheet of
+targets, each a list of forward and a list of reverse sequences: primers,
+barcodes or adapters. Each sheet sequence joins the search set in the
+primer role, and this section calls it a sheet primer: it is matched by sequence, or by reverse complement, to an existing
 preset or FASTA entry and reused under that entry's name, or appended as a
 new entry when no match exists. An entry that matches a primer and the
 reverse complement of another (a target whose reverse primer is the reverse
 complement of its forward primer) reads into the insert in both
 orientations. Sheet primers are attached to the search set
 after presence detection or discovery has narrowed it, so they are always
-searched and can never be narrowed away. `--split-by` leaves the
+searched and can never be narrowed away. `--targets` leaves the
 amplicon-library judgement as the sampled reads gave it: it still decides
 whether a catalog marker primer outside the sheet splits alone, and it is
 not forced on.
@@ -569,7 +569,7 @@ so a primer that the adapter, flank and barcode push past the end zone, or
 that both end zones cover on a short read, is still the terminal primer of
 its end.
 
-Locating a split primer finds one hit per end, but the classifier needs to
+Locating a sheet primer finds one hit per end, but the classifier needs to
 know how every sheet primer, not only the one located, would score there.
 Rescoring aligns each sheet primer against the located locus, widened into
 a window sized to the longest sheet primer and clamped to the read, in the
@@ -585,13 +585,14 @@ keeps a window widened on both sides. The two ends' scores go to the
 classifier. For a target and strand, an end counts at the cheapest scored
 primer of the list the strand puts there, so the primer variants of one
 target never compete with each other. A primer of another key closer than
-`--split-lead` edits to a scored primer stands in for it at one edit more.
-An end that scored primers of other keys only, each within `--split-lead`
-of the penalty, may hold the target's primer at that penalty: the lowest
+`--target-margin` edits to a scored primer stands in for it at one edit
+more. An end that scored primers of other keys only, each within
+`--target-margin` of the penalty, may hold the target's primer at that
+penalty: the lowest
 budget rescoring applied at that end (terminal, or anchored at a locus
 found whole at a trim boundary) plus one, the same for every target. A
-primer that leads the penalty by the lead rules out every target that does
+primer that leads the penalty by the margin rules out every target that does
 not list it there. The classifier assigns the cheapest strand-consistent
-target only when it beats every other target by at least `--split-lead`
+target only when it beats every other target by at least `--target-margin`
 edits; a smaller margin, or a tie, is ambiguous rather than a guess. See
 [cli.md](cli.md#classification) for the calls.

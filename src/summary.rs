@@ -16,7 +16,7 @@ use crate::trim::QualityMethod;
 use crate::workflow::Stats;
 
 /// Incremented only when an existing field changes meaning or is removed.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 /// The `--summary-json` document for one run.
 #[derive(Debug, Serialize)]
@@ -37,9 +37,9 @@ pub struct Summary {
     bases: Bases,
     segments_dropped: SegmentsDropped,
     warnings: Warnings,
-    /// `--split-by` per-key counts; absent without `--split-by`.
+    /// `--targets` per-key counts; absent without `--targets`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    split: Option<SplitSummary>,
+    targets: Option<TargetsSummary>,
 }
 
 /// The run's resolved settings, after defaults and clamping. Reading these back,
@@ -52,18 +52,18 @@ struct Params {
     min_length: usize,
     /// `None` when `--max-length` was not given.
     max_length: Option<usize>,
-    min_qual: f64,
-    max_qual: f64,
+    min_quality: f64,
+    max_quality: f64,
     max_expected_errors: Option<f64>,
     min_gc: Option<f64>,
     max_gc: Option<f64>,
-    qual_mode: &'static str,
-    head_crop: usize,
-    tail_crop: usize,
+    quality_mode: &'static str,
+    trim_front: usize,
+    trim_tail: usize,
     /// `None` without `--quality-trim`.
     quality_trim: Option<QualityTrimParams>,
     update_moves: bool,
-    ordered: bool,
+    preserve_order: bool,
     /// Aux tags removed from every output record, sorted, with every
     /// `--remove-tag` group expanded.
     remove_tags: Vec<String>,
@@ -80,7 +80,7 @@ struct Params {
 /// The `--quality-trim` method and its settings.
 #[derive(Debug, Serialize)]
 struct QualityTrimParams {
-    /// `ends`, `best`, `segments`, or `runs`.
+    /// `ends`, `best-segment`, `segments`, or `runs`.
     method: &'static str,
     cutoff: u8,
     /// Only meaningful for `runs`; `None` otherwise.
@@ -103,12 +103,14 @@ struct AdapterParams {
     /// neither ran.
     count: usize,
     error_rate: f64,
-    end_size: usize,
+    /// `--adapter-end-search`: bases at each read end searched for a terminal
+    /// adapter.
+    end_search: usize,
     /// False under `--adapter-ends-only`.
     split: bool,
     /// Reads sampled for presence detection or inference; `0` disables detection.
     sample: usize,
-    /// `off`, `trim`, or `report`.
+    /// `off` or `discover`. `--adapter-discover-only` writes no summary.
     infer: &'static str,
 }
 
@@ -166,24 +168,24 @@ struct Warnings {
     barcode_tag_unverified_reads: u64,
 }
 
-/// The `split` object: `--split-by`'s resolved settings and per-key counts.
-/// Every sheet key appears in `keys`, in `Keys::names` order, zero counts
-/// included.
+/// The `targets` object: the resolved `--targets` settings and per-key
+/// counts. Every sheet key appears in `keys`, in `Keys::names` order, zero
+/// counts included.
 #[derive(Debug, Serialize)]
-struct SplitSummary {
-    /// The `--split-by` values as given, in order.
+struct TargetsSummary {
+    /// The `--targets` values as given, in order.
     spec: Vec<String>,
     /// `either`, `both`, `fwd`, or `rev`.
     require: &'static str,
     /// `trim` or `retain`.
     action: &'static str,
-    lead: usize,
+    margin: usize,
     keys: Vec<KeySummary>,
     unassigned: UnassignedSummary,
     /// Segments with two or more keys tied for cheapest, or none beating the
-    /// runner-up by `lead`.
+    /// runner-up by `margin`.
     ambiguous: u64,
-    /// Unassigned or ambiguous segments dropped by `--split-discard` rather
+    /// Unassigned or ambiguous segments dropped by `--target-discard` rather
     /// than written.
     discarded: u64,
 }
@@ -205,14 +207,14 @@ struct KeySummary {
 /// Unassigned segments, by reason.
 #[derive(Debug, Serialize)]
 struct UnassignedSummary {
-    no_primer: u64,
-    require: u64,
+    no_match: u64,
+    missing_end: u64,
     orientation: u64,
     length: u64,
 }
 
-impl SplitSummary {
-    /// Builds the `split` object from the resolved splitter, for its keys'
+impl TargetsSummary {
+    /// Builds the `targets` object from the resolved splitter, for its keys'
     /// names and its resolved settings, and its snapshotted counters.
     fn new(splitter: &Splitter, stats: &SplitStats) -> Self {
         let keys = splitter
@@ -231,15 +233,15 @@ impl SplitSummary {
                 minus: k.minus,
             })
             .collect();
-        SplitSummary {
+        TargetsSummary {
             spec: splitter.opts.spec.clone(),
             require: splitter.opts.rules.require.label(),
             action: splitter.opts.action.label(),
-            lead: splitter.opts.rules.lead,
+            margin: splitter.opts.rules.margin,
             keys,
             unassigned: UnassignedSummary {
-                no_primer: stats.unassigned[0],
-                require: stats.unassigned[1],
+                no_match: stats.unassigned[0],
+                missing_end: stats.unassigned[1],
                 orientation: stats.unassigned[2],
                 length: stats.unassigned[3],
             },
@@ -300,11 +302,11 @@ impl Summary {
                 barcode_tag_malformed_reads: stats.barcode_tag_malformed_reads,
                 barcode_tag_unverified_reads: stats.barcode_tag_unverified_reads,
             },
-            split: cfg
+            targets: cfg
                 .splitter
                 .as_deref()
                 .zip(stats.split.as_ref())
-                .map(|(splitter, split_stats)| SplitSummary::new(splitter, split_stats)),
+                .map(|(splitter, split_stats)| TargetsSummary::new(splitter, split_stats)),
         }
     }
 
@@ -332,14 +334,14 @@ impl Params {
             compression_level: cfg.compression_level,
             min_length: cfg.filter.min_length,
             max_length: (cfg.filter.max_length != usize::MAX).then_some(cfg.filter.max_length),
-            min_qual: cfg.filter.min_qual,
-            max_qual: cfg.filter.max_qual,
+            min_quality: cfg.filter.min_qual,
+            max_quality: cfg.filter.max_qual,
             max_expected_errors: cfg.filter.max_expected_errors,
             min_gc: cfg.filter.min_gc,
             max_gc: cfg.filter.max_gc,
-            qual_mode: cfg.filter.qual_mode.label(),
-            head_crop: cfg.trim.head,
-            tail_crop: cfg.trim.tail,
+            quality_mode: cfg.filter.qual_mode.label(),
+            trim_front: cfg.trim.head,
+            trim_tail: cfg.trim.tail,
             quality_trim: cfg.trim.quality.as_ref().map(|op| QualityTrimParams {
                 method: op.method.label(),
                 cutoff: op.cutoff,
@@ -349,7 +351,7 @@ impl Params {
                     .then_some(op.end_cutoff),
             }),
             update_moves: cfg.update_moves,
-            ordered: cfg.ordered,
+            preserve_order: cfg.ordered,
             remove_tags: cfg
                 .remove_tags
                 .tags()
@@ -375,7 +377,7 @@ impl Params {
                 configured: cfg.adapters_configured.unwrap_or(ac.adapters.len()),
                 count: ac.adapters.len(),
                 error_rate: ac.error_rate,
-                end_size: ac.end_size,
+                end_search: ac.end_size,
                 split: ac.split,
                 sample: cfg.adapter_sample,
                 infer: cfg.adapter_infer.label(),
@@ -480,12 +482,15 @@ mod tests {
             std::time::Duration::ZERO,
         );
         let v = value(&s);
-        assert_eq!(v["schema_version"], 2);
+        assert_eq!(v["schema_version"], 3);
         assert_eq!(v["tool"], "whittle");
         assert_eq!(v["params"]["threads"], 8);
         assert_eq!(v["params"]["min_length"], 500);
-        assert_eq!(v["params"]["qual_mode"], "mean");
-        assert_eq!(v["params"]["head_crop"], 20);
+        assert_eq!(v["params"]["quality_mode"], "mean");
+        assert_eq!(v["params"]["trim_front"], 20);
+        assert_eq!(v["params"]["trim_tail"], 20);
+        assert_eq!(v["params"]["min_quality"], 10.0);
+        assert_eq!(v["params"]["preserve_order"], false);
         assert_eq!(v["params"]["quality_trim"]["method"], "runs");
         assert_eq!(v["params"]["quality_trim"]["cutoff"], 9);
         assert_eq!(v["params"]["quality_trim"]["min_low_quality_run"], 50);
@@ -526,7 +531,7 @@ mod tests {
         assert_eq!(v["params"]["adapters"]["configured"], 124);
         assert_eq!(v["params"]["adapters"]["count"], 0);
         assert_eq!(v["params"]["adapters"]["error_rate"], 0.2);
-        assert_eq!(v["params"]["adapters"]["end_size"], 150);
+        assert_eq!(v["params"]["adapters"]["end_search"], 150);
         assert_eq!(v["params"]["adapters"]["split"], true);
         assert_eq!(v["params"]["adapters"]["sample"], 5_000);
         assert_eq!(v["params"]["adapters"]["infer"], "off");

@@ -8,31 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `--split-by <SPEC>` (repeatable) assigns every output read, or
-  chimera-split segment, to a primer target and tags it `wt:Z` with the
-  target, `unassigned` or `ambiguous`. Each `SPEC` adds a source, merged
-  into one sheet: an existing file path (a TSV sheet or annotated FASTA),
-  the preset `mab114`, or an inline target
-  `NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]`. A target holds a primer mix, a
-  list of forward and a list of reverse primers in which any forward primer
-  pairs with any reverse primer: comma-separated lists inline and in the
-  TSV `fwd` and `rev` cells, repeated `target=` and `end=` entries in a
-  FASTA sheet. The variants of one target never make a read ambiguous.
-  Further inline pairs begun by `,F:` or `,R:` form a pool of targets
-  `NAME.1`, `NAME.2`, ... in group `NAME`. The preset `mab114` holds the
-  SQK-MAB114.24 16S and ITS primer mixes under their ONT names. Split
-  primers are located and trimmed with the other primers of the adapter
-  search.
-  `--split-require` sets which end(s) need a located primer, `--split-lead`
-  the assignment margin, and `--split-action retain` keeps a located
-  primer instead of trimming it. An `-o` template holding `{target}`,
-  `{group}` or `{barcode}` writes each key to its own file; without one,
-  every record is tagged and written to one output. `--split-discard`
-  drops the `unassigned` or `ambiguous` bin instead of writing it.
-  Reported per key in the end-of-run log and as an additive `split` object
-  in `--summary-json`.
+- `--targets <SPEC>` (repeatable) assigns every output read, or
+  chimera-split segment, to a target and tags it `wt:Z` with the target,
+  `unassigned` or `ambiguous`. Each `SPEC` adds a source, merged into one
+  sheet: an existing file path (a TSV sheet or annotated FASTA), the preset
+  `mab114`, or an inline target `NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]`. A
+  target holds a list of forward and a list of reverse sequences located at
+  the segment ends, such as primers, barcodes or adapters, in which any
+  forward sequence pairs with any reverse sequence: comma-separated lists
+  inline and in the TSV `fwd` and `rev` cells, repeated `target=` and
+  `end=` entries in a FASTA sheet. The variants of one target, such as the
+  primers of a primer mix, never make a read ambiguous. Further inline
+  pairs begun by `,F:` or `,R:` form a pool of targets `NAME.1`, `NAME.2`,
+  ... in group `NAME`. The preset `mab114` holds the SQK-MAB114.24 16S and
+  ITS primer mixes under their ONT names. Sheet sequences are located and
+  trimmed with the primers of the adapter search.
+  `--target-require` sets which end(s) need a located sequence,
+  `--target-margin` the edit-cost margin of an assignment, and
+  `--target-action retain` keeps the located sequences instead of trimming
+  them. An `-o` template holding `{target}`, `{group}` or `{barcode}`
+  writes each key to its own file; without one, every record is tagged and
+  written to one output. `--target-discard` drops the `unassigned` or
+  `ambiguous` bin instead of writing it. Unassigned segments are counted
+  by reason: `no_match`, `missing_end`, `orientation` and `length`.
+  Reported per key in the end-of-run log and as an additive `targets`
+  object in `--summary-json`.
 - The catalog lists the twelve SQK-MAB114.24 primers as ONT ships them,
-  under their ONT names, for the `mab114` adapter preset and `--split-by
+  under their ONT names, for the `mab114` adapter preset and `--targets
   mab114`: the 16S mix `16S_mix_F`/`16S_mix_R` with its Borrelia, Chlamydia
   and Enterobacteriaceae variants, and the ITS mix `ITS1`/`ITS4` with its
   Fusarium, Malassezia and Pythium variants, in place of the classic 27F,
@@ -56,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   class each and of `MAB_rear` by one edit in two read-length classes. Every
   other budget outside the kit primers stays as that catalog sets it.
 - `--quality-trim segments` keeps every maximal scoring segment under the
-  modified Mott score of `best` (Ruzzo and Tompa 1999) instead of the best
+  modified Mott score of `best-segment` (Ruzzo and Tompa 1999) instead of the best
   one alone, so a read with a low-quality interior keeps both flanks.
   Segments scoring below 50 error-free bases are dropped; the kept segments
   are named, filtered and counted like the pieces of `runs`.
@@ -101,11 +103,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `io::bam::BamSink::block_level` is removed, and the `level` field of
   `BamSink::Blocks` is removed.
 - Quality trimming is selected with one method and one cutoff:
-  `--quality-trim <ends|best|segments|runs>` with `--quality-cutoff <PHRED>`,
+  `--quality-trim <ends|best-segment|segments|runs>` with `--quality-cutoff <PHRED>`,
   which is required with it, and `--min-low-quality-run <BASES>` for `runs`.
   `--trim-quality Q` becomes `--quality-trim ends --quality-cutoff Q`,
-  `--best-quality-segment Q` becomes `best`, `--split-quality Q` becomes
-  `runs`, and `--split-min-low-quality-bases N` becomes
+  `--best-quality-segment Q` becomes `best-segment`, `--split-quality Q`
+  becomes `runs`, and `--split-min-low-quality-bases N` becomes
   `--min-low-quality-run N`. The old spellings are not accepted. The summary
   JSON reports `params.quality_trim` with `method`, `cutoff` and
   `min_low_quality_run` in place of `params.quality_op`.
@@ -140,13 +142,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--update-signal-tags` is renamed `--update-moves`, after the ONT move
   table it maintains. The old spelling is not accepted.
 - `--remove-kinetics` is folded into `--remove-tag`, which now takes
-  comma-separated lists and the group names `kinetics`, `mods` and `signal`.
+  comma-separated lists and the group names `kinetics`, `mods` and `moves`
+  (`signal` is accepted for `moves`).
   The summary JSON drops `params.strip_kinetics` and moves to
   `schema_version` 2.
 - `--discover-adapters [trim|report]` is replaced by `--adapter-discover`
-  (discover and trim) and `--adapter-report` (print the discovered FASTA and
-  exit). `params.adapters.infer` in the summary JSON reads `off`, `discover`
-  or `report`.
+  (discover and trim) and `--adapter-discover-only` (print the discovered
+  FASTA and exit without trimming or writing reads). `-o`,
+  `--rejected-output` and `--summary-json` given with
+  `--adapter-discover-only` are reported with the startup banner, before
+  discovery runs. `params.adapters.infer` in the summary JSON reads `off` or
+  `discover`.
+- The `--quality-mode` value `arithmetic` is renamed `phred-mean` and the
+  `--quality-trim` method `best` is renamed `best-segment`; the old values
+  are not accepted. `--head-crop` and `--tail-crop` remain accepted for
+  `--trim-front` and `--trim-tail` but are no longer listed in `--help`.
+- The summary JSON names each parameter after its flag:
+  `params.min_quality`, `params.max_quality`, `params.quality_mode`,
+  `params.trim_front`, `params.trim_tail`, `params.preserve_order` and
+  `params.adapters.end_search` replace `min_qual`, `max_qual`,
+  `qual_mode`, `head_crop`, `tail_crop`, `ordered` and `end_size`, and the
+  file moves to `schema_version` 3.
 - `-t` bounds the working threads: BGZF input takes its decode workers out
   of the budget instead of adding them to the render pool.
 - BGZF blocks are compressed with one libdeflate compressor per thread,

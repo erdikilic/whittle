@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-\-max\-expected\-errors\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-quality\-trim\fR] [\fB\-\-quality\-cutoff\fR] [\fB\-\-min\-low\-quality\-run\fR] [\fB\-\-quality\-end\-cutoff\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-report\fR] [\fB\-\-split\-by\fR] [\fB\-\-split\-require\fR] [\fB\-\-split\-action\fR] [\fB\-\-split\-lead\fR] [\fB\-\-split\-discard\fR] [\fB\-h\fR|\fB\-\-help\fR]
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-\-max\-expected\-errors\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-quality\-trim\fR] [\fB\-\-quality\-cutoff\fR] [\fB\-\-min\-low\-quality\-run\fR] [\fB\-\-quality\-end\-cutoff\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-discover\-only\fR] [\fB\-\-targets\fR] [\fB\-\-target\-require\fR] [\fB\-\-target\-action\fR] [\fB\-\-target\-margin\fR] [\fB\-\-target\-discard\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH OPTIONS
@@ -20,7 +20,7 @@ Print version information and exit
 Input FASTQ\-family file, unaligned BAM, or directory; \- means stdin. Defaults to stdin
 .TP
 \fB\-o\fR, \fB\-\-output\fR \fI<PATH>\fR
-Output file, whose extension selects the format; \- means stdout. Defaults to stdout. Under \-\-split\-by, a path holding {target}, {group} or {barcode} is a template with one file per split key
+Output file, whose extension selects the format; \- means stdout. Defaults to stdout. Under \-\-targets, a path holding {target}, {group} or {barcode} is a template with one file per key
 .TP
 \fB\-\-input\-format\fR \fI<FORMAT>\fR
 Force the input format instead of detecting it from the path or stream
@@ -118,17 +118,17 @@ Minimum post\-trim segment quality under \-\-quality\-mode
 \fB\-Q\fR, \fB\-\-max\-quality\fR \fI<PHRED>\fR [default: 1000]
 Maximum post\-trim segment quality under \-\-quality\-mode
 .TP
-\fB\-\-max\-expected\-errors\fR \fI<E>\fR
+\fB\-\-max\-expected\-errors\fR \fI<ERRORS>\fR
 Maximum expected errors per output segment: the sum of its per\-base error probabilities 10^(\-Q/10) after trimming (Edgar and Flyvbjerg 2015). A total per segment rather than a rate, for amplicons of a fixed length; a non\-negative number
 .TP
 \fB\-g\fR, \fB\-\-min\-gc\fR \fI<FRACTION>\fR
 Minimum post\-trim GC fraction (0 to 1; 0.4 means 40%)
 .TP
-\fB\-\-tag\-filter\fR \fI<EXPR>\fR
-Keep only reads whose aux tags satisfy EXPR, a samtools\-style expression over [tag] values, for example \*(Aq[er]!="unblock_mux_change"\*(Aq or \*(Aq[qs]>=10 && [dx]==1\*(Aq. Repeatable; every expression must hold. Applied before adapter discovery and trimming. BAM or tagged FASTQ input
-.TP
 \fB\-G\fR, \fB\-\-max\-gc\fR \fI<FRACTION>\fR
 Maximum post\-trim GC fraction (0 to 1; 0.4 means 40%)
+.TP
+\fB\-\-tag\-filter\fR \fI<EXPR>\fR
+Keep only reads whose aux tags satisfy EXPR, a samtools\-style expression over [tag] values, for example \*(Aq[er]!="unblock_mux_change"\*(Aq or \*(Aq[qs]>=10 && [dx]==1\*(Aq. Repeatable; every expression must hold. Applied before adapter discovery and trimming. BAM or tagged FASTQ input
 .TP
 \fB\-m\fR, \fB\-\-quality\-mode\fR \fI<MODE>\fR [default: mean]
 Quality calculation of the mean\-quality filter, \-\-min\-quality and \-\-max\-quality, on each output segment. \-\-quality\-trim and \-\-max\-expected\-errors use per\-base qualities and are unaffected; a recomputed dorado qs tag is always the error\-probability mean
@@ -140,7 +140,7 @@ Quality calculation of the mean\-quality filter, \-\-min\-quality and \-\-max\-q
 .IP \(bu 2
 mean: Mean error probability, expressed as a Phred score
 .IP \(bu 2
-arithmetic: Mean of the Phred scores
+phred\-mean: Arithmetic mean of the Phred scores
 .IP \(bu 2
 median: Median Phred score
 .RE
@@ -162,7 +162,7 @@ Quality trimming of each adapter\-derived segment after the fixed crop, scored a
 .IP \(bu 2
 ends: Trim each end up to the first base at or above the cutoff
 .IP \(bu 2
-best: Keep the single best segment under the modified Mott score
+best\-segment: Keep the single best segment under the modified Mott score
 .IP \(bu 2
 segments: Keep every maximal segment under the modified Mott score
 .IP \(bu 2
@@ -195,20 +195,20 @@ Bases at each read end searched for a terminal adapter. Requires an adapter sour
 Trim adapters at read ends only; never split on interior adapters. Does not disable quality splitting
 .TP
 \fB\-\-adapter\-sample\-reads\fR \fI<COUNT>\fR
-Reads inspected for preset presence or adapter discovery; at least 100. 0 disables presence detection and uses the full preset; discovery requires sampling. Ignored with \-\-adapter\-fasta unless discovering adapters. Defaults to 2000 with a preset and 40000 under \-\-adapter\-discover or \-\-adapter\-report. Sampling is also bounded by 256 MiB of payload and 64 Mi bases
+Reads inspected for preset presence or adapter discovery; at least 100. 0 disables presence detection and uses the full preset; discovery requires sampling. Ignored with \-\-adapter\-fasta unless discovering adapters. Defaults to 2000 with a preset and 40000 under \-\-adapter\-discover or \-\-adapter\-discover\-only. Sampling is also bounded by 256 MiB of payload and 64 Mi bases
 .TP
 \fB\-\-adapter\-discover\fR
 Discover adapters, barcodes and primers de novo in layers from each read end and trim them. A preset or FASTA is trimmed first and discovery continues beyond it. Enables adapter trimming
 .TP
-\fB\-\-adapter\-report\fR
-Run the same discovery as \-\-adapter\-discover, print the discovered FASTA to stdout and exit without read output or a JSON summary
-.SH SPLIT
+\fB\-\-adapter\-discover\-only\fR
+Run the same discovery as \-\-adapter\-discover, print the discovered FASTA to stdout and exit. No reads are trimmed or written and no JSON summary is written; \-o, \-\-rejected\-output and \-\-summary\-json are ignored with a warning
+.SH TARGETS
 .TP
-\fB\-\-split\-by\fR \fI<SPEC>\fR
-Assign every output read or segment to a primer target from the primers at its ends and tag it wt:Z with the target, unassigned or ambiguous. Repeatable; each SPEC adds a source, merged into one sheet. SPEC is an existing sheet file (TSV or annotated FASTA), the preset mab114 (also enables \-\-adapter\-preset mab114 unless \-a or \-\-adapter\-preset is given), or an inline target NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]. A target holds a primer mix: any of its forward primers pairs with any of its reverse primers. Further pairs after a comma (,F:...:R:...) form a pool of targets NAME.1, NAME.2, ... in group NAME. Split primers are trimmed with the adapters. An \-o template such as out/{barcode}.{target}.fastq.gz writes each key to its own file: {target} or {group} names the key (unassigned and ambiguous included), {barcode} the BC:Z barcode call (unclassified without one); without a placeholder every read goes to the one output
+\fB\-\-targets\fR \fI<SPEC>\fR
+Assign every output read or segment to a target from the sequences at its ends and tag it wt:Z with the target, unassigned or ambiguous. A target holds a list of forward and a list of reverse sequences, such as primers, barcodes or adapters; any forward sequence pairs with any reverse sequence. Repeatable; each SPEC adds a source, merged into one sheet. SPEC is an existing sheet file (TSV or annotated FASTA), the preset mab114 (also enables \-\-adapter\-preset mab114 unless \-a or \-\-adapter\-preset is given), or an inline target NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]. Further pairs after a comma (,F:...:R:...) form a pool of targets NAME.1, NAME.2, ... in group NAME. The located sequences are trimmed with the adapters, or kept under \-\-target\-action retain. An \-o template such as out/{barcode}.{target}.fastq.gz writes each key to its own file: {target} or {group} names the key (unassigned and ambiguous included), {barcode} the BC:Z barcode call (unclassified without one); without a placeholder every read goes to the one output
 .TP
-\fB\-\-split\-require\fR \fI<RULE>\fR [default: either]
-Which read ends need a located primer for an assignment
+\fB\-\-target\-require\fR \fI<RULE>\fR [default: either]
+Which ends of a segment need a located sequence for an assignment
 .br
 
 .br
@@ -217,15 +217,15 @@ Which read ends need a located primer for an assignment
 .IP \(bu 2
 either: Either end alone is enough
 .IP \(bu 2
-both: Both ends must carry a located primer
+both: Both ends must carry a located sequence
 .IP \(bu 2
-fwd: The forward end must carry a located primer
+fwd: The forward end must carry a located sequence
 .IP \(bu 2
-rev: The reverse end must carry a located primer
+rev: The reverse end must carry a located sequence
 .RE
 .TP
-\fB\-\-split\-action\fR \fI<ACTION>\fR [default: trim]
-Whether located split primers are trimmed or kept in the output
+\fB\-\-target\-action\fR \fI<ACTION>\fR [default: trim]
+Whether the located forward and reverse sequences are trimmed or kept in the output
 .br
 
 .br
@@ -234,13 +234,13 @@ Whether located split primers are trimmed or kept in the output
 .IP \(bu 2
 trim: Keep the piece as trimmed
 .IP \(bu 2
-retain: Keep the piece widened over its located primer loci
+retain: Keep the piece widened over its located sequences
 .RE
 .TP
-\fB\-\-split\-lead\fR \fI<N>\fR [default: 2]
-Minimum edit\-cost lead of the best target over the best different target; a smaller lead is ambiguous
+\fB\-\-target\-margin\fR \fI<EDITS>\fR [default: 2]
+Minimum edit\-cost margin of the best target over the best different target; a smaller margin is ambiguous
 .TP
-\fB\-\-split\-discard\fR \fI<BINS>\fR
+\fB\-\-target\-discard\fR \fI<BINS>\fR
 Drop these bins instead of writing them, comma\-separated: unassigned, ambiguous
 .br
 
@@ -250,7 +250,7 @@ Drop these bins instead of writing them, comma\-separated: unassigned, ambiguous
 .IP \(bu 2
 unassigned: Reads and segments no target is assigned to
 .IP \(bu 2
-ambiguous: Reads and segments with two targets within \-\-split\-lead
+ambiguous: Reads and segments with two targets within \-\-target\-margin
 .RE
 .SH EXTRA
 Examples:

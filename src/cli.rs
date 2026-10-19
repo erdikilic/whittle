@@ -33,8 +33,8 @@ struct Cli {
     #[arg(short = 'i', long, value_name = "PATH", help_heading = "Setup")]
     input: Option<PathBuf>,
     /// Output file, whose extension selects the format; - means stdout.
-    /// Defaults to stdout. Under --split-by, a path holding {target},
-    /// {group} or {barcode} is a template with one file per split key.
+    /// Defaults to stdout. Under --targets, a path holding {target},
+    /// {group} or {barcode} is a template with one file per key.
     #[arg(short = 'o', long, value_name = "PATH", help_heading = "Setup")]
     output: Option<PathBuf>,
     /// Force the input format instead of detecting it from the path or stream.
@@ -158,13 +158,16 @@ struct Cli {
     /// length; a non-negative number.
     #[arg(
         long = "max-expected-errors",
-        value_name = "E",
+        value_name = "ERRORS",
         help_heading = "Filtering"
     )]
     max_expected_errors: Option<f64>,
     /// Minimum post-trim GC fraction (0 to 1; 0.4 means 40%).
     #[arg(short = 'g', long, value_name = "FRACTION", help_heading = "Filtering")]
     min_gc: Option<f64>,
+    /// Maximum post-trim GC fraction (0 to 1; 0.4 means 40%).
+    #[arg(short = 'G', long, value_name = "FRACTION", help_heading = "Filtering")]
+    max_gc: Option<f64>,
     /// Keep only reads whose aux tags satisfy EXPR, a samtools-style
     /// expression over [tag] values, for example '[er]!="unblock_mux_change"'
     /// or '[qs]>=10 && [dx]==1'. Repeatable; every expression must hold.
@@ -172,9 +175,6 @@ struct Cli {
     /// input.
     #[arg(long = "tag-filter", value_name = "EXPR", help_heading = "Filtering")]
     tag_filter: Vec<String>,
-    /// Maximum post-trim GC fraction (0 to 1; 0.4 means 40%).
-    #[arg(short = 'G', long, value_name = "FRACTION", help_heading = "Filtering")]
-    max_gc: Option<f64>,
     /// Quality calculation of the mean-quality filter, --min-quality and
     /// --max-quality, on each output segment. --quality-trim and
     /// --max-expected-errors use per-base qualities and are unaffected; a
@@ -195,7 +195,7 @@ struct Cli {
     #[arg(
         short = 'H',
         long = "trim-front",
-        visible_alias = "head-crop",
+        alias = "head-crop",
         value_name = "BASES",
         default_value_t = 0,
         help_heading = "Trimming"
@@ -207,7 +207,7 @@ struct Cli {
     #[arg(
         short = 'T',
         long = "trim-tail",
-        visible_alias = "tail-crop",
+        alias = "tail-crop",
         value_name = "BASES",
         default_value_t = 0,
         help_heading = "Trimming"
@@ -299,7 +299,7 @@ struct Cli {
     /// 0 disables presence detection and uses the full preset; discovery
     /// requires sampling. Ignored with --adapter-fasta unless discovering
     /// adapters. Defaults to 2000 with a preset and 40000 under
-    /// --adapter-discover or --adapter-report.
+    /// --adapter-discover or --adapter-discover-only.
     /// Sampling is also bounded by 256 MiB of payload and 64 Mi bases.
     #[arg(
         long = "adapter-sample-reads",
@@ -313,80 +313,84 @@ struct Cli {
     #[arg(
         long = "adapter-discover",
         help_heading = "Adapter trimming",
-        conflicts_with = "adapter_report"
+        conflicts_with = "adapter_discover_only"
     )]
     adapter_discover: bool,
     /// Run the same discovery as --adapter-discover, print the discovered
-    /// FASTA to stdout and exit without read output or a JSON summary.
-    #[arg(long = "adapter-report", help_heading = "Adapter trimming")]
-    adapter_report: bool,
+    /// FASTA to stdout and exit. No reads are trimmed or written and no JSON
+    /// summary is written; -o, --rejected-output and --summary-json are
+    /// ignored with a warning.
+    #[arg(long = "adapter-discover-only", help_heading = "Adapter trimming")]
+    adapter_discover_only: bool,
 
-    /// Assign every output read or segment to a primer target from the
-    /// primers at its ends and tag it wt:Z with the target, unassigned or
-    /// ambiguous. Repeatable; each SPEC adds a source, merged into one
+    /// Assign every output read or segment to a target from the sequences at
+    /// its ends and tag it wt:Z with the target, unassigned or ambiguous. A
+    /// target holds a list of forward and a list of reverse sequences, such
+    /// as primers, barcodes or adapters; any forward sequence pairs with any
+    /// reverse sequence. Repeatable; each SPEC adds a source, merged into one
     /// sheet. SPEC is an existing sheet file (TSV or annotated FASTA), the
     /// preset mab114 (also enables --adapter-preset mab114 unless -a or
     /// --adapter-preset is given), or an inline target
-    /// NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]. A target holds a primer mix:
-    /// any of its forward primers pairs with any of its reverse primers.
-    /// Further pairs after a comma (,F:...:R:...) form a pool of targets
-    /// NAME.1, NAME.2, ... in group NAME. Split primers are
-    /// trimmed with the adapters. An -o template such as
+    /// NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]. Further pairs after a comma
+    /// (,F:...:R:...) form a pool of targets NAME.1, NAME.2, ... in group
+    /// NAME. The located sequences are trimmed with the adapters, or kept
+    /// under --target-action retain. An -o template such as
     /// out/{barcode}.{target}.fastq.gz writes each key to its own file:
     /// {target} or {group} names the key (unassigned and ambiguous
     /// included), {barcode} the BC:Z barcode call (unclassified without
     /// one); without a placeholder every read goes to the one output.
-    #[arg(long = "split-by", value_name = "SPEC", help_heading = "Split")]
-    split_by: Vec<String>,
-    /// Which read ends need a located primer for an assignment.
+    #[arg(long = "targets", value_name = "SPEC", help_heading = "Targets")]
+    targets: Vec<String>,
+    /// Which ends of a segment need a located sequence for an assignment.
     #[arg(
-        long = "split-require",
+        long = "target-require",
         value_enum,
         value_name = "RULE",
         default_value_t = Require::Either,
-        requires = "split_by",
-        help_heading = "Split"
+        requires = "targets",
+        help_heading = "Targets"
     )]
-    split_require: Require,
-    /// Whether located split primers are trimmed or kept in the output.
+    target_require: Require,
+    /// Whether the located forward and reverse sequences are trimmed or kept
+    /// in the output.
     #[arg(
-        long = "split-action",
+        long = "target-action",
         value_enum,
         value_name = "ACTION",
         default_value_t = Action::Trim,
-        requires = "split_by",
-        help_heading = "Split"
+        requires = "targets",
+        help_heading = "Targets"
     )]
-    split_action: Action,
-    /// Minimum edit-cost lead of the best target over the best different
-    /// target; a smaller lead is ambiguous.
+    target_action: Action,
+    /// Minimum edit-cost margin of the best target over the best different
+    /// target; a smaller margin is ambiguous.
     #[arg(
-        long = "split-lead",
-        value_name = "N",
+        long = "target-margin",
+        value_name = "EDITS",
         default_value_t = 2,
-        requires = "split_by",
-        help_heading = "Split"
+        requires = "targets",
+        help_heading = "Targets"
     )]
-    split_lead: usize,
+    target_margin: usize,
     /// Drop these bins instead of writing them, comma-separated: unassigned,
     /// ambiguous.
     #[arg(
-        long = "split-discard",
+        long = "target-discard",
         value_enum,
         value_name = "BINS",
         value_delimiter = ',',
-        requires = "split_by",
-        help_heading = "Split"
+        requires = "targets",
+        help_heading = "Targets"
     )]
-    split_discard: Vec<SplitBin>,
+    target_discard: Vec<TargetBin>,
 }
 
-/// A `--split-discard` bin.
+/// A `--target-discard` bin.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
-enum SplitBin {
+enum TargetBin {
     /// Reads and segments no target is assigned to.
     Unassigned,
-    /// Reads and segments with two targets within --split-lead.
+    /// Reads and segments with two targets within --target-margin.
     Ambiguous,
 }
 
@@ -405,7 +409,8 @@ Examples:
 const DEFAULT_ADAPTER_ERROR_RATE: f64 = 0.2;
 /// The default `--adapter-end-search`.
 const DEFAULT_ADAPTER_END_SIZE: usize = 150;
-/// The default `--adapter-sample-reads` under `--adapter-discover` and `--adapter-report`.
+/// The default `--adapter-sample-reads` under `--adapter-discover` and
+/// `--adapter-discover-only`.
 const DEFAULT_INFER_SAMPLE: usize = 40_000;
 /// The default `--adapter-sample-reads` for preset presence detection.
 const DEFAULT_PRESET_SAMPLE: usize = 2_000;
@@ -460,7 +465,7 @@ pub fn parse() -> anyhow::Result<Config> {
         _ => None,
     };
 
-    let cfg = Config {
+    let mut cfg = Config {
         io: IoConfig {
             input: c.input,
             output: c.output,
@@ -507,6 +512,18 @@ pub fn parse() -> anyhow::Result<Config> {
         split_search,
         splitter: None,
     };
+
+    // Discover-only inference prints the discovered FASTA and writes no
+    // records, so every artifact flag is reported with the banner, before
+    // discovery runs.
+    if cfg.adapter_infer.is_discover_only() {
+        let ignored: Vec<&'static str> = cfg.write_targets().map(|(flag, _)| flag).collect();
+        for flag in ignored {
+            cfg.advisories.push(Advisory::warn(format!(
+                "{flag} is ignored under --adapter-discover-only, which writes no records"
+            )));
+        }
+    }
 
     // Only an explicit `--input-format` or a known extension decides the input
     // format here; a stream or an extensionless path is classified by `run`,
@@ -634,8 +651,8 @@ fn resolve_quality(c: &Cli) -> anyhow::Result<Option<QualityOp>> {
 /// Resolves the de novo inference mode and checks it against the other
 /// adapter sources.
 fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<AdapterInfer> {
-    let adapter_infer = if c.adapter_report {
-        AdapterInfer::Report
+    let adapter_infer = if c.adapter_discover_only {
+        AdapterInfer::DiscoverOnly
     } else if c.adapter_discover {
         AdapterInfer::Discover
     } else {
@@ -643,12 +660,12 @@ fn resolve_infer(c: &Cli, advisories: &mut Vec<Advisory>) -> anyhow::Result<Adap
     };
 
     // A FASTA or preset supplied with inference is trimmed first, and
-    // inference continues from the boundary those sequences leave. Report
-    // mode names discovered adapters against the built-in catalog and the
-    // supplied FASTA (see `infer::discover`).
-    if adapter_infer.is_report() && c.adapter_fasta.is_some() {
+    // inference continues from the boundary those sequences leave.
+    // Discover-only mode names discovered adapters against the built-in
+    // catalog and the supplied FASTA (see `infer::discover`).
+    if adapter_infer.is_discover_only() && c.adapter_fasta.is_some() {
         advisories.push(Advisory::info(
-            "--adapter-report with --adapter-fasta: discovered adapters are named \
+            "--adapter-discover-only with --adapter-fasta: discovered adapters are named \
              against the built-in adapter catalog and the supplied FASTA",
         ));
     }
@@ -667,7 +684,8 @@ fn resolve_adapters(
 ) -> anyhow::Result<Option<crate::adapter::AdapterConfig>> {
     // Preset and FASTA sequences form the known set. Under inference they are
     // trimmed first and also name the discoveries; `infer::discover` looks up
-    // the built-in catalog itself. Report mode exits before any trimming.
+    // the built-in catalog itself. Discover-only mode exits before any
+    // trimming.
     let mut adapter_seqs: Vec<crate::adapter::Adapter> = Vec::new();
     if let Some(kits) = preset_kits(c)? {
         adapter_seqs.extend(crate::adapter::preset::preset(&kits));
@@ -685,10 +703,10 @@ fn resolve_adapters(
         adapter_seqs.extend(from_fasta);
     }
 
-    // `--split-by` searches its primers with the adapter settings, so the
+    // `--targets` searches its sequences with the adapter settings, so the
     // tuning flags apply to it without another source.
     if adapter_seqs.is_empty() && adapter_infer == AdapterInfer::Off {
-        if c.split_by.is_empty() {
+        if c.targets.is_empty() {
             require_adapter_source(c)?;
             if c.adapter_ends_only {
                 advisories.push(Advisory::warn(
@@ -698,7 +716,7 @@ fn resolve_adapters(
             }
         } else if c.adapter_sample.is_some() {
             advisories.push(Advisory::info(
-                "--adapter-sample-reads has no effect with --split-by alone (presence detection \
+                "--adapter-sample-reads has no effect with --targets alone (presence detection \
                  applies to --adapter-preset, and sampling to --adapter-discover)",
             ));
         }
@@ -735,31 +753,31 @@ fn search_config(
     })
 }
 
-/// Resolves `--split-by` and its options, or `None` without `--split-by`:
+/// Resolves `--targets` and its options, or `None` without `--targets`:
 /// loads every given value, merges them into one sheet (`Sheet::load_all`),
-/// and validates it against `--split-require`. A `mab114` source also
+/// and validates it against `--target-require`. A `mab114` source also
 /// selects `--adapter-preset mab114` when neither `-a` nor
 /// `--adapter-preset` is given; a sheet file or inline target enables no
 /// adapters. A `-o` path holding placeholders is the output template, whose
 /// key placeholder sets the key level (`{target}` over `{group}`) and whose
 /// placeholders require every sheet name they take to be one path
 /// component; without one the run is tag-only with one key per target and
-/// names are unrestricted. Output placeholders without `--split-by` are an
+/// names are unrestricted. Output placeholders without `--targets` are an
 /// error.
 fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
-    if c.split_by.is_empty() {
+    if c.targets.is_empty() {
         if let Some(out) = c.output.as_deref()
             && Template::has_placeholder(out)
         {
             anyhow::bail!(
-                "-o {}: the placeholders {{target}}, {{group}} and {{barcode}} name split \
-                 outputs and require --split-by",
+                "-o {}: the placeholders {{target}}, {{group}} and {{barcode}} name target \
+                 outputs and require --targets",
                 out.display()
             );
         }
         return Ok(None);
     }
-    let specs = c.split_by.clone();
+    let specs = c.targets.clone();
     let template = match c.output.as_deref() {
         Some(out) => Template::parse(out)?,
         None => None,
@@ -770,7 +788,7 @@ fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
         .filter(|path| path.is_file())
         .collect();
     let sheet = Sheet::load_all(&specs)?;
-    sheet.validate(c.split_require)?;
+    sheet.validate(c.target_require)?;
     if let Some(template) = &template {
         template.check_names(&sheet)?;
     }
@@ -787,12 +805,12 @@ fn resolve_split(c: &mut Cli) -> anyhow::Result<Option<SplitOptions>> {
         sheet,
         level: template.as_ref().map_or(KeyLevel::Target, Template::key),
         rules: Rules {
-            require: c.split_require,
-            lead: c.split_lead,
+            require: c.target_require,
+            margin: c.target_margin,
         },
-        action: c.split_action,
-        discard_unassigned: c.split_discard.contains(&SplitBin::Unassigned),
-        discard_ambiguous: c.split_discard.contains(&SplitBin::Ambiguous),
+        action: c.target_action,
+        discard_unassigned: c.target_discard.contains(&TargetBin::Unassigned),
+        discard_ambiguous: c.target_discard.contains(&TargetBin::Ambiguous),
         spec: specs,
         sources,
         template,
@@ -1040,6 +1058,12 @@ mod tests {
             "--adapter-sample",
             "--adapter-infer",
             "--adapter-infer-policy",
+            "--adapter-report",
+            "--split-by",
+            "--split-require",
+            "--split-action",
+            "--split-lead",
+            "--split-discard",
         ] {
             let error = Cli::try_parse_from(["whittle", flag]).unwrap_err();
             assert_eq!(
@@ -1053,10 +1077,23 @@ mod tests {
     /// The two discovery modes are exclusive, so asking for both is a parse
     /// error rather than a silent choice.
     #[test]
-    fn adapter_discover_and_report_conflict() {
+    fn adapter_discover_and_discover_only_conflict() {
         let error =
-            Cli::try_parse_from(["whittle", "--adapter-discover", "--adapter-report"]).unwrap_err();
+            Cli::try_parse_from(["whittle", "--adapter-discover", "--adapter-discover-only"])
+                .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// The renamed crop spellings stay accepted without appearing in `--help`.
+    #[test]
+    fn crop_aliases_parse_and_are_hidden() {
+        let c = Cli::try_parse_from(["whittle", "--head-crop", "3", "--tail-crop", "4"]).unwrap();
+        assert_eq!((c.head_crop, c.tail_crop), (3, 4));
+        let help = command().render_long_help().to_string();
+        assert!(
+            !help.contains("head-crop") && !help.contains("tail-crop"),
+            "{help}"
+        );
     }
 
     /// Help text quotes the matcher's minimum pattern length and the detection

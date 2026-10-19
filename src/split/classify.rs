@@ -92,9 +92,9 @@ pub enum Ends {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unassigned {
     /// Neither end had a score.
-    NoPrimer,
+    NoMatch,
     /// A target matched, but not at the end(s) `Rules::require` needs.
-    Require,
+    MissingEnd,
     /// A target's primer scored at both ends, so no strand is consistent.
     Orientation,
     /// The assigned target's `len` window excludes the segment length.
@@ -105,8 +105,8 @@ impl Unassigned {
     /// The wording used for this reason in the report and the `wt:Z` tag.
     pub fn label(self) -> &'static str {
         match self {
-            Unassigned::NoPrimer => "no_primer",
-            Unassigned::Require => "require",
+            Unassigned::NoMatch => "no_match",
+            Unassigned::MissingEnd => "missing_end",
             Unassigned::Orientation => "orientation",
             Unassigned::Length => "length",
         }
@@ -132,18 +132,18 @@ pub enum Call {
     /// Not assigned, for the given reason.
     Unassigned(Unassigned),
     /// Two or more keys tied for cheapest, or none beat the runner-up by
-    /// `Rules::lead`.
+    /// `Rules::margin`.
     Ambiguous,
 }
 
-/// The end rule and lead margin `classify` applies.
+/// The end rule and margin `classify` applies.
 #[derive(Clone, Copy, Debug)]
 pub struct Rules {
     /// Which end(s) a target needs a located primer at.
     pub require: Require,
-    /// Minimum cost lead the best key needs over the best different key to
+    /// Minimum cost margin the best key needs over the best different key to
     /// be assigned rather than ambiguous.
-    pub lead: usize,
+    pub margin: usize,
 }
 
 /// Facts `classify` weighs a used end with besides its scores: the keys
@@ -154,7 +154,7 @@ pub struct Bounds {
     /// `keys[p]` lists the keys whose targets name primer `p`.
     keys: Vec<Vec<usize>>,
     /// `close[p]` lists each primer of a different key whose IUPAC edit
-    /// distance to `p` is below the lead (`Sheet::close_pairs_by`).
+    /// distance to `p` is below the margin (`Sheet::close_pairs_by`).
     close: Vec<Vec<usize>>,
     /// The cost a role primer that did not score counts at an end rescored
     /// at the terminal budgets: the lowest terminal budget of the sheet's
@@ -170,11 +170,11 @@ impl Bounds {
     /// Builds the bounds of `sheet` classified into `keys`, with `budget`
     /// and `anchored` the terminal and anchored rescoring budgets of each
     /// sheet primer (`Scorer::budgets`, `Scorer::anchored_budgets`) and
-    /// `lead` the lead the classifier applies.
+    /// `margin` the margin the classifier applies.
     pub fn new(
         sheet: &Sheet,
         keys: &Keys,
-        lead: usize,
+        margin: usize,
         budget: &[usize],
         anchored: &[usize],
     ) -> Bounds {
@@ -189,7 +189,7 @@ impl Bounds {
             }
         }
         let mut close: Vec<Vec<usize>> = vec![Vec::new(); n];
-        let pairs = sheet.close_pairs_by(lead, |i, j| keys.of_target[i] == keys.of_target[j]);
+        let pairs = sheet.close_pairs_by(margin, |i, j| keys.of_target[i] == keys.of_target[j]);
         for (a, b, _) in pairs {
             close[a].push(b);
             close[b].push(a);
@@ -211,7 +211,7 @@ struct Evidence<'a> {
     /// The scores returned at this end, each within its primer's budget.
     scored: &'a [Score],
     /// For each scored primer, every close primer of a different key at the
-    /// scored cost plus one: the two cannot be told apart at the lead, so the
+    /// scored cost plus one: the two cannot be told apart at the margin, so the
     /// hit of either stands for both, and the primer that scored keeps a
     /// one-edit preference.
     close: Vec<Score>,
@@ -257,7 +257,7 @@ enum Fit {
     /// scored.
     Matched { cost: usize, scored: bool },
     /// The end scored a primer of another key, none of the target's own,
-    /// and nothing that leads a primer that did not score by the lead, so
+    /// and nothing that leads a primer that did not score by the margin, so
     /// the role primer may sit there beyond its budget: it counts at the
     /// end's penalty (`Evidence::penalty`), which every target shares.
     Penalised(usize),
@@ -284,12 +284,12 @@ impl Fit {
 /// so the variants of one list never compete with each other. Otherwise the
 /// end is penalised when `role` is not empty, the end scored a primer of
 /// another key and no primer of `other`, and every score there is within
-/// `lead` of the end's penalty (`cost + lead > penalty`): no scored primer
-/// leads a role primer that did not score by the lead, so the end may hold
+/// `margin` of the end's penalty (`cost + margin > penalty`): no scored primer
+/// leads a role primer that did not score by the margin, so the end may hold
 /// the role primer beside a near-identical primer of another key. Every
 /// other case vetoes the target on this strand: a scored primer of `other`
 /// places the target's own primer at the wrong end, a primer that leads by
-/// the lead names another target there, and scores of the target's key
+/// the margin names another target there, and scores of the target's key
 /// alone leave the end to the targets that list them.
 fn fit(
     end: &Evidence,
@@ -297,7 +297,7 @@ fn fit(
     other: &[usize],
     key: usize,
     bounds: &Bounds,
-    lead: usize,
+    margin: usize,
 ) -> Fit {
     if !end.used() {
         return Fit::Unused;
@@ -321,8 +321,8 @@ fn fit(
         .scored
         .iter()
         .any(|s| bounds.keys[s.primer].iter().any(|&k| k != key));
-    let within_lead = end.scored.iter().all(|s| s.cost + lead > end.penalty);
-    if !role.is_empty() && !own && foreign && within_lead {
+    let within_margin = end.scored.iter().all(|s| s.cost + margin > end.penalty);
+    if !role.is_empty() && !own && foreign && within_margin {
         Fit::Penalised(end.penalty)
     } else {
         Fit::Vetoed
@@ -411,10 +411,10 @@ pub fn classify(
 /// compete only when no key has a candidate matched at every used end. The
 /// cheapest competing key is assigned when its candidate has a role primer
 /// that scored, not only one a close primer stands for, and it beats every
-/// other competing key by at least `rules.lead`; two keys tying for cheapest
-/// are always ambiguous, whatever the lead. With no kept candidate at all: a
+/// other competing key by at least `rules.margin`; two keys tying for cheapest
+/// are always ambiguous, whatever the margin. With no kept candidate at all: a
 /// candidate whose used ends all matched, one of them by a scored role
-/// primer, that failed `require` gives `Unassigned::Require`; otherwise a
+/// primer, that failed `require` gives `Unassigned::MissingEnd`; otherwise a
 /// target with primers of one role list scored at both ends gives
 /// `Unassigned::Orientation`; otherwise the call is `Ambiguous`.
 ///
@@ -451,7 +451,7 @@ pub(crate) fn classify_at_length(
         (true, true) => Ends::Both,
         (true, false) => Ends::Five,
         (false, true) => Ends::Three,
-        (false, false) => return Call::Unassigned(Unassigned::NoPrimer),
+        (false, false) => return Call::Unassigned(Unassigned::NoMatch),
     };
     let five = Evidence::new(five, bounds, boundary[0]);
     let three = Evidence::new(three, bounds, boundary[1]);
@@ -473,8 +473,8 @@ pub(crate) fn classify_at_length(
                 Strand::Plus => (&target.fwd, &target.rev),
                 Strand::Minus => (&target.rev, &target.fwd),
             };
-            let five_fit = fit(&five, five_role, three_role, key, bounds, rules.lead);
-            let three_fit = fit(&three, three_role, five_role, key, bounds, rules.lead);
+            let five_fit = fit(&five, five_role, three_role, key, bounds, rules.margin);
+            let three_fit = fit(&three, three_role, five_role, key, bounds, rules.margin);
             let fits = [five_fit, three_fit];
             if fits.contains(&Fit::Vetoed) || !fits.iter().any(|f| f.matched()) {
                 continue;
@@ -519,7 +519,7 @@ pub(crate) fn classify_at_length(
 
     if entries.is_empty() {
         if structurally_consistent {
-            return Call::Unassigned(Unassigned::Require);
+            return Call::Unassigned(Unassigned::MissingEnd);
         }
         for target in &sheet.targets {
             let fwd_both = scored(five.scored, &target.fwd) && scored(three.scored, &target.fwd);
@@ -542,7 +542,7 @@ pub(crate) fn classify_at_length(
         return Call::Ambiguous;
     }
     let leads = match entries.get(1) {
-        Some((_, second)) => winner.cost + rules.lead <= second.cost,
+        Some((_, second)) => winner.cost + rules.margin <= second.cost,
         None => true,
     };
     if !winner.scored || !leads {
@@ -589,15 +589,15 @@ mod tests {
         .unwrap()
     }
 
-    fn rules(require: Require, lead: usize) -> Rules {
-        Rules { require, lead }
+    fn rules(require: Require, margin: usize) -> Rules {
+        Rules { require, margin }
     }
 
     fn score(primer: usize, cost: usize) -> Score {
         Score { primer, cost }
     }
 
-    /// The bounds of `sheet` at lead 2, with every primer at budget 3.
+    /// The bounds of `sheet` at margin 2, with every primer at budget 3.
     fn bounds(sheet: &Sheet, keys: &Keys) -> Bounds {
         let budgets = vec![3; sheet.primers.len()];
         Bounds::new(sheet, keys, 2, &budgets, &budgets)
@@ -684,7 +684,7 @@ mod tests {
             &[score(2, 0)],
             &[],
         );
-        assert_eq!(call, Call::Unassigned(Unassigned::Require));
+        assert_eq!(call, Call::Unassigned(Unassigned::MissingEnd));
     }
 
     #[test]
@@ -701,7 +701,7 @@ mod tests {
             &[score(3, 0)],
             &[],
         );
-        assert_eq!(call, Call::Unassigned(Unassigned::Require));
+        assert_eq!(call, Call::Unassigned(Unassigned::MissingEnd));
     }
 
     #[test]
@@ -725,7 +725,7 @@ mod tests {
         let keys = Keys::new(&sheet, KeyLevel::Target);
         // five scores A's forward primer, three scores B's reverse primer,
         // both exactly. Each exact primer leads a primer that did not score
-        // by the lead, so it rules out A and C at 3' and B at 5'.
+        // by the margin, so it rules out A and C at 3' and B at 5'.
         let call = classify(
             &sheet,
             &keys,
@@ -817,7 +817,7 @@ mod tests {
         assert_eq!(
             ambiguous,
             Call::Ambiguous,
-            "cost 2 leads cost 3 by only 1, short of lead 2"
+            "cost 2 leads cost 3 by only 1, short of margin 2"
         );
     }
 
@@ -848,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn no_scores_is_no_primer() {
+    fn no_scores_is_no_match() {
         let sheet = fixture();
         let keys = Keys::new(&sheet, KeyLevel::Target);
         let call = classify(
@@ -859,7 +859,7 @@ mod tests {
             &[],
             &[],
         );
-        assert_eq!(call, Call::Unassigned(Unassigned::NoPrimer));
+        assert_eq!(call, Call::Unassigned(Unassigned::NoMatch));
     }
 
     /// Targets `M` (forward `f1`, `f2`; reverse `r1`, `r2`), `N` (forward
@@ -942,7 +942,7 @@ mod tests {
     }
 
     /// An end counts at the lowest cost among the scored variants of the
-    /// role, so the lead is measured from the best variant.
+    /// role, so the margin is measured from the best variant.
     #[test]
     fn lowest_cost_variant_sets_the_end_cost() {
         let sheet = mix_fixture();
@@ -970,7 +970,7 @@ mod tests {
                 &[]
             ),
             Call::Ambiguous,
-            "variant f2 at cost 1 leads N at cost 2 by 1, short of lead 2"
+            "variant f2 at cost 1 leads N at cost 2 by 1, short of margin 2"
         );
     }
 
@@ -1028,7 +1028,7 @@ mod tests {
                 &[score(1, 0)],
                 &[]
             ),
-            Call::Unassigned(Unassigned::Require)
+            Call::Unassigned(Unassigned::MissingEnd)
         );
     }
 
@@ -1056,7 +1056,7 @@ mod tests {
                 &[],
                 &[score(1, 0)]
             ),
-            Call::Unassigned(Unassigned::Require)
+            Call::Unassigned(Unassigned::MissingEnd)
         );
         assert_eq!(
             classify(
@@ -1109,7 +1109,7 @@ mod tests {
             ),
             Call::Ambiguous,
             "O has no reverse list to place at 3', and O's exact forward primer leads N's \
-             forward primer that did not score by the lead, so it rules N out at 5'"
+             forward primer that did not score by the margin, so it rules N out at 5'"
         );
     }
 
@@ -1210,7 +1210,7 @@ mod tests {
                 &[score(1, 0)],
                 &[]
             ),
-            Call::Unassigned(Unassigned::Require)
+            Call::Unassigned(Unassigned::MissingEnd)
         );
         assert_eq!(
             classify(
@@ -1221,7 +1221,7 @@ mod tests {
                 &[],
                 &[score(1, 0)]
             ),
-            Call::Unassigned(Unassigned::Require)
+            Call::Unassigned(Unassigned::MissingEnd)
         );
     }
 
@@ -1302,16 +1302,16 @@ mod tests {
     }
 
     /// A V4 read whose 806R is clipped while 785R scores within its budget
-    /// is never assigned V34, at any cost of 785R or 515F: at lead 2 the
-    /// close 785R stands in for 806R, and at lead 1, where the primers are
+    /// is never assigned V34, at any cost of 785R or 515F: at margin 2 the
+    /// close 785R stands in for 806R, and at margin 1, where the primers are
     /// not close, 515F at the 5' end rules V34 out unless it is within the
-    /// lead of the penalty.
+    /// margin of the penalty.
     #[test]
     fn clipped_806r_is_never_assigned_v34() {
         let (sheet, keys, _) = amplicon_fixture();
-        for lead in [1, 2] {
+        for margin in [1, 2] {
             let budgets = [3, 4, 3, 4];
-            let bounds = Bounds::new(&sheet, &keys, lead, &budgets, &budgets);
+            let bounds = Bounds::new(&sheet, &keys, margin, &budgets, &budgets);
             for cost_515f in 0..=3 {
                 for cost_785r in 0..=4 {
                     for (five, three, strand) in [
@@ -1322,16 +1322,16 @@ mod tests {
                             &sheet,
                             &keys,
                             &bounds,
-                            rules(Require::Either, lead),
+                            rules(Require::Either, margin),
                             &[five],
                             &[three],
                         );
-                        let case = format!("lead {lead}, 515F {cost_515f}, 785R {cost_785r}");
+                        let case = format!("margin {margin}, 515F {cost_515f}, 785R {cost_785r}");
                         assert!(
                             !matches!(call, Call::Assigned { key: 0, .. }),
                             "{case}: {call:?}"
                         );
-                        if lead == 2 {
+                        if margin == 2 {
                             assert_eq!(call, assigned(1, strand, Ends::Both), "{case}");
                         }
                     }
@@ -1369,7 +1369,7 @@ mod tests {
     }
 
     /// With only the shared end scored, near-identical primers of two keys
-    /// are judged by the lead, whichever of them cleared its budget.
+    /// are judged by the margin, whichever of them cleared its budget.
     #[test]
     fn close_primers_at_one_end_are_judged_by_the_lead() {
         let (sheet, keys, bounds) = amplicon_fixture();
@@ -1392,7 +1392,7 @@ mod tests {
                 &[score(1, 0)]
             ),
             assigned(0, Strand::Plus, Ends::Three),
-            "at lead 1 the primers are not close, and 785R alone names V34"
+            "at margin 1 the primers are not close, and 785R alone names V34"
         );
     }
 
@@ -1423,11 +1423,11 @@ mod tests {
                 &[score(0, 0)],
                 &[]
             ),
-            Call::Unassigned(Unassigned::Require)
+            Call::Unassigned(Unassigned::MissingEnd)
         );
     }
 
-    /// Bounds of `fixture` at lead 2 with `rA` at budget 1 and every other
+    /// Bounds of `fixture` at margin 2 with `rA` at budget 1 and every other
     /// primer at budget 3, so the penalty is 2 at every end.
     fn unequal_bounds(sheet: &Sheet, keys: &Keys) -> Bounds {
         let budgets = [3, 1, 3, 3, 3];
@@ -1462,7 +1462,7 @@ mod tests {
 
     /// Exact primers of two keys at the two ends, a chimera, are not
     /// assigned to either key, whatever the budgets of the primers that did
-    /// not score: each exact primer leads the penalty by the lead and rules
+    /// not score: each exact primer leads the penalty by the margin and rules
     /// out the targets that do not list it. With the penalty taken from the
     /// budget of the missing primer, `A`, missing `rA` at budget 1, led `B`
     /// and `C`, missing primers at budget 3, and was assigned.
@@ -1563,9 +1563,9 @@ mod tests {
 
     /// At a boundary locus the penalty follows the anchored budgets that
     /// rescoring applied there: with terminal budgets 3 and anchored budgets
-    /// 4, `N`'s reverse primer at cost 3 is within the lead of the terminal
+    /// 4, `N`'s reverse primer at cost 3 is within the margin of the terminal
     /// penalty 4, so `M`, matched at 5', is penalised at 3' and assigned, and
-    /// not within the lead of the anchored penalty 5, so it rules `M` out.
+    /// not within the margin of the anchored penalty 5, so it rules `M` out.
     #[test]
     fn boundary_locus_takes_the_anchored_penalty() {
         let sheet = mix_fixture();

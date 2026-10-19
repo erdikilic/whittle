@@ -75,7 +75,7 @@ pub fn kinetics_tags() -> impl Iterator<Item = [u8; 2]> {
     .into_iter()
 }
 
-/// The ONT signal tags the `signal` removal group names and the BAM writer
+/// The ONT signal tags the `moves` removal group names and the BAM writer
 /// maintains under `--update-moves`.
 pub const SIGNAL_TAGS: [[u8; 2]; 5] = [*b"mv", *b"ts", *b"ns", *b"sp", *b"pi"];
 
@@ -94,7 +94,8 @@ pub struct TagRemoval {
 impl TagRemoval {
     /// Parses the `--remove-tag` values. Each value is a comma-separated list
     /// whose items are two ASCII alphanumeric characters, the shape of a SAM
-    /// tag, or one of the group names `kinetics`, `mods` and `signal`.
+    /// tag, or one of the group names `kinetics`, `mods` and `moves`.
+    /// `signal` is accepted as a synonym of `moves`.
     pub fn parse(values: &[String]) -> anyhow::Result<Self> {
         let mut tags = BTreeSet::new();
         for item in values.iter().flat_map(|v| v.split(',')) {
@@ -102,14 +103,14 @@ impl TagRemoval {
             match item {
                 "kinetics" => tags.extend(kinetics_tags()),
                 "mods" => tags.extend(MOD_TAGS),
-                "signal" => tags.extend(SIGNAL_TAGS),
+                "moves" | "signal" => tags.extend(SIGNAL_TAGS),
                 _ if item.len() == 2 && item.bytes().all(|c| c.is_ascii_alphanumeric()) => {
                     let b = item.as_bytes();
                     tags.insert([b[0], b[1]]);
                 },
                 _ => anyhow::bail!(
                     "--remove-tag: invalid item {item:?} (a SAM tag is exactly 2 alphanumeric \
-                     characters, such as `ML` or `RG`; the groups are kinetics, mods and signal)"
+                     characters, such as `ML` or `RG`; the groups are kinetics, mods and moves)"
                 ),
             }
         }
@@ -140,13 +141,13 @@ pub enum AdapterInfer {
     /// Discovery runs and the run trims with the discovered sequences.
     Discover,
     /// Discovery runs, prints the discovered FASTA and the run ends.
-    Report,
+    DiscoverOnly,
 }
 
 impl AdapterInfer {
-    /// Whether discovery runs in report mode.
-    pub fn is_report(self) -> bool {
-        matches!(self, Self::Report)
+    /// Whether discovery runs without trimming (`--adapter-discover-only`).
+    pub fn is_discover_only(self) -> bool {
+        matches!(self, Self::DiscoverOnly)
     }
 
     /// The mode name used by the banner and the summary.
@@ -154,7 +155,7 @@ impl AdapterInfer {
         match self {
             Self::Off => "off",
             Self::Discover => "discover",
-            Self::Report => "report",
+            Self::DiscoverOnly => "discover-only",
         }
     }
 }
@@ -300,16 +301,16 @@ pub struct Config {
     /// in dorado's `tm` token order. Recorded by `settle` and merged into the
     /// `@RG` and per-read `tm` fields.
     pub trim_classes: [bool; 3],
-    /// The resolved `--split-by` configuration, or `None` without `--split-by`.
+    /// The resolved `--targets` configuration, or `None` without `--targets`.
     /// `settle` builds `splitter` from it once the adapter set is final.
     pub split_opts: Option<crate::split::SplitOptions>,
     /// The adapter search settings the split primers are attached to when no
     /// adapter source is given: `--adapter-error-rate`,
     /// `--adapter-end-search`, `--adapter-ends-only` and `--min-length`, with
-    /// no adapters. `None` without `--split-by`.
+    /// no adapters. `None` without `--targets`.
     pub split_search: Option<crate::adapter::AdapterConfig>,
     /// The splitter that calls every surviving segment, built by `settle`
-    /// after adapter resolution; `None` without `--split-by`.
+    /// after adapter resolution; `None` without `--targets`.
     pub splitter: Option<std::sync::Arc<crate::split::Splitter>>,
 }
 
@@ -356,7 +357,7 @@ pub const OUTPUT_FLAG: &str = "-o/--output";
 
 impl Config {
     /// Every file the run writes, each paired with the flag that named it. The
-    /// overwrite guards and the report-only advisories both derive from this
+    /// overwrite guards and the discover-only advisories both derive from this
     /// list, so an artifact flag added here is covered by both. An output
     /// template is listed with each placeholder as `*`; its expanded paths
     /// are checked as their files are opened.
@@ -380,7 +381,7 @@ impl Config {
         .filter_map(|(flag, path)| path.map(|p| (flag, p)))
     }
 
-    /// The `-o` output template of a `--split-by` run, or `None` for a run
+    /// The `-o` output template of a `--targets` run, or `None` for a run
     /// with one output.
     pub fn output_template(&self) -> Option<&crate::split::Template> {
         self.split_opts.as_ref()?.template.as_ref()
@@ -515,17 +516,26 @@ mod tests {
         let r = TagRemoval::parse(&["MM,RG".to_string(), "kinetics".to_string()]).unwrap();
         assert!(r.contains(b"MM") && r.contains(b"RG") && r.contains(b"ip"));
         assert_eq!(r.tags().count(), 11);
-        let r = TagRemoval::parse(&["mods,signal".to_string()]).unwrap();
+        let r = TagRemoval::parse(&["mods,moves".to_string()]).unwrap();
         assert_eq!(r.tags().count(), 8);
         assert!(r.contains(b"ML") && r.contains(b"mv") && r.contains(b"pi"));
         assert!(TagRemoval::parse(&[]).unwrap().is_empty());
+    }
+
+    /// `signal` names the same tags as `moves`.
+    #[test]
+    fn signal_is_a_synonym_of_moves() {
+        assert_eq!(
+            TagRemoval::parse(&["signal".to_string()]).unwrap(),
+            TagRemoval::parse(&["moves".to_string()]).unwrap()
+        );
     }
 
     /// Group names are exact lowercase words; any other spelling is rejected
     /// rather than read as a tag or a group.
     #[test]
     fn group_names_are_lowercase_only() {
-        for item in ["Kinetics", "KINETICS", "kinetic", "MODS", "xyz"] {
+        for item in ["Kinetics", "KINETICS", "kinetic", "MODS", "Moves", "xyz"] {
             let err = TagRemoval::parse(&[item.to_string()]).unwrap_err();
             assert!(err.to_string().contains("invalid item"), "{item}: {err}");
         }

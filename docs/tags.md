@@ -76,21 +76,21 @@ Records written to `--rejected-output` carry `wr:Z:<reason>`, in the aux data of
 a BAM record or as a header field of a FASTQ record; see
 [cli.md](cli.md#rejected-output) for the reasons.
 
-## Split target
+## Target tag
 
-Every output record written under `--split-by` carries a `wt:Z` tag naming the
+Every output record written under `--targets` carries a `wt:Z` tag naming the
 target key it was classified into, or `unassigned` or `ambiguous`, in the
 aux data of a BAM record or as a header field of a FASTQ record. An
 existing `wt` tag in the input record is replaced. A record written to
 `--rejected-output` carries no `wt:Z` tag, since the classifier never sees
-a segment a filter dropped. See [cli.md](cli.md#primer-split) for the sheet
+a segment a filter dropped. See [cli.md](cli.md#targets) for the sheet
 formats and the classification rules.
 
 ## Tag removal
 
 `--remove-tag <TAGS>` removes named aux tags from every output record; the
 groups `kinetics` (`ip`, `pw`, `fi`, `fp`, `ri`, `rp`, `sa`, `sm`, `sx`),
-`mods` (`MM`, `ML`, `MN`) and `signal` (`mv`, `ts`, `ns`, `sp`, `pi`) name
+`mods` (`MM`, `ML`, `MN`) and `moves` (`mv`, `ts`, `ns`, `sp`, `pi`) name
 several at once. Removal runs after the rewrites in
 the table above, so the remaining tags stay in register. It applies to BAM
 output and to the tags carried into a BAM-to-FASTQ header, and requires BAM

@@ -1,4 +1,4 @@
-//! Output routing for `--split-by`: the `-o` path template, the table of
+//! Output routing for `--targets`: the `-o` path template, the table of
 //! expanded output paths the render workers route segments to, and the
 //! checks each path passes before its file is created.
 
@@ -103,7 +103,7 @@ impl Template {
         if !(target || group) {
             anyhow::bail!(
                 "-o {raw}: {{barcode}} needs {{target}} or {{group}} in the path to name the \
-                 split key"
+                 key"
             );
         }
         if crate::io::from_extension(path).is_none() {

@@ -1,4 +1,4 @@
-//! `--split-by`: primer split calls in tag-only mode, over the compiled binary.
+//! `--targets`: primer split calls in tag-only mode, over the compiled binary.
 //! Every output record carries a `wt:Z` tag naming its target, `unassigned`
 //! or `ambiguous`.
 
@@ -203,7 +203,7 @@ fn tag_only_fastq_labels_every_read() {
         let out = dir.path().join(format!("out{threads}.fastq"));
         whittle()
             .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", threads])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", threads])
             .assert()
             .success();
         let text = std::fs::read_to_string(&out).unwrap();
@@ -236,7 +236,7 @@ fn tagged_fastq_appends_the_target_after_the_input_tags() {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .success();
     let text = std::fs::read_to_string(&out).unwrap();
@@ -256,7 +256,7 @@ fn tag_only_bam_writes_wt_tag() {
         let out = dir.path().join(format!("out{threads}.bam"));
         whittle()
             .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", threads])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", threads])
             .args(["--preserve-order"])
             .assert()
             .success();
@@ -290,7 +290,7 @@ fn bam_to_fastq_appends_the_target_tag() {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .success();
     let text = std::fs::read_to_string(&out).unwrap();
@@ -314,8 +314,8 @@ fn retain_keeps_primer_bases() {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
-        .args(["--split-action", "retain"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--target-action", "retain"])
         .assert()
         .success();
     let text = std::fs::read_to_string(&out).unwrap();
@@ -341,7 +341,7 @@ fn head_crop_keeps_the_call() {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1", "-H", "5"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1", "-H", "5"])
         .assert()
         .success();
     let text = std::fs::read_to_string(&out).unwrap();
@@ -374,7 +374,7 @@ fn split_primers_survive_presence_sampling() {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "2"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "2"])
         .args(["--adapter-preset", "lsk114"])
         .assert()
         .success();
@@ -393,10 +393,10 @@ fn split_primers_survive_presence_sampling() {
 #[test]
 fn split_flags_require_split() {
     for args in [
-        &["--split-lead", "3"][..],
-        &["--split-require", "both"],
-        &["--split-action", "retain"],
-        &["--split-discard", "unassigned"],
+        &["--target-margin", "3"][..],
+        &["--target-require", "both"],
+        &["--target-action", "retain"],
+        &["--target-discard", "unassigned"],
     ] {
         whittle()
             .args(args)
@@ -404,7 +404,7 @@ fn split_flags_require_split() {
             .write_stdin("")
             .assert()
             .failure()
-            .stderr(predicates::str::contains("--split-by <SPEC>"));
+            .stderr(predicates::str::contains("--targets <SPEC>"));
     }
 }
 
@@ -434,7 +434,7 @@ fn split_mab114_enables_preset() {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", "mab114", "-t", "1"])
+        .args(["--targets", "mab114", "-t", "1"])
         .assert()
         .success();
     let text = std::fs::read_to_string(&out).unwrap();
@@ -479,7 +479,7 @@ fn mab114_mix_pool() -> Vec<(String, Vec<u8>, &'static str)> {
     ]
 }
 
-/// Runs `specs` over `mab114_mix_pool` under `--split-require both` with a
+/// Runs `specs` over `mab114_mix_pool` under `--target-require both` with a
 /// `{target}` template, and checks that each target's file holds exactly
 /// its planted reads, whichever variants they carry.
 fn assert_mab114_mix_split(specs: &[&str]) {
@@ -495,9 +495,9 @@ fn assert_mab114_mix_split(specs: &[&str]) {
     let mut cmd = whittle();
     cmd.args(["-i", input.to_str().unwrap()])
         .args(["-o", out.join("{target}.fastq").to_str().unwrap()])
-        .args(["--split-require", "both", "--preserve-order", "-t", "1"]);
+        .args(["--target-require", "both", "--preserve-order", "-t", "1"]);
     for spec in specs {
-        cmd.args(["--split-by", spec]);
+        cmd.args(["--targets", spec]);
     }
     cmd.assert().success();
     assert_eq!(
@@ -560,7 +560,7 @@ fn sheet_files_with_primer_lists_assign_every_variant() {
 }
 
 /// An inline-only run, with no sheet file or preset, assigns the planted 16S
-/// and ITS reads from two `--split-by` targets.
+/// and ITS reads from two `--targets` targets.
 #[test]
 fn inline_split_by_assigns_planted_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -573,8 +573,8 @@ fn inline_split_by_assigns_planted_reads() {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", &spec16])
-        .args(["--split-by", &spec_its])
+        .args(["--targets", &spec16])
+        .args(["--targets", &spec_its])
         .args(["-t", "1"])
         .assert()
         .success();
@@ -591,7 +591,7 @@ fn inline_split_by_assigns_planted_reads() {
     assert_eq!(head, "none\twt:Z:unassigned");
 }
 
-/// `--split-by` given twice, both times an inline target, merges into one
+/// `--targets` given twice, both times an inline target, merges into one
 /// sheet: a plain target and a pool, routed through a `{group}` template.
 /// The pool's two targets share a group and collapse into one file.
 #[test]
@@ -620,8 +620,8 @@ fn split_by_given_twice_as_inline_targets_pool_collapses_to_one_file() {
     whittle()
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", out.join("{group}.fastq").to_str().unwrap()])
-        .args(["--split-by", &spec16])
-        .args(["--split-by", &spec_v34])
+        .args(["--targets", &spec16])
+        .args(["--targets", &spec_v34])
         .args(["-t", "1"])
         .assert()
         .success();
@@ -638,7 +638,7 @@ fn split_by_given_twice_as_inline_targets_pool_collapses_to_one_file() {
 
 /// Three barcode-style targets, each with one sequence in both role lists,
 /// split reads that carry the barcode at both ends in either orientation or
-/// at one end only. Both located ends are trimmed. `--split-require both`
+/// at one end only. Both located ends are trimmed. `--target-require both`
 /// assigns only the reads with the barcode at both ends.
 #[test]
 fn symmetric_targets_split_by_a_barcode_at_both_ends() {
@@ -661,9 +661,9 @@ fn symmetric_targets_split_by_a_barcode_at_both_ends() {
         let mut cmd = whittle();
         cmd.args(["-i", input.to_str().unwrap()])
             .args(["-o", out.join("{target}.fastq").to_str().unwrap()])
-            .args(["--split-require", require, "-t", "1", "--preserve-order"]);
+            .args(["--target-require", require, "-t", "1", "--preserve-order"]);
         for (name, bc) in names.iter().zip(&barcodes) {
-            cmd.args(["--split-by", &format!("{name}:F:{0}:R:{0}", s(bc))]);
+            cmd.args(["--targets", &format!("{name}:F:{0}:R:{0}", s(bc))]);
         }
         cmd.assert().success();
     };
@@ -717,8 +717,8 @@ fn discard_unassigned_in_tag_only_mode() {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
-        .args(["--split-discard", "unassigned"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--target-discard", "unassigned"])
         .assert()
         .success()
         .stderr(predicates::str::contains("No trimming or filtering").not());
@@ -728,7 +728,7 @@ fn discard_unassigned_in_tag_only_mode() {
     assert_eq!(names, ["plus16\twt:Z:16S", "minusits\twt:Z:ITS"]);
 }
 
-/// A run without `--split-by` writes no target tag.
+/// A run without `--targets` writes no target tag.
 #[test]
 fn no_split_writes_no_target_tag() {
     let dir = tempfile::tempdir().unwrap();
@@ -758,7 +758,7 @@ fn end_of_run_log_reports_the_split_table() {
     let out = dir.path().join("out.fastq");
     let output = whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .success()
         .get_output()
@@ -766,26 +766,26 @@ fn end_of_run_log_reports_the_split_table() {
         .clone();
     let stderr = String::from_utf8_lossy(&output);
     assert!(
-        stderr.contains("Split 16S: 1 segments, 400 bp (50.0% of assigned)"),
+        stderr.contains("Target 16S: 1 segments, 400 bp (50.0% of assigned)"),
         "{stderr}"
     );
     assert!(
-        stderr.contains("Split ITS: 1 segments, 400 bp (50.0% of assigned)"),
+        stderr.contains("Target ITS: 1 segments, 400 bp (50.0% of assigned)"),
         "{stderr}"
     );
     assert!(
         stderr.contains(
-            "Split unassigned: 1 segments (no_primer 1, require 0, orientation 0, length 0)"
+            "Target unassigned: 1 segments (no_match 1, missing_end 0, orientation 0, length 0)"
         ),
         "{stderr}"
     );
-    assert!(stderr.contains("Split ambiguous: 0 segments"), "{stderr}");
-    assert!(stderr.contains("Split discarded: 0 segments"), "{stderr}");
+    assert!(stderr.contains("Target ambiguous: 0 segments"), "{stderr}");
+    assert!(stderr.contains("Target discarded: 0 segments"), "{stderr}");
 }
 
-/// Without `--split-by`, the end-of-run log has no split table at all.
+/// Without `--targets`, the end-of-run log has no target table at all.
 #[test]
-fn end_of_run_log_has_no_split_table_without_split() {
+fn end_of_run_log_has_no_target_table_without_targets() {
     let dir = tempfile::tempdir().unwrap();
     let p = primers();
     let input = dir.path().join("in.fastq");
@@ -800,7 +800,7 @@ fn end_of_run_log_has_no_split_table_without_split() {
         .stderr
         .clone();
     let stderr = String::from_utf8_lossy(&output);
-    assert!(!stderr.contains("Split "), "{stderr}");
+    assert!(!stderr.contains("Target "), "{stderr}");
 }
 
 /// The `tm` field of the `@RG` record of a uBAM header, if any.
@@ -829,8 +829,8 @@ fn retain_leaves_primer_out_of_the_trim_mode() {
         let out = dir.path().join(format!("{action}.bam"));
         whittle()
             .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
-            .args(["--split-action", action])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
+            .args(["--target-action", action])
             .assert()
             .success();
         read_group_trim_mode(&out)
@@ -859,16 +859,16 @@ fn split_only_notes_that_sampling_has_no_effect() {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .args(["--adapter-sample-reads", "500"])
         .assert()
         .success()
         .stderr(predicates::str::contains(
-            "--adapter-sample-reads has no effect with --split-by alone",
+            "--adapter-sample-reads has no effect with --targets alone",
         ));
 }
 
-/// Without `--split-by`, the ends-only advisory names the three adapter sources.
+/// Without `--targets`, the ends-only advisory names the three adapter sources.
 #[test]
 fn ends_only_advisory_without_split_names_the_adapter_sources() {
     let dir = tempfile::tempdir().unwrap();
@@ -1000,7 +1000,7 @@ fn fastq_gz_split_writes_one_file_per_key() {
         whittle()
             .args(["-i", input.to_str().unwrap()])
             .args(["-o", template.to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", threads])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", threads])
             .args(["--preserve-order"])
             .assert()
             .success();
@@ -1029,7 +1029,7 @@ fn bam_split_files_have_headers() {
         whittle()
             .args(["-i", input.to_str().unwrap()])
             .args(["-o", out.join("{target}.bam").to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", threads])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", threads])
             .args(["--preserve-order"])
             .assert()
             .success();
@@ -1085,7 +1085,7 @@ fn group_template_merges_targets() {
     whittle()
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", out.join("{group}.fq").to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .success();
     assert_eq!(files_under(&out), ["16S.fq", "ITS.fq"]);
@@ -1099,7 +1099,7 @@ fn group_template_merges_targets() {
     whittle()
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", out.join("{group}/{target}.fq").to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .success();
     assert_eq!(
@@ -1164,7 +1164,7 @@ fn barcode_placeholder_from_bc_tag() {
         whittle()
             .args(["-i", input.to_str().unwrap()])
             .args(["-o", out.join("{barcode}.{target}.bam").to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", threads])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", threads])
             .assert()
             .success();
         assert_eq!(files_under(&out), expected);
@@ -1185,7 +1185,7 @@ fn barcode_placeholder_from_bc_tag() {
     whittle()
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", out.join("{barcode}/{target}.fq").to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .success();
     assert_eq!(
@@ -1210,7 +1210,7 @@ fn barcode_placeholder_from_bc_tag() {
     whittle()
         .args(["-i", tagged.to_str().unwrap()])
         .args(["-o", out.join("{barcode}.{target}.fq").to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "2"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "2"])
         .assert()
         .success();
     assert_eq!(
@@ -1228,7 +1228,7 @@ fn barcode_placeholder_from_bc_tag() {
     whittle()
         .args(["-i", plain.to_str().unwrap()])
         .args(["-o", out.join("{barcode}.{target}.fq").to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .success();
     assert_eq!(
@@ -1271,7 +1271,7 @@ fn discard_ambiguous_writes_no_file() {
     whittle()
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", kept.join("{target}.fq").to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .success();
     assert_eq!(
@@ -1285,8 +1285,8 @@ fn discard_ambiguous_writes_no_file() {
         whittle()
             .args(["-i", input.to_str().unwrap()])
             .args(["-o", out.join("{target}.fq").to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", threads])
-            .args(["--split-discard", "ambiguous"])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", threads])
+            .args(["--target-discard", "ambiguous"])
             .assert()
             .success();
         assert_eq!(files_under(&out), ["16S.fq", "ITS.fq", "unassigned.fq"]);
@@ -1318,7 +1318,7 @@ fn unused_keys_create_no_file() {
         whittle()
             .args(["-i", input.to_str().unwrap()])
             .args(["-o", out.join("{target}.fastq.gz").to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", threads])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", threads])
             .assert()
             .success();
         assert_eq!(files_under(&out), ["16S.fastq.gz", "ITS.fastq.gz"]);
@@ -1344,7 +1344,7 @@ fn template_hitting_input_is_error() {
         whittle()
             .current_dir(dir.path())
             .args(["-i", "in.fq", "-o", "{target}.fq"])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", threads])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", threads])
             .assert()
             .failure()
             .stderr(predicates::str::contains("in.fq").and(predicates::str::contains("input")));
@@ -1377,7 +1377,7 @@ fn template_refuses_names_that_are_not_path_components() {
         whittle()
             .args(["-i", input.to_str().unwrap()])
             .args(["-o", out.join("{target}.fq").to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
             .assert()
             .failure()
             .stderr(predicates::str::contains(format!("target {bad:?}")));
@@ -1390,7 +1390,7 @@ fn template_refuses_names_that_are_not_path_components() {
                 "-o",
                 tagged.to_str().unwrap(),
             ])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
             .assert()
             .success();
         let text = std::fs::read_to_string(&tagged).unwrap();
@@ -1418,7 +1418,7 @@ fn template_refuses_names_that_differ_only_in_case() {
     whittle()
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", out.join("{target}.fq").to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .failure()
         .stderr(
@@ -1459,7 +1459,7 @@ fn two_owners_on_one_path_is_error() {
             "-o",
             dir.path().join("{target}{barcode}.bam").to_str().unwrap(),
         ])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .failure()
         .stderr(
@@ -1488,7 +1488,7 @@ fn template_hitting_rejected_output_is_error() {
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", dir.path().join("{target}.fq").to_str().unwrap()])
         .args(["--rejected-output", rejected.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .failure()
         .stderr(
@@ -1520,7 +1520,7 @@ fn two_keys_on_one_file_is_error() {
     whittle()
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", template.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("16S.bam").and(predicates::str::contains("same file")));
@@ -1540,7 +1540,7 @@ fn template_errors_name_the_path() {
     ] {
         whittle()
             .args(["-i", input.to_str().unwrap(), "-o", template])
-            .args(["--split-by", sheet.to_str().unwrap()])
+            .args(["--targets", sheet.to_str().unwrap()])
             .assert()
             .failure()
             .stderr(predicates::str::contains(template).and(predicates::str::contains(needle)));
@@ -1549,7 +1549,7 @@ fn template_errors_name_the_path() {
         .args(["-i", input.to_str().unwrap(), "-o", "out/{target}.fq"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("--split-by"));
+        .stderr(predicates::str::contains("--targets"));
 }
 
 #[test]
@@ -1565,7 +1565,7 @@ fn preserve_order_same_across_threads() {
         whittle()
             .args(["-i", input.to_str().unwrap()])
             .args(["-o", out.join("{target}.fastq").to_str().unwrap()])
-            .args(["--split-by", sheet.to_str().unwrap(), "-t", threads])
+            .args(["--targets", sheet.to_str().unwrap(), "-t", threads])
             .args(["--preserve-order"])
             .assert()
             .success();
@@ -1654,7 +1654,7 @@ fn assert_degenerate_pool_assigned(n: u64, extra: &[&str], exact: bool) {
     let out = dir.path().join("out.fastq");
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap()])
+        .args(["--targets", sheet.to_str().unwrap()])
         .args(["--adapter-preset", "mab114", "-t", "1"])
         .args(extra)
         .assert()
@@ -1691,7 +1691,7 @@ fn degenerate_sheet_under_the_mab114_preset_with_discovery_assigns_both_targets(
 
 /// A target whose reverse primer is the reverse complement of its forward
 /// primer is located at both ends on both strands and assigned under
-/// `--split-require both`, beside an ordinary target.
+/// `--target-require both`, beside an ordinary target.
 #[test]
 fn reverse_primer_equal_to_reverse_complemented_forward_opens_both_ends() {
     let dir = tempfile::tempdir().unwrap();
@@ -1719,9 +1719,9 @@ fn reverse_primer_equal_to_reverse_complemented_forward_opens_both_ends() {
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
         .args([
-            "--split-by",
+            "--targets",
             sheet.to_str().unwrap(),
-            "--split-require",
+            "--target-require",
             "both",
         ])
         .args(["-t", "1", "--summary-json", json.to_str().unwrap()])
@@ -1738,7 +1738,7 @@ fn reverse_primer_equal_to_reverse_complemented_forward_opens_both_ends() {
     }
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
-    let x = v["split"]["keys"]
+    let x = v["targets"]["keys"]
         .as_array()
         .unwrap()
         .iter()
@@ -1769,10 +1769,10 @@ fn retained_internal_segments_pass_the_final_length_filter() {
         .arg(&input)
         .arg("-o")
         .arg(&output)
-        .arg("--split-by")
+        .arg("--targets")
         .arg(&sheet)
         .args([
-            "--split-action",
+            "--target-action",
             "retain",
             "--min-length",
             "375",
@@ -1827,7 +1827,7 @@ fn junctions_in_end_zones_split_on_both_strands() {
                         .arg(&input)
                         .arg("-o")
                         .arg(&output)
-                        .arg("--split-by")
+                        .arg("--targets")
                         .arg(&sheet)
                         .args(["--adapter-error-rate", "0", "--preserve-order"])
                         .assert()
@@ -1874,7 +1874,7 @@ fn group_length_windows_are_independent_of_row_order() {
             .arg(&input)
             .arg("-o")
             .arg(output_dir.join("{group}.fq"))
-            .arg("--split-by")
+            .arg("--targets")
             .arg(&sheet)
             .args(["--adapter-error-rate", "0"])
             .assert()
@@ -1898,7 +1898,7 @@ fn split_sources_are_protected_from_every_output() {
     write_fastq(&input, &three_reads(&p));
     for flag in ["-o", "--summary-json", "--rejected-output"] {
         let mut cmd = whittle();
-        cmd.arg("-i").arg(&input).arg("--split-by").arg(&sheet);
+        cmd.arg("-i").arg(&input).arg("--targets").arg(&sheet);
         if flag != "-o" {
             cmd.arg("-o").arg(dir.path().join("out.fq"));
         }
@@ -1906,7 +1906,7 @@ fn split_sources_are_protected_from_every_output() {
             .arg(&sheet)
             .assert()
             .failure()
-            .stderr(predicates::str::contains("--split-by"));
+            .stderr(predicates::str::contains("--targets"));
         assert_eq!(std::fs::read(&sheet).unwrap(), original);
     }
     let template_source = dir.path().join("16S.fq");
@@ -1916,11 +1916,11 @@ fn split_sources_are_protected_from_every_output() {
         .arg(&input)
         .arg("-o")
         .arg(dir.path().join("{target}.fq"))
-        .arg("--split-by")
+        .arg("--targets")
         .arg(&template_source)
         .assert()
         .failure()
-        .stderr(predicates::str::contains("--split-by"));
+        .stderr(predicates::str::contains("--targets"));
     assert_eq!(std::fs::read(&template_source).unwrap(), original);
 }
 
@@ -1947,7 +1947,7 @@ fn hard_linked_split_outputs_are_refused() {
             .arg(&input)
             .arg("-o")
             .arg(dir.path().join(template))
-            .arg("--split-by")
+            .arg("--targets")
             .arg(&sheet)
             .args(["-t", "1"])
             .assert()
@@ -1990,7 +1990,7 @@ fn rejected_records_omit_input_target_tags() {
                 .arg(output)
                 .arg("--rejected-output")
                 .arg(&rejected)
-                .arg("--split-by")
+                .arg("--targets")
                 .arg(&sheet)
                 .args([flag, value])
                 .assert()

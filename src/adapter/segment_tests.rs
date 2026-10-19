@@ -2586,7 +2586,7 @@ fn adapter_junction_splits_beside_split_primers() {
 
 /// A lone sheet primer inside a read and a catalog marker primer beside it,
 /// within the end zone of each other, back neither excision: the read stays
-/// whole under `--split-by`.
+/// whole under `--targets`.
 #[test]
 fn nested_sheet_primer_does_not_back_a_marker_primer() {
     let p = split_primers();

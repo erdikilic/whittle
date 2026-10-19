@@ -230,7 +230,7 @@ mod tests {
         let mut c = base();
         c.min_qual = 15.0;
         // The arithmetic mean of [10, 20] is 15.0, which passes at the threshold.
-        c.qual_mode = QualMode::Arithmetic;
+        c.qual_mode = QualMode::PhredMean;
         assert!(passes(b"AT", &[10, 20], &c));
         // The probability mean of [10, 20] is below 15, which fails.
         c.qual_mode = QualMode::Mean;
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn length_is_evaluated_before_quality() {
         let mut c = base();
-        c.qual_mode = QualMode::Arithmetic;
+        c.qual_mode = QualMode::PhredMean;
         c.min_qual = 30.0;
         c.min_length = 3;
         assert_eq!(check(b"AT", &[10, 20], &c), Some(DropReason::TooShort));
@@ -293,12 +293,12 @@ mod tests {
     #[test]
     fn check_reports_low_and_high_quality() {
         let mut c = base();
-        c.qual_mode = QualMode::Arithmetic;
+        c.qual_mode = QualMode::PhredMean;
         c.min_qual = 25.0;
         assert_eq!(check(b"AT", &[10, 20], &c), Some(DropReason::LowQuality));
 
         let mut c = base();
-        c.qual_mode = QualMode::Arithmetic;
+        c.qual_mode = QualMode::PhredMean;
         c.max_qual = 12.0;
         assert_eq!(check(b"AT", &[10, 20], &c), Some(DropReason::HighQuality));
     }

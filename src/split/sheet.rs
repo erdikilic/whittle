@@ -1,7 +1,6 @@
-//! Primer split sheet: the target model plus its TSV, FASTA and preset
-//! parsers.
+//! Target sheet: the target model plus its TSV, FASTA and preset parsers.
 //!
-//! A sheet names the primer targets `--split-by` demultiplexes reads into. Each
+//! A sheet names the targets `--targets` demultiplexes reads into. Each
 //! target is a primer mix (a list of forward primers and a list of reverse
 //! primers, either of which may be empty) plus a group and an optional
 //! expected length range. Any forward primer of a target pairs with any of
@@ -60,16 +59,17 @@ pub struct Sheet {
     pub targets: Vec<Target>,
 }
 
-/// Which end(s) of a read a target needs a located primer at to be assigned.
+/// Which end(s) of a segment a target needs a located sequence at to be
+/// assigned.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 pub enum Require {
     /// Either end alone is enough.
     Either,
-    /// Both ends must carry a located primer.
+    /// Both ends must carry a located sequence.
     Both,
-    /// The forward end must carry a located primer.
+    /// The forward end must carry a located sequence.
     Fwd,
-    /// The reverse end must carry a located primer.
+    /// The reverse end must carry a located sequence.
     Rev,
 }
 
@@ -112,14 +112,14 @@ impl PrimerTable {
         let seq = normalize_seq(raw);
         if seq.len() < MIN_PATTERN_LEN {
             bail!(
-                "primer {:?} is {} nt, shorter than the minimum of {MIN_PATTERN_LEN} nt",
+                "sequence {:?} is {} nt, shorter than the minimum of {MIN_PATTERN_LEN} nt",
                 name,
                 seq.len()
             );
         }
         if let Some(&bad) = seq.iter().find(|&&b| search::iupac_degeneracy(b).is_none()) {
             bail!(
-                "primer {:?} contains a non-nucleotide character {:?}",
+                "sequence {:?} contains a non-nucleotide character {:?}",
                 name,
                 bad as char
             );
@@ -263,7 +263,7 @@ fn edit_distance(
         .min()
 }
 
-/// The three `--split-by` forms, with an inline example, for resolution
+/// The three `--targets` forms, with an inline example, for resolution
 /// errors.
 const SPEC_FORMS: &str = "SPEC is a sheet file, a preset (mab114), or an inline target \
                           NAME:F:SEQ[,SEQ...]:R:SEQ[,SEQ...][,F:...] such as \
@@ -282,19 +282,19 @@ impl Sheet {
 }
 
 impl Sheet {
-    /// Loads a sheet from one `--split-by` value: an existing file path first
+    /// Loads a sheet from one `--targets` value: an existing file path first
     /// (FASTA when its first non-blank byte is `>`, TSV otherwise), then a
     /// preset token, then the inline form (`parse_inline`).
     pub fn load(spec: &str) -> anyhow::Result<Sheet> {
         let path = std::path::Path::new(spec);
         if path.is_file() {
             let bytes = std::fs::read(path)
-                .with_context(|| format!("reading --split-by sheet {}", path.display()))?;
+                .with_context(|| format!("reading --targets sheet {}", path.display()))?;
             return if bytes.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'>') {
                 Sheet::parse_fasta(&bytes)
             } else {
                 let text = String::from_utf8(bytes).with_context(|| {
-                    format!("--split-by sheet {} is not valid UTF-8", path.display())
+                    format!("--targets sheet {} is not valid UTF-8", path.display())
                 })?;
                 Sheet::parse_tsv(&text)
             };
@@ -304,19 +304,19 @@ impl Sheet {
         }
         if !spec.contains(':') {
             bail!(
-                "--split-by {spec:?} is not an existing file, a known preset or an inline \
+                "--targets {spec:?} is not an existing file, a known preset or an inline \
                  target; {SPEC_FORMS}"
             );
         }
         Sheet::parse_inline(spec).with_context(|| {
             format!(
-                "--split-by {spec:?} is not an existing file or a known preset, and not a valid \
+                "--targets {spec:?} is not an existing file or a known preset, and not a valid \
                  inline target; {SPEC_FORMS}"
             )
         })
     }
 
-    /// Loads every `--split-by` value (`load`) and merges them into one
+    /// Loads every `--targets` value (`load`) and merges them into one
     /// sheet (`merge`).
     pub fn load_all(specs: &[String]) -> anyhow::Result<Sheet> {
         let sheets = specs
@@ -392,7 +392,7 @@ impl Sheet {
             bail!("inline target has an empty target name");
         }
         if rest.trim().is_empty() {
-            bail!("inline target {name:?} has no primer; give F:SEQ, R:SEQ or both");
+            bail!("inline target {name:?} has no sequence; give F:SEQ, R:SEQ or both");
         }
 
         let mut pairs: Vec<Pair> = Vec::new();
@@ -411,8 +411,8 @@ impl Sheet {
                 let seq = fields.next().unwrap_or("");
                 if seq.is_empty() {
                     bail!(
-                        "inline target {name:?}: empty sequence in the {} list of primer pair \
-                         {n}; a list takes no trailing or doubled comma",
+                        "inline target {name:?}: empty sequence in the {} list of pair {n}; a \
+                         list takes no trailing or doubled comma",
                         TAGS[current]
                     );
                 }
@@ -425,21 +425,21 @@ impl Sheet {
                     } else {
                         "doubled"
                     };
-                    bail!("inline target {name:?}: {what} ':' in primer pair {n}");
+                    bail!("inline target {name:?}: {what} ':' in pair {n}");
                 }
                 let Some(role) = role_of(tag) else {
                     bail!(
-                        "inline target {name:?}: unknown tag {tag:?} in primer pair {n}; tags \
-                         are F and R"
+                        "inline target {name:?}: unknown tag {tag:?} in pair {n}; tags are F \
+                         and R"
                     );
                 };
                 let tag = TAGS[role];
                 if pair.tagged[role] {
-                    bail!("inline target {name:?}: primer pair {n} gives {tag} more than once");
+                    bail!("inline target {name:?}: pair {n} gives {tag} more than once");
                 }
                 let seq = fields.next().unwrap_or("");
                 if seq.is_empty() {
-                    bail!("inline target {name:?}: tag {tag} has no sequence in primer pair {n}");
+                    bail!("inline target {name:?}: tag {tag} has no sequence in pair {n}");
                 }
                 pair.tagged[role] = true;
                 pair.seqs[role].push(seq);
@@ -460,9 +460,9 @@ impl Sheet {
             {
                 let tag = TAGS[second];
                 bail!(
-                    "inline target {name:?}: primer pair {} gives only {tag} after a comma, and \
-                     pair {} only {}; write \":{tag}:\" to add {} primers to pair {}, or give \
-                     each target its own --split-by",
+                    "inline target {name:?}: pair {} gives only {tag} after a comma, and pair \
+                     {} only {}; write \":{tag}:\" to add {} sequences to pair {}, or give \
+                     each target its own --targets value",
                     n + 2,
                     n + 1,
                     TAGS[first],
@@ -506,14 +506,14 @@ impl Sheet {
             .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'));
         let header = lines
             .next()
-            .ok_or_else(|| anyhow::anyhow!("primer sheet is empty"))?;
+            .ok_or_else(|| anyhow::anyhow!("target sheet is empty"))?;
         let columns: Vec<String> = header
             .split('\t')
             .map(|c| c.trim().to_ascii_lowercase())
             .collect();
         let col = |name: &str| -> anyhow::Result<usize> {
             columns.iter().position(|c| c == name).ok_or_else(|| {
-                anyhow::anyhow!("primer sheet header is missing the required column {name:?}")
+                anyhow::anyhow!("target sheet header is missing the required column {name:?}")
             })
         };
         let target_col = col("target")?;
@@ -531,7 +531,7 @@ impl Sheet {
 
             let name = field(target_col);
             if name.is_empty() {
-                bail!("a primer sheet row has an empty target name");
+                bail!("a target sheet row has an empty target name");
             }
             let fwd = add_list(
                 &mut table,
@@ -610,7 +610,7 @@ impl Sheet {
         let mut index: HashMap<String, usize> = HashMap::new();
 
         while let Some(rec) = reader.next() {
-            let rec = rec.map_err(|e| anyhow::anyhow!("primer FASTA: {e}"))?;
+            let rec = rec.map_err(|e| anyhow::anyhow!("target FASTA: {e}"))?;
             let head = String::from_utf8_lossy(rec.head()).into_owned();
             let (name, description) = head
                 .split_once(char::is_whitespace)
@@ -634,7 +634,7 @@ impl Sheet {
                 continue;
             };
             let end = end_field.ok_or_else(|| {
-                anyhow::anyhow!("primer {name:?}: target={target_name:?} needs end=fwd or end=rev")
+                anyhow::anyhow!("entry {name:?}: target={target_name:?} needs end=fwd or end=rev")
             })?;
 
             let idx = table.add(&name, rec.seq())?;
@@ -650,7 +650,7 @@ impl Sheet {
             if let Some(g) = group_field {
                 match &targets[target_idx].group {
                     Some(existing) if existing != g => bail!(
-                        "primer {name:?}: target={target_name:?} group={g:?} conflicts with the \
+                        "entry {name:?}: target={target_name:?} group={g:?} conflicts with the \
                          group {existing:?} already given for this target",
                     ),
                     _ => targets[target_idx].group = Some(g.to_string()),
@@ -659,12 +659,12 @@ impl Sheet {
             match end.to_ascii_lowercase().as_str() {
                 "fwd" => push_unique(&mut targets[target_idx].fwd, idx),
                 "rev" => push_unique(&mut targets[target_idx].rev, idx),
-                other => bail!("primer {name:?}: end={other:?} must be fwd or rev"),
+                other => bail!("entry {name:?}: end={other:?} must be fwd or rev"),
             }
         }
 
         if targets.is_empty() {
-            bail!("primer FASTA has no entry with a target= field");
+            bail!("target FASTA has no entry with a target= field");
         }
         let targets: Vec<Target> = targets
             .into_iter()
@@ -718,7 +718,7 @@ impl Sheet {
 
     /// Checks that every target has a primer in each role list `require`
     /// needs. Load-time parsing allows an empty list; this is the separate
-    /// check for a specific `--split-require` value.
+    /// check for a specific `--target-require` value.
     pub fn validate(&self, require: Require) -> anyhow::Result<()> {
         for t in &self.targets {
             let ok = match require {
@@ -734,7 +734,7 @@ impl Sheet {
                     .get_name()
                     .to_string();
                 bail!(
-                    "target {:?} has no primer for --split-require {}",
+                    "target {:?} has no sequence for --target-require {}",
                     t.name,
                     spelling
                 );
@@ -745,16 +745,16 @@ impl Sheet {
 
     /// Returns every pair of primers of two targets of different keys (target
     /// names by default, or groups when `by_group`) whose IUPAC edit distance
-    /// is below `lead`, regardless of which role list each primer is in:
+    /// is below `margin`, regardless of which role list each primer is in:
     /// primer index, primer index (lower first), distance. Rescoring aligns
     /// every sheet primer in the orientation valid for each end, so a forward
     /// primer of one key and a reverse primer of another compete at the same
-    /// end too; those keys cannot be reliably told apart at `--split-lead
-    /// lead`. A pair is reported once even when several role combinations or
+    /// end too; those keys cannot be reliably told apart at a `--target-margin`
+    /// of `margin`. A pair is reported once even when several role combinations or
     /// target pairs reach the same two primers. Primers of one key, the
     /// variants of one target among them, are never compared.
-    pub fn close_pairs(&self, lead: usize, by_group: bool) -> Vec<(usize, usize, usize)> {
-        self.close_pairs_by(lead, |i, j| {
+    pub fn close_pairs(&self, margin: usize, by_group: bool) -> Vec<(usize, usize, usize)> {
+        self.close_pairs_by(margin, |i, j| {
             let (a, b) = (&self.targets[i], &self.targets[j]);
             if by_group {
                 a.group == b.group
@@ -768,7 +768,7 @@ impl Sheet {
     /// whether two target indices share a key.
     pub fn close_pairs_by(
         &self,
-        lead: usize,
+        margin: usize,
         same_key: impl Fn(usize, usize) -> bool,
     ) -> Vec<(usize, usize, usize)> {
         fn primers(t: &Target) -> impl Iterator<Item = usize> + '_ {
@@ -796,10 +796,10 @@ impl Sheet {
                             &mut searcher,
                             &self.primers[pair.0].seq,
                             &self.primers[pair.1].seq,
-                            lead,
+                            margin,
                         );
                         if let Some(dist) = dist
-                            && dist < lead
+                            && dist < margin
                         {
                             out.push((pair.0, pair.1, dist));
                         }
@@ -1499,8 +1499,8 @@ mod tests {
         const R: &str = "CGGTTACCTTGTTACGACTT";
         for (spec, needle) in [
             (format!(":F:{F}"), "empty target name"),
-            ("16S".to_string(), "no primer"),
-            ("16S:".to_string(), "no primer"),
+            ("16S".to_string(), "no sequence"),
+            ("16S:".to_string(), "no sequence"),
             (format!("16S:X:{F}"), "\"X\""),
             (format!("16S:F:{F}:Q:{R}"), "\"Q\""),
             (format!("16S:F:{F}:R"), "R has no sequence"),
@@ -1509,27 +1509,21 @@ mod tests {
             (format!("16S:R:{R}:R:{F}"), "R more than once"),
             (
                 format!("16S:F:{F},"),
-                "empty sequence in the F list of primer pair 1",
+                "empty sequence in the F list of pair 1",
             ),
             (format!("16S:F:{F},,R:{R}"), "empty sequence in the F list"),
             (format!("16S:F:{F},{R},"), "empty sequence in the F list"),
             (
                 format!("16S:F:{F}:R:{R},"),
-                "empty sequence in the R list of primer pair 1",
+                "empty sequence in the R list of pair 1",
             ),
-            (
-                format!("16S:F:{F}:R:{R},F:{R},,{F}"),
-                "F list of primer pair 2",
-            ),
+            (format!("16S:F:{F}:R:{R},F:{R},,{F}"), "F list of pair 2"),
             (format!("16S:F:{F},:R:{R}"), "empty sequence in the F list"),
             (format!("16S:F:{F},{R}:F:{R}"), "F more than once"),
-            (
-                format!("16S:F:{F},F:"),
-                "F has no sequence in primer pair 2",
-            ),
-            (format!("16S:F:{F}:"), "trailing ':' in primer pair 1"),
-            (format!("16S:F:{F}:R:{R}:"), "trailing ':' in primer pair 1"),
-            (format!("16S:F:{F}::R:{R}"), "doubled ':' in primer pair 1"),
+            (format!("16S:F:{F},F:"), "F has no sequence in pair 2"),
+            (format!("16S:F:{F}:"), "trailing ':' in pair 1"),
+            (format!("16S:F:{F}:R:{R}:"), "trailing ':' in pair 1"),
+            (format!("16S:F:{F}::R:{R}"), "doubled ':' in pair 1"),
             (format!("16S:F:{F},ACGT"), "11"),
             (format!("16S:F:{F}:R:{F}GG{R}X"), "non-nucleotide"),
             ("16S:F:ACGTACGTAC".to_string(), "11"),
@@ -1551,17 +1545,17 @@ mod tests {
         for (spec, needle) in [
             (
                 format!("16S:F:{F},R:{R}"),
-                "primer pair 2 gives only R after a comma, and pair 1 only F; write \":R:\" \
-                 to add reverse primers to pair 1",
+                "pair 2 gives only R after a comma, and pair 1 only F; write \":R:\" to add \
+                 reverse sequences to pair 1",
             ),
             (
                 format!("16S:R:{R},F:{F}"),
-                "write \":F:\" to add forward primers to pair 1",
+                "write \":F:\" to add forward sequences to pair 1",
             ),
-            (format!("16S:F:{F},{P},R:{R}"), "primer pair 2 gives only R"),
+            (format!("16S:F:{F},{P},R:{R}"), "pair 2 gives only R"),
             (
                 format!("16S:F:{F}:R:{R},F:{P},R:{R}"),
-                "primer pair 3 gives only R after a comma, and pair 2 only F",
+                "pair 3 gives only R after a comma, and pair 2 only F",
             ),
         ] {
             let err = format!("{:#}", Sheet::parse_inline(&spec).unwrap_err());

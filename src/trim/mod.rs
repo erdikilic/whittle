@@ -11,7 +11,7 @@ pub enum QualityMethod {
     /// Trim each end up to the first base at or above the cutoff
     Ends,
     /// Keep the single best segment under the modified Mott score
-    Best,
+    BestSegment,
     /// Keep every maximal segment under the modified Mott score
     Segments,
     /// Split at runs of --min-low-quality-run bases below the cutoff
@@ -24,7 +24,7 @@ impl QualityMethod {
     pub fn label(self) -> &'static str {
         match self {
             QualityMethod::Ends => "ends",
-            QualityMethod::Best => "best",
+            QualityMethod::BestSegment => "best-segment",
             QualityMethod::Segments => "segments",
             QualityMethod::Runs => "runs",
         }
@@ -76,7 +76,7 @@ impl QualityOp {
     fn apply(&self, phred: &[u8]) -> Vec<(usize, usize)> {
         let pieces = match self.method {
             QualityMethod::Ends => return trim_by_quality(phred, self.cutoff),
-            QualityMethod::Best => return best_segment(phred, self.cutoff),
+            QualityMethod::BestSegment => return best_segment(phred, self.cutoff),
             QualityMethod::Segments => maximal_segments(phred, self.cutoff),
             QualityMethod::Runs => split_low_quality(phred, self.cutoff, self.min_low_quality_run),
         };
@@ -315,7 +315,7 @@ mod tests {
             vec![(3, 59), (83, 139)]
         );
         let best = TrimPlan {
-            quality: Some(QualityOp::new(QualityMethod::Best, 20)),
+            quality: Some(QualityOp::new(QualityMethod::BestSegment, 20)),
             ..plan
         };
         assert_eq!(

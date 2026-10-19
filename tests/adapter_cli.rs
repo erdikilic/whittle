@@ -540,10 +540,10 @@ fn rejects_policy_with_discovery_enabled() {
         ));
 }
 
-/// Report-only inference names discoveries against the built-in catalog and
+/// Discover-only inference names discoveries against the built-in catalog and
 /// user-supplied FASTA entries.
 #[test]
-fn infer_report_with_fasta_notes_naming_includes_fasta() {
+fn infer_discover_only_with_fasta_notes_naming_includes_fasta() {
     let mut fa = tempfile::NamedTempFile::new().unwrap();
     writeln!(fa, ">present\nACGTACGTACGTACGTACGT").unwrap();
     let mut fq = tempfile::NamedTempFile::new().unwrap();
@@ -556,7 +556,7 @@ fn infer_report_with_fasta_notes_naming_includes_fasta() {
         .args([
             "-i",
             fq.path().to_str().unwrap(),
-            "--adapter-report",
+            "--adapter-discover-only",
             "--adapter-fasta",
             fa.path().to_str().unwrap(),
         ])
@@ -642,42 +642,60 @@ fn infer_action_maps_to_banner() {
     Command::cargo_bin("whittle")
         .unwrap()
         .env_remove("WHITTLE_LOG")
-        .args(["-i", fq.to_str().unwrap(), "--adapter-report", "-t", "1"])
+        .args([
+            "-i",
+            fq.to_str().unwrap(),
+            "--adapter-discover-only",
+            "-t",
+            "1",
+        ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("\u{b7} report"));
+        .stderr(predicates::str::contains("\u{b7} discover-only"));
 }
 
 #[test]
-fn infer_report_prints_and_does_not_trim() {
+fn infer_discover_only_prints_and_does_not_trim() {
     let dir = tempfile::tempdir().unwrap();
     let fq = write_adapted_fastq(dir.path(), 500);
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
-    cmd.args(["-i", fq.to_str().unwrap(), "--adapter-report", "-t", "1"]);
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "--adapter-discover-only",
+        "-t",
+        "1",
+    ]);
     let assert = cmd.assert().success();
     let out = assert.get_output();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("Adapter inference: sampled") && stderr.contains("discovered"),
-        "Report-only logs what it discovered: {stderr}"
+        "Discover-only logs what it discovered: {stderr}"
     );
-    // Report-only exits before dispatch: no FASTQ record header on stdout.
+    // Discover-only exits before dispatch: no FASTQ record header on stdout.
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         !stdout.contains('@'),
-        "Report-only writes no trimmed FASTQ to stdout: {stdout}"
+        "Discover-only writes no trimmed FASTQ to stdout: {stdout}"
     );
 }
 
-/// Report-only emits discovered adapters as FASTA records on stdout.
+/// Discover-only emits discovered adapters as FASTA records on stdout.
 #[test]
-fn infer_report_prints_sequence_to_stdout() {
+fn infer_discover_only_prints_sequence_to_stdout() {
     let dir = tempfile::tempdir().unwrap();
     let fq = write_adapted_fastq(dir.path(), 500);
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
-    cmd.args(["-i", fq.to_str().unwrap(), "--adapter-report", "-t", "1"]);
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "--adapter-discover-only",
+        "-t",
+        "1",
+    ]);
     let assert = cmd.assert().success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     assert!(
@@ -697,10 +715,10 @@ fn infer_report_prints_sequence_to_stdout() {
     );
 }
 
-/// A supplied FASTA is the known set: report mode trims it first and reports
+/// A supplied FASTA is the known set: discover-only mode trims it first and reports
 /// only sequences discovered beyond it.
 #[test]
-fn infer_report_treats_fasta_as_known_sequences() {
+fn infer_discover_only_treats_fasta_as_known_sequences() {
     let dir = tempfile::tempdir().unwrap();
     let fq = write_adapted_fastq(dir.path(), 500);
     let fa_path = dir.path().join("known_refs.fa");
@@ -715,7 +733,7 @@ fn infer_report_treats_fasta_as_known_sequences() {
     cmd.args([
         "-i",
         fq.to_str().unwrap(),
-        "--adapter-report",
+        "--adapter-discover-only",
         "--adapter-fasta",
         fa_path.to_str().unwrap(),
         "-t",
@@ -828,10 +846,10 @@ fn infer_on_tiny_input_warns_and_keeps_reads() {
     }
 }
 
-/// Report-only writes no records when discovery is skipped for insufficient
+/// Discover-only writes no records when discovery is skipped for insufficient
 /// input reads.
 #[test]
-fn infer_report_tiny_input_writes_no_output() {
+fn infer_discover_only_tiny_input_writes_no_output() {
     let dir = tempfile::tempdir().unwrap();
     let n = 10; // < MIN_SAMPLE_FOR_DETECTION (100)
     let fq = write_adapted_fastq(dir.path(), n);
@@ -843,7 +861,7 @@ fn infer_report_tiny_input_writes_no_output() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--adapter-report",
+        "--adapter-discover-only",
         "-t",
         "1",
     ]);
@@ -854,12 +872,12 @@ fn infer_report_tiny_input_writes_no_output() {
         "Warns about the undersized sample: {stderr}"
     );
 
-    // Report-only writes no records: either the `-o` file was never created, or
+    // Discover-only writes no records: either the `-o` file was never created, or
     // it exists but is empty or has no FASTQ record header.
     match std::fs::read(&out_path) {
         Ok(bytes) => assert!(
             bytes.is_empty() || !bytes.contains(&b'@'),
-            "Report-only writes no output records to -o: {:?}",
+            "Discover-only writes no output records to -o: {:?}",
             String::from_utf8_lossy(&bytes)
         ),
         Err(e) => assert_eq!(
@@ -870,9 +888,9 @@ fn infer_report_tiny_input_writes_no_output() {
     }
 }
 
-/// Report-only leaves an existing output path unchanged.
+/// Discover-only leaves an existing output path unchanged.
 #[test]
-fn infer_report_does_not_clobber_output_file() {
+fn infer_discover_only_does_not_clobber_output_file() {
     let dir = tempfile::tempdir().unwrap();
     // At least `MIN_SAMPLE_FOR_DETECTION` planted-adapter reads, so discovery
     // runs rather than the too-few-reads path.
@@ -888,7 +906,7 @@ fn infer_report_does_not_clobber_output_file() {
         fq.to_str().unwrap(),
         "-o",
         out_path.to_str().unwrap(),
-        "--adapter-report",
+        "--adapter-discover-only",
         "-t",
         "1",
     ]);
@@ -897,7 +915,7 @@ fn infer_report_does_not_clobber_output_file() {
     let contents = std::fs::read_to_string(&out_path).unwrap();
     assert_eq!(
         contents, sentinel,
-        "Report-only leaves a pre-existing -o file untouched"
+        "Discover-only leaves a pre-existing -o file untouched"
     );
 }
 
@@ -984,7 +1002,13 @@ fn infer_warns_on_marginal_support() {
     let fq = write_adapted_fastq_marginal(dir.path(), 500);
     let mut cmd = Command::cargo_bin("whittle").unwrap();
     cmd.env_remove("WHITTLE_LOG");
-    cmd.args(["-i", fq.to_str().unwrap(), "--adapter-report", "-t", "1"]);
+    cmd.args([
+        "-i",
+        fq.to_str().unwrap(),
+        "--adapter-discover-only",
+        "-t",
+        "1",
+    ]);
     let assert = cmd.assert().success();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
@@ -1018,9 +1042,9 @@ fn write_minimal_ubam(path: &std::path::Path, n: usize) {
     writer.try_finish().unwrap();
 }
 
-/// BAM report-only mode emits FASTA text and completes without record output.
+/// BAM discover-only mode emits FASTA text and completes without record output.
 #[test]
-fn infer_report_on_bam_input_with_piped_stdout_succeeds() {
+fn infer_discover_only_on_bam_input_with_piped_stdout_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let in_path = dir.path().join("in.bam");
     write_minimal_ubam(&in_path, 500);
@@ -1031,7 +1055,7 @@ fn infer_report_on_bam_input_with_piped_stdout_succeeds() {
         .args([
             "-i",
             in_path.to_str().unwrap(),
-            "--adapter-report",
+            "--adapter-discover-only",
             "-t",
             "1",
         ])
@@ -1057,7 +1081,7 @@ fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
             "-q",
             "30",
             "-m",
-            "arithmetic",
+            "phred-mean",
             "-t",
             "1",
         ])
@@ -1080,7 +1104,7 @@ fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
             "-q",
             "30",
             "-m",
-            "arithmetic",
+            "phred-mean",
             "-t",
             "1",
         ])
@@ -1103,7 +1127,7 @@ fn quality_filter_judges_the_trimmed_insert_not_the_raw_read() {
             "-q",
             "45",
             "-m",
-            "arithmetic",
+            "phred-mean",
             "-t",
             "1",
         ])

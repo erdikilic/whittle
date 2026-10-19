@@ -97,14 +97,15 @@ AGAGTTTGATYMTGGCTCAG
 TACGGYTACCTTGTTACGACTT
 ```
 
-Split a pooled amplicon run by primer target: `--split-by` (repeatable)
-takes a TSV or FASTA sheet of primer pairs or primer mixes, the preset
+Assign the reads of a pooled run to targets by the sequences at their ends:
+`--targets` (repeatable) takes a TSV or FASTA sheet of forward and reverse
+sequences (primer pairs, primer mixes, barcodes or adapters), the preset
 `mab114` (the kit's 16S and ITS primer mixes), or an inline target such as
 `16S:F:SEQ[,SEQ...]:R:SEQ[,SEQ...]`, and tags each record `wt:Z`; an `-o`
 template writes each target to its own file.
 
 ```bash
-whittle -i pool.bam -o out/{barcode}.{target}.fastq.gz --split-by mab114
+whittle -i pool.bam -o out/{barcode}.{target}.fastq.gz --targets mab114
 ```
 
 Trim PacBio SMRTbell adapters and split concatemers.
@@ -116,7 +117,7 @@ whittle -i hifi.bam -o trimmed.bam --adapter-preset pacbio
 Discover adapters de novo: report the candidates, or trim with them directly.
 
 ```bash
-whittle -i reads.fastq.gz --adapter-report
+whittle -i reads.fastq.gz --adapter-discover-only
 whittle -i reads.fastq.gz -o trimmed.fastq.gz --adapter-discover
 ```
 
@@ -155,17 +156,17 @@ whittle -i reads.bam -o reads.fastq.gz -l 500 --quiet --summary-json qc.json
 
 `--min-quality` and `--max-quality` filter each output segment using the
 calculation selected by `--quality-mode`: `mean` (average error probability
-converted to Phred, the default), `arithmetic` (average Phred score), or
+converted to Phred, the default), `phred-mean` (average Phred score), or
 `median`. This setting does not affect trimming or splitting.
-`--max-expected-errors E` rejects a segment whose summed per-base error
-probabilities exceed E, an absolute budget per segment meant for amplicons of
+`--max-expected-errors ERRORS` rejects a segment whose summed per-base error
+probabilities exceed ERRORS, an absolute budget per segment meant for amplicons of
 a fixed length ([details](docs/cli.md#quality-filtering-and-trimming)).
 
 | Operation | Parameters | Behavior |
 |---|---|---|
 | Fixed crop | `--trim-front BASES`, `--trim-tail BASES` | Remove a fixed number of bases from each adapter-derived segment's 5' and 3' ends after barcode restriction |
 | Quality end trimming | `--quality-trim ends --quality-cutoff PHRED` | Trim each end until reaching a base at or above the cutoff |
-| Best segment | `--quality-trim best --quality-cutoff PHRED` | Select the highest-scoring contiguous segment using cumulative error probabilities (modified Mott); bases below the cutoff can be retained |
+| Best segment | `--quality-trim best-segment --quality-cutoff PHRED` | Select the highest-scoring contiguous segment using cumulative error probabilities (modified Mott); bases below the cutoff can be retained |
 | Maximal segments | `--quality-trim segments --quality-cutoff PHRED` | Keep every maximal-scoring segment under the best-segment score, so a low-quality interior region splits the read and both flanks are kept |
 | Low-quality runs | `--quality-trim runs --quality-cutoff PHRED`, `--min-low-quality-run BASES` | Split at the specified number of consecutive bases below the cutoff; retain shorter internal stretches |
 
@@ -180,16 +181,17 @@ regions while its ends are trimmed more strictly.
 
 Notes on quality filtering ([details](docs/cli.md#quality-filtering-and-trimming)):
 
-- The default `mean` averages per-base error probabilities and converts back to Phred, as dorado, chopper, NanoFilt and Filtlong do; `-q Q` then keeps segments whose expected error rate (expected errors divided by length) is at most `10^(-Q/10)`, the test of `vsearch --fastq_maxee_rate`. `arithmetic` averages Phred values, as fastp and fastplong do, and gives much higher values on reads with many bases at the quality cap.
+- The default `mean` averages per-base error probabilities and converts back to Phred, as dorado, chopper, NanoFilt and Filtlong do; `-q Q` then keeps segments whose expected error rate (expected errors divided by length) is at most `10^(-Q/10)`, the test of `vsearch --fastq_maxee_rate`. `phred-mean` averages Phred values, as fastp and fastplong do, and gives much higher values on reads with many bases at the quality cap.
 - `--quality-mode` affects only `-q`/`-Q`. The trimming methods and `--max-expected-errors` use per-base qualities, and a recomputed dorado `qs` tag is always the error-probability mean of the kept segment.
 - dorado computes `qs` over the bases after the first 60, so `-q` and a read's `qs` can differ; `--tag-filter '[qs]>=10'` filters on dorado's own value.
 - PacBio HiFi base QVs are binned on current instruments and read accuracy is in the `rq` tag: filter HiFi reads with `--tag-filter '[rq]>=0.99'` rather than a mean recomputed from binned QVs. Quality trimming is rarely needed for HiFi.
 - `-q` limits the error rate per base whatever the length; `--max-expected-errors` limits the total per segment, so long reads need a higher per-base accuracy to pass. Use it for fixed-length amplicons, not for genomic long reads.
-- `--quality-trim ends` stops at the first base at or above the cutoff, so a single good base inside a low-quality tail ends trimming; `best` and `segments` score the whole tail and do not stop there.
-- Most long-read uses need no quality trimming, only a length and quality filter. Use `best` for reads with low-quality ends and `segments` for reads with low-quality interior regions.
+- `--quality-trim ends` stops at the first base at or above the cutoff, so a single good base inside a low-quality tail ends trimming; `best-segment` and `segments` score the whole tail and do not stop there.
+- Most long-read uses need no quality trimming, only a length and quality filter. Use `best-segment` for reads with low-quality ends and `segments` for reads with low-quality interior regions.
 
-`--head-crop` and `--tail-crop` are aliases for `--trim-front` and `--trim-tail`.
-Both accept a base count and retain the short options `-H` and `-T`.
+`--head-crop` and `--tail-crop` are accepted for `--trim-front` and
+`--trim-tail` without appearing in `--help`; the short options are `-H` and
+`-T`.
 
 ## Trimming pipeline
 

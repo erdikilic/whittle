@@ -66,7 +66,7 @@ fn head_tail_crop_over_stdin() {
 fn quality_mode_filters_segments_without_changing_split_locations() {
     let input = "@r1\nACGTACGTACG\n+\nII#II##IIII\n";
     let split = "@r1_segment_1\nACGTA\n+\nII#II\n@r1_segment_2\nTACG\n+\nIIII\n";
-    for mode in ["mean", "arithmetic", "median"] {
+    for mode in ["mean", "phred-mean", "median"] {
         whittle()
             .args([
                 "--quality-trim",
@@ -130,7 +130,7 @@ fn quality_trim_flag_combinations_are_validated() {
         (
             &[
                 "--quality-trim",
-                "best",
+                "best-segment",
                 "--quality-cutoff",
                 "10",
                 "--min-low-quality-run",
@@ -167,7 +167,7 @@ fn quality_trim_flag_combinations_are_validated() {
         (
             &[
                 "--quality-trim",
-                "best",
+                "best-segment",
                 "--quality-cutoff",
                 "10",
                 "--quality-end-cutoff",

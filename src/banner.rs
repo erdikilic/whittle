@@ -135,7 +135,7 @@ pub(crate) fn filters_and_trim_line(
 }
 
 /// The startup banner's `Adapters: ...` line: sequence count with its role
-/// breakdown, `trim + split` or `ends-only`, error rate, end-zone size, and
+/// breakdown, `trim + split` or `ends-only`, error rate, end-search size, and
 /// whether presence detection samples. `None` when adapter trimming is off,
 /// so the caller skips the line.
 ///
@@ -159,7 +159,7 @@ pub(crate) fn adapter_banner_line(
     };
     let (n_adapters, roles) = (a.adapters.len(), role_breakdown(&a.adapters));
     Some(format!(
-        "Adapters: {n_adapters} sequences{roles} · {mode} · error {:.2} · end-zone {} bp · {sample}{infer_suffix}",
+        "Adapters: {n_adapters} sequences{roles} · {mode} · error {:.2} · end-search {} bp · {sample}{infer_suffix}",
         a.error_rate, a.end_size
     ))
 }
@@ -392,8 +392,8 @@ mod tests {
         let f = base_filter();
         let mut t = base_trim();
 
-        t.quality = Some(trim::QualityOp::new(trim::QualityMethod::Best, 20));
-        assert!(filters_and_trim_line(&f, &t).ends_with("trim: quality best Q20"));
+        t.quality = Some(trim::QualityOp::new(trim::QualityMethod::BestSegment, 20));
+        assert!(filters_and_trim_line(&f, &t).ends_with("trim: quality best-segment Q20"));
 
         t.quality = Some(trim::QualityOp::new(trim::QualityMethod::Segments, 10));
         assert!(filters_and_trim_line(&f, &t).ends_with("trim: quality segments Q10"));
@@ -461,7 +461,7 @@ mod tests {
         assert!(line.contains("1 sequences"));
         assert!(line.contains("trim + split"));
         assert!(line.contains("error 0.20"));
-        assert!(line.contains("end-zone 150 bp"));
+        assert!(line.contains("end-search 150 bp"));
         assert!(line.contains("sample 10000"));
         assert!(!line.contains("infer"), "No infer suffix when off: {line}");
 
@@ -509,8 +509,8 @@ mod tests {
         let trim_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::Discover).unwrap();
         assert!(trim_line.ends_with("\u{b7} discover"), "{trim_line}");
 
-        let report_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::Report).unwrap();
-        assert!(report_line.ends_with("\u{b7} report"), "{report_line}");
+        let only_line = adapter_banner_line(Some(&cfg), 40000, AdapterInfer::DiscoverOnly).unwrap();
+        assert!(only_line.ends_with("\u{b7} discover-only"), "{only_line}");
     }
 
     #[test]

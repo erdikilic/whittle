@@ -1,4 +1,4 @@
-//! Live, thread-shared `--split-by` counters: one `KeyCounters` per sheet key,
+//! Live, thread-shared `--targets` counters: one `KeyCounters` per sheet key,
 //! the by-reason unassigned tally, and the ambiguous and discarded totals.
 //! Built once the run's `Splitter` exists, sized by `Keys::names`, and
 //! snapshotted into a plain `SplitStats` for `Stats` and the summary.
@@ -8,18 +8,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::classify::{Call, Ends, Strand, Unassigned};
 
 /// Index into `SplitCounters::unassigned` and `SplitStats::unassigned`,
-/// matching the summary's field order (`no_primer`, `require`,
+/// matching the summary's field order (`no_match`, `missing_end`,
 /// `orientation`, `length`).
 fn unassigned_index(reason: Unassigned) -> usize {
     match reason {
-        Unassigned::NoPrimer => 0,
-        Unassigned::Require => 1,
+        Unassigned::NoMatch => 0,
+        Unassigned::MissingEnd => 1,
         Unassigned::Orientation => 2,
         Unassigned::Length => 3,
     }
 }
 
-/// Live per-key `--split-by` counters.
+/// Live per-key `--targets` counters.
 #[derive(Debug, Default)]
 pub struct KeyCounters {
     pub reads: AtomicU64,
@@ -45,7 +45,7 @@ impl KeyCounters {
     }
 }
 
-/// Live, thread-shared `--split-by` counters for one run: one `KeyCounters` per
+/// Live, thread-shared `--targets` counters for one run: one `KeyCounters` per
 /// sheet key, in `Keys::names` order, the by-reason unassigned tally, and the
 /// ambiguous and discarded totals.
 #[derive(Debug)]
@@ -139,7 +139,7 @@ pub struct KeyStats {
 }
 
 /// A snapshot of `SplitCounters`, keys in `Keys::names` order. `unassigned`
-/// is indexed as `[no_primer, require, orientation, length]`.
+/// is indexed as `[no_match, missing_end, orientation, length]`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SplitStats {
     pub keys: Vec<KeyStats>,
@@ -201,11 +201,11 @@ mod tests {
     #[test]
     fn unassigned_call_bumps_its_reason_in_summary_field_order() {
         let counters = SplitCounters::new(1);
-        counters.record(&Call::Unassigned(Unassigned::NoPrimer), 0, false);
-        counters.record(&Call::Unassigned(Unassigned::Require), 0, false);
+        counters.record(&Call::Unassigned(Unassigned::NoMatch), 0, false);
+        counters.record(&Call::Unassigned(Unassigned::MissingEnd), 0, false);
         counters.record(&Call::Unassigned(Unassigned::Orientation), 0, false);
         counters.record(&Call::Unassigned(Unassigned::Length), 0, false);
-        counters.record(&Call::Unassigned(Unassigned::NoPrimer), 0, false);
+        counters.record(&Call::Unassigned(Unassigned::NoMatch), 0, false);
 
         let snap = counters.snapshot();
         assert_eq!(snap.unassigned, [2, 1, 1, 1]);
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn discarded_adds_to_the_discarded_total_without_changing_the_classification() {
         let counters = SplitCounters::new(1);
-        counters.record(&Call::Unassigned(Unassigned::NoPrimer), 0, true);
+        counters.record(&Call::Unassigned(Unassigned::NoMatch), 0, true);
         counters.record(&Call::Ambiguous, 0, true);
         counters.record(&Call::Ambiguous, 0, false);
 

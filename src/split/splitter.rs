@@ -11,12 +11,12 @@ use super::score::{End, Scorer};
 use super::sheet::Sheet;
 use crate::workflow::KeyId;
 
-/// What `--split-by` does with a classified piece.
+/// What `--target-action` does with a classified piece.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 pub enum Action {
     /// Keep the piece as trimmed.
     Trim,
-    /// Keep the piece widened over its located primer loci.
+    /// Keep the piece widened over its located sequences.
     Retain,
 }
 
@@ -30,14 +30,14 @@ impl Action {
     }
 }
 
-/// Resolved `--split-by` configuration for a run.
+/// Resolved `--targets` configuration for a run.
 #[derive(Debug, Clone)]
 pub struct SplitOptions {
     /// The parsed primer split sheet.
     pub sheet: Sheet,
     /// Key granularity: one key per target or one key per group.
     pub level: KeyLevel,
-    /// The end rule and lead margin the classifier applies.
+    /// The end rule and margin the classifier applies.
     pub rules: Rules,
     /// Whether an assigned piece is trimmed or retained.
     pub action: Action,
@@ -47,7 +47,7 @@ pub struct SplitOptions {
     /// Drops reads classified `Ambiguous` instead of writing them to the
     /// `ambiguous` bin.
     pub discard_ambiguous: bool,
-    /// The `--split-by` values as given, in order, carried through to the
+    /// The `--targets` values as given, in order, carried through to the
     /// report.
     pub spec: Vec<String>,
     /// File sources loaded into the sheet, protected from output writes.
@@ -61,7 +61,7 @@ pub struct SplitOptions {
 /// against them.
 #[derive(Debug)]
 pub struct Splitter {
-    /// The resolved `--split-by` configuration.
+    /// The resolved `--targets` configuration.
     pub opts: SplitOptions,
     /// The sheet's keys at `opts.level`.
     pub keys: Keys,
@@ -100,7 +100,7 @@ impl Splitter {
         let bounds = Bounds::new(
             &opts.sheet,
             &keys,
-            opts.rules.lead,
+            opts.rules.margin,
             &scorer.budgets(),
             &scorer.anchored_budgets(),
         );
@@ -292,12 +292,12 @@ mod tests {
         cfg
     }
 
-    /// Resolved `--split-by` options with default action and no discards.
-    fn options(sheet: Sheet, require: Require, lead: usize) -> SplitOptions {
+    /// Resolved `--targets` options with default action and no discards.
+    fn options(sheet: Sheet, require: Require, margin: usize) -> SplitOptions {
         SplitOptions {
             sheet,
             level: KeyLevel::Target,
-            rules: Rules { require, lead },
+            rules: Rules { require, margin },
             action: Action::Trim,
             discard_unassigned: false,
             discard_ambiguous: false,
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(piece.three, None);
         assert_eq!(
             splitter.call(&read, &piece),
-            Call::Unassigned(Unassigned::NoPrimer)
+            Call::Unassigned(Unassigned::NoMatch)
         );
     }
 
@@ -435,7 +435,7 @@ mod tests {
         };
         assert_eq!(splitter.label(&assigned), "16S");
         assert_eq!(
-            splitter.label(&Call::Unassigned(Unassigned::NoPrimer)),
+            splitter.label(&Call::Unassigned(Unassigned::NoMatch)),
             "unassigned"
         );
         assert_eq!(splitter.label(&Call::Ambiguous), "ambiguous");
@@ -478,7 +478,7 @@ mod tests {
         opts.template = Template::parse(std::path::Path::new("{barcode}/{target}.fq")).unwrap();
         let splitter = Splitter::new(opts, &cfg).unwrap();
         assert!(splitter.reads_barcode());
-        let none = Call::Unassigned(Unassigned::NoPrimer);
+        let none = Call::Unassigned(Unassigned::NoMatch);
         let first = splitter.output_key(&none, Some(b"bc1")).unwrap();
         let second = splitter.output_key(&a, None).unwrap();
         assert_ne!(first, second);
@@ -712,8 +712,8 @@ mod tests {
     /// aligns whole, so its outer edge stays closed: neither primer may hang
     /// its first bases off the adapter boundary for free, and the neighbour
     /// pays for the adapter base it lacks, beyond its budget. The two primers
-    /// are closer than the default lead, so the one-edit lead decides at
-    /// lead 1.
+    /// are closer than the default margin, so the one-edit margin decides at
+    /// margin 1.
     #[test]
     fn whole_primer_behind_adapter_keeps_its_lead_over_a_shifted_neighbour() {
         let site = splitmix_dna(850, 21);
@@ -897,7 +897,7 @@ mod tests {
             assert_eq!(pieces[0].five, None, "{pieces:?}");
             assert_eq!(
                 splitter.call(&read, &pieces[0]),
-                Call::Unassigned(Unassigned::NoPrimer)
+                Call::Unassigned(Unassigned::NoMatch)
             );
         }
     }
@@ -1013,7 +1013,7 @@ mod tests {
         assert_eq!(pieces[0].five, None, "{pieces:?}");
         assert_eq!(
             splitter.call(&read, &pieces[0]),
-            Call::Unassigned(Unassigned::NoPrimer)
+            Call::Unassigned(Unassigned::NoMatch)
         );
     }
 
@@ -1147,7 +1147,7 @@ mod tests {
             ends: Ends::Both,
         };
         assert!(!splitter.discards(&assigned));
-        assert!(splitter.discards(&Call::Unassigned(Unassigned::NoPrimer)));
+        assert!(splitter.discards(&Call::Unassigned(Unassigned::NoMatch)));
         assert!(!splitter.discards(&Call::Ambiguous));
 
         let sheet = two_target_sheet();
@@ -1157,7 +1157,7 @@ mod tests {
         opts.discard_ambiguous = true;
         let splitter = Splitter::new(opts, &cfg).unwrap();
         assert!(!splitter.discards(&assigned));
-        assert!(!splitter.discards(&Call::Unassigned(Unassigned::NoPrimer)));
+        assert!(!splitter.discards(&Call::Unassigned(Unassigned::NoMatch)));
         assert!(splitter.discards(&Call::Ambiguous));
     }
 }

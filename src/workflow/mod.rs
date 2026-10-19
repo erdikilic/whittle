@@ -510,8 +510,8 @@ pub struct Counters {
     /// The `--rejected-output` channel, set before the first record is read when
     /// the flag is given; unset otherwise.
     pub(crate) rejects: OnceLock<reject::Rejects>,
-    /// Per-key `--split-by` counters, set in `settle` once the run's `Splitter`
-    /// exists, sized by `Keys::names`; unset without `--split-by`.
+    /// Per-key `--targets` counters, set in `settle` once the run's `Splitter`
+    /// exists, sized by `Keys::names`; unset without `--targets`.
     pub(crate) split: OnceLock<crate::split::SplitCounters>,
     /// Input reads that produced at least one surviving output segment,
     /// bumped once per input read (not once per segment, unlike
@@ -525,9 +525,9 @@ pub struct Counters {
     /// `reads_with_output` and `reads_all_filtered` in the invariant below.
     pub reads_trimmed_to_nothing: AtomicU64,
     /// Input reads that produced at least one segment, but every one was
-    /// either rejected by post-trim `filter::check` or, under `--split-by`,
+    /// either rejected by post-trim `filter::check` or, under `--targets`,
     /// written nowhere because a run's splitter discarded it
-    /// (`--split-discard`). Read-level, paired with `reads_with_output` and
+    /// (`--target-discard`). Read-level, paired with `reads_with_output` and
     /// `reads_trimmed_to_nothing` in the invariant below.
     pub reads_all_filtered: AtomicU64,
     /// Segments dropped as `TooShort`. This and the five counters below are
@@ -596,7 +596,7 @@ impl Counters {
         // Every input read lands in exactly one of the four read-level buckets: it
         // was rejected by the tag filter, produced surviving segments, produced
         // none at all, or produced some but wrote none, lost to
-        // `filter::check` or, under `--split-by`, to `--split-discard`.
+        // `filter::check` or, under `--targets`, to `--target-discard`.
         // Segment-level drops are excluded, since a read can shed segments and
         // still survive. The assertion catches an early return that skips one.
         debug_assert_eq!(
@@ -645,11 +645,11 @@ pub(crate) fn read_span(name: &[u8]) -> tracing::Span {
     }
 }
 
-/// The aux tag naming a segment's `--split-by` bin.
+/// The aux tag naming a segment's `--targets` bin.
 pub(crate) const TARGET_TAG: [u8; 2] = *b"wt";
 
 /// Trims one read under `cfg`: the kept `[start, end)` spans in original-read
-/// order and, under `--split-by`, the pieces carrying their primer loci, one per
+/// order and, under `--targets`, the pieces carrying their primer loci, one per
 /// span; without a splitter the pieces are empty and the spans come from
 /// `trim::apply`. `barcode` is the retained barcode interval, as
 /// `trim::apply` takes it.
@@ -680,7 +680,7 @@ pub(crate) enum Routing<'a> {
     Untagged,
     /// Written to the output key with the target tag holding the bin name.
     Tagged(&'a str, KeyId),
-    /// Dropped by `--split-discard`.
+    /// Dropped by `--target-discard`.
     Discarded,
 }
 
@@ -733,7 +733,7 @@ pub(crate) fn push_fastq_target(out: &mut Vec<u8>, label: &str) {
 /// before filtering; they do not restart at adapter boundaries. For each survivor,
 /// `render` receives `(idx, total, start, end)` and returns whether it wrote
 /// the segment: `false` means a run's splitter discarded it
-/// (`--split-discard`), and it is left out of `output_reads`/`output_bases`.
+/// (`--target-discard`), and it is left out of `output_reads`/`output_bases`.
 /// A run without a splitter always writes, so its behavior is unchanged. For
 /// each rejected segment and for a read that produced none, `reject`
 /// receives the `Rejection`. A render error stops processing before the
@@ -866,7 +866,7 @@ pub struct Stats {
     pub reads_trimmed_to_nothing: u64,
     /// Read-level: input reads that produced at least one segment, but every
     /// one of them was rejected by post-trim `filter::check` or, under
-    /// `--split-by`, discarded (`--split-discard`).
+    /// `--targets`, discarded (`--target-discard`).
     pub reads_all_filtered: u64,
     /// Read-level: input reads rejected by `--tag-filter` before trimming.
     pub reads_tag_filtered: u64,
@@ -885,7 +885,7 @@ pub struct Stats {
     /// Segment-level: segments dropped by post-trim `filter::check` for GC fraction
     /// outside `[min_gc, max_gc]`.
     pub segments_dropped_gc: u64,
-    /// Snapshotted `--split-by` counters; `None` without `--split-by`.
+    /// Snapshotted `--targets` counters; `None` without `--targets`.
     pub split: Option<crate::split::SplitStats>,
 }
 

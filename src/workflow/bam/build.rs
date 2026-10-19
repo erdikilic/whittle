@@ -45,7 +45,7 @@ pub(super) struct RecordEdit<'a> {
     pub(super) updates: TagUpdates,
     /// The tags `--remove-tag` drops, applied after the rewrites.
     pub(super) remove: &'a TagRemoval,
-    /// The `--split-by` bin name, written as the `wt:Z` tag after the input
+    /// The `--targets` bin name, written as the `wt:Z` tag after the input
     /// tags, in place of an input `wt`.
     pub(super) target: Option<Vec<u8>>,
     /// The rejection reason, written as the `wr:Z` tag.

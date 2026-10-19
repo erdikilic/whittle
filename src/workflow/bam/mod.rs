@@ -180,7 +180,7 @@ fn pack_bam_blocks(
 /// Runs the uBAM workflow on raw records from a production reader. Full-window
 /// runs filter and write unchanged records without building an owned
 /// `RecordBuf`; any configuration that can alter sequence or tags is routed to
-/// `run_bam`, tag removal and `--split-by` included, since a record that would
+/// `run_bam`, tag removal and `--targets` included, since a record that would
 /// otherwise pass through untouched still has to be rebuilt without the
 /// removed tags or with its target tag. `level` is the sinks' BGZF level,
 /// at which a parallel run compresses its blocks on the pool.

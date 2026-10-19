@@ -34,7 +34,7 @@ pub(crate) fn selected() -> bool {
 }
 
 /// One worker's state: its render parts (key 0 only, since a paraseq run has
-/// no `--split-by`), its counts since the last hand-off and the writer channel.
+/// no `--targets`), its counts since the last hand-off and the writer channel.
 #[derive(Clone)]
 struct Processor {
     cfg: Arc<Config>,

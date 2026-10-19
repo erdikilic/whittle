@@ -123,8 +123,8 @@ pub fn median_q(phred: &[u8]) -> f64 {
 pub enum QualMode {
     /// Mean error probability, expressed as a Phred score.
     Mean,
-    /// Mean of the Phred scores.
-    Arithmetic,
+    /// Arithmetic mean of the Phred scores.
+    PhredMean,
     /// Median Phred score.
     Median,
 }
@@ -134,7 +134,7 @@ impl QualMode {
     pub fn label(self) -> &'static str {
         match self {
             QualMode::Mean => "mean",
-            QualMode::Arithmetic => "arithmetic",
+            QualMode::PhredMean => "phred-mean",
             QualMode::Median => "median",
         }
     }
@@ -144,7 +144,7 @@ impl QualMode {
 pub fn read_quality(phred: &[u8], mode: QualMode) -> f64 {
     match mode {
         QualMode::Mean => mean_prob_q(phred),
-        QualMode::Arithmetic => mean_arith_q(phred),
+        QualMode::PhredMean => mean_arith_q(phred),
         QualMode::Median => median_q(phred),
     }
 }
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn read_quality_dispatches() {
-        assert_eq!(read_quality(&[10, 20, 30], QualMode::Arithmetic), 20.0);
+        assert_eq!(read_quality(&[10, 20, 30], QualMode::PhredMean), 20.0);
         assert_eq!(read_quality(&[10, 20, 30], QualMode::Median), 20.0);
         assert_eq!(read_quality(&[10], QualMode::Mean), mean_prob_q(&[10]));
     }

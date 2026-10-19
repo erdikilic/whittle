@@ -56,7 +56,7 @@ fn summary_counts_match_the_run() {
         .success();
 
     let v = summary(dir.path());
-    assert_eq!(v["schema_version"], 2);
+    assert_eq!(v["schema_version"], 3);
     assert_eq!(v["tool"], "whittle");
     assert_eq!(v["reads"]["input"], 4);
 
@@ -113,10 +113,10 @@ fn summary_records_the_resolved_parameters() {
 
     let v = summary(dir.path());
     assert_eq!(v["params"]["threads"], 2);
-    assert_eq!(v["params"]["head_crop"], 3);
-    assert_eq!(v["params"]["tail_crop"], 4);
+    assert_eq!(v["params"]["trim_front"], 3);
+    assert_eq!(v["params"]["trim_tail"], 4);
     assert_eq!(v["params"]["min_length"], 5);
-    assert_eq!(v["params"]["min_qual"], 7.0);
+    assert_eq!(v["params"]["min_quality"], 7.0);
     assert_eq!(v["params"]["quality_trim"]["method"], "runs");
     assert_eq!(v["params"]["quality_trim"]["cutoff"], 9);
     assert_eq!(v["params"]["quality_trim"]["min_low_quality_run"], 6);
@@ -233,26 +233,35 @@ fn adapted_reads(n: usize) -> String {
     fq
 }
 
-/// Report mode writes no records and therefore no summary; the run says the
-/// flag is ignored rather than exiting 0 with neither file.
+/// Discover-only mode writes no records and therefore no summary; the run says the
+/// flag is ignored, before discovery runs, rather than exiting 0 with neither file.
 #[test]
-fn report_mode_warns_that_summary_json_is_ignored() {
+fn discover_only_warns_that_summary_json_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.fastq");
     std::fs::write(&input, adapted_reads(200)).unwrap();
     let json = dir.path().join("summary.json");
 
-    whittle()
+    let assert = whittle()
         .args(["-i", input.to_str().unwrap()])
         .args(["-o", dir.path().join("out.fastq").to_str().unwrap()])
         .args(["--summary-json", json.to_str().unwrap()])
-        .args(["--adapter-report"])
+        .args(["--adapter-discover-only"])
         .assert()
         .success()
         .stderr(predicate::str::contains("--summary-json is ignored"))
         .stderr(predicate::str::contains("-o/--output is ignored"));
 
-    assert!(!json.exists(), "Report mode writes no summary file");
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let warned = stderr.find("--summary-json is ignored").unwrap();
+    let discovered = stderr
+        .find("Adapter inference")
+        .expect("Discovery logs its result");
+    assert!(
+        warned < discovered,
+        "The ignored flags are reported before discovery runs: {stderr}"
+    );
+    assert!(!json.exists(), "Discover-only mode writes no summary file");
 }
 
 /// Argument-parsing diagnostics are emitted through tracing, so the level filter
@@ -266,7 +275,7 @@ fn parse_time_advisories_respect_the_level_filter() {
     std::fs::write(&input, "@r1\nACGTACGTACGT\n+\nIIIIIIIIIIII\n").unwrap();
     let out = dir.path().join("out.fastq");
 
-    // Report mode with a naming FASTA raises an INFO advisory, which --quiet
+    // Discover-only mode with a naming FASTA raises an INFO advisory, which --quiet
     // must drop; the skipped short FASTA entry raises a WARN one, which it
     // must keep.
     let fasta = dir.path().join("names.fa");
@@ -280,7 +289,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         "ont",
         "--adapter-fasta",
         fasta.to_str().unwrap(),
-        "--adapter-report",
+        "--adapter-discover-only",
     ];
 
     whittle()
@@ -288,7 +297,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "--adapter-report with --adapter-fasta",
+            "--adapter-discover-only with --adapter-fasta",
         ));
 
     whittle()
@@ -299,7 +308,7 @@ fn parse_time_advisories_respect_the_level_filter() {
         // The INFO advisory is filtered out; the WARN one still belongs on stderr,
         // since --quiet keeps warnings.
         .stderr(
-            predicate::str::contains("--adapter-report with --adapter-fasta")
+            predicate::str::contains("--adapter-discover-only with --adapter-fasta")
                 .not()
                 .and(predicate::str::contains("Adapter entry skipped")),
         );
@@ -416,7 +425,7 @@ fn inference_reports_zero_configured_adapters() {
     assert_eq!(a["infer"], "discover");
 }
 
-/// Generates deterministic SplitMix64 bases, for `--split-by` fixtures.
+/// Generates deterministic SplitMix64 bases, for `--targets` fixtures.
 fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
     let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
     (0..len)
@@ -542,20 +551,23 @@ fn summary_split_object() {
 
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .args(["--summary-json", json.to_str().unwrap()])
         .assert()
         .success();
 
     let v = summary(dir.path());
-    assert_eq!(v["schema_version"], 2);
-    let split = &v["split"];
-    assert_eq!(split["spec"], serde_json::json!([sheet.to_str().unwrap()]));
-    assert_eq!(split["require"], "either");
-    assert_eq!(split["action"], "trim");
-    assert_eq!(split["lead"], 2);
+    assert_eq!(v["schema_version"], 3);
+    let targets = &v["targets"];
+    assert_eq!(
+        targets["spec"],
+        serde_json::json!([sheet.to_str().unwrap()])
+    );
+    assert_eq!(targets["require"], "either");
+    assert_eq!(targets["action"], "trim");
+    assert_eq!(targets["margin"], 2);
 
-    let keys = split["keys"].as_array().unwrap();
+    let keys = targets["keys"].as_array().unwrap();
     let key16 = keys.iter().find(|k| k["key"] == "16S").unwrap();
     assert_eq!(key16["reads"], 3);
     assert_eq!(key16["plus"], 2);
@@ -565,17 +577,17 @@ fn summary_split_object() {
     assert_eq!(key_its["reads"], 2);
 
     assert_eq!(
-        split["unassigned"]["no_primer"], 4,
-        "The 4 primer-free reads are unassigned no_primer"
+        targets["unassigned"]["no_match"], 4,
+        "The 4 primer-free reads are unassigned no_match"
     );
-    assert_eq!(split["unassigned"]["require"], 0);
-    assert_eq!(split["unassigned"]["orientation"], 0);
-    assert_eq!(split["unassigned"]["length"], 0);
-    assert_eq!(split["ambiguous"], 0);
-    assert_eq!(split["discarded"], 0);
+    assert_eq!(targets["unassigned"]["missing_end"], 0);
+    assert_eq!(targets["unassigned"]["orientation"], 0);
+    assert_eq!(targets["unassigned"]["length"], 0);
+    assert_eq!(targets["ambiguous"], 0);
+    assert_eq!(targets["discarded"], 0);
 }
 
-/// `split.spec` is an array of every `--split-by` value, in the order given,
+/// `split.spec` is an array of every `--targets` value, in the order given,
 /// not a single string.
 #[test]
 fn summary_split_spec_is_an_array_of_every_split_by_value() {
@@ -590,20 +602,20 @@ fn summary_split_spec_is_an_array_of_every_split_by_value() {
 
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap()])
-        .args(["--split-by", inline])
+        .args(["--targets", sheet.to_str().unwrap()])
+        .args(["--targets", inline])
         .args(["-t", "1", "--summary-json", json.to_str().unwrap()])
         .assert()
         .success();
 
     let v = summary(dir.path());
     assert_eq!(
-        v["split"]["spec"],
+        v["targets"]["spec"],
         serde_json::json!([sheet.to_str().unwrap(), inline])
     );
 }
 
-/// Without `--split-by`, the summary carries no `split` key at all (not a `null`
+/// Without `--targets`, the summary carries no `split` key at all (not a `null`
 /// value): the object is additive and absent otherwise.
 #[test]
 fn summary_without_split_has_no_split_key() {
@@ -620,7 +632,7 @@ fn summary_without_split_has_no_split_key() {
     let v = summary(dir.path());
     assert!(
         v.get("split").is_none(),
-        "split must be entirely absent without --split-by: {v}"
+        "split must be entirely absent without --targets: {v}"
     );
 }
 
@@ -643,13 +655,13 @@ fn zero_count_key_listed() {
 
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
         .args(["--summary-json", json.to_str().unwrap()])
         .assert()
         .success();
 
     let v = summary(dir.path());
-    let keys = v["split"]["keys"].as_array().unwrap();
+    let keys = v["targets"]["keys"].as_array().unwrap();
     assert_eq!(keys.len(), 2, "Both sheet keys are listed: {keys:?}");
     let key_its = keys.iter().find(|k| k["key"] == "ITS").unwrap();
     assert_eq!(key_its["reads"], 0);
@@ -676,30 +688,30 @@ fn accounting_invariant() {
 
     whittle()
         .args(["-i", input.to_str().unwrap(), "-o", out.to_str().unwrap()])
-        .args(["--split-by", sheet.to_str().unwrap(), "-t", "1"])
-        .args(["--split-discard", "unassigned"])
+        .args(["--targets", sheet.to_str().unwrap(), "-t", "1"])
+        .args(["--target-discard", "unassigned"])
         .args(["--summary-json", json.to_str().unwrap()])
         .assert()
         .success();
 
     let v = summary(dir.path());
-    let assigned: u64 = v["split"]["keys"]
+    let assigned: u64 = v["targets"]["keys"]
         .as_array()
         .unwrap()
         .iter()
         .map(|k| k["reads"].as_u64().unwrap())
         .sum();
-    let unassigned: u64 = ["no_primer", "require", "orientation", "length"]
+    let unassigned: u64 = ["no_match", "missing_end", "orientation", "length"]
         .iter()
-        .map(|f| v["split"]["unassigned"][f].as_u64().unwrap())
+        .map(|f| v["targets"]["unassigned"][f].as_u64().unwrap())
         .sum();
-    let ambiguous = v["split"]["ambiguous"].as_u64().unwrap();
-    let discarded = v["split"]["discarded"].as_u64().unwrap();
+    let ambiguous = v["targets"]["ambiguous"].as_u64().unwrap();
+    let discarded = v["targets"]["discarded"].as_u64().unwrap();
     let output = v["reads"]["output"].as_u64().unwrap();
 
     assert_eq!(assigned, 5, "3 16S + 2 ITS reads are assigned");
     assert_eq!(unassigned, 4, "The 4 primer-free reads are unassigned");
-    assert_eq!(discarded, 4, "--split-discard unassigned drops them all");
+    assert_eq!(discarded, 4, "--target-discard unassigned drops them all");
     assert_eq!(
         assigned + unassigned + ambiguous,
         output + discarded,

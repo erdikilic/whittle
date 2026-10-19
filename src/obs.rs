@@ -374,7 +374,7 @@ impl ProgressHandle {
         }
 
         let key_names = cfg.splitter.as_deref().map(|s| s.keys.names.as_slice());
-        for line in split_lines(stats, key_names) {
+        for line in target_lines(stats, key_names) {
             tracing::info!("{}", line);
         }
 
@@ -722,14 +722,14 @@ fn segments_dropped_line(stats: &Stats) -> Option<String> {
     ))
 }
 
-/// The end-of-run `--split-by` table: one line per sheet key (`Split <key>: 120
-/// reads, 45.2 kbp (60.0% of assigned)`), then the unassigned reasons on one
+/// The end-of-run `--targets` table: one line per sheet key (`Target <key>: 120
+/// segments, 45.2 kbp (60.0% of assigned)`), then the unassigned reasons on one
 /// line, then ambiguous and discarded totals. Percentages are of the total
 /// assigned reads across every key, `0.0%` when that total is zero. Empty
-/// without `--split-by` (`key_names` is `None`) or before `stats` carries a
+/// without `--targets` (`key_names` is `None`) or before `stats` carries a
 /// split snapshot. `key_names` is `Keys::names`, so it and `split.keys` are
 /// the same length and order.
-fn split_lines(stats: &Stats, key_names: Option<&[String]>) -> Vec<String> {
+fn target_lines(stats: &Stats, key_names: Option<&[String]>) -> Vec<String> {
     let (Some(key_names), Some(split)) = (key_names, stats.split.as_ref()) else {
         return Vec::new();
     };
@@ -744,7 +744,7 @@ fn split_lines(stats: &Stats, key_names: Option<&[String]>) -> Vec<String> {
                 100.0 * k.reads as f64 / assigned_total as f64
             };
             format!(
-                "Split {name}: {} segments, {} ({pct:.1}% of assigned)",
+                "Target {name}: {} segments, {} ({pct:.1}% of assigned)",
                 commas(k.reads),
                 human_bases(k.bases),
             )
@@ -752,7 +752,7 @@ fn split_lines(stats: &Stats, key_names: Option<&[String]>) -> Vec<String> {
         .collect();
     let unassigned_total: u64 = split.unassigned.iter().sum();
     lines.push(format!(
-        "Split unassigned: {} segments (no_primer {}, require {}, orientation {}, length {})",
+        "Target unassigned: {} segments (no_match {}, missing_end {}, orientation {}, length {})",
         commas(unassigned_total),
         commas(split.unassigned[0]),
         commas(split.unassigned[1]),
@@ -760,11 +760,11 @@ fn split_lines(stats: &Stats, key_names: Option<&[String]>) -> Vec<String> {
         commas(split.unassigned[3]),
     ));
     lines.push(format!(
-        "Split ambiguous: {} segments",
+        "Target ambiguous: {} segments",
         commas(split.ambiguous)
     ));
     lines.push(format!(
-        "Split discarded: {} segments",
+        "Target discarded: {} segments",
         commas(split.discarded)
     ));
     lines
@@ -1326,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn split_lines_reports_one_line_per_key_then_unassigned_ambiguous_discarded() {
+    fn target_lines_reports_one_line_per_key_then_unassigned_ambiguous_discarded() {
         let names = ["16S".to_string(), "ITS".to_string()];
         let stats = Stats {
             split: Some(crate::split::SplitStats {
@@ -1337,15 +1337,15 @@ mod tests {
             }),
             ..Default::default()
         };
-        let lines = split_lines(&stats, Some(&names));
+        let lines = target_lines(&stats, Some(&names));
         assert_eq!(
             lines,
             vec![
-                "Split 16S: 30 segments, 12.0 kbp (75.0% of assigned)",
-                "Split ITS: 10 segments, 4.0 kbp (25.0% of assigned)",
-                "Split unassigned: 8 segments (no_primer 5, require 2, orientation 1, length 0)",
-                "Split ambiguous: 3 segments",
-                "Split discarded: 4 segments",
+                "Target 16S: 30 segments, 12.0 kbp (75.0% of assigned)",
+                "Target ITS: 10 segments, 4.0 kbp (25.0% of assigned)",
+                "Target unassigned: 8 segments (no_match 5, missing_end 2, orientation 1, length 0)",
+                "Target ambiguous: 3 segments",
+                "Target discarded: 4 segments",
             ]
         );
     }
@@ -1353,7 +1353,7 @@ mod tests {
     /// A key with no reads reports `0.0%`, not a NaN from dividing by an
     /// assigned total of zero.
     #[test]
-    fn split_lines_reports_zero_percent_when_nothing_was_assigned() {
+    fn target_lines_reports_zero_percent_when_nothing_was_assigned() {
         let names = ["16S".to_string()];
         let stats = Stats {
             split: Some(crate::split::SplitStats {
@@ -1364,13 +1364,13 @@ mod tests {
             }),
             ..Default::default()
         };
-        let lines = split_lines(&stats, Some(&names));
-        assert_eq!(lines[0], "Split 16S: 0 segments, 0 bp (0.0% of assigned)");
+        let lines = target_lines(&stats, Some(&names));
+        assert_eq!(lines[0], "Target 16S: 0 segments, 0 bp (0.0% of assigned)");
     }
 
     #[test]
-    fn split_lines_empty_without_split() {
-        assert_eq!(split_lines(&Stats::default(), None), Vec::<String>::new());
+    fn target_lines_empty_without_targets() {
+        assert_eq!(target_lines(&Stats::default(), None), Vec::<String>::new());
     }
 
     #[test]

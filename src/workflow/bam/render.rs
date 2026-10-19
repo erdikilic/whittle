@@ -279,7 +279,7 @@ pub(super) fn prepare_read<'a>(
 /// produced segment and calls `render` with every window and the record's
 /// modification block: `None` for a survivor, or the reason for a rejected
 /// segment (a read that produced no segment is one rejected full window).
-/// Under `--split-by` each survivor is called first: a discarded one is not
+/// Under `--targets` each survivor is called first: a discarded one is not
 /// rendered, and every other one is rendered with its bin name as the target
 /// tag and its output key, which also takes the record's `BC:Z` barcode call
 /// when the template holds `{barcode}`; a rejected window has no target. A

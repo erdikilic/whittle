@@ -411,10 +411,10 @@ impl Session {
 
     /// Runs the workflow for one (input, output) format pair.
     ///
-    /// Every arm settles the adapter set before creating the output file: an
-    /// inference-report exit (`Ok(None)` from `settle`) returns before any output
+    /// Every arm settles the adapter set before creating the output file: a
+    /// discover-only exit (`Ok(None)` from `settle`) returns before any output
     /// is touched, since building the writer first would truncate a pre-existing
-    /// `-o` file even though report mode writes no records. The FASTQ-to-BAM
+    /// `-o` file even though discover-only mode writes no records. The FASTQ-to-BAM
     /// rejection sits before its writer for the same reason, so a rejected run
     /// leaves no 0-byte file behind.
     fn dispatch(
@@ -807,7 +807,7 @@ impl Session {
 /// render-pool size comes from the thread budget. Both are assigned in this one
 /// place so every dispatch arm sees the same narrowed set and pool size.
 ///
-/// Under `--split-by`, the split primers are attached to the resolved set, or to
+/// Under `--targets`, the split primers are attached to the resolved set, or to
 /// `Config::split_search` when no adapter source is given, and the splitter
 /// is built from it. Attaching follows resolution, since resolution replaces
 /// the adapter set and would detach them. The splitter's per-key counters are
@@ -815,7 +815,7 @@ impl Session {
 /// any read is processed.
 ///
 /// `Ok(None)` means the run is over without writing records: that is
-/// `--adapter-report`, which prints the inferred FASTA and stops.
+/// `--adapter-discover-only`, which prints the inferred FASTA and stops.
 fn settle<R, I, F>(
     records: I,
     cfg: &mut Config,
@@ -830,7 +830,6 @@ where
     F: for<'a> Fn(&'a R) -> std::borrow::Cow<'a, [u8]>,
 {
     let Some(resolved) = adapter::resolve::resolve(records, cfg, seq_of, weight)? else {
-        note_report_only_ignores(cfg);
         return Ok(None);
     };
     // Captured before the overwrite: the banner already printed this figure, and
@@ -841,7 +840,7 @@ where
         let mut adapters = match cfg.adapters.take().or_else(|| cfg.split_search.clone()) {
             Some(adapters) => adapters,
             None => {
-                anyhow::bail!("--split-by requires adapter search settings (Config::split_search)")
+                anyhow::bail!("--targets requires adapter search settings (Config::split_search)")
             },
         };
         adapters.attach_split(&opts.sheet.primers);
@@ -859,25 +858,26 @@ where
     Ok(Some(resolved.records))
 }
 
-/// Warns for every pair of split primers of different keys closer than
-/// `--split-lead`: reads carrying either primer cannot be told apart by it.
+/// Warns for every pair of sheet sequences of different keys closer than
+/// `--target-margin`: reads carrying either sequence cannot be told apart by
+/// it.
 fn warn_close_primers(opts: &split::SplitOptions) {
     let by_group = opts.level == split::KeyLevel::Group;
-    for (a, b, distance) in opts.sheet.close_pairs(opts.rules.lead, by_group) {
+    for (a, b, distance) in opts.sheet.close_pairs(opts.rules.margin, by_group) {
         tracing::warn!(
             primer_a = %opts.sheet.primers[a].name,
             primer_b = %opts.sheet.primers[b].name,
             distance,
-            lead = opts.rules.lead,
-            "Split primers of different keys are closer than --split-lead; their keys may be \
-             called ambiguous"
+            margin = opts.rules.margin,
+            "Target sequences of different keys are closer than --target-margin; their keys \
+             may be called ambiguous"
         );
     }
 }
 
 /// Returns which sequence classes the resolved adapter set trims, as the
 /// `adapter`, `primer` and `barcode` flags of `io::bam::merge_trim_mode`.
-/// Under `--split-action retain` the split sheet primers are kept, so their
+/// Under `--target-action retain` the split sheet primers are kept, so their
 /// entries count for no class.
 fn trim_classes(cfg: &Config) -> [bool; 3] {
     let retain = cfg
@@ -900,14 +900,6 @@ fn trim_classes(cfg: &Config) -> [bool; 3] {
         classes[class] = true;
     }
     classes
-}
-
-/// Warns for every artifact flag that report-only inference leaves unwritten;
-/// the run exits 0 without creating any of them.
-fn note_report_only_ignores(cfg: &Config) {
-    for (flag, _) in cfg.write_targets() {
-        tracing::warn!("{flag} is ignored under --adapter-report, which writes no records");
-    }
 }
 
 /// The resolved facts both entry points announce before processing starts.
@@ -1086,7 +1078,7 @@ fn protected_paths(cfg: &Config, members: &[PathBuf]) -> Vec<(String, PathBuf)> 
         out.extend(
             opts.sources
                 .iter()
-                .map(|p| ("a --split-by file".into(), p.clone())),
+                .map(|p| ("a --targets file".into(), p.clone())),
         );
     }
     for (what, path) in [
@@ -1172,7 +1164,7 @@ mod tests {
             |r| (r.name.len() + r.seq.len() + r.qual.len(), r.seq.len()),
         )
         .expect("Settle succeeds")
-        .expect("Records are returned when not in report mode");
+        .expect("Records are returned when not in discover-only mode");
 
         assert_eq!(
             cfg.render_workers, 5,

@@ -62,7 +62,7 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
                 adapter = %d.adapter.name,
                 support = %support,
                 floor = MARGINAL_SUPPORT,
-                "Inferred adapter support is marginal; verify with --adapter-report"
+                "Inferred adapter support is marginal; verify with --adapter-discover-only"
             );
         }
         if d.uncertain_bases() > 0 {
@@ -196,7 +196,7 @@ pub(crate) struct Resolved<R> {
 /// needed, and returns it with the stream intact.
 ///
 /// `Ok(None)` means the run is over without writing records: that is
-/// `--adapter-report`, which prints the inferred FASTA and stops.
+/// `--adapter-discover-only`, which prints the inferred FASTA and stops.
 ///
 /// Takes `&Config` and returns the outcome rather than writing back into the
 /// config: the set is final only after reads have been seen, which is after the
@@ -236,13 +236,13 @@ where
                 Box::new(sample.into_iter().map(anyhow::Ok).chain(records))
             };
         if s < detect::MIN_SAMPLE_FOR_DETECTION {
-            // Report-only mode writes no output when the sample is too small.
+            // Discover-only mode writes no output when the sample is too small.
             tracing::warn!(
                 reads = s,
                 minimum = detect::MIN_SAMPLE_FOR_DETECTION,
                 "Adapter inference: too few reads to infer reliably; keeping reads untrimmed"
             );
-            if cfg.adapter_infer.is_report() {
+            if cfg.adapter_infer.is_discover_only() {
                 return Ok(None);
             }
             let mut reduced = base;
@@ -256,9 +256,10 @@ where
         let discovered = with_sequences(&sample, &seq_of, |seqs| infer::discover(seqs, &base));
         log_discovered(&discovered, s);
 
-        if cfg.adapter_infer.is_report() {
-            // Report mode prints the inferred FASTA and writes no records.
-            // `lib::settle` warns about every write target this leaves unused.
+        if cfg.adapter_infer.is_discover_only() {
+            // Discover-only mode prints the inferred FASTA and writes no
+            // records. `cli::parse` warns about every write target this leaves
+            // unused.
             print_discovered_fasta(&discovered);
             return Ok(None);
         }

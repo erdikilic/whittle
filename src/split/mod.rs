@@ -1,4 +1,5 @@
-//! Primer split: read demultiplexing by primer or primer pool.
+//! Target assignment (`--targets`): read demultiplexing by the sequences at
+//! segment ends, such as primers, barcodes or adapters.
 //!
 //! `sheet` holds the target model and its TSV, FASTA and preset parsers.
 //! `score` rescores sheet primers at a located primer locus. `classify` is

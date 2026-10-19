@@ -23,10 +23,10 @@ pub(crate) fn binary_to_terminal(
 }
 
 /// Rejects binary output to an interactive terminal before creating a writer.
-/// Report-only inference is exempt because it emits textual FASTA and exits
+/// Discover-only inference is exempt because it emits textual FASTA and exits
 /// before workflow dispatch.
 pub(crate) fn guard_stdout_binary(cfg: &Config, out_fmt: io::Format) -> anyhow::Result<()> {
-    if cfg.adapter_infer.is_report() {
+    if cfg.adapter_infer.is_discover_only() {
         return Ok(());
     }
     let stdout_is_tty = std::io::stdout().is_terminal();
@@ -126,7 +126,7 @@ pub(crate) fn guard_output_collisions(
         reads.push(("--adapter-fasta", ac));
     }
     if let Some(opts) = &cfg.split_opts {
-        reads.extend(opts.sources.iter().map(|p| ("--split-by", p.as_path())));
+        reads.extend(opts.sources.iter().map(|p| ("--targets", p.as_path())));
     }
     for p in extra_inputs {
         reads.push(("an input file in the directory", p.as_path()));
@@ -180,7 +180,7 @@ pub(crate) fn guard_output_collisions(
     // A mistyped artifact path is caught during setup rather than after the
     // reads are written. Probing the parent directory instead of creating the
     // file leaves nothing behind on a run that writes no artifact
-    // (`--adapter-report`). A permission failure still surfaces at write
+    // (`--adapter-discover-only`). A permission failure still surfaces at write
     // time; a nonexistent directory does not. An output template is exempt:
     // its directories are created as its files are opened, and each file is
     // checked then (`split::route::OpenGuard`).
