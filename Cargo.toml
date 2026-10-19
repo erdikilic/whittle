@@ -30,15 +30,15 @@ rayon = "1"
 
 seq_io = "0.3.4"
 paraseq = { version = "0.6", default-features = false, features = ["anyhow"], optional = true }
-noodles-bam = "0.96.0"
-noodles-sam = "0.91.0"
+noodles-bam = "0.97.0"
+noodles-sam = "0.92.0"
 noodles-bgzf = { version = "0.52.0", features = ["libdeflate"] }
 libdeflater = "1"
 
 flate2 = { version = "1", features = ["zlib-rs"], default-features = false }
 
 
-sassy = { version = "=0.2.6", default-features = false }
+sassy = { version = "=0.3.0", default-features = false }
 ensure_simd = "0.1"
 
 serde = { version = "1", features = ["derive"] }

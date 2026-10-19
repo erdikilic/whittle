@@ -207,7 +207,7 @@ pub fn encode_patterns(patterns: &[Vec<u8>]) -> EncodedAdapterBatch {
     );
     // A forward-only searcher encodes the given strand alone; the reverse
     // strand is its own encoding.
-    let mut encoder = Searcher::<Iupac>::new_fwd();
+    let encoder = Searcher::<Iupac>::new_fwd();
     let complements: Vec<Vec<u8>> = patterns.iter().map(|p| Iupac::complement(p)).collect();
     EncodedAdapterBatch {
         forward: encoder.encode_patterns(patterns),
