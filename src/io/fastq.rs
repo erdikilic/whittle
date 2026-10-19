@@ -186,23 +186,23 @@ impl Read for InflateThread {
 pub fn reader_from_bgzf(
     inner: Box<dyn Read + Send>,
     workers: usize,
-) -> anyhow::Result<Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send>> {
+) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
     // The block reader issues a `read` per frame part (header, payload,
     // trailer); the buffer in front of the source coalesces them.
     let inner = BufReader::with_capacity(INPUT_BUFFER_CAPACITY, inner);
     let inner: Box<dyn Read + Send> = if workers > 1 {
         Box::new(noodles_bgzf::io::MultithreadedReader::with_worker_count(
-            std::num::NonZero::new(workers).unwrap_or(std::num::NonZero::<usize>::MIN),
+            crate::io::workers_nonzero(workers),
             inner,
         ))
     } else {
         Box::new(noodles_bgzf::io::Reader::new(inner))
     };
-    Ok(Box::new(RecordIter::new(inner)))
+    Box::new(RecordIter::new(inner))
 }
 
 /// Highest raw Phred score a Phred+33 quality byte encodes (`~`, ASCII 126).
-pub(crate) const MAX_PHRED33: u8 = 126 - 33;
+const MAX_PHRED33: u8 = 126 - 33;
 
 struct RecordIter<R: Read> {
     reader: Reader<R>,
@@ -244,9 +244,30 @@ impl<R: Read> RecordIter<R> {
     }
 }
 
+/// Converts the Phred+33 quality bytes `raw` of the record `id` to raw Phred
+/// scores. A byte outside ASCII 33..=126 is an error naming the record and
+/// the byte (`invalid_quality`).
+pub(crate) fn phred_from_ascii(id: &[u8], raw: &[u8]) -> anyhow::Result<Vec<u8>> {
+    // One pass converts and validates: a byte below 33 wraps above the
+    // maximum, so a single compare per byte flags both ends of the range.
+    let mut out_of_range = false;
+    let qual: Vec<u8> = raw
+        .iter()
+        .map(|&b| {
+            let q = b.wrapping_sub(33);
+            out_of_range |= q > MAX_PHRED33;
+            q
+        })
+        .collect();
+    if out_of_range {
+        return Err(invalid_quality(id, raw));
+    }
+    Ok(qual)
+}
+
 /// Names the first quality byte outside the Phred+33 range. `qual` holds at
 /// least one such byte.
-pub(crate) fn invalid_quality(id: &[u8], qual: &[u8]) -> anyhow::Error {
+fn invalid_quality(id: &[u8], qual: &[u8]) -> anyhow::Error {
     let (pos, &byte) = qual
         .iter()
         .enumerate()
@@ -267,21 +288,10 @@ impl<R: Read> Iterator for RecordIter<R> {
             Ok(rec) => rec,
             Err(e) => return Some(Err(self.describe(e))),
         };
-        // One pass converts and validates: a byte below 33 wraps above the
-        // maximum, so a single compare per byte flags both ends of the range.
-        let raw = rec.qual();
-        let mut out_of_range = false;
-        let qual: Vec<u8> = raw
-            .iter()
-            .map(|&b| {
-                let q = b.wrapping_sub(33);
-                out_of_range |= q > MAX_PHRED33;
-                q
-            })
-            .collect();
-        if out_of_range {
-            return Some(Err(invalid_quality(rec.id_bytes(), raw)));
-        }
+        let qual = match phred_from_ascii(rec.id_bytes(), rec.qual()) {
+            Ok(qual) => qual,
+            Err(e) => return Some(Err(e)),
+        };
         self.count += 1;
         self.last_id.clear();
         self.last_id.extend_from_slice(rec.id_bytes());
@@ -664,22 +674,19 @@ pub(crate) enum FastqOut {
     Bgzf(crate::io::bgzf::Writer<BufferedOutput>),
     /// Pre-compressed BGZF blocks, compressed at the level `block_level`
     /// names.
-    Blocks {
-        /// The output.
-        inner: BufferedOutput,
-    },
+    Blocks(BufferedOutput),
 }
 
 impl Write for FastqOut {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            FastqOut::Plain(w) | FastqOut::Blocks { inner: w, .. } => w.write(buf),
+            FastqOut::Plain(w) | FastqOut::Blocks(w) => w.write(buf),
             FastqOut::Bgzf(w) => w.write(buf),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            FastqOut::Plain(w) | FastqOut::Blocks { inner: w, .. } => w.flush(),
+            FastqOut::Plain(w) | FastqOut::Blocks(w) => w.flush(),
             FastqOut::Bgzf(w) => w.flush(),
         }
     }
@@ -694,7 +701,7 @@ impl FastqOut {
         let mut inner = match self {
             FastqOut::Plain(w) => w,
             FastqOut::Bgzf(w) => w.finish()?,
-            FastqOut::Blocks { mut inner, .. } => {
+            FastqOut::Blocks(mut inner) => {
                 inner.write_all(&crate::io::bgzf::EOF_BLOCK)?;
                 inner
             },
@@ -734,7 +741,7 @@ pub(crate) fn writer_to(
         crate::io::Format::FastqGz | crate::io::Format::FastqBgzf => {
             crate::io::bgzf::compression_level(level)?;
             if parallel {
-                return Ok(FastqOut::Blocks { inner: base });
+                return Ok(FastqOut::Blocks(base));
             }
             Ok(FastqOut::Bgzf(crate::io::bgzf::Writer::new(base, level)))
         },
@@ -973,7 +980,7 @@ mod tests {
     /// The sequential `.fastq.gz` writer emits BGZF-framed gzip that a plain
     /// gzip decoder reads back.
     #[test]
-    fn gz_writer_clamps_zero_workers_and_writes_bgzf() {
+    fn gz_writer_writes_bgzf() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("o.fastq.gz");
         let cfg = crate::cli::config_for_test(&path, &path, 0, 0);
@@ -1003,7 +1010,6 @@ mod tests {
         let compressed = writer.finish().unwrap();
 
         let records: Vec<_> = reader_from_bgzf(Box::new(std::io::Cursor::new(compressed)), 1)
-            .unwrap()
             .map(Result::unwrap)
             .collect();
         assert_eq!(records.len(), 2);

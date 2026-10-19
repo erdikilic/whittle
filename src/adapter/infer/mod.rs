@@ -142,8 +142,6 @@ pub struct InferredAdapter {
     /// Sequence used for trimming (or printed as the recommendation), named
     /// `inferred_N` by presentation order.
     pub adapter: Adapter,
-    /// Complete sequence retained after boundary validation.
-    pub assembled_seq: Vec<u8>,
     /// Fraction of sampled end windows containing the consensus within its
     /// edit budget.
     pub support: f64,
@@ -152,15 +150,6 @@ pub struct InferredAdapter {
     pub name_hits: Vec<(String, f32)>,
     /// Discovery layer, counted from the read end after any known sequences.
     pub layer: usize,
-}
-
-impl InferredAdapter {
-    /// Returns the number of assembled bases excluded from the trimming sequence.
-    pub fn uncertain_bases(&self) -> usize {
-        self.assembled_seq
-            .len()
-            .saturating_sub(self.adapter.seq.len())
-    }
 }
 
 /// A merged layer family ready for variant suppression: sequence, support,
@@ -227,7 +216,6 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     );
 
     let mut searcher = crate::adapter::search::new_searcher_fwd();
-    let mut strand_searcher = crate::adapter::search::new_searcher_fwd();
     let mut distinct: Vec<(Vec<u8>, f64, usize, bool, bool)> = Vec::new();
     // An accepted primer marks the insert boundary at its end; no layer lies
     // beyond it.
@@ -334,7 +322,8 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         let background = stride_sample(&background, RECOUNT_WINDOWS);
 
         // Insert stretches identified by their mirror also reject the graph
-        // fragments that reconstruct part of them.
+        // fragments that reconstruct part of them. `same_family` compares
+        // both strands, so each stretch is kept on the strand it was cut from.
         let mut inserts: Vec<Vec<u8>> = Vec::new();
         let mut next_words: Vec<Vec<u8>> = Vec::new();
         let cut: Vec<(Vec<u8>, f64, bool, u64, End)> = five
@@ -352,7 +341,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                     // outer adapter each end keeps.
                     let strand = strand_words.iter().any(|word| {
                         !hits(
-                            &mut strand_searcher,
+                            &mut searcher,
                             word,
                             &seq,
                             edit_budget(base.error_rate, word.len()),
@@ -371,7 +360,6 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                     // for a candidate the assembly window could not bound.
                     let (cut, insert) = symmetry_cut(&seq, end, own, opposite, base.error_rate);
                     if insert.len() >= MIN_PATTERN_LEN {
-                        inserts.push(crate::adapter::reverse_complement(&insert));
                         inserts.push(insert);
                     }
                     let cut = cut?;
@@ -518,12 +506,13 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             }
             let flush = layer == 0
                 && known.is_empty()
-                && [(End::Five, &five_phys), (End::Three, &three_phys)]
-                    .iter()
-                    .any(|(end, phys)| {
-                        outer_depth(&mut searcher, &seq, phys, *end, base.error_rate)
-                            <= ADAPTER_FLUSH
-                    });
+                && is_flush(
+                    &mut searcher,
+                    &seq,
+                    &five_phys,
+                    &three_phys,
+                    base.error_rate,
+                );
             if boundary {
                 let index = usize::from(end == End::Three);
                 open[index] = false;
@@ -561,18 +550,19 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             distinct.push((seq, support, layer, flush, member));
         }
         for (seq, support, end) in own_forms {
-            if accepted.contains(&seq) || distinct.iter().any(|(other, _, _, _, _)| *other == seq) {
+            if distinct.iter().any(|(other, _, _, _, _)| *other == seq) {
                 continue;
             }
             tracing::debug!(sequence = %String::from_utf8_lossy(&seq), "Other end layer");
             let flush = layer == 0
                 && known.is_empty()
-                && [(End::Five, &five_phys), (End::Three, &three_phys)]
-                    .iter()
-                    .any(|(end, phys)| {
-                        outer_depth(&mut searcher, &seq, phys, *end, base.error_rate)
-                            <= ADAPTER_FLUSH
-                    });
+                && is_flush(
+                    &mut searcher,
+                    &seq,
+                    &five_phys,
+                    &three_phys,
+                    base.error_rate,
+                );
             accepted_ends.push(end);
             accepted.push(seq.clone());
             distinct.push((seq, support, layer, flush, false));
@@ -693,13 +683,12 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 adapter: Adapter {
                     name: format!("inferred_{}", i + 1),
                     seq: if tag {
-                        seq.clone()
+                        seq
                     } else {
                         crate::adapter::with_marker_codes(&seq, base.error_rate)
                     },
                     role,
                 },
-                assembled_seq: seq,
                 support,
                 name_hits,
                 layer,

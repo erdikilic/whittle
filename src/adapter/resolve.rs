@@ -68,57 +68,35 @@ pub(crate) fn log_discovered(discovered: &[infer::InferredAdapter], n_sampled: u
                 "Inferred adapter support is marginal; verify with --adapter-discover-only"
             );
         }
-        if d.uncertain_bases() > 0 {
-            tracing::warn!(
-                adapter = %d.adapter.name,
-                anchor_bp = d.adapter.seq.len(),
-                uncertain_bp = d.uncertain_bases(),
-                consensus_bp = d.assembled_seq.len(),
-                "Inferred adapter excludes unsupported consensus bases"
-            );
-        }
         let sequence = String::from_utf8_lossy(&d.adapter.seq);
         tracing::debug!(
             adapter = %d.adapter.name,
             sequence = %sequence,
             "Inferred adapter trimming sequence"
         );
-        if d.uncertain_bases() > 0 {
-            let consensus = String::from_utf8_lossy(&d.assembled_seq);
-            tracing::debug!(
-                adapter = %d.adapter.name,
-                consensus = %consensus,
-                "Inferred adapter full recurrent consensus"
-            );
-        }
     }
 }
 
-/// Prints inferred adapters as FASTA with support and the best catalog match.
-/// Numbering follows the final discovery order used by the status log. A
-/// failed write is returned, so a closed pipe ends the run as any other
-/// output does.
+/// Prints inferred adapters as FASTA under their names, with support and the
+/// best catalog match. The trimming sequence spans the whole validated
+/// consensus, so every header states `boundary=full`, the sequence length as
+/// `assembled_length` and `uncertain_bases=0`. A failed write is returned, so
+/// a closed pipe ends the run as any other output does.
 pub(crate) fn print_discovered_fasta(discovered: &[infer::InferredAdapter]) -> io::Result<()> {
     let mut out = io::stdout().lock();
-    for (i, d) in discovered.iter().enumerate() {
-        let n = i + 1;
+    for d in discovered {
         let name_suffix = match d.name_hits.first() {
             Some((name, pct)) => format!(" [\u{2248} {name} ({pct:.0}%)]"),
             None => String::new(),
         };
         writeln!(
             out,
-            ">inferred_{n} layer={} role={} support={:.2} boundary={} assembled_length={} uncertain_bases={}{name_suffix}",
+            ">{} layer={} role={} support={:.2} boundary=full assembled_length={} uncertain_bases=0{name_suffix}",
+            d.adapter.name,
             d.layer + 1,
             d.adapter.role.label(),
             d.support,
-            if d.uncertain_bases() == 0 {
-                "full"
-            } else {
-                "bounded"
-            },
-            d.assembled_seq.len(),
-            d.uncertain_bases(),
+            d.adapter.seq.len(),
         )?;
         writeln!(out, "{}", String::from_utf8_lossy(&d.adapter.seq))?;
     }

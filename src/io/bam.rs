@@ -2,14 +2,12 @@
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
-use std::num::NonZero;
 use std::path::Path;
 
 use anyhow::Context;
 use noodles_bam as bam;
 use noodles_bgzf as bgzf;
 use noodles_sam::alignment::RecordBuf;
-use noodles_sam::alignment::io::Write as _; // write_header / write_alignment_record
 use noodles_sam::alignment::record::Flags;
 use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::{self as sam};
@@ -19,15 +17,6 @@ use noodles_sam::{self as sam};
 /// the workflow converts it to `RecordBuf` on a render worker instead of doing
 /// all structured decoding on the serial reader thread.
 pub type RawRecordIter = Box<dyn Iterator<Item = anyhow::Result<bam::Record>> + Send>;
-
-/// Returns the worker count for a noodles BGZF reader or writer.
-///
-/// noodles builds a private Rayon pool per reader or writer from this count;
-/// the global Rayon registry is not consulted. A count of zero is clamped to
-/// one. An incorrect count is not a type error: the codec runs single-threaded.
-fn workers_nonzero(workers: usize) -> NonZero<usize> {
-    NonZero::new(workers.max(1)).unwrap_or(NonZero::<usize>::MIN)
-}
 
 /// The read name for a message, `<unnamed>` for a record without one.
 pub(crate) fn display_name(name: Option<&[u8]>) -> String {
@@ -97,12 +86,6 @@ pub(crate) fn refuse_untrimmable(
 /// Errors (naming the read) if a decoded record is aligned, flagged
 /// reverse-complemented or carries a legacy `Mm`/`Ml` tag; see
 /// `refuse_untrimmable`. Only unaligned BAM (uBAM) input is supported.
-/// Returns whether a BAM QUAL field encodes absent quality: `0xFF` in every
-/// position, which BAM writes for a `*` QUAL.
-pub fn quality_absent(qual: &[u8]) -> bool {
-    !qual.is_empty() && qual.iter().all(|&q| q == 0xFF)
-}
-
 pub fn ensure_trimmable(rec: &RecordBuf) -> anyhow::Result<()> {
     let legacy_tag = LEGACY_MOD_TAGS
         .into_iter()
@@ -124,7 +107,10 @@ pub fn reader_from(
     // trailer); the buffer in front of the source coalesces them.
     let inner = BufReader::with_capacity(INPUT_BUFFER_CAPACITY, inner);
     if workers > 1 {
-        let mt = bgzf::io::MultithreadedReader::with_worker_count(workers_nonzero(workers), inner);
+        let mt = bgzf::io::MultithreadedReader::with_worker_count(
+            crate::io::workers_nonzero(workers),
+            inner,
+        );
         let mut r = bam::io::Reader::from(mt);
         let header = r.read_header()?;
         Ok((header, Box::new(RawRecordIterImpl { reader: r })))
@@ -202,23 +188,6 @@ pub fn writer(
     })
 }
 
-/// Encodes `records` under `header` into BGZF blocks at `level`: the bytes of
-/// a BGZF stream fragment with complete blocks and no EOF block, which a
-/// `BamSink::Blocks` writes through.
-pub fn encode_blocks<'a>(
-    header: &sam::Header,
-    level: u8,
-    records: impl IntoIterator<Item = &'a RecordBuf>,
-) -> io::Result<Vec<u8>> {
-    let mut w = bam::io::Writer::from(Vec::new());
-    for rec in records {
-        w.write_alignment_record(header, rec)?;
-    }
-    let mut blocks = Vec::new();
-    crate::io::bgzf::encode(level, &w.into_inner(), &mut blocks)?;
-    Ok(blocks)
-}
-
 /// Writes one encoded BAM record, given without its `block_size` prefix, to
 /// `dst` under `header`: the prefix, then the record bytes. A reference
 /// sequence ID or mate reference sequence ID that names no `@SQ` entry of
@@ -274,7 +243,7 @@ impl BamSink {
     /// Writes compressed BGZF blocks through; `Blocks` only.
     pub fn write_blocks(&mut self, blocks: &[u8]) -> io::Result<()> {
         match self {
-            BamSink::Blocks { inner, .. } => inner.write_all(blocks),
+            BamSink::Blocks { inner } => inner.write_all(blocks),
             BamSink::Single(_) => Err(io::Error::other(
                 "a record sink takes records, not compressed blocks",
             )),
@@ -287,7 +256,7 @@ impl BamSink {
     pub fn finish(self) -> anyhow::Result<()> {
         let mut inner = match self {
             BamSink::Single(w) => w.into_inner().finish()?,
-            BamSink::Blocks { mut inner, .. } => {
+            BamSink::Blocks { mut inner } => {
                 inner.write_all(&crate::io::bgzf::EOF_BLOCK)?;
                 inner
             },
@@ -631,6 +600,7 @@ mod tests {
 
     #[test]
     fn mt_writer_roundtrips_through_mt_reader() {
+        use noodles_sam::alignment::io::Write as _;
         use noodles_sam::alignment::record::Flags;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mt.bam");
@@ -639,16 +609,17 @@ mod tests {
         // batch the way a render worker does it.
         let header = sam::Header::default();
         let mut sink = writer(Some(&path), &header, true, 6).unwrap();
-        let mut records = Vec::new();
+        let mut batch = bam::io::Writer::from(Vec::new());
         for name in [b"r1".as_slice(), b"r2".as_slice()] {
             let mut rec = RecordBuf::default();
             *rec.flags_mut() = Flags::UNMAPPED;
             *rec.name_mut() = Some(name.into());
             *rec.sequence_mut() = b"ACGT".to_vec().into();
             *rec.quality_scores_mut() = vec![40u8; 4].into();
-            records.push(rec);
+            batch.write_alignment_record(&header, &rec).unwrap();
         }
-        let blocks = encode_blocks(&header, 6, &records).unwrap();
+        let mut blocks = Vec::new();
+        crate::io::bgzf::encode(6, &batch.into_inner(), &mut blocks).unwrap();
         sink.write_blocks(&blocks).unwrap();
         sink.finish().unwrap();
 

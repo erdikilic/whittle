@@ -100,8 +100,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Library API: `workflow::run_raw_bam` is no longer public,
   `obs::ProgressHandle::finish` takes `&Config`, `Stats` is no longer
   `Copy`, `Config::write_targets` yields its paths as `Cow<Path>`,
-  `io::bam::BamSink::block_level` is removed, and the `level` field of
-  `BamSink::Blocks` is removed.
+  `io::bam::BamSink::block_level` is removed, the `level` field of
+  `BamSink::Blocks` is removed, `io::bam::encode_blocks` and
+  `io::bam::quality_absent` are removed, `io::fastq::reader_from_bgzf`
+  returns its record iterator without a `Result`, and
+  `adapter::infer::InferredAdapter` drops `assembled_seq` and
+  `uncertain_bases`, since the trimming sequence spans the whole consensus.
 - Quality trimming is selected with one method and one cutoff:
   `--quality-trim <ends|best-segment|segments|runs>` with `--quality-cutoff <PHRED>`,
   which is required with it, and `--min-low-quality-run <BASES>` for `runs`.

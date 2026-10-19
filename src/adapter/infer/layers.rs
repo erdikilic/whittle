@@ -279,6 +279,21 @@ pub(super) fn outer_depth(
     depths[depths.len() / 2]
 }
 
+/// Returns whether `seq` lies within `ADAPTER_FLUSH` of the physical read
+/// end (`outer_depth`) in the 5' windows `five_phys` or the 3' windows
+/// `three_phys`, as an outermost sequencing adapter does.
+pub(super) fn is_flush(
+    searcher: &mut AmbiguousSearcher,
+    seq: &[u8],
+    five_phys: &[&[u8]],
+    three_phys: &[&[u8]],
+    error_rate: f64,
+) -> bool {
+    [(End::Five, five_phys), (End::Three, three_phys)]
+        .into_iter()
+        .any(|(end, phys)| outer_depth(searcher, seq, phys, end, error_rate) <= ADAPTER_FLUSH)
+}
+
 /// Cuts the insert-facing part of `seq` whose reverse complement occurs at
 /// the opposite physical end at a different depth. Returns the outer part,
 /// or `None` when fewer than `MIN_PATTERN_LEN` outer bases remain, with the

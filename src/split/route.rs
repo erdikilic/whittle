@@ -134,11 +134,6 @@ impl Template {
         found
     }
 
-    /// The template as given.
-    pub fn raw(&self) -> &str {
-        &self.raw
-    }
-
     /// The key granularity the template names.
     pub fn key(&self) -> KeyLevel {
         self.key
@@ -233,15 +228,10 @@ impl Template {
         Ok(ids.into_iter().map(|id| table.path(id)).collect())
     }
 
-    /// Expands the template for `key` and the barcode call `barcode`
-    /// (`unclassified` when `None`). Both `{target}` and `{group}` take
-    /// `key`.
-    pub fn expand(&self, key: &str, barcode: Option<&str>) -> PathBuf {
-        self.expand_in_group(key, key, barcode)
-    }
-
-    /// Expands the template as `expand` does, except that a `{group}` beside
-    /// a `{target}` key takes `group`, the key's group.
+    /// Expands the template for `key`, whose group is `group`, and the
+    /// barcode call `barcode` (`unclassified` when `None`). `{target}` takes
+    /// `key`; `{group}` takes `group` beside a `{target}` key and `key`
+    /// otherwise.
     pub fn expand_in_group(&self, key: &str, group: &str, barcode: Option<&str>) -> PathBuf {
         let group = match self.key {
             KeyLevel::Target => group,
@@ -569,16 +559,16 @@ mod tests {
     fn expand_substitutes_and_defaults_barcode() {
         let template = parse("{barcode}.{target}.fq.gz").unwrap().unwrap();
         assert_eq!(
-            template.expand("16S", None),
+            template.expand_in_group("16S", "16S", None),
             PathBuf::from("unclassified.16S.fq.gz")
         );
         assert_eq!(
-            template.expand("unassigned", Some("barcode03")),
+            template.expand_in_group("unassigned", "unassigned", Some("barcode03")),
             PathBuf::from("barcode03.unassigned.fq.gz")
         );
         let template = parse("out/{group}/{group}.bam").unwrap().unwrap();
         assert_eq!(
-            template.expand("ITS", None),
+            template.expand_in_group("ITS", "ITS", None),
             PathBuf::from("out/ITS/ITS.bam")
         );
     }
@@ -595,7 +585,10 @@ mod tests {
     #[test]
     fn unmatched_braces_are_text() {
         let template = parse("out{/{target}.fq").unwrap().unwrap();
-        assert_eq!(template.expand("A", None), PathBuf::from("out{/A.fq"));
+        assert_eq!(
+            template.expand_in_group("A", "A", None),
+            PathBuf::from("out{/A.fq")
+        );
     }
 
     #[test]

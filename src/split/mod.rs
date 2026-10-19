@@ -17,8 +17,7 @@ pub mod sheet;
 pub mod splitter;
 
 pub use classify::{
-    Bounds, Call, Ends, KeyLevel, Keys, Rules, Score, Strand, Unassigned, check_length, classify,
-    classify_at,
+    Bounds, Call, Ends, KeyLevel, Keys, Rules, Score, Strand, Unassigned, check_length,
 };
 pub use counters::{KeyCounters, KeyStats, SplitCounters, SplitStats};
 pub use route::{KeyTable, Owner, Template};

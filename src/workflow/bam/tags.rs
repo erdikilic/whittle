@@ -11,16 +11,14 @@ use super::*;
 /// untouched. Any other `B` array whose length equals the read length is also
 /// treated as per-base (structural rule), so custom tags need no dedicated
 /// handling.
-pub(crate) const KNOWN_PERBASE_TAGS: [[u8; 2]; 8] = [
-    *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sm", *b"sx",
-];
+pub(crate) use crate::config::KNOWN_PERBASE_TAGS;
 
 /// PacBio `sa:B:I`: run-length encoded per-base coverage by subread alignments,
 /// stored as `<length>,<coverage>` pairs. Decoded to per-base coverage, sliced
 /// to the window and re-encoded (`slice_rle_coverage`). A tag whose run lengths
 /// do not sum to the read length is left unchanged and surfaced via
 /// `has_malformed_perbase_tag`.
-pub(crate) const RLE_COVERAGE_TAG: [u8; 2] = *b"sa";
+pub(crate) use crate::config::RLE_COVERAGE_TAG;
 
 /// PacBio undo blobs: `ds` (segmented-read reconstitution data for `skera
 /// undo`) and `ls` (clipped data for `lima-undo`). Both describe the untrimmed
@@ -376,15 +374,9 @@ pub(super) fn window_tag_updates(
 }
 
 /// Bumps `Counters::undo_tags_dropped_reads` when a read carrying a PacBio
-/// undo blob (`ds`/`ls`) loses it in the output: at least one written window
-/// does not span the whole read.
-pub(super) fn count_undo_tags_dropped(
-    counters: &Counters,
-    src: &RecordBuf,
-    orig_len: usize,
-    survivors: &[(usize, usize)],
-) {
-    let trimmed = survivors.iter().any(|&(s, e)| s != 0 || e != orig_len);
+/// undo blob (`ds`/`ls`) loses it in the output, which `trimmed` tells: at
+/// least one written window does not span the whole read.
+pub(super) fn count_undo_tags_dropped(counters: &Counters, src: &RecordBuf, trimmed: bool) {
     let carries_undo = UNDO_TAGS
         .iter()
         .any(|t| src.data().get(&Tag::new(t[0], t[1])).is_some());

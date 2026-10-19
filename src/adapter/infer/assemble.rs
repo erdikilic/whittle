@@ -70,7 +70,7 @@ pub(super) fn assemble(
     // Whether a candidate at the boundary follows the template, so that the
     // insert begins there for the reads holding it.
     let mut at_template = false;
-    for (cons, _) in peel_paths(weighted, KMER_K, end) {
+    for cons in peel_paths(weighted, KMER_K, end) {
         tracing::debug!(sequence = %String::from_utf8_lossy(&cons), "Assembled end candidate");
         // Original weights show the support of every k-mer of the path,
         // including k-mers earlier peels removed from the graph.
@@ -88,7 +88,7 @@ pub(super) fn assemble(
         // continuations recur reverse complemented at the other read end, as
         // the primers of the two strands do; variants of a conserved insert
         // do not.
-        let deep = deep.get_or_insert_with(|| kmer_counts(&recount));
+        let deep = deep.get_or_insert_with(|| kmer_counts(&recount, KMER_K));
         let mut divided = Vec::new();
         if let Some((edge, continuations)) = division_point(&cons, deep, recount.len(), lo, hi, end)
             && continuations.iter().all(|word| {

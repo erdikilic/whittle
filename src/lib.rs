@@ -559,7 +559,7 @@ impl Session {
                     }
                     return self.finish(obs, &stats, cfg);
                 }
-                let records = self.fastq_reader(source, in_fmt, cfg.threads > 1)?;
+                let records = self.fastq_reader(source, in_fmt, cfg.threads > 1);
                 let records = self.tag_filtered_fastq(cfg, records);
                 let Some(records) = settle(
                     records,
@@ -766,20 +766,17 @@ impl Session {
         source: Source,
         in_fmt: Format,
         threaded: bool,
-    ) -> anyhow::Result<Box<dyn Iterator<Item = anyhow::Result<record::ReadRecord>> + Send>> {
+    ) -> Box<dyn Iterator<Item = anyhow::Result<record::ReadRecord>> + Send> {
         match source {
             Source::Stream(src) => match in_fmt {
-                Format::Fastq => Ok(io::fastq::reader_from(src, false, false)),
-                Format::FastqGz => Ok(io::fastq::reader_from(src, true, threaded)),
+                Format::Fastq => io::fastq::reader_from(src, false, false),
+                Format::FastqGz => io::fastq::reader_from(src, true, threaded),
                 Format::FastqBgzf => io::fastq::reader_from_bgzf(src, self.budget.decode),
                 Format::Bam => unreachable!("BAM input is dispatched to bam_reader"),
             },
-            Source::Folder(paths) => Ok(io::dir::fastq_records(
-                &paths,
-                self.budget.decode,
-                threaded,
-                self.counters.clone(),
-            )),
+            Source::Folder(paths) => {
+                io::dir::fastq_records(&paths, self.budget.decode, threaded, self.counters.clone())
+            },
         }
     }
 
@@ -871,8 +868,8 @@ where
             },
         };
         adapters.attach_split(&opts.sheet.primers);
-        warn_close_primers(&opts);
         let splitter = split::Splitter::new(opts, &adapters)?;
+        warn_close_primers(&splitter);
         counters
             .split
             .set(split::SplitCounters::new(splitter.keys.names.len()))
@@ -886,11 +883,11 @@ where
 }
 
 /// Warns for every pair of sheet sequences of different keys closer than
-/// `--target-margin`: reads carrying either sequence cannot be told apart by
-/// it.
-fn warn_close_primers(opts: &split::SplitOptions) {
-    let by_group = opts.level == split::KeyLevel::Group;
-    for (a, b, distance) in opts.sheet.close_pairs(opts.rules.margin, by_group) {
+/// `--target-margin` (`Bounds::close_pairs`): reads carrying either sequence
+/// cannot be told apart by it.
+fn warn_close_primers(splitter: &split::Splitter) {
+    let opts = &splitter.opts;
+    for &(a, b, distance) in splitter.bounds.close_pairs() {
         tracing::warn!(
             primer_a = %opts.sheet.primers[a].name,
             primer_b = %opts.sheet.primers[b].name,

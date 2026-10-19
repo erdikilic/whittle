@@ -136,7 +136,7 @@ pub enum Call {
     Ambiguous,
 }
 
-/// The end rule and margin `classify` applies.
+/// The end rule and margin `classify_at_length` applies.
 #[derive(Clone, Copy, Debug)]
 pub struct Rules {
     /// Which end(s) a target needs a located primer at.
@@ -146,15 +146,17 @@ pub struct Rules {
     pub margin: usize,
 }
 
-/// Facts `classify` weighs a used end with besides its scores: the keys
-/// that list each primer, its close primers of other keys, and the penalty
-/// of a role primer that did not score.
+/// Facts `classify_at_length` weighs a used end with besides its scores: the
+/// keys that list each primer, its close primers of other keys, and the
+/// penalty of a role primer that did not score.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bounds {
     /// `keys[p]` lists the keys whose targets name primer `p`.
     keys: Vec<Vec<usize>>,
-    /// `close[p]` lists each primer of a different key whose IUPAC edit
-    /// distance to `p` is below the margin (`Sheet::close_pairs_by`).
+    /// Every pair of primers of different keys whose IUPAC edit distance is
+    /// below the margin, as `Sheet::close_pairs_by` returns them.
+    pairs: Vec<(usize, usize, usize)>,
+    /// `close[p]` lists every primer that `pairs` pairs with `p`.
     close: Vec<Vec<usize>>,
     /// The cost a role primer that did not score counts at an end rescored
     /// at the terminal budgets: the lowest terminal budget of the sheet's
@@ -188,19 +190,28 @@ impl Bounds {
                 }
             }
         }
-        let mut close: Vec<Vec<usize>> = vec![Vec::new(); n];
         let pairs = sheet.close_pairs_by(margin, |i, j| keys.of_target[i] == keys.of_target[j]);
-        for (a, b, _) in pairs {
+        let mut close: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &(a, b, _) in &pairs {
             close[a].push(b);
             close[b].push(a);
         }
         let penalty = |budgets: &[usize]| budgets.iter().min().map_or(0, |&k| k + 1);
         Bounds {
             keys: of_primer,
+            pairs,
             close,
             penalty: penalty(budget),
             penalty_anchored: penalty(anchored),
         }
+    }
+
+    /// Every pair of primers of different keys whose IUPAC edit distance is
+    /// below the margin, as `(primer, primer, distance)` with the lower
+    /// primer index first (`Sheet::close_pairs_by`). Reads carrying either
+    /// primer of a pair cannot be told apart by it.
+    pub fn close_pairs(&self) -> &[(usize, usize, usize)] {
+        &self.pairs
     }
 }
 
@@ -339,7 +350,7 @@ fn scored(scores: &[Score], role: &[usize]) -> bool {
     scores.iter().any(|s| role.contains(&s.primer))
 }
 
-/// One target/strand that `classify` keeps for its key.
+/// One target/strand that `classify_at_length` keeps for its key.
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
     /// Whether an end is penalised rather than matched.
@@ -383,24 +394,12 @@ fn passes_require(require: Require, strand: Strand, five: bool, three: bool) -> 
     }
 }
 
-/// Classifies one segment from the primers rescored at its ends, both
-/// rescored at the terminal budgets; see `classify_at`.
-pub fn classify(
-    sheet: &Sheet,
-    keys: &Keys,
-    bounds: &Bounds,
-    rules: Rules,
-    five: &[Score],
-    three: &[Score],
-) -> Call {
-    classify_at(sheet, keys, bounds, rules, five, three, [false, false])
-}
-
 /// Classifies one segment from the primers rescored at its ends. An empty
 /// `five` or `three` slice means that end has no primer evidence.
 /// `boundary` tells, for the 5' and the 3' end, whether the end was
 /// rescored at a boundary locus (`Locus::boundary`), which sets the penalty
-/// of a role primer that did not score there.
+/// of a role primer that did not score there. `len` is the final segment
+/// length, when known.
 ///
 /// For each target and strand, each end is fitted to the list that strand's
 /// role puts there (`Plus`: forward at 5', reverse at 3'; `Minus`: reverse at
@@ -410,7 +409,8 @@ pub fn classify(
 /// on that strand. A target/strand with no vetoed end and at least one
 /// matched end is a candidate at the cost summed over its used ends, kept
 /// only when its matched ends satisfy `rules.require`. Each key keeps its
-/// best candidate by `Candidate::rank`. Keys with a penalised candidate
+/// best candidate by `Candidate::rank`; equal ranks prefer a target whose
+/// length window is compatible with `len`. Keys with a penalised candidate
 /// compete only when no key has a candidate matched at every used end. The
 /// cheapest competing key is assigned when its candidate has a role primer
 /// that scored, not only one a close primer stands for, and it beats every
@@ -419,26 +419,13 @@ pub fn classify(
 /// candidate whose used ends all matched, one of them by a scored role
 /// primer, that failed `require` gives `Unassigned::MissingEnd`; otherwise a
 /// target with primers of one role list scored at both ends gives
-/// `Unassigned::Orientation`; otherwise the call is `Ambiguous`.
+/// `Unassigned::Orientation`; otherwise the call is `Ambiguous`. The length
+/// window of an assigned target is checked against `len` after the
+/// competition between keys (`check_length`).
 ///
 /// A target that lists one primer in both role lists is consistent on both
 /// strands at the same cost whichever ends score that primer, and takes
 /// `Strand::Plus`, the first strand tried.
-pub fn classify_at(
-    sheet: &Sheet,
-    keys: &Keys,
-    bounds: &Bounds,
-    rules: Rules,
-    five: &[Score],
-    three: &[Score],
-    boundary: [bool; 2],
-) -> Call {
-    classify_at_length(sheet, keys, bounds, rules, five, three, boundary, None)
-}
-
-/// Classifies primer evidence with a final segment length. Equal-rank
-/// targets within one key prefer a compatible length window. The selected
-/// target's length window is checked after competition between keys.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn classify_at_length(
     sheet: &Sheet,
@@ -604,6 +591,49 @@ mod tests {
     fn bounds(sheet: &Sheet, keys: &Keys) -> Bounds {
         let budgets = vec![3; sheet.primers.len()];
         Bounds::new(sheet, keys, 2, &budgets, &budgets)
+    }
+
+    /// Classifies a segment of unknown length whose ends were both rescored
+    /// at the terminal budgets.
+    fn classify(
+        sheet: &Sheet,
+        keys: &Keys,
+        bounds: &Bounds,
+        rules: Rules,
+        five: &[Score],
+        three: &[Score],
+    ) -> Call {
+        classify_at_length(
+            sheet,
+            keys,
+            bounds,
+            rules,
+            five,
+            three,
+            [false, false],
+            None,
+        )
+    }
+
+    /// The bounds keep the close pairs of primers of different keys: two
+    /// targets one edit apart form a pair at the target level and none when
+    /// they share a group at the group level.
+    #[test]
+    fn bounds_keep_the_close_pairs_of_different_keys() {
+        let sheet = Sheet::parse_tsv(
+            "target\tfwd\trev\tgroup\n\
+             A\tAGRGTTYGATYMTGGCTCAG\tCGGTTACCTTGTTACGACTT\tG\n\
+             B\tAGRGTTYGATYMTGGCTCAC\tTCCTCCGCTTATTGATATGC\tG\n",
+        )
+        .unwrap();
+        let budgets = vec![3; sheet.primers.len()];
+        let at = |level| Bounds::new(&sheet, &Keys::new(&sheet, level), 2, &budgets, &budgets);
+        let (a, b) = (sheet.targets[0].fwd[0], sheet.targets[1].fwd[0]);
+        assert_eq!(
+            at(KeyLevel::Target).close_pairs(),
+            [(a.min(b), a.max(b), 1)]
+        );
+        assert!(at(KeyLevel::Group).close_pairs().is_empty());
     }
 
     #[test]
@@ -1596,7 +1626,7 @@ mod tests {
         let bounds = Bounds::new(&sheet, &keys, 2, &vec![3; n], &vec![4; n]);
         let either = rules(Require::Either, 2);
         let call = |boundary| {
-            classify_at(
+            classify_at_length(
                 &sheet,
                 &keys,
                 &bounds,
@@ -1604,6 +1634,7 @@ mod tests {
                 &[score(0, 0)],
                 &[score(5, 3)],
                 boundary,
+                None,
             )
         };
         assert_eq!(call([false, false]), assigned(0, Strand::Plus, Ends::Both));

@@ -165,14 +165,12 @@ pub fn fastq_records(
                     Some(other) => other,
                     None => unreachable!("`classify` admits only files with a read-file extension"),
                 };
-                match format {
+                Ok(match format {
                     Format::FastqBgzf => crate::io::fastq::reader_from_bgzf(inner, bgzf_workers),
-                    Format::FastqGz => {
-                        Ok(crate::io::fastq::reader_from(inner, true, inflate_thread))
-                    },
-                    Format::Fastq => Ok(crate::io::fastq::reader_from(inner, false, false)),
+                    Format::FastqGz => crate::io::fastq::reader_from(inner, true, inflate_thread),
+                    Format::Fastq => crate::io::fastq::reader_from(inner, false, false),
                     Format::Bam => unreachable!("`classify` admits no BAM into a FASTQ folder"),
-                }
+                })
             });
             // Errors name the member file they arose in.
             match reader {

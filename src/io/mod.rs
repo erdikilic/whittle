@@ -189,6 +189,13 @@ pub fn is_bgzf_file(path: &Path) -> bool {
         .is_ok_and(|()| is_bgzf(&header))
 }
 
+/// Returns the worker count for a noodles multithreaded BGZF reader, which
+/// builds a private Rayon pool of that many threads; the global Rayon
+/// registry is not consulted. A count of zero counts as one.
+pub(crate) fn workers_nonzero(workers: usize) -> std::num::NonZero<usize> {
+    std::num::NonZero::new(workers).unwrap_or(std::num::NonZero::<usize>::MIN)
+}
+
 /// Fills `buf` from `source` until it is full or the source ends, since one
 /// `read` may return fewer bytes than asked for. Returns the number of bytes
 /// read.

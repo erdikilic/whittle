@@ -37,6 +37,7 @@ impl<T> Parts<T> {
     }
 
     /// Whether every part other than key 0's is empty.
+    #[cfg(feature = "paraseq")]
     pub(crate) fn only_first(&self) -> bool {
         self.rest.iter().all(Vec::is_empty)
     }

@@ -398,8 +398,8 @@ fn peel_extracts_two_distinct_adapters() {
     ];
     let paths = peel_paths(nodes, 4, End::Five);
     assert_eq!(paths.len(), 2);
-    assert!(paths[0].0.starts_with(b"ACGT"));
-    assert!(paths[1].0.starts_with(b"TTGG"));
+    assert!(paths[0].starts_with(b"ACGT"));
+    assert!(paths[1].starts_with(b"TTGG"));
 }
 
 /// An exact catalog sequence is named at 100 percent identity.
@@ -1330,14 +1330,14 @@ fn division_needs_continuations_that_do_not_rejoin() {
     );
     let mut cons = shared.clone();
     cons.extend_from_slice(&left);
-    let counts = kmer_counts(&divided);
+    let counts = kmer_counts(&divided, KMER_K);
     let edge = division_point(&cons, &counts, divided.len(), 0, cons.len(), End::Five);
     assert_eq!(edge.map(|(edge, _)| edge), Some(shared.len()));
 
     let mut cons = shared.clone();
     cons.push(b'A');
     cons.extend_from_slice(&tail);
-    let counts = kmer_counts(&bubbled);
+    let counts = kmer_counts(&bubbled, KMER_K);
     assert!(division_point(&cons, &counts, bubbled.len(), 0, cons.len(), End::Five).is_none());
 }
 

@@ -292,6 +292,7 @@ pub(super) fn supported_span(weights: &[u32], end: End) -> (usize, usize, bool) 
         rises = rise;
         break;
     }
+    // The run is never empty, and its peak clears the floor.
     let run = &order[first..=last];
     let peak = run.iter().map(|&j| weights[j]).max().unwrap_or(0);
     let floor = (peak as f64 * BOUNDARY_SUPPORT) as u32;
@@ -301,11 +302,7 @@ pub(super) fn supported_span(weights: &[u32], end: End) -> (usize, usize, bool) 
         lo = lo.min(j);
         hi = hi.max(j + KMER_K);
     }
-    if lo == usize::MAX {
-        (0, KMER_K.min(n + KMER_K - 1), rises)
-    } else {
-        (lo, hi, rises)
-    }
+    (lo, hi, rises)
 }
 
 /// Returns the inner edge of the shared part of a consensus whose path
@@ -322,13 +319,14 @@ pub(super) fn supported_span(weights: &[u32], end: End) -> (usize, usize, bool) 
 /// open paths that keep their support for `RUN_PERSIST` k-mers, the other
 /// one off the consensus. A degenerate primer base opens a branch that
 /// rejoins the consensus within `KMER_K` k-mers and does not divide it. The
-/// shared part keeps at least `MIN_PATTERN_LEN` bases. `weights` counts
-/// k-mers over windows that reach past the assembly windows (`kmer_counts`),
-/// so a division near the inner end of the assembly windows still shows its
+/// shared part holds at least the k-mer that divides, so it is longer than
+/// `MIN_PATTERN_LEN`. `weights` holds the window counts of k-mers
+/// (`kmer_counts`) over windows that reach past the assembly windows, so a
+/// division near the inner end of the assembly windows still shows its
 /// continuations.
 pub(super) fn division_point(
     cons: &[u8],
-    weights: &KmerMap<u32>,
+    weights: &KmerMap<(u32, usize)>,
     windows: usize,
     lo: usize,
     hi: usize,
@@ -342,7 +340,7 @@ pub(super) fn division_point(
         .map(|w| encode_kmer(w).unwrap_or(u64::MAX))
         .collect();
     let on_path: std::collections::HashSet<u64> = codes.iter().copied().collect();
-    let weight = |code: u64| weights.get(&code).copied().unwrap_or(0);
+    let weight = |code: u64| weights.get(&code).map_or(0, |&(count, _)| count);
     let mask = (1u64 << (2 * KMER_K)) - 1;
     let step = |code: u64, base: u64| match end {
         End::Five => ((code << 2) | base) & mask,
@@ -355,13 +353,6 @@ pub(super) fn division_point(
     };
     let peak = starts.iter().map(|&j| weight(codes[j])).max().unwrap_or(0);
     for j in starts {
-        let shared = match end {
-            End::Five => j + KMER_K - lo,
-            End::Three => hi - j,
-        };
-        if shared < MIN_PATTERN_LEN {
-            continue;
-        }
         let here = weight(codes[j]);
         let next = match end {
             End::Five => codes[j + 1],
@@ -418,36 +409,6 @@ pub(super) fn division_point(
         }
     }
     None
-}
-
-/// Returns the number of `windows` holding each k-mer of `KMER_K` plain
-/// bases, as `top_kmers` counts them, without its ranking cut.
-pub(super) fn kmer_counts(windows: &[&[u8]]) -> KmerMap<u32> {
-    let mut counts: KmerMap<(u32, usize)> =
-        KmerMap::with_capacity_and_hasher(windows.len() * 64, Default::default());
-    let mask = u64::MAX >> (64 - 2 * KMER_K);
-    for (window_index, window) in windows.iter().enumerate() {
-        let (mut code, mut valid) = (0, 0);
-        for &base in *window {
-            if let Some(bits) = encode_kmer(&[base]) {
-                code = ((code << 2) | bits) & mask;
-                valid += 1;
-                if valid >= KMER_K {
-                    let entry = counts.entry(code).or_insert((0, usize::MAX));
-                    if entry.1 != window_index {
-                        entry.0 += 1;
-                        entry.1 = window_index;
-                    }
-                }
-            } else {
-                (code, valid) = (0, 0);
-            }
-        }
-    }
-    counts
-        .into_iter()
-        .map(|(code, (count, _))| (code, count))
-        .collect()
 }
 
 /// Returns the length of the homopolymer run that ends `seq` on its

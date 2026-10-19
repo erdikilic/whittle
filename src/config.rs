@@ -66,13 +66,21 @@ impl FastqTags {
     }
 }
 
+/// The per-base `B` arrays of PacBio kinetics and per-base alignment counts
+/// that the BAM writer slices with the sequence.
+pub(crate) const KNOWN_PERBASE_TAGS: [[u8; 2]; 8] = [
+    *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sm", *b"sx",
+];
+
+/// The run-length encoded per-base coverage array that the BAM writer slices
+/// with the sequence.
+pub(crate) const RLE_COVERAGE_TAG: [u8; 2] = *b"sa";
+
 /// The per-base arrays the `kinetics` removal group names: the PacBio kinetics
-/// and alignment-count arrays a BAM writer slices with the sequence.
+/// and alignment-count arrays a BAM writer slices with the sequence
+/// (`KNOWN_PERBASE_TAGS` and `RLE_COVERAGE_TAG`).
 pub fn kinetics_tags() -> impl Iterator<Item = [u8; 2]> {
-    [
-        *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sa", *b"sm", *b"sx",
-    ]
-    .into_iter()
+    KNOWN_PERBASE_TAGS.into_iter().chain([RLE_COVERAGE_TAG])
 }
 
 /// The ONT signal tags the `moves` removal group names and the BAM writer
@@ -473,7 +481,7 @@ mod tests {
     }
 
     /// The `kinetics` group folds in exactly the nine per-base arrays the BAM
-    /// writer slices, so the group and the writer cannot drift apart.
+    /// writer slices.
     #[test]
     fn kinetics_group_folds_in_the_nine_per_base_arrays() {
         let r = TagRemoval::parse(&["kinetics".to_string()]).unwrap();

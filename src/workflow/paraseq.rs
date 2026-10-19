@@ -50,19 +50,7 @@ struct Processor {
 
 /// Copies a parsed record into an owned record with raw Phred qualities.
 fn to_read_record<Rf: Record>(record: &Rf) -> anyhow::Result<ReadRecord> {
-    let raw = record.qual().unwrap_or_default();
-    let mut out_of_range = false;
-    let qual: Vec<u8> = raw
-        .iter()
-        .map(|&b| {
-            let q = b.wrapping_sub(33);
-            out_of_range |= q > crate::io::fastq::MAX_PHRED33;
-            q
-        })
-        .collect();
-    if out_of_range {
-        return Err(crate::io::fastq::invalid_quality(record.id(), raw));
-    }
+    let qual = crate::io::fastq::phred_from_ascii(record.id(), record.qual().unwrap_or_default())?;
     Ok(ReadRecord {
         name: record.id().to_vec(),
         seq: record.seq_raw().to_vec(),

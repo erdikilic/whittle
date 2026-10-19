@@ -1,6 +1,6 @@
 //! Exact k-mers of read-end windows: packed encoding, the hasher and map keyed
-//! by packed codes, repeat filters, the counts of the most frequent k-mers, and
-//! the heaviest paths through their graph.
+//! by packed codes, repeat filters, the window counts of k-mers and the most
+//! frequent of them, and the heaviest paths through their graph.
 
 use super::*;
 
@@ -79,12 +79,6 @@ impl std::hash::Hasher for KmerHasher {
 pub(super) type KmerMap<V> =
     std::collections::HashMap<u64, V, std::hash::BuildHasherDefault<KmerHasher>>;
 
-/// Returns whether a k-mer consists of a short tandem repeat.
-pub(super) fn is_low_complexity(kmer: &[u8]) -> bool {
-    (1..=8.min(kmer.len() / 2))
-        .any(|period| kmer.iter().enumerate().all(|(i, &b)| b == kmer[i % period]))
-}
-
 /// Rejects consensuses dominated by a short approximate tandem repeat. Each
 /// base is compared with the base one period earlier, so isolated insertions
 /// and deletions shift the phase without hiding the repeat. Each period is
@@ -101,12 +95,12 @@ pub(super) fn is_repetitive(seq: &[u8]) -> bool {
     })
 }
 
-/// Counts each exact k-mer once per window, excludes short tandem repeats,
-/// sorts by count descending then code ascending, and retains at most `top`.
-pub(super) fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
-    let mut counts: KmerMap<(u32, usize)> =
-        KmerMap::with_capacity_and_hasher(windows.len() * 8, Default::default());
+/// Counts the `windows` holding each exact k-mer of `k` plain bases, each
+/// window once, as `(count, index of the last window counted)`.
+pub(super) fn kmer_counts(windows: &[&[u8]], k: usize) -> KmerMap<(u32, usize)> {
     assert!((1..=32).contains(&k));
+    let mut counts: KmerMap<(u32, usize)> =
+        KmerMap::with_capacity_and_hasher(windows.len() * 64, Default::default());
     let mask = u64::MAX >> (64 - 2 * k);
     for (window_index, &wnd) in windows.iter().enumerate() {
         let (mut code, mut valid) = (0, 0);
@@ -122,22 +116,27 @@ pub(super) fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u3
                     }
                 }
             } else {
-                code = 0;
-                valid = 0;
+                (code, valid) = (0, 0);
             }
         }
     }
+    counts
+}
+
+/// Counts each exact k-mer once per window (`kmer_counts`), excludes short
+/// tandem repeats, sorts by count descending then code ascending, and retains
+/// at most `top`.
+pub(super) fn top_kmers(windows: &[&[u8]], k: usize, top: usize) -> Vec<(u64, u32)> {
+    let counts = kmer_counts(windows, k);
+    let mask = u64::MAX >> (64 - 2 * k);
+    // A k-mer repeats with period `p` when its last `k - p` bases equal its
+    // first `k - p`.
     let mut ranked: Vec<(u64, u32)> = counts
         .into_iter()
-        .map(|(code, (count, _))| (code, count))
         .filter(|&(code, _)| {
-            if k >= 4 {
-                !(1..=8.min(k / 2))
-                    .any(|period| code & (mask >> (2 * period)) == code >> (2 * period))
-            } else {
-                !is_low_complexity(&decode_kmer(code, k))
-            }
+            !(1..=8.min(k / 2)).any(|period| code & (mask >> (2 * period)) == code >> (2 * period))
         })
+        .map(|(code, (count, _))| (code, count))
         .collect();
     // Count descending, then code ascending for a deterministic tie-break.
     let order = |a: &(u64, u32), b: &(u64, u32)| b.1.cmp(&a.1).then(a.0.cmp(&b.0));
@@ -259,11 +258,7 @@ pub(super) fn bounded_heaviest_path(
 /// the next round is forced onto a different path. Sequence past a layer
 /// boundary stays available to later paths. Every path is returned; support
 /// floors apply to the validated candidates.
-pub(super) fn peel_paths(
-    mut nodes: Vec<(u64, u32)>,
-    k: usize,
-    end: End,
-) -> Vec<(Vec<u8>, Vec<u32>)> {
+pub(super) fn peel_paths(mut nodes: Vec<(u64, u32)>, k: usize, end: End) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     while out.len() < MAX_ADAPTERS_PER_END {
         let Some((cons, _, _)) = bounded_heaviest_path(&nodes, k, LMAX) else {
@@ -287,7 +282,7 @@ pub(super) fn peel_paths(
             used = cons.windows(k).filter_map(encode_kmer).collect();
         }
         nodes.retain(|(code, _)| !used.contains(code));
-        out.push((cons, weights));
+        out.push(cons);
         if nodes.is_empty() {
             break;
         }

@@ -10,7 +10,6 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, bail};
-use clap::ValueEnum;
 
 use crate::adapter::MIN_PATTERN_LEN;
 use crate::adapter::search;
@@ -749,44 +748,26 @@ impl Sheet {
                 Require::Rev => !t.rev.is_empty(),
             };
             if !ok {
-                let spelling = require
-                    .to_possible_value()
-                    .expect("Require has a possible value for every variant")
-                    .get_name()
-                    .to_string();
                 bail!(
                     "target {:?} has no sequence for --target-require {}",
                     t.name,
-                    spelling
+                    require.label()
                 );
             }
         }
         Ok(())
     }
 
-    /// Returns every pair of primers of two targets of different keys (target
-    /// names by default, or groups when `by_group`) whose IUPAC edit distance
-    /// is below `margin`, regardless of which role list each primer is in:
+    /// Returns every pair of primers of two targets of different keys, as
+    /// `same_key` tells for two target indices, whose IUPAC edit distance is
+    /// below `margin`, regardless of which role list each primer is in:
     /// primer index, primer index (lower first), distance. Rescoring aligns
     /// every sheet primer in the orientation valid for each end, so a forward
     /// primer of one key and a reverse primer of another compete at the same
     /// end too; those keys cannot be reliably told apart at a `--target-margin`
-    /// of `margin`. A pair is reported once even when several role combinations or
-    /// target pairs reach the same two primers. Primers of one key, the
-    /// variants of one target among them, are never compared.
-    pub fn close_pairs(&self, margin: usize, by_group: bool) -> Vec<(usize, usize, usize)> {
-        self.close_pairs_by(margin, |i, j| {
-            let (a, b) = (&self.targets[i], &self.targets[j]);
-            if by_group {
-                a.group == b.group
-            } else {
-                a.name == b.name
-            }
-        })
-    }
-
-    /// `close_pairs` with the key relation given by `same_key`, which tells
-    /// whether two target indices share a key.
+    /// of `margin`. A pair is reported once even when several role
+    /// combinations or target pairs reach the same two primers. Primers of one
+    /// key, the variants of one target among them, are never compared.
     pub fn close_pairs_by(
         &self,
         margin: usize,
@@ -1265,6 +1246,19 @@ mod tests {
         }
     }
 
+    /// The close pairs of `s` (`Sheet::close_pairs_by`) with one key per
+    /// target name, or per group when `by_group`.
+    fn close_pairs(s: &Sheet, margin: usize, by_group: bool) -> Vec<(usize, usize, usize)> {
+        s.close_pairs_by(margin, |i, j| {
+            let (a, b) = (&s.targets[i], &s.targets[j]);
+            if by_group {
+                a.group == b.group
+            } else {
+                a.name == b.name
+            }
+        })
+    }
+
     /// Variants of one target are never compared with each other; every
     /// variant of one key is compared with every variant of another.
     #[test]
@@ -1275,7 +1269,7 @@ mod tests {
              B\tTCCGTAGGTGAACCTGCGG,AGAGTTTGATCCTGGCTTAT\tTCCTCCGCTTATTGATATGC\n",
         )
         .unwrap();
-        let pairs = s.close_pairs(2, false);
+        let pairs = close_pairs(&s, 2, false);
         let flagged: HashSet<(usize, usize)> = pairs.iter().map(|p| (p.0, p.1)).collect();
         let (a, b) = (&s.targets[0].fwd, &s.targets[1].fwd);
         let expected: HashSet<(usize, usize)> = [
@@ -1320,7 +1314,7 @@ mod tests {
         )
         .unwrap();
 
-        let pairs = s.close_pairs(2, false);
+        let pairs = close_pairs(&s, 2, false);
         assert_eq!(pairs.len(), 1, "different targets: one close pair");
         assert_eq!(pairs[0].2, 1, "one substitution apart");
         let flagged: std::collections::HashSet<usize> = [pairs[0].0, pairs[0].1].into();
@@ -1328,7 +1322,7 @@ mod tests {
             [s.targets[0].fwd[0], s.targets[1].fwd[0]].into();
         assert_eq!(flagged, expected);
 
-        let grouped = s.close_pairs(2, true);
+        let grouped = close_pairs(&s, 2, true);
         assert!(
             grouped.is_empty(),
             "same group under by_group: no pair reported"
@@ -1345,9 +1339,9 @@ mod tests {
              B\tCTTGGTCATTTAGAGGAAGTAA\tTCCTCCGCTTATTGATATGC\n",
         )
         .unwrap();
-        let reference = s.close_pairs(23, false);
+        let reference = close_pairs(&s, 23, false);
         assert_eq!(reference.len(), 4, "{reference:?}");
-        assert_eq!(s.close_pairs(usize::MAX, false), reference);
+        assert_eq!(close_pairs(&s, usize::MAX, false), reference);
     }
 
     /// A forward primer of one key and a reverse primer of another key
@@ -1363,7 +1357,7 @@ mod tests {
         )
         .unwrap();
 
-        let pairs = s.close_pairs(2, false);
+        let pairs = close_pairs(&s, 2, false);
         assert_eq!(pairs.len(), 1, "one cross-role pair: {pairs:?}");
         assert_eq!(pairs[0].2, 1, "one substitution apart");
         let flagged: std::collections::HashSet<usize> = [pairs[0].0, pairs[0].1].into();

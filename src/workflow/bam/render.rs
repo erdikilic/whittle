@@ -218,11 +218,11 @@ pub(super) struct PreparedRead<'a> {
 }
 
 /// Refuses a record without one quality per base: a QUAL length other than
-/// the SEQ length, which includes the empty QUAL noodles reads for `*`, or a
-/// QUAL of `0xFF` bytes. Trimming and FASTQ output need every quality. The
-/// caller names the read.
+/// the SEQ length, which includes the empty QUAL noodles reads for a `*`
+/// QUAL, stored as `0xFF` bytes. Trimming and FASTQ output need every
+/// quality. The caller names the read.
 pub(super) fn require_qualities(seq_len: usize, qual: &[u8]) -> anyhow::Result<()> {
-    if qual.len() != seq_len || crate::io::bam::quality_absent(qual) {
+    if qual.len() != seq_len {
         anyhow::bail!(
             "BAM record SEQ length {} != QUAL length {} \
              (records without per-base quality are not supported)",
@@ -327,7 +327,8 @@ pub(super) fn render_windows(
         } else {
             None
         };
-    let mut survivors: Vec<(usize, usize)> = Vec::new();
+    // Whether a written window leaves out part of the read.
+    let mut trimmed = false;
     let bc_tag = cfg
         .splitter
         .as_ref()
@@ -355,7 +356,7 @@ pub(super) fn render_windows(
                 Routing::Tagged(label, key) => Some((label, key)),
                 Routing::Discarded => return Ok(false),
             };
-            survivors.push((start, end));
+            trimmed |= start != 0 || end != seq.len();
             render.borrow_mut()(
                 Window {
                     start,
@@ -403,7 +404,7 @@ pub(super) fn render_windows(
             render.borrow_mut()(window, mod_block, indexed.as_ref(), Some(reason), None)
         },
     )?;
-    count_undo_tags_dropped(counters, rec, seq.len(), &survivors);
+    count_undo_tags_dropped(counters, rec, trimmed);
     Ok(())
 }
 
