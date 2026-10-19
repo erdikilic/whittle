@@ -111,9 +111,8 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --quality-trim en
 | `--target-action <trim\|retain>` | Whether the located sequences are trimmed (default) or kept by widening the piece back over them |
 | `--target-margin <EDITS>` | Minimum edit-cost margin of the best target over the best different target; a smaller margin is ambiguous (default 2) |
 | `--target-discard <BINS>` | Drop these bins instead of writing them, comma-separated: `unassigned`, `ambiguous` |
-| `-v, --verbose` (repeatable) | Stage detail with `-v`, per-read decisions with `-vv` |
-| `--progress <MODE>` | Progress reporting, independent of the log level: `auto` (default), `bar`, `plain`, `none` |
-| `--quiet` | Silence progress and the summary; warnings and errors still print. Conflicts with `-v` and `--progress` |
+| `-v, --verbose` (repeatable) | Log level: info by default, debug with `-v` (stage detail), trace with `-vv` (per-read decisions) |
+| `--quiet` | Log only warnings and errors: no banner, progress line or summary. Conflicts with `-v` |
 
 `--quality-trim` selects one method for the quality stage. `-H`/`-T` combine
 with any of them.
@@ -803,8 +802,9 @@ the end of the run.
 
 ## Logging and progress
 
-The log level is set with `-v`/`-vv` or `--quiet` (warnings and errors only).
-All logging goes to stderr; stdout carries only read data.
+The log level is info by default, debug with `-v`, trace with `-vv`, and
+warnings and errors only with `--quiet`. All logging goes to stderr; stdout
+carries only read data.
 
 `-v` adds stage detail: the detected input format and detection time, the
 thread budget, and the read and base counts at the end. `-vv` adds per-read
@@ -829,20 +829,21 @@ per-segment lines. `--quiet` takes precedence over it. A value that does not
 parse is reported as a warning and the level falls back to the `-v`/`-vv`
 setting.
 
-Progress is shown as a live bar when stderr is a terminal and as periodic lines
-(every 30 s, or 10 s under `-v`) when stderr is a file or a pipe. The bar is
-never written to a non-terminal, so a redirected log contains no escape
-sequences or carriage returns. `--progress` selects the mode independently of
-the log level:
+Progress is logged as an info line every 30 s, or every 10 s at debug and
+trace, on a terminal and in a redirected log alike:
 
-| Value | Behavior |
-|---|---|
-| `auto` | A bar on a terminal, periodic lines otherwise (default) |
-| `bar` | The bar even when redirected; falls back to periodic lines under `-v`/`-vv` or `WHITTLE_LOG`, since debug lines and the bar cannot share a terminal |
-| `plain` | Periodic lines, never a bar |
-| `none` | No progress reporting; the banner, warnings, and summary still print |
+```text
+[2026-10-19 21:05:23] [INFO] Processed 1,200,000 input reads, 1,150,000 output reads, 42%, 45k reads/s, 380 MB/s, ETA 00:00:40
+```
 
-`--quiet` also drops the summary and conflicts with `--progress`.
+The input and output read counts differ when reads are split or dropped, so
+a filter that discards every read shows while the run is in flight. The
+percentage and ETA follow the input bytes read and are left out for stdin,
+whose size is unknown. A run shorter than the interval logs no progress
+line. `--quiet` silences it with the banner and the summary.
+
+The `[LEVEL]` token is colored when stderr is a terminal; a redirected log,
+or a run with `NO_COLOR` set, carries no escape sequences.
 
 ## Man page
 

@@ -5,9 +5,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{
-    AdapterInfer, Advisory, Config, FastqTags, IoConfig, ProgressMode, TagRemoval,
-};
+use crate::config::{AdapterInfer, Advisory, Config, FastqTags, IoConfig, TagRemoval};
 use crate::filter::FilterConfig;
 use crate::io::Format;
 use crate::qual::QualMode;
@@ -100,27 +98,15 @@ struct Cli {
     #[arg(long = "rejected-output", value_name = "PATH", help_heading = "Setup")]
     rejected_output: Option<PathBuf>,
 
-    /// Increase logging detail: -v is debug, -vv is trace (at most two).
-    /// Overridden by WHITTLE_LOG.
+    /// Write more to the log on standard error: info by default, -v adds
+    /// debug detail, -vv trace lines for every segment and adapter hit (at
+    /// most two). WHITTLE_LOG, a tracing filter such as whittle=debug,
+    /// overrides it.
     #[arg(short = 'v', long, action = clap::ArgAction::Count, help_heading = "Logging")]
     verbose: u8,
-    /// Silence progress and info output; warnings and errors still print.
-    /// Conflicts with -v and --progress.
+    /// Log only warnings and errors.
     #[arg(long, conflicts_with = "verbose", help_heading = "Logging")]
     quiet: bool,
-    /// Progress reporting, independent of the log level: auto selects a bar on
-    /// a terminal and periodic lines otherwise; bar and plain force one form;
-    /// none disables progress and keeps the banner and summary. A bar falls
-    /// back to lines under -v or WHITTLE_LOG.
-    #[arg(
-        long,
-        value_enum,
-        value_name = "MODE",
-        default_value_t = ProgressMode::Auto,
-        conflicts_with = "quiet",
-        help_heading = "Logging"
-    )]
-    progress: ProgressMode,
 
     /// Minimum post-trim segment length.
     #[arg(
@@ -502,7 +488,6 @@ pub fn parse() -> anyhow::Result<Config> {
         summary_json: c.summary_json,
         rejected_output: c.rejected_output,
         advisories,
-        progress: c.progress,
         adapter_fasta: c.adapter_fasta,
         adapters_configured: None,
         trim_classes: [false; 3],
@@ -1059,6 +1044,7 @@ mod tests {
             "--adapter-infer",
             "--adapter-infer-policy",
             "--adapter-report",
+            "--progress",
             "--split-by",
             "--split-require",
             "--split-action",

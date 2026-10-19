@@ -1,5 +1,5 @@
 //! Resolved run configuration: `Config`, tag carry-through policy,
-//! adapter-inference settings, progress mode, and the thread budget.
+//! adapter-inference settings, and the thread budget.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -193,23 +193,6 @@ impl Advisory {
     }
 }
 
-/// How progress is reported, chosen independently of the log level.
-///
-/// `--quiet` conflicts with `--progress` at parse time and outranks this
-/// setting. Progress and log level are separate so the summary can be kept
-/// while in-flight progress lines or the bar are suppressed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum ProgressMode {
-    /// A bar on a terminal, periodic lines otherwise.
-    Auto,
-    /// The animated bar, unless -v or WHITTLE_LOG asks for log lines.
-    Bar,
-    /// Always periodic lines, never a bar.
-    Plain,
-    /// No progress reporting; the banner and summary still print.
-    None,
-}
-
 /// Input and output endpoints and any forced formats.
 #[derive(Debug, Clone, Default)]
 pub struct IoConfig {
@@ -286,8 +269,6 @@ pub struct Config {
     /// Diagnostics raised while parsing arguments, emitted by `run` once the log
     /// subscriber exists. See `Advisory`.
     pub advisories: Vec<Advisory>,
-    /// How progress is reported. See `ProgressMode`.
-    pub progress: ProgressMode,
     /// The `--adapter-fasta` path, kept so `run` can refuse to overwrite it.
     /// The sequences themselves are already resolved into `adapters`.
     pub adapter_fasta: Option<PathBuf>,
@@ -316,9 +297,8 @@ pub struct Config {
 
 impl Default for Config {
     /// The library defaults: stdin to stdout, no trimming or filtering, one
-    /// thread, every tag, compression level 6, progress `auto`. `cli::parse`
-    /// overrides the thread count with the CPU count and the level with 4 for
-    /// `.gz` output.
+    /// thread, every tag, compression level 6. `cli::parse` overrides the
+    /// thread count with the CPU count and the level with 4 for `.gz` output.
     fn default() -> Self {
         Config {
             io: IoConfig::default(),
@@ -341,7 +321,6 @@ impl Default for Config {
             summary_json: None,
             rejected_output: None,
             advisories: Vec::new(),
-            progress: ProgressMode::Auto,
             adapter_fasta: None,
             adapters_configured: None,
             trim_classes: [false; 3],

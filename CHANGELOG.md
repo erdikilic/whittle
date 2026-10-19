@@ -197,6 +197,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - `--trim-barcodes`. Barcode positions apply automatically with an adapter
   source.
+- The progress bar, the indicatif dependency and `--progress`. Logging
+  follows `-v` and `--quiet` alone: info by default, debug with `-v`, trace
+  with `-vv`, and warnings and errors only with `--quiet`. Progress is an
+  info line every 30 s, or every 10 s at debug and trace, on a terminal and
+  in a redirected log alike, and it now reports the output read count beside
+  the input count. The `[LEVEL]` token is not colored when `NO_COLOR` is
+  set. Library API: `config::ProgressMode`, `Config::progress` and
+  `obs::ProgressHandle::is_bar` are removed.
 
 ### Fixed
 - Retained primer bases count toward the final segment length filter for

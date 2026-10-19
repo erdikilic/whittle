@@ -8,10 +8,10 @@
 use crate::config::AdapterInfer;
 use crate::{config, filter, io, trim};
 
-/// The startup banner's operation line, also the wording of bar mode's single
-/// start line: `Trimming FASTQ` when input and output share a `Format::family`
-/// (a FASTQ to FASTQ.gz run is a compression change, not a conversion), else
-/// `Converting {in_label} to {out_label}` for a cross-family conversion.
+/// The startup banner's operation line: `Trimming FASTQ` when input and
+/// output share a `Format::family` (a FASTQ to FASTQ.gz run is a compression
+/// change, not a conversion), else `Converting {in_label} to {out_label}` for
+/// a cross-family conversion.
 pub(crate) fn operation_line(in_fmt: io::Format, out_fmt: io::Format) -> String {
     if in_fmt.family() == out_fmt.family() {
         format!("Trimming {}", in_fmt.family())

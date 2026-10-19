@@ -67,9 +67,9 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     let in_path = cfg.io.input.clone();
     let in_path = in_path.as_deref();
 
-    // The total input byte count, known for a file, drives a determinate
-    // progress bar with percent and ETA; stdin has no size, so `None` selects a
-    // spinner (see `obs::ProgressHandle::start`).
+    // The total input byte count, known for a file, gives the periodic
+    // progress line its percentage and ETA; stdin has no size, so `None` leaves
+    // both out (see `obs::ProgressHandle::start`).
     let total: Option<u64> = in_path
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.len());
@@ -255,8 +255,8 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
     let budget = plan_budget(cfg, decode);
     let counters = Arc::new(workflow::Counters::default());
 
-    // Summed unconditionally, not only when the banner prints: it also drives
-    // the determinate progress bar.
+    // Summed unconditionally, not only when the banner prints: it also gives
+    // the periodic progress line its percentage and ETA.
     let total_bytes: u64 = paths
         .iter()
         .filter_map(|p| std::fs::metadata(p).ok())
@@ -907,7 +907,8 @@ struct Startup {
     /// The `Input:` line body: a path and size, `<stdin>`, or a folder's file
     /// count and total size.
     input_line: String,
-    /// Input bytes, when known. Drives a determinate bar; `None` gives a spinner.
+    /// Input bytes, when known. Gives the periodic progress line its percentage
+    /// and ETA; `None` leaves both out.
     total: Option<u64>,
     /// The input format, or a folder's format family.
     in_fmt: Format,
@@ -923,7 +924,7 @@ struct Startup {
 ///
 /// The order is the output contract: `whittle {version}` and `Command:` (from
 /// `main`), then the resolved config, then every advisory, then live progress,
-/// so the run's provenance is at the top and nothing interleaves with the bar.
+/// so the run's provenance is at the top of the log.
 /// Both entry points call this function, so an advisory is emitted on both
 /// paths. Starting progress here rather than at the call sites makes the
 /// ordering a property of this function.
@@ -955,13 +956,6 @@ fn announce(
         ) {
             tracing::info!("{line}");
         }
-    } else if obs.is_bar() {
-        // Bar mode prints one line so the live bar stays clean.
-        tracing::info!(
-            "{} ({} threads)",
-            banner::operation_line(s.in_fmt, s.out_fmt),
-            cfg.threads
-        );
     }
 
     emit_advisories(&mut cfg.advisories);

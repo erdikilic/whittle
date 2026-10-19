@@ -26,9 +26,9 @@ fn main() {
 
     // The version and command lines precede every other line (the banner, the
     // clamp, mismatch and no-op warnings, and an early hard-error exit), so they
-    // are the first two lines of every log. Line mode only; bar mode emits its
-    // own one-line start. `args_os` (not `args`, which panics on non-UTF-8 argv)
-    // feeds `command_line`.
+    // are the first two lines of every log. `--quiet` omits them with the rest
+    // of the info output. `args_os` (not `args`, which panics on non-UTF-8
+    // argv) feeds `command_line`.
     if obs.shows_lines() {
         tracing::info!("whittle {}", env!("CARGO_PKG_VERSION"));
         tracing::info!("Command: {}", whittle::command_line(std::env::args_os()));
@@ -45,16 +45,16 @@ fn main() {
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
         });
+        // `Drop` stops and joins the progress ticker before the failure line,
+        // so no periodic line follows it. `process::exit` runs no destructors,
+        // so the drop is explicit.
+        drop(obs);
         if !cut_off {
             tracing::error!(
                 "Failed after {}: {e:#}",
                 whittle::obs::human_dur(start.elapsed())
             );
         }
-        // `Drop` stops the ticker and clears any live bar. `process::exit` runs
-        // no destructors, so without this drop a mid-run failure would leave a
-        // stale bar frame on the terminal in place of the `Failed after` line.
-        drop(obs);
         std::process::exit(if cut_off { 0 } else { 1 });
     }
 }

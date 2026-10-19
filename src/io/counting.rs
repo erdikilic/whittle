@@ -7,7 +7,8 @@ use std::sync::atomic::Ordering;
 use crate::workflow::Counters;
 
 /// A `Read` wrapper that adds the byte count of each `read` call to
-/// `counters.bytes_read`, which drives the progress bar.
+/// `counters.bytes_read`, which gives the periodic progress line its
+/// percentage and ETA.
 pub struct CountingReader<R> {
     inner: R,
     counters: Arc<Counters>,

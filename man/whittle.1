@@ -4,7 +4,7 @@
 .SH NAME
 whittle \- Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH SYNOPSIS
-\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-\-progress\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-\-max\-expected\-errors\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-quality\-trim\fR] [\fB\-\-quality\-cutoff\fR] [\fB\-\-min\-low\-quality\-run\fR] [\fB\-\-quality\-end\-cutoff\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-discover\-only\fR] [\fB\-\-targets\fR] [\fB\-\-target\-require\fR] [\fB\-\-target\-action\fR] [\fB\-\-target\-margin\fR] [\fB\-\-target\-discard\fR] [\fB\-h\fR|\fB\-\-help\fR]
+\fBwhittle\fR [\fB\-\-version\fR] [\fB\-i\fR|\fB\-\-input\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-input\-format\fR] [\fB\-\-output\-format\fR] [\fB\-t\fR|\fB\-\-threads\fR] [\fB\-\-preserve\-order\fR] [\fB\-\-fastq\-tags\fR] [\fB\-c\fR|\fB\-\-compression\-level\fR] [\fB\-\-summary\-json\fR] [\fB\-\-rejected\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-quiet\fR] [\fB\-l\fR|\fB\-\-min\-length\fR] [\fB\-L\fR|\fB\-\-max\-length\fR] [\fB\-q\fR|\fB\-\-min\-quality\fR] [\fB\-Q\fR|\fB\-\-max\-quality\fR] [\fB\-\-max\-expected\-errors\fR] [\fB\-g\fR|\fB\-\-min\-gc\fR] [\fB\-G\fR|\fB\-\-max\-gc\fR] [\fB\-\-tag\-filter\fR] [\fB\-m\fR|\fB\-\-quality\-mode\fR] [\fB\-H\fR|\fB\-\-trim\-front\fR] [\fB\-T\fR|\fB\-\-trim\-tail\fR] [\fB\-\-quality\-trim\fR] [\fB\-\-quality\-cutoff\fR] [\fB\-\-min\-low\-quality\-run\fR] [\fB\-\-quality\-end\-cutoff\fR] [\fB\-\-update\-moves\fR] [\fB\-\-remove\-tag\fR] [\fB\-a\fR|\fB\-\-adapter\-fasta\fR] [\fB\-\-adapter\-preset\fR] [\fB\-\-adapter\-error\-rate\fR] [\fB\-\-adapter\-end\-search\fR] [\fB\-\-adapter\-ends\-only\fR] [\fB\-\-adapter\-sample\-reads\fR] [\fB\-\-adapter\-discover\fR] [\fB\-\-adapter\-discover\-only\fR] [\fB\-\-targets\fR] [\fB\-\-target\-require\fR] [\fB\-\-target\-action\fR] [\fB\-\-target\-margin\fR] [\fB\-\-target\-discard\fR] [\fB\-h\fR|\fB\-\-help\fR]
 .SH DESCRIPTION
 Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH OPTIONS
@@ -83,27 +83,10 @@ Remove aux tags from every output record. Comma\-separated and repeatable; an it
 .SH LOGGING
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
-Increase logging detail: \-v is debug, \-vv is trace (at most two). Overridden by WHITTLE_LOG
+Write more to the log on standard error: info by default, \-v adds debug detail, \-vv trace lines for every segment and adapter hit (at most two). WHITTLE_LOG, a tracing filter such as whittle=debug, overrides it
 .TP
 \fB\-\-quiet\fR
-Silence progress and info output; warnings and errors still print. Conflicts with \-v and \-\-progress
-.TP
-\fB\-\-progress\fR \fI<MODE>\fR [default: auto]
-Progress reporting, independent of the log level: auto selects a bar on a terminal and periodic lines otherwise; bar and plain force one form; none disables progress and keeps the banner and summary. A bar falls back to lines under \-v or WHITTLE_LOG
-.br
-
-.br
-\fIPossible values:\fR
-.RS 14
-.IP \(bu 2
-auto: A bar on a terminal, periodic lines otherwise
-.IP \(bu 2
-bar: The animated bar, unless \-v or WHITTLE_LOG asks for log lines
-.IP \(bu 2
-plain: Always periodic lines, never a bar
-.IP \(bu 2
-none: No progress reporting; the banner and summary still print
-.RE
+Log only warnings and errors
 .SH FILTERING
 .TP
 \fB\-l\fR, \fB\-\-min\-length\fR \fI<BASES>\fR [default: 1]

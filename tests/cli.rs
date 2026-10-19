@@ -361,7 +361,7 @@ fn every_validation_names_its_flag() {
             "--min-low-quality-run requires --quality-trim runs",
         ),
         (
-            vec!["--progress".into(), "bar".into(), "--quiet".into()],
+            vec!["-v".into(), "--quiet".into()],
             Expect::Fails,
             "cannot be used with",
         ),

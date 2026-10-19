@@ -150,7 +150,7 @@ pub fn fastq_records(
         move |p| -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
             // Counting wraps the file itself, innermost, so compressed inputs are
             // measured on disk, matching the folder total (summed file sizes)
-            // that drives the progress bar.
+            // the progress percentage is computed against.
             let counted = std::fs::File::open(&p)
                 .map(|f| -> Box<dyn Read + Send> {
                     Box::new(crate::io::counting::CountingReader::new(
@@ -211,7 +211,8 @@ pub fn bam_reader(
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("no BAM files to read"))?;
     // See `fastq_records`: counting wraps the file, so BGZF bytes are measured
-    // compressed, matching the summed file sizes the bar is scaled against.
+    // compressed, matching the summed file sizes the progress percentage is
+    // computed against.
     let counted = |p: &Path, counters: Arc<Counters>| -> anyhow::Result<Box<dyn Read + Send>> {
         let f = std::fs::File::open(p).with_context(|| format!("opening {}", p.display()))?;
         Ok(Box::new(crate::io::counting::CountingReader::new(

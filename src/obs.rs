@@ -1,8 +1,8 @@
-//! Observability: leveled logging (tracing) and progress reporting (indicatif).
+//! Observability: leveled logging (tracing) and periodic progress lines.
 
 use tracing::level_filters::LevelFilter;
 
-use crate::config::{Advisory, Config, ProgressMode};
+use crate::config::{Advisory, Config};
 use tracing_subscriber::fmt::FormattedFields;
 
 /// Maps the CLI verbosity and quiet flags to a tracing level. `WHITTLE_LOG`,
@@ -20,37 +20,35 @@ fn level_from(verbosity: u8, quiet: bool) -> LevelFilter {
     }
 }
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::Writer;
-use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter};
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::workflow::{Counters, Stats};
 
-/// How often the ticker thread refreshes the bar's position and message in
-/// `Mode::Bar`. The thread waits this long via `park_timeout`, but `stop_ticker`
-/// cuts the wait short with `unpark`, so a finished run does not idle for it.
+/// How often the ticker thread wakes to check whether the periodic line is
+/// due. The thread waits this long via `park_timeout`, but `stop_ticker` cuts
+/// the wait short with `unpark`, so a finished run does not idle for it.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
-/// Steady-tick interval for the indicatif spinner shown when `total` is
-/// unknown (no byte count to drive a determinate bar).
-const SPINNER_TICK: Duration = Duration::from_millis(120);
 
-/// Returns the periodic-log cadence of `Mode::Line`: 30 s by default, 10 s at
-/// `-v`/`-vv`. The ticker wakes at most every `TICK_INTERVAL`, or sooner if
-/// `stop_ticker` unparks it, and logs only once this cadence has elapsed.
-fn log_interval(verbosity: u8) -> Duration {
-    if verbosity >= 1 {
+/// Returns the periodic-log cadence of `Mode::Line` for the effective log
+/// level: 30 s at info, 10 s at debug and trace (`-v`, `-vv`, or a
+/// `WHITTLE_LOG` filter that enables them). The ticker wakes at most every
+/// `TICK_INTERVAL`, or sooner if `stop_ticker` unparks it, and logs only once
+/// this cadence has elapsed.
+fn log_interval(level: LevelFilter) -> Duration {
+    if level >= LevelFilter::DEBUG {
         Duration::from_secs(10)
     } else {
         Duration::from_secs(30)
@@ -59,9 +57,9 @@ fn log_interval(verbosity: u8) -> Duration {
 
 /// Custom event formatter: `[YYYY-MM-DD HH:MM:SS] [LEVEL] Message`, replacing
 /// the stock formatter's ` INFO`-padded, unbracketed level. The timestamp is the
-/// local wall clock via `jiff`. `color` (set once in `init` from whether stderr
-/// is a TTY) gates ANSI coloring of the `[LEVEL]` token only, so a non-TTY run
-/// carries no escape bytes.
+/// local wall clock via `jiff`. `color` (set once in `init`: stderr is a
+/// terminal and `NO_COLOR` is unset) gates ANSI coloring of the `[LEVEL]` token
+/// only, so a redirected run carries no escape bytes.
 struct WhittleFormat {
     /// Whether the `[LEVEL]` token is ANSI-colored.
     color: bool,
@@ -133,69 +131,27 @@ where
     }
 }
 
-/// A `MakeWriter` that routes each fmt write through `MultiProgress::suspend`,
-/// so log lines are printed cleanly above the live progress bar (and plainly
-/// when no bar exists).
-#[derive(Clone)]
-struct MpWriter {
-    /// The `MultiProgress` that writes are suspended around.
-    multi: MultiProgress,
-}
-
-impl Write for MpWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.multi.suspend(|| {
-            let mut err = io::stderr().lock();
-            err.write_all(buf)?;
-            Ok(buf.len())
-        })
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        io::stderr().flush()
-    }
-}
-
-impl<'a> MakeWriter<'a> for MpWriter {
-    type Writer = MpWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-/// The output mode for a run, computed once in `init` from `quiet`, the TTY
-/// state, and `verbosity`. Exactly one applies: bar and line-log output never
-/// coexist.
+/// The output mode for a run, computed once in `init` from `quiet`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// `--quiet`: warnings and errors only. No bar, no progress line, no
+    /// `--quiet`: warnings and errors only. No banner, no progress line, no
     /// summary.
     Off,
-    /// `--progress none`: the full banner, warnings and summary, but nothing
-    /// reporting progress while the run is in flight.
-    Silent,
-    /// Default level on a terminal: a one-line start banner, an animated bar or
-    /// spinner, warnings and errors (suspended above it), and the final summary.
-    /// No periodic log lines, no debug.
-    Bar,
-    /// `-v`/`-vv` on a TTY, or any non-TTY run: the full multi-line start
-    /// banner, a periodic progress line every `log_interval`, debug and trace
-    /// output (per level), and the summary. No bar.
+    /// The default: the multi-line start banner, a periodic progress line
+    /// every `log_interval`, debug and trace output (per level), and the
+    /// summary.
     Line,
 }
 
-/// Owns the progress `MultiProgress`, the live ticker thread, and (in
-/// `Mode::Bar`) the bar or spinner it drives. Created in the binary.
+/// Owns the live ticker thread that logs the periodic progress line, and the
+/// run clock. Created in the binary.
 pub struct ProgressHandle {
-    /// The indicatif `MultiProgress` that log writes are suspended around.
-    multi: MultiProgress,
     /// The output mode selected by `init`.
     mode: Mode,
     /// The ticker thread, its stop flag, and its join handle, while live. The
     /// join handle also serves `stop_ticker`'s `unpark` call that wakes the
     /// thread out of its `park_timeout` wait.
     ticker: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
-    /// The live bar or spinner in `Mode::Bar`.
-    bar: Option<ProgressBar>,
     /// Wall-clock start: construction time until `start` resets it once the
     /// input is open; `finish` reports the elapsed time from it.
     start: Instant,
@@ -209,120 +165,61 @@ impl ProgressHandle {
     /// subscriber.
     pub fn disabled() -> Self {
         ProgressHandle {
-            multi: MultiProgress::new(),
             mode: Mode::Off,
             ticker: None,
-            bar: None,
             start: Instant::now(),
             log_interval: Duration::from_secs(30),
         }
     }
 
-    /// True in `Mode::Line` and `Mode::Silent`: the modes with a multi-line
-    /// banner and no live bar. Gates output that must not appear over a bar,
-    /// such as the startup banner in `lib.rs`. False in `Mode::Bar` and
-    /// `Mode::Off`.
+    /// True in `Mode::Line`, which prints the multi-line banner. False in
+    /// `Mode::Off`, where INFO output is filtered.
     pub fn shows_lines(&self) -> bool {
-        matches!(self.mode, Mode::Line | Mode::Silent)
+        self.mode == Mode::Line
     }
 
-    /// True in `Mode::Bar` only. Gates the one-line bar-mode start banner in
-    /// `lib.rs`: bar mode prints one line so the bar stays clean, where line
-    /// mode prints the full banner.
-    pub fn is_bar(&self) -> bool {
-        matches!(self.mode, Mode::Bar)
-    }
-
-    /// Begins live progress once the input is open. In `Mode::Bar` a ticker
-    /// thread polls the shared counters every `TICK_INTERVAL` and drives a bar,
-    /// or a spinner when `total` is `None` (stdin has no byte count). In
-    /// `Mode::Line` the ticker emits a periodic INFO line every `log_interval`
-    /// instead. In `Mode::Off` and `Mode::Silent` only the run clock starts.
-    /// A ticker left running by an earlier `start` is stopped first.
+    /// Begins live progress once the input is open. In `Mode::Line` a ticker
+    /// thread polls the shared counters every `TICK_INTERVAL` and logs a
+    /// periodic INFO line every `log_interval`; `total` adds the percentage
+    /// and ETA when the input size is known. In `Mode::Off` only the run clock
+    /// starts. A ticker left running by an earlier `start` is stopped first.
     pub fn start(&mut self, total: Option<u64>, counters: Arc<Counters>) {
         // The timer runs in every mode, including `Off`: `--quiet` silences the
         // human-readable summary, but `elapsed_seconds` in `--summary-json` is
         // still reported.
         let start = Instant::now();
         self.start = start;
-        if matches!(self.mode, Mode::Off | Mode::Silent) {
+        if self.mode != Mode::Line {
             return;
         }
         self.stop_ticker();
-        let bar = if matches!(self.mode, Mode::Bar) {
-            let pb = match total {
-                Some(t) => {
-                    let pb = self.multi.add(ProgressBar::new(t));
-                    pb.set_style(
-                        ProgressStyle::with_template(
-                            "{elapsed_precise} [{bar:20}] {percent:>3}% {msg} ETA {eta_precise}",
-                        )
-                        .unwrap()
-                        .progress_chars("=>-"),
-                    );
-                    // Seeded so the first frame carries the same fields as every
-                    // later one; the ticker replaces it on its first pass.
-                    pb.set_message(bar_message(0, 0, 0, Duration::ZERO));
-                    pb
-                },
-                None => {
-                    let pb = self.multi.add(ProgressBar::new_spinner());
-                    pb.set_style(
-                        ProgressStyle::with_template("{elapsed_precise} {spinner} {msg}").unwrap(),
-                    );
-                    pb.enable_steady_tick(SPINNER_TICK);
-                    pb
-                },
-            };
-            Some(pb)
-        } else {
-            None
-        };
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_t = stop.clone();
-        let bar_t = bar.clone();
-        let mode = self.mode;
         let log_interval = self.log_interval;
         let handle = std::thread::spawn(move || {
             let mut last_log = start;
             while !stop_t.load(Ordering::Relaxed) {
                 std::thread::park_timeout(TICK_INTERVAL);
-                let ir = counters.input_reads.load(Ordering::Relaxed);
-                let or = counters.output_reads.load(Ordering::Relaxed);
-                let by = counters.bytes_read.load(Ordering::Relaxed);
-                match mode {
-                    Mode::Bar => {
-                        if let Some(pb) = &bar_t {
-                            if total.is_some() {
-                                pb.set_position(by);
-                            }
-                            pb.set_message(bar_message(ir, or, by, start.elapsed()));
-                        }
-                    },
-                    Mode::Line => {
-                        if last_log.elapsed() >= log_interval {
-                            tracing::info!("{}", periodic_line(ir, by, total, start.elapsed()));
-                            last_log = Instant::now();
-                        }
-                    },
-                    // Neither mode spawns this thread; stopping is the safe
-                    // response to a mode changed underneath it.
-                    Mode::Off | Mode::Silent => break,
+                if last_log.elapsed() >= log_interval {
+                    let ir = counters.input_reads.load(Ordering::Relaxed);
+                    let or = counters.output_reads.load(Ordering::Relaxed);
+                    let by = counters.bytes_read.load(Ordering::Relaxed);
+                    tracing::info!("{}", periodic_line(ir, or, by, total, start.elapsed()));
+                    last_log = Instant::now();
                 }
             }
         });
         self.ticker = Some((stop, handle));
-        self.bar = bar;
     }
 
-    /// Stops the ticker (signal, unpark, and join) and clears the bar, if either
-    /// is live. The unpark cuts short whatever `park_timeout` wait the thread is
-    /// in, so the join returns immediately instead of waiting for the next tick.
-    /// Idempotent: both fields are taken, so a second call (including the one in
-    /// `Drop` after an explicit `finish`) is a no-op. Shared by `finish`, which
-    /// follows it with the end-of-run summary, and `Drop`, which cleans up
-    /// silently on an early error return.
+    /// Stops the ticker (signal, unpark, and join), if it is live. The unpark
+    /// cuts short whatever `park_timeout` wait the thread is in, so the join
+    /// returns immediately instead of waiting for the next tick. Idempotent:
+    /// the field is taken, so a second call (including the one in `Drop` after
+    /// an explicit `finish`) is a no-op. Shared by `finish`, which follows it
+    /// with the end-of-run summary, and `Drop`, which cleans up silently on an
+    /// early error return.
     fn stop_ticker(&mut self) {
         if let Some((stop, handle)) = self.ticker.take() {
             stop.store(true, Ordering::Relaxed);
@@ -332,16 +229,13 @@ impl ProgressHandle {
             let joined = handle.join();
             debug_assert!(joined.is_ok(), "Progress ticker thread panicked");
         }
-        if let Some(pb) = self.bar.take() {
-            pb.finish_and_clear();
-        }
     }
 
-    /// Stops the ticker, clears the bar, then logs the end-of-run summary.
-    /// Clearing happens first so no stale bar frame is left behind the summary.
-    /// The closing `Completed` line is separate (`complete`), so the caller can
-    /// write its artifacts between the two and a failed write is never reported
-    /// after a success line.
+    /// Stops the ticker, then logs the end-of-run summary. Stopping happens
+    /// first so no periodic line interleaves with the summary. The closing
+    /// `Completed` line is separate (`complete`), so the caller can write its
+    /// artifacts between the two and a failed write is never reported after a
+    /// success line.
     ///
     /// Returns the elapsed duration it reported, so `summary::Summary` quotes
     /// the same number.
@@ -436,41 +330,12 @@ impl ProgressHandle {
 }
 
 /// Backstop for an early error return between `start` and `finish`: without it
-/// the ticker thread and the bar-mode spinner keep running past the error and
-/// can overwrite the fatal message `main` prints. Stops the ticker and clears
-/// the bar without a summary, since an error path has no `Stats`. A no-op after
-/// an explicit `finish`.
+/// the ticker thread keeps running past the error and can log a progress line
+/// after the fatal message `main` prints. Stops the ticker without a summary,
+/// since an error path has no `Stats`. A no-op after an explicit `finish`.
 impl Drop for ProgressHandle {
     fn drop(&mut self) {
         self.stop_ticker();
-    }
-}
-
-/// Pure mode selection (see `init`): the TTY and `WHITTLE_LOG` state are
-/// parameters, so tests run without mutating process environment, which races
-/// across parallel test threads. `init` reads the real state and delegates here.
-fn select_mode(
-    quiet: bool,
-    tty: bool,
-    verbosity: u8,
-    whittle_log_set: bool,
-    progress: ProgressMode,
-) -> Mode {
-    // `--quiet` silences everything, including the summary, so it outranks any
-    // progress preference.
-    if quiet {
-        return Mode::Off;
-    }
-    // Debug output and a live bar cannot share a terminal, so verbosity and a
-    // `WHITTLE_LOG` filter both fall back to periodic lines, under an explicit
-    // `--progress bar` as well as under `auto`. `auto` additionally needs a
-    // terminal to redraw on.
-    let bar_fits = verbosity == 0 && !whittle_log_set;
-    match progress {
-        ProgressMode::None => Mode::Silent,
-        ProgressMode::Bar if bar_fits => Mode::Bar,
-        ProgressMode::Auto if bar_fits && tty => Mode::Bar,
-        ProgressMode::Bar | ProgressMode::Auto | ProgressMode::Plain => Mode::Line,
     }
 }
 
@@ -480,29 +345,28 @@ fn select_mode(
 /// `-v`/`-vv`; otherwise the level follows `verbosity`. A `WHITTLE_LOG` that does
 /// not parse falls back to the verbosity level and returns an advisory naming it,
 /// since a lossy parse would enable nothing and hide even the ERROR line of a
-/// failing run. The returned flag says whether `WHITTLE_LOG` took effect, which
-/// `select_mode` uses to keep its lines off a bar.
+/// failing run.
 fn log_filter(
     whittle_log: Option<&str>,
     verbosity: u8,
     quiet: bool,
-) -> (Targets, bool, Option<Advisory>) {
+) -> (Targets, Option<Advisory>) {
     let fallback = || Targets::new().with_default(level_from(verbosity, quiet));
     if quiet {
-        return (fallback(), false, None);
+        return (fallback(), None);
     }
     let Some(spec) = whittle_log else {
-        return (fallback(), false, None);
+        return (fallback(), None);
     };
     match spec.parse::<Targets>() {
-        Ok(filter) => (filter, true, None),
+        Ok(filter) => (filter, None),
         Err(e) => {
             let level = level_from(verbosity, false);
             let advisory = Advisory::warn(format!(
                 "WHITTLE_LOG is not a valid log filter and is ignored: \
                  value={spec:?}, error={e}, level={level}"
             ));
-            (fallback(), false, Some(advisory))
+            (fallback(), Some(advisory))
         },
     }
 }
@@ -511,37 +375,30 @@ fn log_filter(
 /// in the binary.
 ///
 /// The level follows `log_filter`; a rejected `WHITTLE_LOG` lands in
-/// `cfg.advisories`, which `run` prints once the banner is up.
-///
-/// Mode is never both bar and line log: `quiet` gives `Off`, a default-verbosity
-/// TTY with no `WHITTLE_LOG` gives `Bar`, everything else gives `Line`.
-/// `WHITTLE_LOG` forces `Line` so its debug lines cannot interleave with a bar.
+/// `cfg.advisories`, which `run` prints once the banner is up. Every line goes
+/// to stderr. The `[LEVEL]` token is colored only when stderr is a terminal
+/// and `NO_COLOR` is unset. `--quiet` selects `Mode::Off`; every other run
+/// logs the periodic progress line at the cadence of the effective level.
 pub fn init(cfg: &mut Config) -> ProgressHandle {
-    let (verbosity, quiet, progress) = (cfg.verbosity, cfg.quiet, cfg.progress);
+    let (verbosity, quiet) = (cfg.verbosity, cfg.quiet);
     let whittle_log = std::env::var("WHITTLE_LOG").ok().filter(|s| !s.is_empty());
-    let (filter, whittle_log_set, advisory) = log_filter(whittle_log.as_deref(), verbosity, quiet);
+    let (filter, advisory) = log_filter(whittle_log.as_deref(), verbosity, quiet);
     cfg.advisories.extend(advisory);
-    let multi = MultiProgress::new();
-    let tty = io::stderr().is_terminal();
-    let mode = select_mode(quiet, tty, verbosity, whittle_log_set, progress);
+    let color = io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     tracing_subscriber::registry()
         .with(filter)
         .with(
             fmt::layer()
-                .event_format(WhittleFormat { color: tty })
+                .event_format(WhittleFormat { color })
                 .with_ansi(false)
-                .with_writer(MpWriter {
-                    multi: multi.clone(),
-                }),
+                .with_writer(io::stderr),
         )
         .init();
     ProgressHandle {
-        multi,
-        mode,
+        mode: if quiet { Mode::Off } else { Mode::Line },
         ticker: None,
-        bar: None,
         start: Instant::now(),
-        log_interval: log_interval(verbosity),
+        log_interval: log_interval(LevelFilter::current()),
     }
 }
 
@@ -798,46 +655,36 @@ fn completed_line(elapsed: Duration, output: &str) -> String {
     format!("Completed in {}, output {output}", human_dur(elapsed))
 }
 
-/// `HH:MM:SS`-style duration for the periodic line's ETA field (indicatif draws
-/// its own ETA from the bar template; this covers the line-mode equivalent).
+/// `HH:MM:SS` duration, rounded to the second, for the periodic line's ETA
+/// field.
 fn fmt_hms(d: Duration) -> String {
-    let s = d.as_secs();
-    format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+    let s = d.as_secs_f64().round() as u64;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
 }
 
-/// Bar-mode message: `145k reads, 53 MB/s`. Covers only the data fields, since
-/// the bar template draws elapsed, percent, and ETA. The processed read count
-/// carries no `of <total>` because only total bytes are known up front.
-/// `bytes == 0` omits the MB/s field.
-fn bar_message(input_reads: u64, output_reads: u64, bytes: u64, elapsed: Duration) -> String {
-    // Reads consumed and segments emitted, so a filter discarding everything
-    // shows while the run is going rather than only in the summary. Labeled
-    // `out` rather than `kept` because a split read emits several segments, so
-    // the second figure can exceed the first. The two counters are also sampled
-    // a moment apart, so the pair drifts until the run settles.
-    let mut s = format!(
-        "{} reads, {} out",
-        human_count(input_reads),
-        human_count(output_reads)
-    );
-    if bytes > 0 {
-        let secs = elapsed.as_secs_f64().max(1e-3);
-        let mbps = (bytes as f64 / 1_000_000.0) / secs;
-        s.push_str(&format!(", {mbps:.0} MB/s"));
-    }
-    s
-}
-
-/// Line-mode periodic progress log, emitted at INFO every `log_interval`: `Processed 1,200,000 input reads, 42%, 45k reads/s,
-/// 380 MB/s, ETA 00:00:40`. Fields, in order: full-precision input read count
-/// (reads consumed, not reads emitted, which differ under quality splitting),
+/// The periodic progress line, emitted at INFO every `log_interval`:
+/// `Processed 1,200,000 input reads, 1,150,000 output reads, 42%, 45k
+/// reads/s, 380 MB/s, ETA 00:00:40`. Fields, in order: input reads consumed,
+/// output reads written (a split read writes several, and a filter that
+/// discards every read shows as a zero here while the run is in flight),
 /// percent complete (if `total` bytes are known), reads/s, MB/s (if any bytes
-/// have been read), ETA (if `total` is known).
-fn periodic_line(input_reads: u64, bytes: u64, total: Option<u64>, elapsed: Duration) -> String {
+/// have been read), ETA (if `total` is known). The two counts are sampled a
+/// moment apart, so their ratio is approximate until the run ends.
+fn periodic_line(
+    input_reads: u64,
+    output_reads: u64,
+    bytes: u64,
+    total: Option<u64>,
+    elapsed: Duration,
+) -> String {
     let secs = elapsed.as_secs_f64().max(1e-3);
     let rps = input_reads as f64 / secs;
 
-    let mut s = format!("Processed {} input reads", commas(input_reads));
+    let mut s = format!(
+        "Processed {} input reads, {} output reads",
+        commas(input_reads),
+        commas(output_reads)
+    );
     if let Some(t) = total.filter(|&t| t > 0) {
         let pct = (100.0 * bytes as f64 / t as f64).min(100.0);
         s.push_str(&format!(", {pct:.0}%"));
@@ -859,17 +706,20 @@ fn periodic_line(input_reads: u64, bytes: u64, total: Option<u64>, elapsed: Dura
 mod tests {
     use super::*;
 
+    /// A line-mode handle with a 30 s cadence, as `init` builds at info.
+    fn line_handle() -> ProgressHandle {
+        ProgressHandle {
+            mode: Mode::Line,
+            ticker: None,
+            start: Instant::now(),
+            log_interval: Duration::from_secs(30),
+        }
+    }
+
     /// Dropping an active line-mode handle joins its ticker thread.
     #[test]
     fn dropping_started_handle_stops_ticker_without_hanging() {
-        let mut h = ProgressHandle {
-            multi: MultiProgress::new(),
-            mode: Mode::Line,
-            ticker: None,
-            bar: None,
-            start: Instant::now(),
-            log_interval: Duration::from_secs(30),
-        };
+        let mut h = line_handle();
         h.start(None, Arc::new(Counters::default()));
         assert!(h.ticker.is_some(), "start() spawns a ticker");
         drop(h); // joins the ticker thread and returns
@@ -879,14 +729,7 @@ mod tests {
     /// leaving its thread running.
     #[test]
     fn restarting_a_handle_stops_the_previous_ticker() {
-        let mut h = ProgressHandle {
-            multi: MultiProgress::new(),
-            mode: Mode::Line,
-            ticker: None,
-            bar: None,
-            start: Instant::now(),
-            log_interval: Duration::from_secs(30),
-        };
+        let mut h = line_handle();
         h.start(None, Arc::new(Counters::default()));
         let first = Arc::clone(&h.ticker.as_ref().expect("a ticker runs").0);
         h.start(None, Arc::new(Counters::default()));
@@ -900,14 +743,7 @@ mod tests {
     /// for the tick fails, and leaves room for scheduling delay.
     #[test]
     fn stop_ticker_wakes_immediately_instead_of_waiting_for_the_next_tick() {
-        let mut h = ProgressHandle {
-            multi: MultiProgress::new(),
-            mode: Mode::Line,
-            ticker: None,
-            bar: None,
-            start: Instant::now(),
-            log_interval: Duration::from_secs(30),
-        };
+        let mut h = line_handle();
         h.start(None, Arc::new(Counters::default()));
         let began = Instant::now();
         h.stop_ticker();
@@ -918,21 +754,14 @@ mod tests {
         );
     }
 
-    /// Dropping an active bar-mode handle joins its ticker and clears the bar.
+    /// `--quiet` starts only the run clock: no ticker and no banner lines.
     #[test]
-    fn dropping_started_bar_handle_stops_ticker_without_hanging() {
-        let mut h = ProgressHandle {
-            multi: MultiProgress::new(),
-            mode: Mode::Bar,
-            ticker: None,
-            bar: None,
-            start: Instant::now(),
-            log_interval: Duration::from_secs(30),
-        };
+    fn off_mode_starts_no_ticker_and_shows_no_lines() {
+        let mut h = ProgressHandle::disabled();
         h.start(Some(1_000), Arc::new(Counters::default()));
-        assert!(h.ticker.is_some(), "start() spawns a ticker");
-        assert!(h.bar.is_some(), "Mode::Bar creates a live bar");
-        drop(h); // joins the ticker thread and clears the bar
+        assert!(h.ticker.is_none());
+        assert!(!h.shows_lines());
+        assert!(line_handle().shows_lines());
     }
 
     #[test]
@@ -994,139 +823,11 @@ mod tests {
         assert_eq!(level_from(3, true), LevelFilter::WARN);
     }
 
-    /// `--progress` is independent of the log level: the summary is kept while
-    /// the periodic line or the bar is suppressed.
-    #[test]
-    fn progress_mode_overrides_the_terminal_default() {
-        // A terminal would otherwise get a bar.
-        assert_eq!(
-            select_mode(false, true, 0, false, ProgressMode::None),
-            Mode::Silent
-        );
-        assert_eq!(
-            select_mode(false, true, 0, false, ProgressMode::Plain),
-            Mode::Line
-        );
-        // Redirected output would otherwise get periodic lines.
-        assert_eq!(
-            select_mode(false, false, 0, false, ProgressMode::Bar),
-            Mode::Bar
-        );
-        assert_eq!(
-            select_mode(false, false, 0, false, ProgressMode::None),
-            Mode::Silent
-        );
-    }
-
-    /// `--quiet` drops the summary as well, so it outranks any progress choice.
-    #[test]
-    fn quiet_outranks_every_progress_mode() {
-        for p in [
-            ProgressMode::Auto,
-            ProgressMode::Bar,
-            ProgressMode::Plain,
-            ProgressMode::None,
-        ] {
-            assert_eq!(select_mode(true, true, 0, false, p), Mode::Off);
-        }
-    }
-
-    /// Silent keeps the multi-line banner and the summary; only the in-flight
-    /// progress reporting is gone.
-    #[test]
-    fn silent_still_shows_the_banner() {
-        let h = ProgressHandle {
-            mode: Mode::Silent,
-            multi: MultiProgress::new(),
-            bar: None,
-            ticker: None,
-            start: Instant::now(),
-            log_interval: Duration::from_secs(30),
-        };
-        assert!(h.shows_lines());
-        assert!(!h.is_bar());
-    }
-
-    #[test]
-    fn select_mode_quiet_always_off() {
-        // Quiet outranks TTY state, verbosity, and WHITTLE_LOG.
-        assert_eq!(
-            select_mode(true, true, 0, false, ProgressMode::Auto),
-            Mode::Off
-        );
-        assert_eq!(
-            select_mode(true, false, 2, true, ProgressMode::Auto),
-            Mode::Off
-        );
-    }
-
-    #[test]
-    fn select_mode_default_tty_is_bar() {
-        assert_eq!(
-            select_mode(false, true, 0, false, ProgressMode::Auto),
-            Mode::Bar
-        );
-    }
-
-    #[test]
-    fn select_mode_non_tty_is_always_line() {
-        assert_eq!(
-            select_mode(false, false, 0, false, ProgressMode::Auto),
-            Mode::Line
-        );
-    }
-
-    #[test]
-    fn select_mode_verbose_tty_is_line() {
-        assert_eq!(
-            select_mode(false, true, 1, false, ProgressMode::Auto),
-            Mode::Line
-        );
-    }
-
-    #[test]
-    fn select_mode_whittle_log_forces_line_even_on_a_bar_eligible_tty() {
-        // A non-empty `WHITTLE_LOG` forces line mode even at the default
-        // verbosity on a TTY; its debug and trace lines would otherwise
-        // interleave with a live bar.
-        assert_eq!(
-            select_mode(false, true, 0, true, ProgressMode::Auto),
-            Mode::Line
-        );
-    }
-
-    /// An explicit bar gives way to lines under `-v` or `WHITTLE_LOG`: bar mode
-    /// hides the multi-line banner that a verbose run is asking for, and debug
-    /// lines would interleave with the bar.
-    #[test]
-    fn select_mode_explicit_bar_downgrades_to_line_when_verbose() {
-        assert_eq!(
-            select_mode(false, true, 1, false, ProgressMode::Bar),
-            Mode::Line
-        );
-        assert_eq!(
-            select_mode(false, false, 2, false, ProgressMode::Bar),
-            Mode::Line
-        );
-        assert_eq!(
-            select_mode(false, true, 0, true, ProgressMode::Bar),
-            Mode::Line
-        );
-        assert_eq!(
-            select_mode(false, false, 0, false, ProgressMode::Bar),
-            Mode::Bar
-        );
-    }
-
     /// An unparseable `WHITTLE_LOG` does not disable logging: the filter falls
     /// back to the verbosity level and the rejected directive is reported.
     #[test]
     fn log_filter_falls_back_and_warns_on_an_invalid_whittle_log() {
-        let (filter, applied, advisory) = log_filter(Some("garbage=nope=1"), 0, false);
-        assert!(
-            !applied,
-            "An invalid filter does not count as WHITTLE_LOG set"
-        );
+        let (filter, advisory) = log_filter(Some("garbage=nope=1"), 0, false);
         assert_eq!(filter.to_string(), "info");
         let advisory = advisory.expect("An invalid WHITTLE_LOG raises an advisory");
         assert!(advisory.warn);
@@ -1139,13 +840,12 @@ mod tests {
 
     #[test]
     fn log_filter_applies_a_valid_whittle_log_unless_quiet() {
-        let (filter, applied, advisory) = log_filter(Some("debug"), 0, false);
-        assert!(applied);
+        let (filter, advisory) = log_filter(Some("debug"), 0, false);
         assert!(advisory.is_none());
         assert_eq!(filter.to_string(), "debug");
 
-        let (filter, applied, advisory) = log_filter(Some("debug"), 0, true);
-        assert!(!applied, "Quiet outranks WHITTLE_LOG");
+        // Quiet outranks WHITTLE_LOG.
+        let (filter, advisory) = log_filter(Some("debug"), 0, true);
         assert!(advisory.is_none());
         assert_eq!(filter.to_string(), "warn");
     }
@@ -1184,12 +884,13 @@ mod tests {
         assert_eq!(human_bytes(1_000), "1.0 KB");
     }
 
-    /// The periodic-log cadence is 30 s by default and 10 s under any verbosity.
+    /// The periodic-log cadence is 30 s at info and 10 s at debug and trace.
     #[test]
     fn log_interval_is_30s_and_10s_when_verbose() {
-        assert_eq!(log_interval(0), Duration::from_secs(30));
-        assert_eq!(log_interval(1), Duration::from_secs(10));
-        assert_eq!(log_interval(2), Duration::from_secs(10));
+        assert_eq!(log_interval(LevelFilter::WARN), Duration::from_secs(30));
+        assert_eq!(log_interval(LevelFilter::INFO), Duration::from_secs(30));
+        assert_eq!(log_interval(LevelFilter::DEBUG), Duration::from_secs(10));
+        assert_eq!(log_interval(LevelFilter::TRACE), Duration::from_secs(10));
     }
 
     #[test]
@@ -1409,8 +1110,8 @@ mod tests {
 
     #[test]
     fn periodic_line_without_total_has_no_percent_or_eta() {
-        let s = periodic_line(1_200_000, 0, None, Duration::from_secs(10));
-        assert!(s.contains("Processed 1,200,000 input reads"));
+        let s = periodic_line(1_200_000, 1_150_000, 0, None, Duration::from_secs(10));
+        assert!(s.contains("Processed 1,200,000 input reads, 1,150,000 output reads"));
         assert!(s.contains("reads/s"));
         assert!(!s.contains('%'));
         assert!(!s.contains("ETA"));
@@ -1426,30 +1127,15 @@ mod tests {
 
     #[test]
     fn periodic_line_with_total_adds_percent_and_eta() {
-        let s = periodic_line(500, 42_000_000, Some(100_000_000), Duration::from_secs(2));
+        let s = periodic_line(
+            500,
+            450,
+            42_000_000,
+            Some(100_000_000),
+            Duration::from_secs(2),
+        );
         assert!(s.contains("42%")); // 42 MB of 100 MB
         assert!(s.contains("MB/s"));
-        assert!(s.contains("ETA"));
-    }
-
-    #[test]
-    fn bar_message_without_bytes_omits_the_rate() {
-        let s = bar_message(145_000, 140_000, 0, Duration::from_secs(60));
-        assert_eq!(s, "145k reads, 140k out");
-    }
-
-    #[test]
-    fn bar_message_with_bytes_adds_rate_but_never_a_total() {
-        let s = bar_message(145_000, 145_000, 50_000_000, Duration::from_secs(60));
-        assert!(s.starts_with("145k reads, 145k out"));
-        assert!(s.contains("MB/s"));
-        assert!(
-            !s.contains(" of "),
-            "No total-reads figure is invented: {s}"
-        );
-        assert!(
-            !s.contains('%'),
-            "The bar template draws the percentage: {s}"
-        );
+        assert!(s.contains("ETA 00:00:03"), "{s}");
     }
 }
