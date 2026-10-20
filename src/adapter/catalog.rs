@@ -3,9 +3,10 @@
 //! Assembled from primary sources and cross-verified: dorado
 //! `adapter_primer_kits.cpp` and `utils/barcode_kits.cpp` (kit-14
 //! authoritative), Porechop `porechop/adapters.py` (legacy kits and the 96
-//! barcodes), the qcat kit YAMLs, the ONT primer sheet of SQK-MAB114.24, and
-//! the NCBI UniVec records for the PacBio sequences. The sequences are
-//! vendor-published facts; the catalog itself is whittle's own compilation.
+//! barcodes), the qcat kit YAMLs, the ONT primer sheet of SQK-MAB114.24, ONT's
+//! Chemistry Technical Document, and the NCBI UniVec records for the PacBio
+//! sequences. The sequences are vendor-published facts; the catalog itself
+//! is whittle's own compilation.
 //!
 //! Every entry names the kits it belongs to, so a preset selects the subset a
 //! library can contain. Every entry is searched on both strands, so a rear
@@ -15,8 +16,9 @@
 //! Barcode dedup rule: one barcode number is a single shared 24 bp oligo across
 //! the native, PCR, and rapid kits, which differ only in flank and orientation
 //! (native uses the reverse complement). Only the canonical forward oligo is
-//! stored, and reverse-complement search covers the rest. Trimming through the
-//! flanks removes the barcode whatever its number.
+//! stored, and reverse-complement search covers the rest. The rapid PCR kit's
+//! barcode 12, `RLB12A`, is an oligo of its own. Trimming through the flanks
+//! removes the barcode whatever its number.
 
 use super::Role;
 use super::preset::Kit;
@@ -38,19 +40,23 @@ const KIT14: &[Kit] = &[
     Kit::Mab114,
 ];
 
-/// Kits that attach the rapid adapter by transposase or rapid attachment.
-const RAPID: &[Kit] = &[Kit::Rad114, Kit::Rbk114, Kit::Rpb114, Kit::Mab114];
+/// Kits whose presets carry the rapid adapter `RAD`, the transposon end of
+/// the rapid kits. A rapid PCR barcoding read holds only its last 21 bases,
+/// which `RLB_rear` covers.
+const RAPID: &[Kit] = &[Kit::Rad114, Kit::Rbk114, Kit::Mab114];
 
-/// The catalog sequences that lie between a barcode and the insert in their
-/// kit's read layout: the inner flanks of the PCR, rapid PCR, rapid and
-/// amplicon barcodes (`BC_1st_REAR`, the `PCR1_front` end of `BC_2nd_REAR`,
-/// `RLB_REAR`, `RBK4_REAR` as `RAD`, `MAB_REAR`). A read end trimmed through
-/// one of them holds its barcode outboard of the trim.
+/// The sequences that lie between a barcode and the insert in their kit's
+/// read layout: the inner flanks of the PCR, rapid PCR, rapid and amplicon
+/// barcodes (`BC_1st_REAR`, the `PCR1_front` end of `BC_2nd_REAR`, `RLB_REAR`
+/// as dorado lists it and as `RLB_rear` with the transposon end's last base,
+/// `RBK4_REAR` as `RAD`, `MAB_REAR`). A read end trimmed through one of them
+/// holds its barcode outboard of the trim.
 /// [dorado:barcode_kits.cpp]
 pub(super) const INSERT_SIDE_FLANKS: &[&[u8]] = &[
     b"TTAACCTTTCTGTTGGTGCTGATATTGC",
     b"ACTTGCCTGTCGCTCTATCTTC",
     b"CGTTTTTCGTGCGCCGCTTC",
+    b"CGTTTTTCGTGCGCCGCTTCA",
     b"GTTTTCGCATTTATCGTGAAACGCTTTCGCGTTTTTCGTGCGCCGCTTCA",
     b"CCATATCCGTGTCGCCCTT",
 ];
@@ -154,7 +160,7 @@ pub(crate) const CATALOG: &[Entry] = &[
     ("LSK109_rear", Role::Adapter, KIT14, b"GCAATACGTAACTGAACGAAGT"),
 
     // Rapid adapter, which doubles as the 3' flank of the rapid-barcoding kits.
-    // SQK-RAD004/RAD114, ULK114, RBK*, RPB*, MAB114
+    // SQK-RAD004/RAD114, ULK114, RBK*, MAB114
     // [dorado:adapter_primer_kits.cpp(RAD) / porechop(Rapid_adapter)]
     ("RAD", Role::Adapter, RAPID, b"GTTTTCGCATTTATCGTGAAACGCTTTCGCGTTTTTCGTGCGCCGCTTCA"),
 
@@ -184,13 +190,13 @@ pub(crate) const CATALOG: &[Entry] = &[
     // [dorado:adapter_primer_kits.cpp(GEN10X)]
     ("GEN10X_rear", Role::Primer, &[Kit::Lsk114], b"GTACTCTGCGTTGATACCACTGCTT"),
     // PCR/cDNA (legacy) [porechop:adapters.py(PCR_1)]; also LWB_1st_REAR.
-    ("PCR1_front", Role::Primer, &[Kit::Pcb114, Kit::Rpb114], b"ACTTGCCTGTCGCTCTATCTTC"),
+    ("PCR1_front", Role::Primer, &[Kit::Pcb114], b"ACTTGCCTGTCGCTCTATCTTC"),
     // [porechop:adapters.py(PCR_1)]
-    ("PCR1_rear", Role::Primer, &[Kit::Pcb114, Kit::Rpb114], b"GAAGATAGAGCGACAGGCAAGT"),
+    ("PCR1_rear", Role::Primer, &[Kit::Pcb114], b"GAAGATAGAGCGACAGGCAAGT"),
     // PCR/cDNA (legacy) [porechop:adapters.py(PCR_2)]; also LWB_2nd_REAR.
-    ("PCR2_front", Role::Primer, &[Kit::Pcb114, Kit::Rpb114], b"TTTCTGTTGGTGCTGATATTGC"),
+    ("PCR2_front", Role::Primer, &[Kit::Pcb114], b"TTTCTGTTGGTGCTGATATTGC"),
     // [porechop:adapters.py(PCR_2)]
-    ("PCR2_rear", Role::Primer, &[Kit::Pcb114, Kit::Rpb114], b"GCAATATCAGCACCAACAGAAA"),
+    ("PCR2_rear", Role::Primer, &[Kit::Pcb114], b"GCAATATCAGCACCAACAGAAA"),
     // cDNA SSP (legacy) [porechop:adapters.py(cDNA_SSP)]
     ("cDNA_SSP", Role::Primer, &[Kit::Pcb114], b"TTTCTGTTGGTGCTGATATTGCTGCCATTACGGCCGGG"),
 
@@ -222,16 +228,22 @@ pub(crate) const CATALOG: &[Entry] = &[
     // [dorado:barcode_kits.cpp(NB_1st_FRONT, NB_1st_REAR)]
     ("NB_construct", Role::Barcode, &[Kit::Nbd114], b"ATTGCTAAGGTTAANNNNNNNNNNNNNNNNNNNNNNNNCAGCACCT"),
     // PCR barcoding (PBC/BC*) [dorado:barcode_kits.cpp(BC_1st_REAR)]
-    ("PBC_rear", Role::Barcode, &[Kit::Pcb114, Kit::Rpb114], b"TTAACCTTTCTGTTGGTGCTGATATTGC"),
+    ("PBC_rear", Role::Barcode, &[Kit::Pcb114], b"TTAACCTTTCTGTTGGTGCTGATATTGC"),
     // Rapid barcoding v4 / kit 14 (RBK*) and MAB114 [dorado:barcode_kits.cpp(RBK4_FRONT, MAB_FRONT)]
     ("RBK4_front", Role::Barcode, &[Kit::Rbk114, Kit::Mab114], b"GCTTGGGTGTTTAACC"),
-    // Rapid ligation barcoding (RLB, RPB) [dorado:barcode_kits.cpp(RLB_REAR)]
-    ("RLB_rear", Role::Barcode, &[Kit::Rpb114], b"CGTTTTTCGTGCGCCGCTTC"),
+    // Rapid PCR barcoding (RLB, RPB): the 3' end of the barcode primers,
+    // 5'-ATCGCCTACCGTGAC, barcode, CGTTTTTCGTGCGCCGCTTC-3', which matches the
+    // transposon end up to its last base, and that final A, which every read
+    // carries before the insert.
+    // [dorado:barcode_kits.cpp(RLB_REAR, RBK4_REAR) /
+    // ONT:Chemistry Technical Document, rapid PCR barcoding kits]
+    ("RLB_rear", Role::Barcode, &[Kit::Rpb114], b"CGTTTTTCGTGCGCCGCTTCA"),
     // Microbial amplicon barcoding (MAB114) [dorado:barcode_kits.cpp(MAB_REAR)]
     ("MAB_rear", Role::Barcode, &[Kit::Mab114], b"CCATATCCGTGTCGCCCTT"),
 
     // The 96 canonical forward barcode oligos, from Porechop `adapters.py` and confirmed
-    // present in dorado. BC01 to BC24 serve the 24-plex PCR and rapid PCR kits as well.
+    // present in dorado. BC01 to BC24 serve the 24-plex PCR kits as well, and all but BC12
+    // the rapid PCR kit, whose barcode 12 is RLB12A [dorado:barcode_kits.cpp(BC2_1_24)].
     ("BC01", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"AAGAAAGTTGTCGGTGTCTTTGTG"),
     ("BC02", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"TCGATTCCGTTTGTAGTCGTCTGT"),
     ("BC03", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"GAGTCTTGTGTCCCAGTTACCAGG"),
@@ -243,7 +255,10 @@ pub(crate) const CATALOG: &[Entry] = &[
     ("BC09", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"AACTAGGCACAGCGAGTCTTGGTT"),
     ("BC10", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"AAGCGTTGAAACCTTTGTCCTCTC"),
     ("BC11", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"GTTTCATCTATCGGAGGGAATGGA"),
-    ("BC12", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"CAGGTAGAAAGAAGCAGAATCGGA"),
+    ("BC12", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114], b"CAGGTAGAAAGAAGCAGAATCGGA"),
+    // Barcode 12 of the rapid PCR kits, which ONT names RLB12 in kit 14
+    // [dorado:barcode_kits.cpp(RLB12A) / ONT:Chemistry Technical Document, RLB12]
+    ("RLB12A", Role::Barcode, &[Kit::Rpb114], b"GTTGAGTTACAAAGCACCGATCAG"),
     ("BC13", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"AGAACGACTTCCATACTCGTGTGA"),
     ("BC14", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"AACGAGTCTCTTGGGACCCATAGA"),
     ("BC15", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"AGGTCTACCTCGCTAACACCACTG"),

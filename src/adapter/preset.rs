@@ -21,7 +21,8 @@ pub enum Kit {
     Nbd114,
     /// cDNA-PCR sequencing and barcoding kits V14 (SQK-PCS114, SQK-PCB114).
     Pcb114,
-    /// Rapid PCR barcoding kit V14 (SQK-RPB114).
+    /// Rapid PCR barcoding kit V14 (SQK-RPB114.24): BC01 to BC24 with RLB12A
+    /// as barcode 12.
     Rpb114,
     /// Microbial amplicon barcoding kit V14 (SQK-MAB114): 16S and ITS primers
     /// and its own 24 barcodes.
@@ -279,6 +280,60 @@ mod tests {
         let pb = preset(&[Kit::PacBio]);
         assert_eq!(pb.len(), 2);
         assert!(pb.iter().any(|a| a.name == "SMRTbell"));
+    }
+
+    /// The rapid PCR barcoding preset holds what SQK-RPB114.24 reads carry, as
+    /// dorado's `SQK-RPB114-24` arrangement lists it: the ligation Y-adapter,
+    /// whose top strand the rapid adapter shares, the `RLB_REAR` flank with
+    /// the transposon end's last base, and the barcodes of `BC2_1_24`, RLB12A
+    /// in place of BC12. The PCR primers and flank of the cDNA-PCR kits and
+    /// the transposon end of the rapid kits stay with those kits.
+    #[test]
+    fn rpb114_preset_matches_the_kit() {
+        let names: Vec<String> = preset(&[Kit::Rpb114]).into_iter().map(|a| a.name).collect();
+        let mut expected: Vec<String> = [
+            "LSK114_front",
+            "LSK114_rear",
+            "LSK109_front",
+            "LSK109_rear",
+            "RLB_rear",
+        ]
+        .map(String::from)
+        .to_vec();
+        expected.extend((1..=24).map(|n| match n {
+            12 => "RLB12A".to_string(),
+            _ => format!("BC{n:02}"),
+        }));
+        assert_eq!(names, expected);
+        assert_eq!(
+            super::super::catalog::sequence_of("RLB12A"),
+            Some(&b"GTTGAGTTACAAAGCACCGATCAG"[..])
+        );
+        assert_eq!(
+            super::super::catalog::sequence_of("RLB_rear"),
+            Some(&b"CGTTTTTCGTGCGCCGCTTCA"[..])
+        );
+
+        let pcb = preset(&[Kit::Pcb114]);
+        for name in [
+            "PCR1_front",
+            "PCR1_rear",
+            "PCR2_front",
+            "PCR2_rear",
+            "PBC_rear",
+            "BC12",
+        ] {
+            assert!(pcb.iter().any(|a| a.name == name), "{name}");
+        }
+        assert!(pcb.iter().all(|a| a.name != "RLB12A"));
+        for kit in [Kit::Rad114, Kit::Rbk114, Kit::Mab114] {
+            assert!(preset(&[kit]).iter().any(|a| a.name == "RAD"), "{kit:?}");
+        }
+        assert!(
+            preset(&[Kit::Rbk114, Kit::Nbd114])
+                .iter()
+                .all(|a| a.name != "RLB12A")
+        );
     }
 
     /// The whole catalog holds every barcode, and the ONT union excludes PacBio.

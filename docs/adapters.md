@@ -512,7 +512,7 @@ a comma-separated list of tokens:
 | `rbk114` | Rapid barcoding kit V14 | Rapid adapter, rapid flank, 96 barcodes |
 | `nbd114` | Native barcoding kit V14 | Ligation adapter, native flank, 96 barcodes |
 | `pcb114`, `pcs114` | cDNA-PCR sequencing and barcoding kits V14 | Ligation adapter, PCS primers, PCS114 UMI, PCR flanks, 24 barcodes |
-| `rpb114` | Rapid PCR barcoding kit V14 | Rapid adapter, PCR primers, rapid ligation flank, 24 barcodes |
+| `rpb114` | Rapid PCR barcoding kit V14 | Ligation adapter, whose top strand the rapid adapter shares, rapid PCR barcode flank, 24 barcodes with RLB12A as barcode 12 |
 | `mab114` | Microbial amplicon barcoding kit V14 | Ligation and rapid adapters, the kit's seven 16S and five ITS primers, MAB flanks, 24 barcodes |
 | `rna004` | Direct RNA sequencing kit | RNA adapter |
 | `pacbio` | PacBio SMRTbell | SMRTbell adapter, C2 sequencing primer |
@@ -521,8 +521,9 @@ a comma-separated list of tokens:
 
 The catalog is assembled from vendor-published sources: dorado's
 `adapter_primer_kits.cpp` and `barcode_kits.cpp`, Porechop's `adapters.py`,
-qcat's kit definitions, ONT's primer sheet for SQK-MAB114.24, and the NCBI
-UniVec records of the PacBio sequences.
+qcat's kit definitions, ONT's primer sheet for SQK-MAB114.24, ONT's
+Chemistry Technical Document, and the NCBI UniVec records of the PacBio
+sequences.
 Every entry names its kits, so a kit preset searches only what its library can
 contain; a union searches everything, at some cost in speed and precision.
 Flanks shorter than 11 bp are excluded, since a pattern that short matches

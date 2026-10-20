@@ -852,6 +852,51 @@ fn native_barcode_construct_is_trimmed_through_its_inner_flank() {
     );
 }
 
+/// A rapid PCR barcoded read is trimmed at both ends through the last base
+/// of the transposon end behind the barcode primer: the rapid adapter, the
+/// primer tag, barcode 12 (`RLB12A`) and `RLB_rear` at the 5' end, and their
+/// reverse complement without the adapter at the 3' end.
+#[test]
+fn rapid_pcr_barcode_is_trimmed_through_the_transposon_end() {
+    let mut primer = b"ATCGCCTACCGTGAC".to_vec();
+    primer.extend_from_slice(b"GTTGAGTTACAAAGCACCGATCAG");
+    primer.extend_from_slice(b"CGTTTTTCGTGCGCCGCTTCA");
+    let mut front = b"CCTGTACTTCGTTCAGTTACGTATTGCT".to_vec();
+    front.extend_from_slice(&primer);
+    let insert = splitmix_dna(3, 400);
+    let mut w = front.clone();
+    w.extend_from_slice(&insert);
+    w.extend(reverse_complement(&primer));
+    let c = cfg_with(
+        super::preset::preset(&[super::preset::Kit::Rpb114]),
+        0.2,
+        150,
+        true,
+    );
+    assert_eq!(
+        adapter_segments(&w, &c),
+        vec![(front.len(), front.len() + insert.len())]
+    );
+}
+
+/// A dorado barcode call verifies its span against the catalog barcodes of
+/// its number, the rapid PCR kit's `RLB12A` among those of barcode 12.
+#[test]
+fn barcode_call_verifies_against_the_catalog_barcodes_of_its_number() {
+    let rlb12a = b"GTTGAGTTACAAAGCACCGATCAG";
+    let mut w = splitmix_dna(5, 60);
+    w.extend_from_slice(rlb12a);
+    w.extend(splitmix_dna(6, 300));
+    let c = cfg(Vec::new(), true);
+    let (start, end) = (60, 60 + rlb12a.len());
+    let call = |n: &str| format!("SQK-RPB114-24_barcode{n}").into_bytes();
+    assert!(c.barcode_span_verified(&w, start, end, Some(call("12").as_slice())));
+    assert!(!c.barcode_span_verified(&w, start, end, Some(call("11").as_slice())));
+    assert_eq!(barcode_number(b"RLB12A"), Some(12));
+    assert_eq!(barcode_number(b"BC07"), Some(7));
+    assert_eq!(barcode_number(b"RBK4_front"), None);
+}
+
 /// A minimal user FASTA: `f` and its reverse complement, with the adapter
 /// and its insert on a 162 bp read. The shortened rear entry exercises
 /// two entries of different lengths.
@@ -1869,12 +1914,14 @@ fn a_barcode_within_a_marker_primers_budget_keeps_its_own_family() {
 }
 
 /// The kit primers of one marker-primer site form one chance family, so the
-/// variants of a site leave the budgets of every other entry where the
-/// catalog of one primer per site put them: under the `ont` and `all`
+/// variants of a site leave the budgets of the other entries where the
+/// catalog of one primer per site puts them: under the `ont` and `all`
 /// presets, each entry outside the amplicon kit keeps its terminal and
 /// interior budgets when the twelve kit primers stand in for the four
-/// primers 16S 27F and 1492R, ITS1F and ITS4. The pair budget of the UMI,
-/// the one such entry that pairs with the primers, follows theirs.
+/// primers 16S 27F and 1492R, ITS1F and ITS4, except `RNA004_rear` under
+/// `all`, which keeps one interior edit more in reads of 32 to 64 kb. The
+/// pair budget of the UMI, the one such entry that pairs with the primers,
+/// follows theirs.
 #[test]
 fn kit_primer_variants_leave_the_budgets_of_other_entries() {
     use super::catalog::CATALOG;
@@ -1911,9 +1958,13 @@ fn kit_primer_variants_leave_the_budgets_of_other_entries() {
             }
             let j = single.iter().position(|a| a.name == adapter.name).unwrap();
             let (a, b) = (&variants.budgets[i], &sites.budgets[j]);
+            let mut k_mid = b.k_mid;
+            if kits == Kit::ALL && adapter.name == "RNA004_rear" {
+                k_mid[interior_class(40_000)] += 1;
+            }
             assert_eq!(
                 (a.k_end, a.k_far, a.k_mid),
-                (b.k_end, b.k_far, b.k_mid),
+                (b.k_end, b.k_far, k_mid),
                 "{}",
                 adapter.name
             );

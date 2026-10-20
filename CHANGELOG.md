@@ -52,11 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shorter than ITS1F; against a catalog of those four, this raises the pair
   budget of the `PCS114_UMI` pattern by one edit in reads of 8 to 16 kb
   under `ont` and `all`, lowers the interior budget of `MAB_rear` by one
-  edit in the same reads under `ont`, and under `mab114` alone, where the
-  kit's primers take the adapter role and join no chance family, moves the
-  interior budget of `LSK109_front` and `RAD` by one edit in one read-length
-  class each and of `MAB_rear` by one edit in two read-length classes. Every
-  other budget outside the kit primers stays as that catalog sets it.
+  edit in the same reads under `all`, raises that of `RNA004_rear` by one
+  edit in reads of 32 to 64 kb under `all`, and under `mab114` alone,
+  where the kit's primers take the adapter role and join no chance family,
+  moves the interior budget of `LSK109_front` and `RAD` by one edit in one
+  read-length class each and of `MAB_rear` by one edit in two read-length
+  classes. Every other budget outside the kit primers stays as that catalog
+  sets it.
 - `--quality-trim segments` keeps every maximal scoring segment under the
   modified Mott score of `best-segment` (Ruzzo and Tompa 1999) instead of the best
   one alone, so a read with a low-quality interior keeps both flanks.
@@ -225,6 +227,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `obs::ProgressHandle::is_bar` are removed.
 
 ### Fixed
+- The `rpb114` adapter preset holds what SQK-RPB114.24 reads carry, as
+  dorado's `SQK-RPB114-24` arrangement and ONT's protocol list it. Barcode
+  12 of the kit is `RLB12A`, not `BC12`. The PCR primers and barcode flank
+  of the cDNA-PCR kits are no longer searched, nor is the rapid adapter
+  `RAD`, the transposon end, of which the reads hold only the last 21
+  bases. `RLB_rear` covers those bases: it adds the last base of the
+  transposon end, which every read carries between the barcode primer and
+  the insert, so trimming removes it. A dorado barcode call `barcode12`
+  verifies a recorded barcode span against `RLB12A` as well. Under `ont`
+  and `all`, the 21-base `RLB_rear` admits fewer chance matches than the
+  20-base flank, so the set-wide interior bound leaves one edit more to
+  `16S_Bor_R`, `16S_Chl_R` and `MAB_rear` in reads of 8 to 16 kb under
+  `ont`, and to `ITS4`, `ITS4_Pyt` and `PacBio_C2` in reads of 16 to 32 kb
+  and `RNA004_rear` in reads of 32 to 64 kb under `all`.
 - Adapter discovery keeps a flank that both read ends carry behind an
   adapter that only the 5' end carries, such as a barcode flank behind a
   rapid adapter, instead of cutting it as insert: its reverse complement at

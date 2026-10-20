@@ -321,9 +321,19 @@ fn catalog_barcodes_by_number() -> &'static std::collections::HashMap<u32, Vec<&
     })
 }
 
-/// Returns the numeric value of the trailing digits of a barcode name, such
-/// as `07` in `SQK-NBD114-24_barcode07` or `BC07`.
+/// Returns the numeric value of the digits a barcode name ends in, ahead of
+/// at most one letter that marks a variant oligo: `07` in
+/// `SQK-NBD114-24_barcode07` or `BC07`, and `12` in `RLB12A`, which dorado
+/// calls `barcode12` (`utils/barcode_kits.cpp::normalize_barcode_name`).
 fn barcode_number(name: &[u8]) -> Option<u32> {
+    let name = match name.split_last() {
+        Some((last, rest))
+            if last.is_ascii_alphabetic() && rest.last().is_some_and(u8::is_ascii_digit) =>
+        {
+            rest
+        },
+        _ => name,
+    };
     let digits = name.iter().rev().take_while(|b| b.is_ascii_digit()).count();
     (digits > 0)
         .then(|| {
