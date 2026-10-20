@@ -2035,3 +2035,51 @@ fn a_primer_behind_a_one_sided_adapter_is_kept() {
         "the primer is not recovered: {found:?}"
     );
 }
+
+/// Ligated 16S amplicons of six templates, read from either strand: the Y
+/// adapter's top strand, a forward or a reverse primer, the template, the
+/// other primer and, in seven reads of ten, part of the rear adapter. Reads
+/// without the rear adapter end at the primer, so unprimed read starts would
+/// place the insert boundary behind the rear adapter; the template that
+/// begins behind each primer places it there instead, and each primer is
+/// kept whole.
+#[test]
+fn ligated_amplicon_primers_are_kept_whole() {
+    let top = b"TTTTTTTTCCTGTACTTCGTTCAGTTACGTATTGCT";
+    let rear = b"AGCAATACGTAACTGAACGAAGTACAGG";
+    let forward = b"AGAGTTTGATCATGGCTCAG".to_vec();
+    let reverse = b"CGGTTACCTTGTTACGACTT".to_vec();
+    let templates: Vec<Vec<u8>> = (0..6).map(|t| random_bases(80_100 + t, 600)).collect();
+    let reads: Vec<Vec<u8>> = (0..1500u64)
+        .map(|i| {
+            let template = &templates[(i % 6) as usize];
+            let (outer, body, inner) = if (i / 6) % 2 == 0 {
+                (&forward, template.clone(), rc(&reverse))
+            } else {
+                (&reverse, rc(template), rc(&forward))
+            };
+            let kept = if i % 10 < 7 {
+                8 + (i as usize * 7) % 21
+            } else {
+                0
+            };
+            let read = [&top[..], outer, &body, &inner, &rear[..kept]].concat();
+            with_errors(&read, 80_200 + i, 20)
+        })
+        .collect();
+    let found = infer_owned(&reads);
+    for primer in [&forward, &reverse] {
+        assert!(
+            found.iter().any(|d| {
+                longest_common_substring(primer, &d.adapter.seq) >= 20
+                    || longest_common_substring(&rc(primer), &d.adapter.seq) >= 20
+            }),
+            "{:?} is not recovered whole: {:?}",
+            String::from_utf8_lossy(primer),
+            found
+                .iter()
+                .map(|d| String::from_utf8_lossy(&d.adapter.seq).into_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+}

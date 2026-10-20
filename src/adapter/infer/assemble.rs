@@ -83,6 +83,8 @@ pub(super) fn assemble(
         reversed.iter().map(Vec::as_slice).collect()
     };
     let mut deep = None;
+    // Candidates whose insert boundary only unprimed read starts support.
+    let mut contrast_only: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     // Whether a candidate at the boundary follows the template, so that the
     // insert begins there for the reads holding it.
     let mut at_template = false;
@@ -219,6 +221,7 @@ pub(super) fn assemble(
             .then(|| contrast_boundary(&cons, &oriented, end))
             .flatten();
         let has_insert_boundary = contrast.is_some() || template;
+        let from_contrast = contrast.is_some() && !template;
         let mut unbounded = false;
         let mut measured = None;
         let sequences = if let Some(boundary) = contrast {
@@ -318,6 +321,9 @@ pub(super) fn assemble(
                         primer_edges[hit.text_idx] = Some((edge, trimmed.len() / 2));
                     }
                 }
+                if from_contrast {
+                    contrast_only.insert(trimmed.clone());
+                }
                 out.push((
                     trimmed,
                     support,
@@ -360,7 +366,7 @@ pub(super) fn assemble(
     // an outer layer assembled together with the primer's first bases does,
     // is continued to the primer's inner end. Both need a candidate at the
     // insert boundary, which a library without amplicons lacks.
-    let flagged: Vec<bool> = out
+    let mut flagged: Vec<bool> = out
         .iter()
         .map(|(_, _, boundary, _, _, _)| *boundary)
         .collect();
@@ -374,10 +380,33 @@ pub(super) fn assemble(
             hit_spans(seq, &recount, end, edit_budget(base.error_rate, seq.len()))
         })
         .collect();
+    // Reads that lack an outer adapter start at the primer behind it as they
+    // would at the insert, so a boundary that only unprimed read starts
+    // support gives way to a template that begins further inward in the
+    // reads holding both.
+    let template: Vec<bool> = out
+        .iter()
+        .zip(&flagged)
+        .map(|((seq, ..), &flag)| flag && !contrast_only.contains(seq))
+        .collect();
+    for j in 0..out.len() {
+        if flagged[j]
+            && contrast_only.contains(&out[j].0)
+            && (0..out.len())
+                .any(|i| i != j && template[i] && read_through(&spans[i], &spans[j]) > 0)
+        {
+            tracing::debug!(sequence = %String::from_utf8_lossy(&out[j].0), "Template behind an unprimed-read boundary");
+            flagged[j] = false;
+            out[j].2 = false;
+        }
+    }
+    // A candidate reads past a primer it holds; a sibling primer behind the
+    // same adapter aligns into its reads over the shared adapter only.
+    let seqs: Vec<Vec<u8>> = out.iter().map(|(seq, ..)| seq.clone()).collect();
     let mut cut = vec![false; out.len()];
     for (i, (seq, _, boundary, _, unbounded, _)) in out.iter_mut().enumerate() {
         let excess = (0..spans.len())
-            .filter(|&j| j != i && flagged[j])
+            .filter(|&j| j != i && flagged[j] && same_adapter(&seqs[j], &seqs[i], base.error_rate))
             .map(|j| read_through(&spans[i], &spans[j]))
             .max()
             .unwrap_or(0);

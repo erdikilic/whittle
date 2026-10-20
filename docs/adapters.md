@@ -320,28 +320,28 @@ at one position, such as the primers of the two strands behind a shared
 adapter or the members of a barcode panel, continue differently. The second
 base must hold at least 20 reads and one in 20 of the column.
 
-A candidate is cut at the first of its columns that follows the template,
-and dropped when that column lies within its first 11 bases or when one of
-the 16 columns outboard of it follows the template: the candidate then lies
-in the insert. A candidate whose first column behind it follows the
-template, or that holds the inner end of a catalog marker primer (see
-[Marker-gene primers](#marker-gene-primers)), ends at the insert boundary:
-when accepted it
-closes its read end, as a primer reconstructed from unprimed read starts
-does, and its reverse complement marks the insert boundary at the other read
-end, where the far primer of the molecule is read. A candidate that reads
-past the inner end of such a sequence, in the reads holding both or with at
-least 7 of its outer bases repeating that end, as a read eroded into the
-primer at its physical end holds it, is cut there. A candidate that ends
-inside such a primer in most of the reads holding both, as an outer layer
-assembled together with the first bases of the primer does, is continued to
-the primer's inner end. Where a candidate that follows the template from its
-outer bases lies within 11 bases of the boundary, no other layer is taken at
-that end. Behind the sequences of a preset or FASTA, the reads they trimmed
-are tested column by column behind the boundary, as a whole and as two
-families split by their most frequent far k-mer, as the two ends of a gene
-read from the two strands are; when the template begins within 11 bases of
-the boundary, discovery adds no layer at that end.
+A candidate is cut at the first of its columns that follows the template, and
+dropped when that column lies within its first 11 bases or when one of the 16
+columns outboard of it follows the template: the candidate then lies in the
+insert. A candidate whose first column behind it follows the template, or that
+holds the inner end of a catalog marker primer (see [Marker-gene
+primers](#marker-gene-primers)), ends at the insert boundary: when accepted it
+closes its read end, as a primer reconstructed from unprimed read starts does,
+and its reverse complement marks the insert boundary at the other read end,
+where the far primer of the molecule is read. A candidate that holds such a
+sequence and reads past its inner end, in the reads holding both or with at
+least 7 of its outer bases repeating that end, as a read eroded into the primer
+at its physical end holds it, is cut there; a sibling primer behind the same
+adapter, which aligns only over the adapter, cuts nothing. A candidate that
+ends inside such a primer in most of the reads holding both, as an outer layer
+assembled together with the first bases of the primer does, is continued to the
+primer's inner end. Where a candidate that follows the template from its outer
+bases lies within 11 bases of the boundary, no other layer is taken at that
+end. Behind the sequences of a preset or FASTA, the reads they trimmed are
+tested column by column behind the boundary, as a whole and as two families
+split by their most frequent far k-mer, as the two ends of a gene read from the
+two strands are; when the template begins within 11 bases of the boundary,
+discovery adds no layer at that end.
 
 Conserved bases before the first variable column of the insert cannot be
 told apart from the primer: a primer outside the catalog whose templates all
@@ -428,6 +428,9 @@ displace a stronger assembly merely because they match more reads.
 For amplicons, recurrent read starts can identify an insert boundary in reads
 that lack a primer. Discovery aligns the upstream sequence in primer-bearing
 reads, reconstructs supported IUPAC variants, and excludes the conserved insert.
+Reads that lack only an outer adapter start at the primer behind it as well,
+so a boundary that such read starts alone support yields to a template that
+begins further inward in the same reads.
 Distinct primer families sharing an insert boundary are considered separately.
 Candidates overlapping a validated insert start, or supported mainly on the
 insert-facing side of a reconstructed primer, are excluded. Candidates whose

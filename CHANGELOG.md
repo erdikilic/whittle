@@ -225,6 +225,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `obs::ProgressHandle::is_bar` are removed.
 
 ### Fixed
+- Adapter discovery keeps the primers of ligated amplicon and cDNA libraries
+  whose reads often lack the rear adapter. Such reads start at the primer, so
+  an insert boundary from unprimed read starts behind the rear adapter yields
+  to a template that begins further inward, and a sibling primer behind the
+  same adapter no longer cuts the bases of the other from its end.
 - Adapter discovery keeps a primer behind a rapid adapter that only the 5'
   end carries. A candidate that ends at an established insert boundary, such
   as a marker-gene primer, is no longer cut as insert because its reverse
