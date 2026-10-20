@@ -291,7 +291,16 @@ candidate that reaches past the shared layer of a division into strand
 primers, in most of the reads holding both, is left to the next layer, which
 assembles the primers whole behind it. A homopolymer run of at least 8 bases at the inner
 end of a candidate, such as the poly(A) tail behind an oligo(dT) primer,
-varies in length between reads and is left to the insert. A variable layer is resolved from
+varies in length between reads and is left to the insert. The k-mers that
+reach into such a run keep their support through its length errors and can
+set the support floor of the path above the rest of the primer, so the
+primer is assembled in two pieces: an inner one that ends at the run, and an
+outer one whose path ends where the inner one's k-mers were taken. An outer
+piece that opens a strand-specific layer, kept without an insert boundary of
+its own, is joined with the inner piece when the heaviest k-mer that
+continues its inner end is the outer k-mer of the inner piece, with more
+than half and less than twice the support of the k-mer it continues, and the
+whole primer ends at the run. A variable layer is resolved from
 the reads rather than the graph: when the best supported candidate lies at
 least 11 bases past the boundary and every candidate at the boundary is
 fourfold rarer, the stretch before it holds one member per read, and those
@@ -311,18 +320,25 @@ realigning the windows to the layer and the tag so far. A position belongs to
 the tag when one base holds the midpoint between its composition share and
 one, or when a base falls fourfold below its composition share; it is written
 with the ambiguity code of the bases present, such as `V` for a position that
-excludes T. The tag ends with the run of fixed bases after its last
-degenerate position; a further run, such as the G run a template switch adds,
-varies in length between reads and is left to the insert. A tag needs 16
-positions, at least 1% of the windows and 20 windows, and random degenerate
-positions: no combination of their bases recurs in 20 windows, and at least
-half of the windows hold distinct combinations. A barcode panel, the
-conserved starts of an amplicon's species or two alternative primers
-concentrate in a few combinations, and a genomic insert holds every base near
-its composition share, whatever the genome's composition. A tag takes the
-primer role: it trims read ends and, with its chance exact matches above the
-interior bound, does not split reads. A tag that a known sequence already
-describes is not reported.
+excludes T. A deletion inside a run of degenerate positions lets the realigned
+tag end short of the run's end at no cost, so the tally of the run's last
+position also holds the fixed base behind the run; a position that passes
+neither test is held open, and the growth stops at the second such position
+in a row. Each position is then coded again from one alignment of the layer
+and the whole tag per window, where the fixed positions around a degenerate
+run hold its indels in place, and the tag ends at the first position that
+this alignment does not conserve. Within that, the tag ends with the run of
+fixed bases after its last degenerate position; a further run, such as the G
+run a template switch adds, varies in length between reads and is left to
+the insert. A tag needs 16 positions, at least 1% of the windows and 20 windows,
+and random degenerate positions: no combination of their bases recurs in 20
+windows, and at least half of the windows hold distinct combinations. A
+barcode panel, the conserved starts of an amplicon's species or two
+alternative primers concentrate in a few combinations, and a genomic insert
+holds every base near its composition share, whatever the genome's
+composition. A tag takes the primer role: it trims read ends and, with its
+chance exact matches above the interior bound, does not split reads. A tag
+that a known sequence already describes is not reported.
 
 Discovery separates primers from the amplicon they bind in two ways. The
 far end of the molecule is one: a conserved gene start that reads reach from

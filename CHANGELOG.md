@@ -255,6 +255,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preset leaves one edit more to `LSK109_front` in reads of 512 kb to 1 Mb
   and of 64 to 128 Mb, to `LSK109_rear` in reads of 2 to 4 Mb and to
   `LSK114_front` in reads of 1 Gb or more.
+- Adapter discovery keeps a cDNA strand primer whole when the poly(A) tail
+  behind it splits its assembly in two, as the SQK-PCS114 oligo(dT) VN
+  primer at the 3' end of reads without a rear adapter. The k-mers that
+  reach into the tail set the support floor of the primer's path above the
+  rest of the primer. The outer piece, which opens the primer's
+  strand-specific layer, joins the inner piece rather than standing for the
+  primer alone, which left the primer's inner 11 bases in the reads.
+- Adapter discovery reads a random tag, such as the SQK-PCS114 UMI behind
+  the strand-switching primer, from reads with about 6% errors including
+  indels. A deletion inside a run of the tag's degenerate positions carried
+  the fixed base behind the run into the tally of the run's last position,
+  which ended the tag after three bases; such a position is held open and
+  every position is coded from one alignment of the whole tag per read.
 - Adapter discovery keeps a flank that both read ends carry behind an
   adapter that only the 5' end carries, such as a barcode flank behind a
   rapid adapter, instead of cutting it as insert: its reverse complement at

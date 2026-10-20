@@ -38,18 +38,21 @@ pub(super) fn position_code(counts: [usize; 4], composition: [f64; 4]) -> Option
 /// that follows each alignment. A position is conserved when one base holds
 /// the midpoint between its share of `composition` and one, as in
 /// `conserved`, or when at least one base falls `ABSENT_FACTOR` below its
-/// share, and it is written with the ambiguity code of the bases present;
-/// the conserved positions end at the first position that is not. A random
-/// tag closes with the homopolymer run of fixed bases after its last
-/// degenerate position, and the layer ends there: a further fixed run, such
-/// as the G run a template switch adds, varies in length between reads and
-/// is left to the insert, as a poly(A) run is. The layer needs `KMER_K`
-/// positions and support at the `KEEP_SUPPORT` and `MIN_SUPPORT_WINDOWS`
-/// floors, and its degenerate positions must be random: no combination of
-/// their bases recurs in `MIN_SUPPORT_WINDOWS` windows, and at least half of
-/// the windows hold distinct combinations. A panel of barcodes, the conserved
-/// starts of an amplicon's species or the primers of two strands concentrate
-/// in a few combinations instead.
+/// share, and it is written with the ambiguity code of the bases present. A
+/// position that is not conserved is held open, and the growth ends at the
+/// second such position in a row. Each position is then coded from its
+/// column in one alignment of `pattern` and the whole layer per window, and
+/// the layer ends at the first column that is not conserved. A random tag
+/// closes with the homopolymer run of fixed bases after its last degenerate
+/// position, and the layer ends there: a further fixed run, such as the G
+/// run a template switch adds, varies in length between reads and is left
+/// to the insert, as a poly(A) run is. The layer needs `KMER_K` positions
+/// and support at the `KEEP_SUPPORT` and `MIN_SUPPORT_WINDOWS` floors, and
+/// its degenerate positions must be random: no combination of their bases
+/// recurs in `MIN_SUPPORT_WINDOWS` windows, and at least half of the windows
+/// hold distinct combinations. A panel of barcodes, the conserved starts of
+/// an amplicon's species or the primers of two strands concentrate in a few
+/// combinations instead.
 pub(super) fn degenerate_layer(
     searcher: &mut AmbiguousSearcher,
     pattern: &[u8],
@@ -101,14 +104,31 @@ pub(super) fn degenerate_layer(
         if counts.iter().sum::<usize>() < floor {
             break;
         }
-        match position_code(counts, composition) {
-            Some(code) => {
-                layer.push(code);
-                query.push(code);
-            },
-            None => break,
+        // A deletion inside a run of degenerate positions lets the query
+        // end short of the run's end at no cost, so the tally of the run's
+        // last position carries the base that follows the run. Such a
+        // position is held open as `N` and decided from the columns below;
+        // a second undecided position in a row ends the growth.
+        let code = position_code(counts, composition).unwrap_or(b'N');
+        if code == b'N' && layer.last() == Some(&b'N') {
+            break;
         }
+        layer.push(code);
+        query.push(code);
     }
+    while layer.last() == Some(&b'N') {
+        layer.pop();
+    }
+    // Each position is coded again from the columns of one alignment of
+    // `pattern` and the whole layer per text, in which the fixed positions
+    // around a degenerate run hold its indels in place. The layer ends at
+    // the first column that is not conserved.
+    let full = [pattern, &layer].concat();
+    let columns = column_counts(&full, &texts, edit_budget(error_rate, full.len()))?;
+    layer = columns[pattern.len()..]
+        .iter()
+        .map_while(|&[a, c, g, t, _]| position_code([a, c, g, t], composition))
+        .collect();
     let degenerate: Vec<usize> = (0..layer.len())
         .filter(|&i| !matches!(layer[i], b'A' | b'C' | b'G' | b'T'))
         .collect();

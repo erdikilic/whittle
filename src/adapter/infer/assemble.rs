@@ -27,6 +27,33 @@ pub(super) fn jumps_past(
         <= u64::from(continuation) * recounted as u64
 }
 
+/// Returns the index of the first of `candidates` whose outer k-mer is
+/// `next`, with `seq` joined to that candidate over the `KMER_K - 1` bases
+/// they share. `seq` and `candidates` are candidates of `end`, and `next` is
+/// the k-mer that continues the inner end of `seq`, which holds all of
+/// `next` but its inner base. `None` when no candidate has `next` as its
+/// outer k-mer or the inner end of `seq` does not hold the rest of `next`.
+pub(super) fn joined_into(
+    seq: &[u8],
+    next: &[u8],
+    candidates: &[Candidate],
+    end: End,
+) -> Option<(usize, Vec<u8>)> {
+    let shared = KMER_K - 1;
+    if seq.len() < shared || next.len() != KMER_K {
+        return None;
+    }
+    candidates
+        .iter()
+        .enumerate()
+        .find_map(|(index, (other, ..))| match end {
+            End::Five => (seq[seq.len() - shared..] == next[..shared] && other.starts_with(next))
+                .then(|| (index, [seq, &other[shared..]].concat())),
+            End::Three => (seq[..shared] == next[1..] && other.ends_with(next))
+                .then(|| (index, [&other[..other.len() - shared], seq].concat())),
+        })
+}
+
 /// A path through the k-mer graph of one read end, with the span of its
 /// outermost support run (`supported_span`) and the outermost division that
 /// the reads tell the kind of, which ends it.
@@ -411,6 +438,44 @@ pub(super) fn assemble(
                     "Recurrent sequence has no supported insert boundary");
             }
             unbounded = !bounded;
+            // A candidate that opens a strand-specific layer is kept without
+            // an insert boundary (`discover`). When its support carries on
+            // at its own level into the outer k-mer of a candidate of an
+            // earlier path, it ends only because the peel of that path took
+            // the k-mer, as where the k-mers that reach into a
+            // homopolymer run, which keep their support through its length
+            // errors, set the support floor of a span (`supported_span`)
+            // above the rest of a primer. The two are one primer, which
+            // replaces the inner candidate and ends where it does.
+            let joinable = unbounded
+                && !drop
+                && continuation < 2 * boundary_weight
+                && strand.iter().any(|word| {
+                    let edits = edit_budget(base.error_rate, word.len());
+                    !hits(&mut primer_searcher, word, &trimmed, edits).is_empty()
+                });
+            if let Some((index, joined)) = joinable
+                .then(|| joined_into(&trimmed, &decode_kmer(next, KMER_K), &out, end))
+                .flatten()
+            {
+                let edits = edit_budget(base.error_rate, joined.len());
+                let (present, anchored) = terminal_support(&joined, &recount, end, edits);
+                let support = present as f64 / n_recount as f64;
+                if present >= MIN_SUPPORT_WINDOWS
+                    && support >= KEEP_SUPPORT
+                    && anchored * 100 >= present * ANCHORED_PERCENT
+                {
+                    tracing::debug!(sequence = %String::from_utf8_lossy(&joined), present, anchored, "Candidate runs into a candidate of its end");
+                    let inner = &mut out[index];
+                    if contrast_only.remove(&inner.0) {
+                        contrast_only.insert(joined.clone());
+                    }
+                    inner.0 = joined;
+                    inner.1 = support;
+                    inner.3 += weight;
+                    continue;
+                }
+            }
             vec![trimmed]
         };
         for trimmed in sequences {

@@ -1421,6 +1421,19 @@ fn random_tag_behind_a_primer_is_a_degenerate_layer() {
     assert!(present >= 1800, "{present}");
 }
 
+/// At 6% errors, a third of them indels, a deletion inside a run of the
+/// tag's degenerate positions lets the realigned tag end short of the run's
+/// end, so the tally of the run's last position holds the spacer base behind
+/// it; the columns of the whole tag decide that position, and the tag is
+/// read whole.
+#[test]
+fn random_tag_with_indels_is_a_degenerate_layer() {
+    let (reads, head) = primed_reads(tag_and_ggg, 60);
+    let (layer, present) = layer_behind_primer(&reads, &head).expect("degenerate layer");
+    assert_eq!(layer, b"VVVVTTVVVVTTVVVVTTVVVVTTT");
+    assert!(present >= 1800, "{present}");
+}
+
 /// Discovery reports the degenerate layer behind the primer, and trimming
 /// with the discovered set removes the tag and keeps the `GGG` behind it.
 #[test]
@@ -1498,9 +1511,9 @@ fn random_tag_behind_a_known_primer() {
 }
 
 /// Sequence behind a primer that is not a random tag yields no degenerate
-/// layer: a random or AT-rich insert, the conserved starts of a few species,
-/// which exclude bases at many positions but concentrate in a few
-/// combinations, and two alternative primers.
+/// layer, at 1% and at 6% errors: a random or AT-rich insert, the conserved
+/// starts of a few species, which exclude bases at many positions but
+/// concentrate in a few combinations, and two alternative primers.
 #[test]
 fn conserved_or_biased_sequence_behind_a_primer_is_not_a_degenerate_layer() {
     let species: Vec<Vec<u8>> = (0..6).map(|i| random_bases(9200 + i, 60)).collect();
@@ -1519,9 +1532,11 @@ fn conserved_or_biased_sequence_behind_a_primer_is_not_a_degenerate_layer() {
         ),
     ];
     for (name, behind) in cases {
-        let (reads, head) = primed_reads(behind, 10);
-        let found = layer_behind_primer(&reads, &head);
-        assert!(found.is_none(), "{name}: {found:?}");
+        for per_mille in [10, 60] {
+            let (reads, head) = primed_reads(&behind, per_mille);
+            let found = layer_behind_primer(&reads, &head);
+            assert!(found.is_none(), "{name} at {per_mille}: {found:?}");
+        }
     }
 }
 
@@ -2295,5 +2310,71 @@ fn custom_primers_behind_an_adapter_are_kept_whole() {
                 );
             }
         }
+    }
+}
+
+/// Reads of a cDNA library read without a rear adapter: the Y adapter's top
+/// strand, then either strand of a strand-switched molecule
+/// (`strand_switched`) between the strand-switching primer `ssp` and the
+/// oligo(dT) primer `vnp`, with a poly(A) tail of 20 to 40 bases. The
+/// adapter and the primers carry 5.6% errors, a third of them indels, and a
+/// quarter of the reads lose 1 to 6 bases at the 3' end; the insert carries
+/// no errors.
+fn poly_a_cdna_reads(ssp: &[u8], vnp: &[u8]) -> Vec<Vec<u8>> {
+    let top = b"TTTTTTTTCCTGTACTTCGTTCAGTTACGTATTGCT";
+    (0..2000u64)
+        .map(|i| {
+            let mut state = 85_000 + i;
+            let tail = 20 + (draw(&mut state) % 21) as usize;
+            let transcript = random_bases(86_000 + i, 500);
+            let (outer, body, inner) = strand_switched(i % 2 == 0, &transcript, tail, ssp, vnp);
+            let front = with_errors(&[&top[..], &outer].concat(), 87_000 + i, 56);
+            let mut back = with_errors(&inner, 89_000 + i, 56);
+            if draw(&mut state).is_multiple_of(4) {
+                back.truncate(back.len() - 1 - (draw(&mut state) % 6) as usize);
+            }
+            [front, body, back].concat()
+        })
+        .collect()
+}
+
+/// The k-mers over the junction of the poly(A) tail and the oligo(dT)
+/// primer at the 3' end hold fewer primer bases, and so fewer of its
+/// errors, than the primer's own k-mers, and set the support floor of the
+/// primer's path above most of them: the path ends inside the primer, and
+/// the rest of the primer is assembled from the k-mers left as an outer
+/// piece that opens the primer's strand-specific layer. The outer piece
+/// runs into the inner one and joins it, so the primer is discovered whole
+/// and trimming with the discovered set keeps no primer base, and the
+/// insert with its tail but for the tail base or two that the inner end of
+/// the primer may take.
+#[test]
+fn a_strand_primer_split_at_its_poly_a_tail_is_joined_whole() {
+    let top = b"TTTTTTTTCCTGTACTTCGTTCAGTTACGTATTGCT";
+    let ssp = b"TTTCTGTTGGTGCTGATATTGCTTT";
+    let vnp = b"ACTTGCCTGTCGCTCTATCTTCAGAGGAGAGTCCGCCGCCCGCAAG";
+    let found = infer_owned(&poly_a_cdna_reads(ssp, vnp));
+    let shown: Vec<String> = found
+        .iter()
+        .map(|d| String::from_utf8_lossy(&d.adapter.seq).into_owned())
+        .collect();
+    assert!(
+        found.iter().any(|d| holds_whole(&d.adapter.seq, vnp)),
+        "the oligo(dT) primer is not recovered whole: {shown:?}"
+    );
+    let cfg = trimming_with(found);
+    for i in 0..8u64 {
+        let transcript = random_bases(88_000 + i, 500);
+        let (outer, body, inner) = strand_switched(i % 2 == 0, &transcript, 30, ssp, vnp);
+        let read = [&top[..], &outer, &body, &inner].concat();
+        let start = top.len() + outer.len();
+        let stop = start + body.len();
+        let segments = crate::adapter::adapter_segments(&read, &cfg);
+        assert!(
+            matches!(segments[..], [(first, last)]
+                if (start..=start + 2).contains(&first) && (stop - 2..=stop).contains(&last)),
+            "read {i}: {segments:?} for {:?}: {shown:?}",
+            (start, stop)
+        );
     }
 }
