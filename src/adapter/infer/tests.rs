@@ -2378,3 +2378,135 @@ fn a_strand_primer_split_at_its_poly_a_tail_is_joined_whole() {
         );
     }
 }
+
+/// Reads, the adapter, the primer and the templates of an amplicon library
+/// with one primer at both ends.
+type OnePrimerReads = (Vec<Vec<u8>>, Vec<u8>, Vec<u8>, Vec<Vec<u8>>);
+
+/// Reads with 2.5% errors of amplicons of two templates of 600 bases with
+/// one primer outside the catalog at both ends, read from either strand: a
+/// rapid adapter that only the 5' end carries, eroded by up to three bases,
+/// the primer, the template, and the primer reverse complemented. Both
+/// strands of a template open with the same base, so each base behind the
+/// primer opens the reads of one template.
+fn one_primer_reads() -> OnePrimerReads {
+    let adapter = random_bases(86_001, 44);
+    let primer = random_bases(86_002, 20);
+    let templates: Vec<Vec<u8>> = [(b'A', b'T'), (b'C', b'G')]
+        .into_iter()
+        .zip(0..)
+        .map(|((first, last), t)| {
+            let mut template = vec![first];
+            template.extend(random_bases(86_100 + t, 598));
+            template.push(last);
+            template
+        })
+        .collect();
+    let reads = (0..1000u64)
+        .map(|i| {
+            let template = &templates[(i % 2) as usize];
+            let body = if (i / 2) % 2 == 0 {
+                template.clone()
+            } else {
+                rc(template)
+            };
+            let read = [&adapter[(i % 4) as usize..], &primer, &body, &rc(&primer)].concat();
+            with_errors(&read, 86_200 + i, 25)
+        })
+        .collect();
+    (reads, adapter, primer, templates)
+}
+
+/// Amplicons of two templates with one primer outside the catalog at both
+/// ends, behind a rapid adapter that only the 5' end carries. The two strands
+/// of each template open continuations behind the primer that pair at
+/// opposite read ends as the primers of two strands do, but each pair holds
+/// the reads of one template only, and the starts of the two templates are
+/// each found in reads that hold neither: the insert begins behind the
+/// primer. The primer is kept whole, no sequence of the templates is
+/// learned, and trimming leaves the template.
+#[test]
+fn one_primer_at_both_ends_of_two_templates_is_kept_whole() {
+    let (reads, adapter, primer, templates) = one_primer_reads();
+    let found = infer_owned(&reads);
+    let shown: Vec<String> = found
+        .iter()
+        .map(|d| String::from_utf8_lossy(&d.adapter.seq).into_owned())
+        .collect();
+    assert!(
+        found.iter().any(|d| holds_whole(&d.adapter.seq, &primer)),
+        "the primer is not recovered whole: {shown:?}"
+    );
+    for start in templates
+        .iter()
+        .flat_map(|t| [t[..100].to_vec(), rc(t)[..100].to_vec()])
+    {
+        for word in start.windows(KMER_K) {
+            assert!(
+                !found
+                    .iter()
+                    .any(|d| contains(&d.adapter.seq, word) || contains(&rc(&d.adapter.seq), word)),
+                "template sequence {:?} is learned: {shown:?}",
+                String::from_utf8_lossy(word)
+            );
+        }
+    }
+    let cfg = trimming_with(found);
+    for template in &templates {
+        for body in [template.clone(), rc(template)] {
+            let read = [&adapter[..], &primer, &body, &rc(&primer)].concat();
+            let start = adapter.len() + primer.len();
+            assert_eq!(
+                crate::adapter::adapter_segments(&read, &cfg),
+                vec![(start, start + body.len())],
+                "{shown:?}"
+            );
+        }
+    }
+}
+
+/// Behind one primer at both ends of two templates, the path divides four
+/// ways, one base opening each strand of each template. The other strand of
+/// the path's own template pairs with it at opposite read ends, as the
+/// primer of the other strand would, but holds only that template's reads;
+/// the start of the other template is found in reads that hold neither, and
+/// the path divides into templates.
+#[test]
+fn the_strands_of_several_templates_divide_into_templates() {
+    let shared = random_bases(86_301, 30);
+    let x = [b"A".as_slice(), &random_bases(86_312, 180), b"G"].concat();
+    let y = [b"G".as_slice(), &random_bases(86_323, 180), b"A"].concat();
+    let reads: Vec<Vec<u8>> = (0..400)
+        .map(|i| {
+            let template = if i % 2 == 0 { &x } else { &y };
+            let body = if (i / 2) % 2 == 0 {
+                template.clone()
+            } else {
+                rc(template)
+            };
+            [&shared[..], &body, &rc(&shared)].concat()
+        })
+        .collect();
+    let windows: Vec<&[u8]> = reads.iter().map(|r| &r[..100]).collect();
+    let partners: Vec<&[u8]> = reads.iter().map(|r| &r[r.len() - 100..]).collect();
+    let cons = [&shared[..], &x[..40]].concat();
+    let counts = kmer_counts(&windows, KMER_K);
+    let divisions = division_point(&cons, &counts, 0, cons.len(), End::Five);
+    let kinds: Vec<Option<Division>> = divisions
+        .iter()
+        .map(|(edge, words)| {
+            assert_eq!(*edge, shared.len());
+            division_kind(
+                &shared[shared.len() - KMER_K..],
+                words,
+                &windows,
+                &partners,
+                0.2,
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![None, Some(Division::Templates), Some(Division::Templates)]
+    );
+}

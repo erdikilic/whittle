@@ -382,17 +382,19 @@ pub(super) fn supported_span(weights: &[u32], end: End) -> (usize, usize, bool) 
 }
 
 /// Returns the inner edges of the shared parts of a consensus whose path
-/// divides into two supported continuations, as a shared adapter divides
-/// into the strand-specific primers behind it, with the first `KMER_K`
-/// bases of each continuation, inward from the read end. The edge is the
-/// end of the last shared k-mer for the 5' end and its start for the 3' end.
+/// divides into supported continuations, as a shared adapter divides into
+/// the strand-specific primers behind it, with the first `KMER_K` bases of
+/// two continuations, inward from the read end: the path's own and another
+/// one, once for each other continuation. The edge is the end of the last
+/// shared k-mer for the 5' end and its start for the 3' end.
 ///
 /// Scanning inward over the k-mers of `[lo, hi)`, the innermost included,
 /// whose continuations then lie past the span, a k-mer divides when it
 /// lies within `RUN_JUMP` of the peak of the span, the path's own successor
 /// and another successor each hold at least `1 / RUN_JUMP` of its support
-/// and together at most twice it, and both open paths that keep their
-/// support for `DIVISION_PERSIST` k-mers, the other one off the consensus.
+/// and together at most twice it, and both open paths that keep `1 /
+/// RUN_JUMP` of their opening support for `DIVISION_PERSIST` k-mers, the
+/// other one off the consensus.
 /// A degenerate primer base opens a branch that rejoins the consensus within
 /// `KMER_K` k-mers and does not divide it. The shared part holds at least
 /// the k-mer that divides, so it is longer than `MIN_PATTERN_LEN`. `weights`
@@ -443,11 +445,15 @@ pub(super) fn division_point(
         {
             continue;
         }
-        // A continuation persists when its heaviest path keeps at least half
-        // of its opening support for `DIVISION_PERSIST` k-mers; a barcode
-        // panel behind a flank spreads its support over the members instead.
+        // A continuation persists when its heaviest path keeps at least
+        // `1 / RUN_JUMP` of its opening support for `DIVISION_PERSIST`
+        // k-mers, as each of two template starts that open with the same
+        // base does once they part; a barcode panel behind a flank spreads
+        // its support over more members instead.
         let persists = |start: u64, off_path: bool| {
-            let floor = weight(start).div_ceil(2).max(MIN_SUPPORT_WINDOWS as u32);
+            let floor = weight(start)
+                .div_ceil(RUN_JUMP)
+                .max(MIN_SUPPORT_WINDOWS as u32);
             let mut code = start;
             (0..DIVISION_PERSIST).all(|_| {
                 let kept = weight(code) >= floor && !(off_path && on_path.contains(&code));
@@ -461,28 +467,32 @@ pub(super) fn division_point(
         if !persists(next, false) {
             continue;
         }
-        let alt = (0..4).map(|base| step(codes[j], base)).find(|&alt| {
+        // The first k-mer lying wholly in each continuation.
+        let own = |start: u64| {
+            let mut code = start;
+            for _ in 1..KMER_K {
+                code = (0..4)
+                    .map(|base| step(code, base))
+                    .max_by_key(|&c| weight(c))
+                    .unwrap_or(code);
+            }
+            decode_kmer(code, KMER_K)
+        };
+        let edge = match end {
+            End::Five => j + KMER_K,
+            End::Three => j,
+        };
+        // Each other successor that opens a continuation is paired with the
+        // path's own: behind a primer at both ends of a molecule, the starts
+        // of several templates open more than two, and only a pair from two
+        // templates tells them from the primers of two strands
+        // (`division_kind`).
+        for alt in (0..4).map(|base| step(codes[j], base)).filter(|&alt| {
             alt != next
                 && weight(alt).saturating_mul(RUN_JUMP) >= here
                 && weight(alt) + weight(next) <= here.saturating_mul(2)
                 && persists(alt, true)
-        });
-        if let Some(alt) = alt {
-            // The first k-mer lying wholly in each continuation.
-            let own = |start: u64| {
-                let mut code = start;
-                for _ in 1..KMER_K {
-                    code = (0..4)
-                        .map(|base| step(code, base))
-                        .max_by_key(|&c| weight(c))
-                        .unwrap_or(code);
-                }
-                decode_kmer(code, KMER_K)
-            };
-            let edge = match end {
-                End::Five => j + KMER_K,
-                End::Three => j,
-            };
+        }) {
             divisions.push((edge, [own(next), own(alt)]));
         }
     }
@@ -509,21 +519,23 @@ pub(super) enum Division {
 /// The primers of the two strands flank the same molecules, so the mirror
 /// of each is read at the other end of the reads of the other
 /// (`Division::Strands`). A template start behind one primer is read from
-/// its other strand behind the other primer, at the other end of reads
-/// that hold neither continuation (`Division::Templates`). A barcode read
-/// at both ends recurs in its own reads and is neither. The reads holding
-/// each mirror, at least `MIN_SUPPORT_WINDOWS` and `1 /
-/// MIRROR_SUPPORT_DIVISOR` of the partners, must hold one kind
-/// `RUN_JUMP`-fold more often than the others. The words must differ beyond
-/// their edit budget, as the variants of one sequence do not, and the
-/// continuations must hold at least `1 - 1 / RUN_JUMP` of the windows
-/// holding `shared`: the two orientations of one of several templates
-/// behind a primer at both ends of a molecule recur in each other's reads,
-/// but hold only that template's share. The primers of the two strands
-/// open the layers of most reads and continue in at least `1 / RUN_JUMP`
-/// of `windows`, which a path specific to one barcode does not, while a
-/// shared layer that only some reads keep whole, such as a rear adapter,
-/// does.
+/// its other strand at the other end of reads that hold neither
+/// continuation (`Division::Templates`): behind the other primer, or, with
+/// one primer at both ends of a molecule, behind the same primer in reads
+/// that open with a further continuation. A barcode read at both ends
+/// recurs in its own reads and is neither. The reads holding each mirror,
+/// at least `MIN_SUPPORT_WINDOWS` and `1 / MIRROR_SUPPORT_DIVISOR` of the
+/// partners, must hold one kind `RUN_JUMP`-fold more often than the
+/// others. The words must differ beyond their edit budget, as the variants
+/// of one sequence do not. The primers of the two strands hold at least
+/// `1 - 1 / RUN_JUMP` of the windows holding `shared`: the two orientations
+/// of one of several templates behind a primer at both ends of a molecule
+/// recur in each other's reads as well, but hold only that template's
+/// share, and the starts of two of those templates divide the path into
+/// templates. The primers of the two strands also open the layers of most
+/// reads and continue in at least `1 / RUN_JUMP` of `windows`, which a path
+/// specific to one barcode does not, while a shared layer that only some
+/// reads keep whole, such as a rear adapter, does.
 pub(super) fn division_kind(
     shared: &[u8],
     words: &[Vec<u8>; 2],
@@ -546,9 +558,9 @@ pub(super) fn division_kind(
     let continued = (0..windows.len())
         .filter(|&j| at_shared[j] && (held[0][j] || held[1][j]))
         .count();
-    if continued * jump < holding * (jump - 1) {
-        return None;
-    }
+    // The primers of the two strands hold `1 - 1 / RUN_JUMP` of the windows
+    // holding `shared` and `1 / RUN_JUMP` of all windows.
+    let strands = continued * jump >= holding * (jump - 1) && continued * jump >= windows.len();
     let paired: Vec<usize> = (0..partners.len())
         .filter(|&j| !partners[j].is_empty())
         .collect();
@@ -576,14 +588,13 @@ pub(super) fn division_kind(
         if own + both + other + neither < floor {
             return None;
         }
-        kinds[index] =
-            if other >= jump * (own + both + neither) && continued * jump >= windows.len() {
-                Some(Division::Strands)
-            } else if neither >= jump * (own + both + other) {
-                Some(Division::Templates)
-            } else {
-                None
-            };
+        kinds[index] = if other >= jump * (own + both + neither) && strands {
+            Some(Division::Strands)
+        } else if neither >= jump * (own + both + other) {
+            Some(Division::Templates)
+        } else {
+            None
+        };
     }
     match kinds {
         [Some(first), Some(second)] if first == second => Some(first),

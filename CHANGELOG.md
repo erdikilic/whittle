@@ -268,6 +268,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the fixed base behind the run into the tally of the run's last position,
   which ended the tag after three bases; such a position is held open and
   every position is coded from one alignment of the whole tag per read.
+- Adapter discovery keeps a primer outside the catalog that amplicons of
+  several templates carry at both ends, behind an adapter that only the 5'
+  end carries, and ends it where the templates begin. The two strands of
+  each template open continuations behind the primer that are found in each
+  other's reads, as the primers of two strands are, but hold only that
+  template's share, while the starts of two templates are each found in
+  reads that hold neither: the path divides into templates. Each other
+  continuation of a division is paired with the path's own, and a
+  continuation keeps a quarter of its opening support, as two template
+  starts that open with the same base each do once they part. The primer
+  was cut as insert and left in the reads.
 - Adapter discovery keeps a flank that both read ends carry behind an
   adapter that only the 5' end carries, such as a barcode flank behind a
   rapid adapter, instead of cutting it as insert: its reverse complement at

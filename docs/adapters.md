@@ -260,10 +260,13 @@ found in turn. A layer ends where the support of adjacent k-mers changes
 fourfold, such as where a barcode joins its shared flank, and the sequence
 past that point belongs to the next layer. A path divides where two
 continuations open, each with at least a quarter of the support of the
-k-mer before them and each keeping half its opening support for 17 k-mers,
-the second off the path. The reads tell what it divides into, from where
-the reverse complement of the first 16 bases of each continuation is found
-at the other read end:
+k-mer before them and each keeping a quarter of its opening support for 17
+k-mers, the second off the path; two sequences that open with the same
+base, such as the starts of two templates, part behind it with about half
+of that support each. Where more than two continuations open, each of the
+others is paired with the path's own in turn. The reads tell what it
+divides into, from where the reverse complement of the first 16 bases of
+each continuation is found at the other read end:
 
 - The primers of the two strands flank the same molecules, so each primer is
   found at the other end of the reads of the other. The layer ends at the
@@ -273,20 +276,25 @@ at the other read end:
   and reverse primers, however short. The two primers continue in at least
   a quarter of the windows, which a path specific to one barcode does not.
 - The starts of the templates behind one primer are each read from their
-  other strand behind the other primer, at the other end of reads that hold
-  neither continuation. The insert begins at the division, as at a column
-  that follows the template.
+  other strand at the other end of reads that hold neither continuation:
+  behind the other primer, or, with one primer at both ends of the
+  molecule, behind the same primer in reads that open with a further
+  continuation. The insert begins at the division, as at a column that
+  follows the template.
 
 Each reverse complement must be found in at least 20 reads and one in 8 of
 the reads with an other end, and the reads holding it must hold one kind
 fourfold more often than the others; a barcode read at both ends is found in
-its own reads and divides neither way. The two continuations must hold at
-least three quarters of the reads holding the k-mer before them, as the two
-orientations of one of several templates behind a single primer do not, and
-their first 16 bases must differ beyond the error budget: a degenerate
-primer base opens a branch that rejoins the path within 16 k-mers, and
-variants of a conserved insert are one sequence, so neither divides a
-layer. A path divides at the first such point inward from the read end. A
+its own reads and divides neither way. The primers of the two strands must
+hold at least three quarters of the reads holding the k-mer before them: the
+two strands of one of several templates behind one primer at both ends of a
+molecule are also found in each other's reads, but hold only that
+template's share and divide nothing, while the starts of two of those
+templates divide the path into templates. The first 16 bases of the two
+continuations must differ beyond the error budget: a degenerate primer base
+opens a branch that rejoins the path within 16 k-mers, and variants of a
+conserved insert are one sequence, so neither divides a layer. A path
+divides at the first such point inward from the read end. A
 candidate that reaches past the shared layer of a division into strand
 primers, in most of the reads holding both, is left to the next layer, which
 assembles the primers whole behind it. A homopolymer run of at least 8 bases at the inner
