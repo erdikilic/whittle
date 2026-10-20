@@ -2003,3 +2003,35 @@ fn a_discovery_is_named_by_the_longest_exact_entry() {
         "{named:?}"
     );
 }
+
+/// Amplicons of six templates with one marker-gene primer at both ends,
+/// behind a rapid adapter that only the 5' end carries: the primer lies
+/// deeper at the 5' end than its mirror at the 3' end, by the adapter's
+/// length. The insert begins at the primer's inner end, so the primer is
+/// kept rather than cut as insert.
+#[test]
+fn a_primer_behind_a_one_sided_adapter_is_kept() {
+    let adapter = random_bases(79_001, 44);
+    let primer = b"AGAGTTTGATCATGGCTCAG".to_vec();
+    let templates: Vec<Vec<u8>> = (0..6).map(|t| random_bases(79_100 + t, 600)).collect();
+    let reads: Vec<Vec<u8>> = (0..1200u64)
+        .map(|i| {
+            let template = &templates[(i % 6) as usize];
+            let body = if i % 2 == 0 {
+                template.clone()
+            } else {
+                rc(template)
+            };
+            let read = [&adapter[..], &primer, &body, &rc(&primer)].concat();
+            with_errors(&read, 79_200 + i, 20)
+        })
+        .collect();
+    let found = infer_owned(&reads);
+    assert!(
+        found
+            .iter()
+            .any(|d| longest_common_substring(&primer, &d.adapter.seq) >= 18
+                || longest_common_substring(&rc(&primer), &d.adapter.seq) >= 18),
+        "the primer is not recovered: {found:?}"
+    );
+}

@@ -410,6 +410,14 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                         next_words.extend(divided);
                         return Some((seq, support, boundary, weight, end));
                     }
+                    // A candidate that ends where the insert begins, behind
+                    // a template start, a marker-gene primer or the primers
+                    // of unprimed reads, keeps its inner part: its mirror lies
+                    // at a depth set by the outer layers each end keeps, as a
+                    // one-sided rapid adapter in front of a primer does.
+                    if boundary {
+                        return Some((seq, support, boundary, weight, end));
+                    }
                     let (own, opposite) = match end {
                         End::Five => (&five_phys, &three_phys),
                         End::Three => (&three_phys, &five_phys),

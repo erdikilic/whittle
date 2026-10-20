@@ -225,6 +225,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `obs::ProgressHandle::is_bar` are removed.
 
 ### Fixed
+- Adapter discovery keeps a primer behind a rapid adapter that only the 5'
+  end carries. A candidate that ends at an established insert boundary, such
+  as a marker-gene primer, is no longer cut as insert because its reverse
+  complement lies at a different depth at the 3' end; the primers of rapid
+  amplicon libraries were left in the reads.
 - Adapter discovery compares the support of a candidate and of the k-mer
   after it as shares of their windows. The k-mer count covered the whole
   sample and the candidate count at most 4,000 reads of it, so on a larger

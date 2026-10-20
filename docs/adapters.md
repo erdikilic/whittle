@@ -387,10 +387,13 @@ different depth is cut back to its outer part, or dropped when fewer than 11
 bases remain: sequence that appears at the far end of the molecule without the
 technical layers around it is insert, such as a conserved gene end that reads
 reach from the other side. A mirror at the same depth, or none, is neutral, so
-one-sided rapid libraries are unaffected. A layer that divides into strand
-primers, and the primer layers behind it, are exempt: their mirrors lie at a
-depth set by how much outer adapter each end keeps, which differs between
-the 5' and 3' ends of nanopore reads. A candidate that occupies the same
+one-sided rapid libraries of genomic DNA are unaffected. A layer that divides
+into strand primers, and the primer layers behind it, are exempt: their mirrors
+lie at a depth set by how much outer adapter each end keeps, which differs
+between the 5' and 3' ends of nanopore reads. A candidate that ends where the
+insert begins, behind a template start, a marker-gene primer or the primers of
+unprimed reads, is exempt for the same reason, as a primer behind a rapid
+adapter that only the 5' end carries is. A candidate that occupies the same
 reads as a stronger candidate of its layer is a sequencing variant and is
 dropped. The two ends of a library can read one adapter in forms that end at
 different bases on the insert side, as the two strands of a Y adapter do.
