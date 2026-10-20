@@ -1901,3 +1901,105 @@ fn template_begins_at_a_boundary_only_behind_the_primers() {
     let inserts: Vec<&[u8]> = inserts.iter().map(Vec::as_slice).collect();
     assert!(template_at_boundary(&inserts, End::Five));
 }
+
+/// The rise rule compares shares of windows: a k-mer after a candidate
+/// rises past it when its share of the assembly windows is `RUN_JUMP` times
+/// the candidate's share of the validation windows, however many of the
+/// assembly windows the validation sample holds.
+#[test]
+fn jump_compares_shares_of_windows() {
+    // A candidate in every read, followed in 40% of the reads.
+    assert!(!jumps_past(4000, 4000, 16_000, 40_000));
+    assert!(!jumps_past(400, 400, 160, 400));
+    // A barcode in 4% of the reads joining a shared layer.
+    assert!(jumps_past(160, 4000, 40_000, 40_000));
+    assert!(jumps_past(16, 400, 400, 400));
+    // At one scale, the bound is inclusive.
+    assert!(jumps_past(100, 1000, 400, 1000));
+    assert!(!jumps_past(101, 1000, 400, 1000));
+}
+
+/// An eroded copy of a pattern that shares its length with another advances
+/// the boundary, as one of a unique length does: here 6 to 10 bases of a
+/// 22-base pattern are lost at the physical read end, more than its edit
+/// budget, so only an overhanging hit finds it. A panel member does not.
+#[test]
+fn eroded_patterns_of_a_shared_length_advance_the_boundary() {
+    let pattern = random_bases(77_001, 22);
+    let same_length = random_bases(77_002, 22);
+    let reads: Vec<Vec<u8>> = (0..40u64)
+        .map(|i| {
+            let mut read = pattern[6 + (i % 5) as usize..].to_vec();
+            read.extend(random_bases(77_100 + i, 400));
+            read
+        })
+        .collect();
+    let sample: Vec<&[u8]> = reads.iter().map(Vec::as_slice).collect();
+    let patterns = vec![pattern, same_length];
+    let active = vec![true; sample.len()];
+    for (panel, advanced) in [([false, false], true), ([true, true], false)] {
+        let mut bounds = Boundaries::new(&sample);
+        let moved = advance_boundaries(
+            &sample,
+            &mut bounds,
+            &patterns,
+            &panel,
+            0.2,
+            &active,
+            false,
+            true,
+        );
+        assert_eq!(
+            moved.iter().filter(|&&m| m).count(),
+            if advanced { 40 } else { 0 }
+        );
+        if advanced {
+            for (i, &five) in bounds.five.iter().enumerate() {
+                assert_eq!(five, 16 - i % 5, "read {i}");
+            }
+        }
+    }
+}
+
+/// A heavier reconstruction of a family from the other read end represents
+/// the family with that end, so the end follows the orientation of the
+/// sequence kept.
+#[test]
+fn a_family_takes_the_end_of_its_heaviest_reconstruction() {
+    let adapter = random_bases(78_001, 36);
+    let rear = crate::adapter::reverse_complement(&adapter[10..]);
+    let candidates = vec![
+        (adapter.clone(), 0.5, 900, true, 1000, End::Five),
+        (rear.clone(), 0.6, 950, false, 2000, End::Three),
+    ];
+    let merged = merge_families(candidates, &[], 0.2);
+    assert_eq!(merged, vec![(rear, 0.6, 2000, true, End::Three)]);
+    let candidates = vec![
+        (adapter.clone(), 0.5, 900, true, 3000, End::Five),
+        (
+            crate::adapter::reverse_complement(&adapter[10..]),
+            0.6,
+            950,
+            false,
+            2000,
+            End::Three,
+        ),
+    ];
+    let merged = merge_families(candidates, &[], 0.2);
+    assert_eq!(merged, vec![(adapter, 0.5, 3000, true, End::Five)]);
+}
+
+/// The kit 14 ligation adapter's top strand holds both `LSK114_front` and
+/// the reverse complement of the shorter `LSK109_rear` without an edit; it
+/// is named by the entry that matches more of its bases.
+#[test]
+fn a_discovery_is_named_by_the_longest_exact_entry() {
+    let refs = crate::adapter::preset::preset(crate::adapter::preset::Kit::ALL);
+    let top = b"TTTTTTTTCCTGTACTTCGTTCAGTTACGTATTGCT";
+    let named = name_against(top, &refs, 0.2);
+    assert_eq!(named[0], ("LSK114_front".to_string(), 100.0), "{named:?}");
+    assert!(
+        named.iter().any(|(name, _)| name == "LSK109_rear"),
+        "{named:?}"
+    );
+}

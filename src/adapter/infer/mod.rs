@@ -160,6 +160,58 @@ pub struct InferredAdapter {
 /// its end, and its path weight.
 type Ranked = (Vec<u8>, f64, Vec<bool>, usize, bool, End, u64);
 
+/// A layer candidate as ranked for merging: sequence, support, exact window
+/// count, whether it carries an insert boundary, path weight and end.
+type LayerCandidate = (Vec<u8>, f64, u32, bool, u64, End);
+
+/// A merged layer family: sequence, support, path weight, whether it carries
+/// an insert boundary, and the end its sequence is read at.
+type Family = (Vec<u8>, f64, u64, bool, End);
+
+/// A family accepted in an earlier layer: sequence, support, layer, whether
+/// it is flush with the read end, and whether it belongs to a variable layer.
+type Distinct = (Vec<u8>, f64, usize, bool, bool);
+
+/// Merges the ranked candidates of one layer into families, in rank order. A
+/// family found again in a later layer, in reads its first occurrence did not
+/// match, is not a new layer, and a shorter sequence contained in an earlier
+/// layer is a layer that the earlier one fused with its neighbour: either is
+/// dropped. A fragment of a merged family whose support is within `RUN_JUMP`
+/// of it joins the family. The heaviest reconstruction represents a family,
+/// with its own support and the end it was read at, so a family that one
+/// end's reconstruction replaces is attributed to that end.
+fn merge_families(
+    candidates: Vec<LayerCandidate>,
+    distinct: &[Distinct],
+    error_rate: f64,
+) -> Vec<Family> {
+    let mut merged: Vec<Family> = Vec::new();
+    for (seq, support, _, boundary, matched, end) in candidates {
+        if distinct.iter().any(|(other, _, _, _, _)| {
+            other.len() <= seq.len() + edit_budget(error_rate, seq.len())
+                && same_adapter(&seq, other, error_rate)
+        }) {
+            continue;
+        } else if let Some((other, previous, best, _, stored_end)) =
+            merged.iter_mut().find(|(other, previous, _, _, _)| {
+                support < *previous * f64::from(RUN_JUMP)
+                    && *previous < support * f64::from(RUN_JUMP)
+                    && fragment_of(&seq, other, error_rate)
+            })
+        {
+            if matched > *best {
+                *other = seq;
+                *best = matched;
+                *previous = support;
+                *stored_end = end;
+            }
+        } else {
+            merged.push((seq, support, matched, boundary, end));
+        }
+    }
+    merged
+}
+
 /// Discovers supported technical sequences in layers from each read end. Known
 /// sequences in `base` explain the outermost layers first; each accepted layer
 /// moves the boundary inward and the next layer is assembled from the
@@ -186,12 +238,12 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     let sample: Vec<&[u8]> = folded.iter().map(|read| read.as_ref()).collect();
     let sample = sample.as_slice();
     let mut bounds = Boundaries::new(sample);
-    let known: Vec<Vec<u8>> = base
+    let (known, known_panel): (Vec<Vec<u8>>, Vec<bool>) = base
         .adapters
         .iter()
         .filter(|a| !crate::adapter::is_construct(a))
-        .map(|a| a.seq.to_ascii_uppercase())
-        .collect();
+        .map(|a| (a.seq.to_ascii_uppercase(), a.role == Role::Barcode))
+        .unzip();
     if !known.is_empty() {
         let mut active = vec![true; sample.len()];
         for _ in 0..MAX_LAYERS {
@@ -199,6 +251,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 sample,
                 &mut bounds,
                 &known,
+                &known_panel,
                 base.error_rate,
                 &active,
                 true,
@@ -221,7 +274,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     );
 
     let mut searcher = crate::adapter::search::new_searcher_fwd();
-    let mut distinct: Vec<(Vec<u8>, f64, usize, bool, bool)> = Vec::new();
+    let mut distinct: Vec<Distinct> = Vec::new();
     // An accepted primer marks the insert boundary at its end; no layer lies
     // beyond it.
     let mut open = [true, true];
@@ -376,7 +429,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             )
             .collect();
         strand_words.extend(next_words);
-        let mut candidates: Vec<(Vec<u8>, f64, u32, bool, u64, End)> = cut
+        let mut candidates: Vec<LayerCandidate> = cut
             .into_iter()
             .filter(|(seq, _, _, _, _)| {
                 !inserts
@@ -426,35 +479,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             .iter()
             .map(|(seq, support, _, _, weight, end)| (seq.clone(), *support, *weight, *end))
             .collect();
-        let mut merged: Vec<(Vec<u8>, f64, u64, bool, End)> = Vec::new();
-        for (seq, support, _, boundary, weight, end) in candidates {
-            let matched = weight;
-            // A family found again in a later layer, in reads its first
-            // occurrence did not match, is not a new layer; a shorter
-            // sequence contained in an earlier candidate is a layer that the
-            // candidate fused with its neighbour. The heaviest
-            // reconstruction represents a family with its own support.
-            if distinct.iter().any(|(other, _, _, _, _)| {
-                other.len() <= seq.len() + edit_budget(base.error_rate, seq.len())
-                    && same_adapter(&seq, other, base.error_rate)
-            }) {
-                continue;
-            } else if let Some((other, previous, best, _, _)) =
-                merged.iter_mut().find(|(other, previous, _, _, _)| {
-                    support < *previous * f64::from(RUN_JUMP)
-                        && *previous < support * f64::from(RUN_JUMP)
-                        && fragment_of(&seq, other, base.error_rate)
-                })
-            {
-                if matched > *best {
-                    *other = seq;
-                    *best = matched;
-                    *previous = support;
-                }
-            } else {
-                merged.push((seq, support, matched, boundary, end));
-            }
-        }
+        let merged = merge_families(candidates, &distinct, base.error_rate);
         // Sequencing variants of a family occupy the same reads as the
         // family; distinct families occupy different reads.
         let layer_texts: Vec<&[u8]> = five_sample.iter().chain(&three_sample).copied().collect();
@@ -484,6 +509,8 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 .then(a.0.cmp(&b.0))
         });
         let mut accepted: Vec<Vec<u8>> = Vec::new();
+        // Whether each accepted sequence is a member of a variable layer.
+        let mut accepted_members: Vec<bool> = Vec::new();
         let mut accepted_windows: Vec<Vec<bool>> = Vec::new();
         let mut accepted_ends: Vec<End> = Vec::new();
         let mut own_forms: Vec<(Vec<u8>, f64, End)> = Vec::new();
@@ -526,6 +553,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             }
             accepted_ends.push(end);
             accepted.push(seq.clone());
+            accepted_members.push(member);
             if !member {
                 accepted_windows.push(windows);
                 // The other read end can hold a form of the family that
@@ -570,6 +598,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 );
             accepted_ends.push(end);
             accepted.push(seq.clone());
+            accepted_members.push(false);
             distinct.push((seq, support, layer, flush, false));
         }
         tracing::debug!(
@@ -588,6 +617,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 sample,
                 &mut bounds,
                 &accepted,
+                &accepted_members,
                 base.error_rate,
                 &vec![true; sample.len()],
                 false,

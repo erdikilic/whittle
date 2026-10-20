@@ -225,6 +225,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `obs::ProgressHandle::is_bar` are removed.
 
 ### Fixed
+- Adapter discovery compares the support of a candidate and of the k-mer
+  after it as shares of their windows. The k-mer count covered the whole
+  sample and the candidate count at most 4,000 reads of it, so on a larger
+  sample a candidate followed by a drop in support could pass for a layer
+  joining a shared one; fragments such as partial rear adapters are no
+  longer reported as layers.
+- In adapter discovery, a known or first-layer sequence eroded at the
+  physical read end moves the boundary even when another sequence shares
+  its length, as one of a unique length already did; barcode panels stay
+  excluded. Partial copies no longer assemble into short spurious layers,
+  such as a barcode flank fused with insert bases.
+- A discovered family whose heaviest reconstruction comes from the other
+  read end is recorded at that end, so its insert boundary and other-end
+  forms are read in the orientation of the sequence kept.
+- A discovered adapter is named by the catalog entry that matches more of
+  its bases when two match equally well: the kit 14 ligation adapter is
+  `LSK114_front`, not the shorter `LSK109_rear` it contains.
 - Retained primer bases count toward the final segment length filter for
   internal amplicons.
 - Primer junction pairs split reads within the terminal search zones.

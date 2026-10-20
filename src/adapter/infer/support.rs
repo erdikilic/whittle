@@ -116,7 +116,8 @@ pub(super) fn same_adapter(a: &[u8], b: &[u8], error_rate: f64) -> bool {
 /// sorted by identity descending, at most three, and only at or above
 /// `NAME_IDENTITY_MIN`. Ties go to the reference listed first in
 /// `catalog::MARKER_PRIMERS`, as a primer mix comes before its variants,
-/// and then by name. The result annotates an inferred adapter with the
+/// then to the match over more bases, so an adapter is named by its own
+/// entry rather than by a shorter one it contains, and then by name. The result annotates an inferred adapter with the
 /// catalog entry it corresponds to.
 pub(super) fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f32)> {
     let marker_rank = |r: &Adapter| {
@@ -127,7 +128,7 @@ pub(super) fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec
             .unwrap_or(usize::MAX)
     };
     let mut s = new_ambiguous_searcher();
-    let mut named: Vec<(String, f32, usize)> = Vec::new();
+    let mut named: Vec<(String, f32, usize, usize)> = Vec::new();
     // A barcode construct's `N` block matches any sequence and names nothing.
     for r in refs.iter().filter(|r| !crate::adapter::is_construct(r)) {
         let (short, long) = if seq.len() <= r.seq.len() {
@@ -145,7 +146,7 @@ pub(super) fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec
         {
             let pct = 100.0 * (1.0 - h.cost as f32 / short.len() as f32);
             if pct >= NAME_IDENTITY_MIN {
-                named.push((r.name.clone(), pct, marker_rank(r)));
+                named.push((r.name.clone(), pct, marker_rank(r), short.len()));
             }
         }
     }
@@ -153,12 +154,13 @@ pub(super) fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec
         b.1.partial_cmp(&a.1)
             .unwrap()
             .then(a.2.cmp(&b.2))
+            .then(b.3.cmp(&a.3))
             .then(a.0.cmp(&b.0))
     });
     named
         .into_iter()
         .take(3)
-        .map(|(name, pct, _)| (name, pct))
+        .map(|(name, pct, _, _)| (name, pct))
         .collect()
 }
 

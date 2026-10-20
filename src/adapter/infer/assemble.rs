@@ -10,6 +10,22 @@ use super::*;
 /// it divides into, empty unless it ends at a division (`division_point`).
 pub(super) type Candidate = (Vec<u8>, f64, bool, u64, bool, Vec<Vec<u8>>);
 
+/// Returns whether the k-mer after a candidate occurs in `RUN_JUMP` times as
+/// large a share of the windows as the candidate does: `present` of the
+/// `recounted` validation windows hold the candidate, and `continuation` of
+/// the `windows` assembly windows hold the k-mer. Shares are compared, since
+/// the validation windows sample at most `RECOUNT_WINDOWS` of the assembly
+/// windows.
+pub(super) fn jumps_past(
+    present: usize,
+    recounted: usize,
+    continuation: u32,
+    windows: usize,
+) -> bool {
+    (present as u64) * u64::from(RUN_JUMP) * windows as u64
+        <= u64::from(continuation) * recounted as u64
+}
+
 /// Assembles one end's candidates and validates support and insert boundaries.
 /// `contrast` enables primer reconstruction from recurrent unprimed window
 /// starts, which describe an insert boundary only in the first discovery
@@ -235,8 +251,8 @@ pub(super) fn assemble(
             // Support drops at an insert boundary. It rises where a layer
             // such as a barcode joins a shared downstream layer: between the
             // support plateaus of the path, or where the downstream k-mer
-            // occurs in `RUN_JUMP` times more windows than contain the
-            // candidate at all. Assembly windows shorter than the layer
+            // occurs in a `RUN_JUMP` times larger share of the windows than
+            // the candidate does at all (`jumps_past`). Assembly windows shorter than the layer
             // stack depress the downstream k-mer count; a twofold excess in
             // those counts is confirmed on the validation windows, where a
             // variant path joining its own family never reaches twofold. A
@@ -250,7 +266,7 @@ pub(super) fn assemble(
             );
             measured = Some((present, anchored));
             let rise = rises
-                || present.saturating_mul(RUN_JUMP as usize) <= continuation as usize
+                || jumps_past(present, n_recount, continuation, windows.len())
                 || (continuation >= 2 * boundary_weight && {
                     let downstream = windows_containing(
                         &mut primer_searcher,

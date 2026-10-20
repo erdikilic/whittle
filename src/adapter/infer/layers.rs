@@ -76,13 +76,18 @@ pub(super) fn background_windows<'a>(
 /// past each further hit that starts within `ANCHOR_SLACK` of the depth
 /// reached. With `eroded`, a pattern may hang off the boundary by up to its
 /// edit budget in overhang cost, as an eroded adapter does at the physical
-/// read end, with at least `MIN_OVERLAP` aligned bases. Only reads flagged in
+/// read end, with at least `MIN_OVERLAP` aligned bases, unless it belongs to
+/// a panel (`panel`, indexed like `patterns`) and shares its length with
+/// another pattern: a panel of barcodes on both strands would make chance
+/// partial hits common in windows without a hit. Only reads flagged in
 /// `active` are searched. Returns the reads whose boundary moved, or an empty
 /// vector when none did.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn advance_boundaries(
     sample: &[&[u8]],
     bounds: &mut Boundaries,
     patterns: &[Vec<u8>],
+    panel: &[bool],
     error_rate: f64,
     active: &[bool],
     repeat: bool,
@@ -105,18 +110,25 @@ pub(super) fn advance_boundaries(
     // Patterns of one length, such as a barcode panel, share one tiled
     // search per window; other patterns are searched one strand at a time.
     // Windows without a hit are then searched with overhang when eroded.
-    let mut singletons: Vec<Vec<u8>> = Vec::new();
-    let mut by_length: std::collections::BTreeMap<usize, Vec<Vec<u8>>> =
+    let mut hanging: Vec<Vec<u8>> = Vec::new();
+    let mut by_length: std::collections::BTreeMap<usize, Vec<(Vec<u8>, bool)>> =
         std::collections::BTreeMap::new();
-    for pattern in patterns {
+    for (pattern, &member) in patterns.iter().zip(panel) {
         by_length
             .entry(pattern.len())
             .or_default()
-            .push(pattern.clone());
+            .push((pattern.clone(), member));
     }
     for (len, group) in by_length {
         let k = edit_budget(error_rate, len);
         if group.len() > 1 && len <= crate::adapter::search::MAX_TILED_PATTERN_LEN {
+            hanging.extend(
+                group
+                    .iter()
+                    .filter(|(_, member)| !member)
+                    .map(|(pattern, _)| pattern.clone()),
+            );
+            let group: Vec<Vec<u8>> = group.into_iter().map(|(pattern, _)| pattern).collect();
             let encoded = crate::adapter::search::encode_patterns(&group);
             for (text, hits) in five_texts.iter().zip(&mut five_hits) {
                 let reversed: Vec<u8> = text.iter().rev().copied().collect();
@@ -142,7 +154,7 @@ pub(super) fn advance_boundaries(
             }
             continue;
         }
-        for pattern in group {
+        for (pattern, _) in group {
             for strand in [
                 pattern.clone(),
                 crate::adapter::reverse_complement(&pattern),
@@ -158,10 +170,10 @@ pub(super) fn advance_boundaries(
                         .push((len - hit.text_end, len - hit.text_start - clip_start));
                 }
             }
-            singletons.push(pattern);
+            hanging.push(pattern);
         }
     }
-    if eroded && !singletons.is_empty() {
+    if eroded && !hanging.is_empty() {
         let mut partial = crate::adapter::search::new_overhang_searcher(error_rate as f32);
         let missing = |hits: &[Vec<(usize, usize)>]| -> Vec<usize> {
             (0..hits.len()).filter(|&i| hits[i].is_empty()).collect()
@@ -170,7 +182,7 @@ pub(super) fn advance_boundaries(
         let three_missing = missing(&three_hits);
         let five_subset: Vec<&[u8]> = five_missing.iter().map(|&i| five_texts[i]).collect();
         let three_subset: Vec<&[u8]> = three_missing.iter().map(|&i| three_texts[i]).collect();
-        for pattern in &singletons {
+        for pattern in &hanging {
             let k = edit_budget(error_rate, pattern.len());
             for hit in partial.search_texts(pattern, &five_subset, k) {
                 if hit.text_end - hit.text_start >= crate::adapter::MIN_OVERLAP {
