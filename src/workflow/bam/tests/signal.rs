@@ -10,7 +10,7 @@ fn signal_direction_uses_the_record_group_or_a_shared_header_direction() {
             .parse()
             .unwrap();
     let mut rec = RecordBuf::default();
-    assert_eq!(signal_reversed(&header, &rec), None);
+    assert_eq!(signal_reversed(Some(&header), &rec), None);
     for (id, expected) in [
         (b"dna".as_slice(), Some(false)),
         (b"rna".as_slice(), Some(true)),
@@ -18,15 +18,80 @@ fn signal_direction_uses_the_record_group_or_a_shared_header_direction() {
     ] {
         rec.data_mut()
             .insert(Tag::READ_GROUP, Value::String(id.into()));
-        assert_eq!(signal_reversed(&header, &rec), expected);
+        assert_eq!(signal_reversed(Some(&header), &rec), expected);
     }
     rec.data_mut().remove(&Tag::READ_GROUP);
     let header: sam::Header =
         "@RG\tID:a\tDS:basecall_model=rna004\n@RG\tID:b\tDS:runid=run;basecall_model=rna002\n"
             .parse()
             .unwrap();
-    assert_eq!(signal_reversed(&header, &rec), Some(true));
-    assert_eq!(signal_reversed(&sam::Header::default(), &rec), None);
+    assert_eq!(signal_reversed(Some(&header), &rec), Some(true));
+    assert_eq!(signal_reversed(Some(&sam::Header::default()), &rec), None);
+}
+
+/// A dorado read-group id names the model after the run id, with an optional
+/// barcode after it. Tagged FASTQ input reads the direction from the id alone,
+/// and a BAM read group without a `basecall_model` description falls back to
+/// its id.
+#[test]
+fn signal_direction_reads_a_dorado_read_group_id() {
+    let mut rec = RecordBuf::default();
+    for (id, expected) in [
+        (&b"4f2a_dna_r10.4.1_e8.2_400bps_sup@v5.0.0"[..], Some(false)),
+        (
+            b"4f2a_dna_r10.4.1_e8.2_400bps_sup@v5.0.0_SQK-NBD114-24_barcode01",
+            Some(false),
+        ),
+        (b"4f2a_rna004_130bps_sup@v5.1.0", Some(true)),
+        (b"rna002_70bps_hac@v3", Some(true)),
+        (b"run1", None),
+        (b"sample_dna", None),
+        (b"4f2a_SQK-RNA004", None),
+    ] {
+        rec.data_mut()
+            .insert(Tag::READ_GROUP, Value::String(id.into()));
+        assert_eq!(
+            signal_reversed(None, &rec),
+            expected,
+            "{}",
+            String::from_utf8_lossy(id)
+        );
+    }
+    rec.data_mut().remove(&Tag::READ_GROUP);
+    assert_eq!(signal_reversed(None, &rec), None);
+    let header: sam::Header = "@RG\tID:4f2a_rna004_130bps_sup@v5.1.0\n".parse().unwrap();
+    assert_eq!(signal_reversed(Some(&header), &rec), Some(true));
+}
+
+/// A trimmed read with a move table and no resolvable model fails with its
+/// name on FASTQ output, as on BAM output; without the table, or untrimmed, it
+/// passes.
+#[test]
+fn update_moves_without_a_model_names_the_read_on_fastq_output() {
+    let mut cfg = cfg_bam2fq(None, 2, FastqTags::All);
+    cfg.update_moves = true;
+    let err = run_bam_to_fastq(
+        &sam::Header::default(),
+        [Ok(raw_record(&ubam_with_moves()))].into_iter(),
+        &mut KeyedSinks::single(&mut Vec::new()),
+        None,
+        &cfg,
+        &Arc::new(Counters::default()),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("read r1: --update-moves requires a DNA or RNA basecall model"),
+        "{err:#}"
+    );
+    let mut plain = ubam_with_moves();
+    plain.data_mut().remove(&Tag::new(b'm', b'v'));
+    let (_, text) = bam2fq(vec![plain], &cfg);
+    let mut head: Vec<&str> = text.lines().next().unwrap().split('\t').collect();
+    head.sort_unstable();
+    assert_eq!(head, ["@r1", "du:f:5", "st:Z:2024-06-21T10:00:00Z"]);
+    cfg.trim.head = 0;
+    let (_, text) = bam2fq(vec![ubam_with_moves()], &cfg);
+    assert!(text.contains("\tmv:B:c,2,1,1,0,1,1,0,1,1\t"), "{text}");
 }
 
 #[test]

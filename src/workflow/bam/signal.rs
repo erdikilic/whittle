@@ -21,32 +21,69 @@ pub(crate) fn parse_move_table(value: &Value) -> Option<(i8, &[i8])> {
     }
 }
 
-/// Signal direction resolved from the record's basecalling model.
-pub(super) fn signal_reversed(header: &sam::Header, rec: &RecordBuf) -> Option<bool> {
+/// Signal direction named by a dorado read-group id,
+/// `<run_id>_<basecall_model>[_<barcode>]`: true for an RNA model (`rna0...`),
+/// false for a DNA model (`dna_r...`), found at the start of the id or after an
+/// underscore.
+fn group_id_reversed(id: &[u8]) -> Option<bool> {
+    (0..id.len())
+        .filter(|&i| i == 0 || id[i - 1] == b'_')
+        .find_map(|i| {
+            let model = &id[i..];
+            if model.starts_with(b"rna0") {
+                Some(true)
+            } else if model.starts_with(b"dna_r") {
+                Some(false)
+            } else {
+                None
+            }
+        })
+}
+
+/// Signal direction named by `basecall_model=` in a read group's description:
+/// true for an RNA model, false for a DNA model.
+fn described_reversed(
+    group: &sam::header::record::value::Map<sam::header::record::value::map::ReadGroup>,
+) -> Option<bool> {
     use sam::header::record::value::map::read_group::tag::DESCRIPTION;
-    let direction =
-        |group: &sam::header::record::value::Map<sam::header::record::value::map::ReadGroup>| {
-            let description = group.other_fields().get(&DESCRIPTION)?;
-            description
-                .split(|b| b.is_ascii_whitespace() || *b == b';')
-                .find_map(|field| {
-                    let model = field.strip_prefix(b"basecall_model=")?;
-                    if model.starts_with(b"rna") {
-                        Some(true)
-                    } else if model.starts_with(b"dna") {
-                        Some(false)
-                    } else {
-                        None
-                    }
-                })
-        };
-    match rec.data().get(&Tag::READ_GROUP) {
-        Some(Value::String(id)) => direction(header.read_groups().get(AsRef::<[u8]>::as_ref(id))?),
-        None => {
-            let mut groups = header.read_groups().values();
-            let first = direction(groups.next()?)?;
+    let description = group.other_fields().get(&DESCRIPTION)?;
+    description
+        .split(|b| b.is_ascii_whitespace() || *b == b';')
+        .find_map(|field| {
+            let model = field.strip_prefix(b"basecall_model=")?;
+            if model.starts_with(b"rna") {
+                Some(true)
+            } else if model.starts_with(b"dna") {
+                Some(false)
+            } else {
+                None
+            }
+        })
+}
+
+/// Signal direction resolved from the record's basecalling model: the
+/// `basecall_model` in the description of its `@RG` line, or else the model a
+/// dorado read-group id names, which also covers an id the header lacks.
+/// Without `header` (tagged FASTQ input), only the id in the record's `RG` tag
+/// is read. A BAM record without `RG` takes the direction every read group of
+/// the header shares.
+pub(super) fn signal_reversed(header: Option<&sam::Header>, rec: &RecordBuf) -> Option<bool> {
+    let direction = |id: &[u8], group| described_reversed(group).or_else(|| group_id_reversed(id));
+    match (rec.data().get(&Tag::READ_GROUP), header) {
+        (Some(Value::String(id)), Some(header)) => {
+            let id: &[u8] = id.as_ref();
+            match header.read_groups().get(id) {
+                Some(group) => direction(id, group),
+                None => group_id_reversed(id),
+            }
+        },
+        (Some(Value::String(id)), None) => group_id_reversed(id.as_ref()),
+        (None, Some(header)) => {
+            let mut groups = header.read_groups().iter();
+            let (id, group) = groups.next()?;
+            let first = direction(id.as_ref(), group)?;
             groups
-                .all(|group| direction(group) == Some(first))
+                .all(|(id, group)| direction(id.as_ref(), group) == Some(first))
                 .then_some(first)
         },
         _ => None,
@@ -86,6 +123,60 @@ impl<'a> MoveIndex<'a> {
             boundaries,
             reversed,
         })
+    }
+}
+
+/// The move table of one record under `--update-moves`, indexed on the first
+/// trimmed window that needs it. Shared by the BAM and FASTQ output paths, so
+/// both rewrite the signal tags of a window alike.
+pub(super) struct ReadMoves<'a> {
+    /// The record whose move table is indexed.
+    rec: &'a RecordBuf,
+    /// Whether the signal tags are rewritten (`--update-moves`).
+    update: bool,
+    /// The signal direction (`signal_reversed`), `None` when the model is
+    /// unknown or `update` is off.
+    direction: Option<bool>,
+    /// The move index, built on first use; `None` inside for a missing or
+    /// malformed table.
+    index: std::cell::OnceCell<Option<MoveIndex<'a>>>,
+}
+
+impl<'a> ReadMoves<'a> {
+    /// Resolves the record's signal direction when `update` is set; `header`
+    /// is `None` for tagged FASTQ input.
+    pub(super) fn new(rec: &'a RecordBuf, header: Option<&sam::Header>, update: bool) -> Self {
+        Self {
+            rec,
+            update,
+            direction: update.then(|| signal_reversed(header, rec)).flatten(),
+            index: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Returns the move index for `window`: `None` for a full window, without
+    /// `--update-moves`, or for a missing or malformed table, which leaves the
+    /// signal tags to be removed. A trimmed window of a read with a move table
+    /// and no resolvable model is an error naming the read.
+    pub(super) fn for_window(&self, window: Window) -> anyhow::Result<Option<&MoveIndex<'a>>> {
+        let partial = window.start != 0 || window.end != self.rec.sequence().len();
+        if !self.update || !partial {
+            return Ok(None);
+        }
+        let Some(reverse) = self.direction else {
+            if self.rec.data().get(&Tag::new(b'm', b'v')).is_some() {
+                anyhow::bail!(
+                    "read {}: --update-moves requires a DNA or RNA basecall model, named by \
+                     basecall_model in the @RG description or by a dorado read-group id in RG",
+                    crate::io::bam::display_name(self.rec.name().map(AsRef::as_ref))
+                );
+            }
+            return Ok(None);
+        };
+        Ok(self
+            .index
+            .get_or_init(|| MoveIndex::new(self.rec, reverse))
+            .as_ref())
     }
 }
 

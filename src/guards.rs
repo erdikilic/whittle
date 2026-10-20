@@ -61,27 +61,11 @@ pub(crate) fn guard_fastq_to_bam(in_fmt: io::Format, out_fmt: io::Format) -> any
     Ok(())
 }
 
-/// Rejects `--update-moves` on any input format other than BAM: the ONT
-/// signal tags are rewritten only on BAM-to-BAM output, so elsewhere the flag
-/// would be accepted and silently do nothing. `cli::parse` applies this to the
-/// format an explicit `--input-format` or a known extension names, and `run`
-/// applies it again once detection has classified a stream.
-pub(crate) fn guard_bam_only_flags(cfg: &Config, in_fmt: io::Format) -> anyhow::Result<()> {
-    if in_fmt != io::Format::Bam && cfg.update_moves {
-        anyhow::bail!(
-            "--update-moves rewrites the ONT signal tags of BAM records and requires BAM input \
-             (got {})",
-            in_fmt.label()
-        );
-    }
-    Ok(())
-}
-
-/// Rejects `--tag-filter` and `--remove-tag` on input without aux tags. BAM
-/// records and tagged FASTQ headers carry tags; a plain FASTQ does not, so
-/// there a filter would judge every read without its tags and a removal
-/// would remove nothing. `run` applies this after the complete FASTQ stream
-/// has been inspected.
+/// Rejects `--tag-filter`, `--remove-tag` and `--update-moves` on input
+/// without aux tags. BAM records and tagged FASTQ headers carry tags; a plain
+/// FASTQ does not, so there a filter would judge every read without its tags,
+/// and a removal or a move-table rewrite would change nothing. `run` applies
+/// this after the complete FASTQ stream has been inspected.
 pub(crate) fn guard_tag_flags(
     cfg: &Config,
     in_fmt: io::Format,
@@ -99,6 +83,12 @@ pub(crate) fn guard_tag_flags(
     if !cfg.remove_tags.is_empty() {
         anyhow::bail!(
             "--remove-tag removes aux tags and requires BAM or tagged FASTQ input (got {got})"
+        );
+    }
+    if cfg.update_moves {
+        anyhow::bail!(
+            "--update-moves rewrites the ONT move table and requires BAM or tagged FASTQ input \
+             (got {got})"
         );
     }
     Ok(())

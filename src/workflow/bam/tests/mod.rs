@@ -282,6 +282,7 @@ fn split_cfg() -> Config {
 fn bam2fq(recs: Vec<RecordBuf>, cfg: &Config) -> (Stats, String) {
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
+        &sam::Header::default(),
         recs.iter().map(|r| Ok(raw_record(r))),
         &mut KeyedSinks::single(&mut out),
         None,

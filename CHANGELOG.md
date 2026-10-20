@@ -92,6 +92,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   segment, `--fastq-tags` selects the output tags, and barcode positions,
   `--remove-tag` applies. Each header is inspected;
   a field that does not parse as a SAM tag fails the run and names the read.
+- `--update-moves` rewrites the ONT signal tags on FASTQ output too, from BAM
+  and tagged FASTQ input, so every output format carries the same `mv`,
+  `ts`, `ns`, `sp`, `pi`, poly-A and `st`/`du` values; it was BAM-to-BAM only
+  and ignored with a warning on FASTQ output. The signal direction also comes
+  from a dorado read-group id that names the model
+  (`<run_id>_<model>[_<barcode>]`), which is how tagged FASTQ input, without
+  a header, supplies it. Plain FASTQ input with `--update-moves` is refused
+  once the stream shows no header tags, as for `--remove-tag`.
 
 ### Changed
 - Primer junction searches skip the opening strand when no closing hit can

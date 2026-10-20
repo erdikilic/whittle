@@ -172,6 +172,7 @@ fn integer_qs_and_qe_follow_the_window() {
     let cfg = cfg_bam2fq(None, 2, FastqTags::All);
     let mut fastq = Vec::new();
     run_bam_to_fastq(
+        &sam::Header::default(),
         [Ok(raw_record(&src))].into_iter(),
         &mut KeyedSinks::single(&mut fastq),
         None,
@@ -195,6 +196,7 @@ fn integer_qs_and_qe_follow_the_window() {
     }
     let mut fastq = Vec::new();
     run_bam_to_fastq(
+        &sam::Header::default(),
         [Ok(raw_record(&src))].into_iter(),
         &mut KeyedSinks::single(&mut fastq),
         None,
@@ -247,6 +249,7 @@ fn fixed_size_pacbio_arrays_are_not_sliced() {
     let cfg = cfg_bam2fq(None, 1, FastqTags::All);
     let mut out = Vec::new();
     run_bam_to_fastq(
+        &sam::Header::default(),
         [Ok(raw_record(&two))].into_iter(),
         &mut KeyedSinks::single(&mut out),
         None,

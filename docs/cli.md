@@ -34,7 +34,7 @@ FASTQ input in the same convention (a tab after the read name, then
 so tagged and plain reads can share a file or directory. Tagged records are
 decoded as SAM aux tags and rewritten per output segment exactly as a uBAM
 record's are ([tags.md](tags.md)), `--fastq-tags` selects the output tags, and
-barcode positions (`bi`) and `--remove-tag` apply. A field that
+barcode positions (`bi`), `--remove-tag` and `--update-moves` apply. A field that
 does not parse as a SAM tag fails the run and names the read. A header whose
 tab-delimited text is not in this form is copied verbatim.
 
@@ -102,7 +102,7 @@ whittle -i fastq_pass/barcode03/ -o barcode03.trimmed.fastq.gz --quality-trim en
 | `--quality-cutoff <PHRED>` | Phred cutoff of `--quality-trim`; required with it and rejected without it |
 | `--min-low-quality-run <BASES>` | Consecutive bases below the cutoff that split a read under `--quality-trim runs`; shorter runs stay inside their piece (default 1) |
 | `--quality-end-cutoff <PHRED>` | Trim the ends of every piece of `--quality-trim segments` or `runs` up to the first base at or above PHRED (default `--quality-cutoff`) |
-| `--update-moves` | Rewrite ONT signal tags through trimming instead of removing them (BAM-to-BAM; requires DNA or RNA model metadata in the read-group description) |
+| `--update-moves` | Rewrite ONT signal tags through trimming instead of removing them, on BAM and FASTQ output (BAM or tagged FASTQ input; requires a DNA or RNA model in the read-group description or a dorado read-group id in `RG`) |
 | `--remove-tag <TAGS>` | Remove aux tags from every output record; comma-separated and repeatable; an item is a two-character tag or a group: `kinetics` (`ip pw fi fp ri rp sa sm sx`), `mods` (`MM ML MN`), `moves` (`mv ts ns sp pi`) (BAM or tagged FASTQ input) |
 | `-a, --adapter-fasta <FILE>` | Adapter and primer FASTA (IUPAC codes accepted; `primer` or `barcode` in a header description restricts the entry to the read ends); enables adapter trimming |
 | `--adapter-preset <KITS>` | Built-in kit presets, comma-separated: `lsk114`, `rad114` (`ulk114`), `rbk114`, `nbd114`, `pcb114` (`pcs114`), `rpb114`, `mab114`, `rna004`, `pacbio`, `ont`, `all`; enables adapter trimming |

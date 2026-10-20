@@ -242,7 +242,7 @@ Formats are taken from the path extension, a stream sniff, or `--input-format`/`
 - **No FASTQ-to-BAM.** BAM-to-FASTQ is supported.
 - **`--min-length` applies after trimming**, per output segment, not to the raw read.
 - **BAM folder output requires matching read groups.** Conflicting definitions are rejected.
-- **Signal rewriting requires model direction.** `--update-moves` uses a DNA or RNA `basecall_model` in the BAM read-group description.
+- **Signal rewriting requires model direction.** `--update-moves` uses a DNA or RNA `basecall_model` in the BAM read-group description, or the model a dorado read-group id names (`<run_id>_<model>`), which is all tagged FASTQ input carries.
 - **One quality-trim method per run.** `--quality-trim` takes one method; `-H`/`-T` combine with any of them.
 
 ## Citation

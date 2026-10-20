@@ -422,37 +422,14 @@ pub(super) fn render_bam_read(
     counters: &Counters,
     mut emit: impl FnMut(KeyId, Option<Vec<u8>>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let direction = if cfg.update_moves {
-        signal_reversed(header, rec)
-    } else {
-        None
-    };
-    // The move table is indexed on the first window that needs it.
-    let moves: std::cell::OnceCell<Option<MoveIndex<'_>>> = std::cell::OnceCell::new();
+    let moves = ReadMoves::new(rec, Some(header), cfg.update_moves);
     let seq = rec.sequence().as_ref();
     render_windows(
         rec,
         cfg,
         counters,
         |window, mod_block, indexed, reason, target| {
-            let partial = window.start != 0 || window.end != seq.len();
-            if cfg.update_moves
-                && direction.is_none()
-                && partial
-                && rec.data().get(&Tag::new(b'm', b'v')).is_some()
-            {
-                anyhow::bail!(
-                    "read {}: --update-moves requires a DNA or RNA basecall_model in the @RG description",
-                    crate::io::bam::display_name(rec.name().map(AsRef::as_ref))
-                );
-            }
-            let moves = if partial {
-                moves
-                    .get_or_init(|| direction.and_then(|reverse| MoveIndex::new(rec, reverse)))
-                    .as_ref()
-            } else {
-                None
-            };
+            let moves = moves.for_window(window)?;
             let edit = window_edit(rec, window, mod_block, indexed, moves, &cfg.remove_tags);
             match (edit, reason) {
                 (None, None) if target.is_none() => emit(0, None),

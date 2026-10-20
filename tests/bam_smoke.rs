@@ -311,6 +311,75 @@ fn bam_update_moves_slices_move_table() {
     assert_eq!(ts, 16, "ts must advance past the trimmed head signal");
 }
 
+/// `--update-moves` writes the sliced move table into the FASTQ header, alike
+/// from BAM input, whose `@RG` description names the model, and from the tagged
+/// FASTQ of the same read, whose dorado read-group id names it.
+#[test]
+fn fastq_update_moves_slices_move_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = dir.path().join("mv.bam");
+    let group = "4f2a_dna_r10.4.1_e8.2_400bps_sup@v5.0.0";
+    let header: sam::Header = format!(
+        "@HD\tVN:1.6\n@RG\tID:{group}\tPL:ONT\tDS:basecall_model=dna_r10.4.1_e8.2_400bps_sup@v5.0.0\n"
+    )
+    .parse()
+    .unwrap();
+    let mut w = bam::io::Writer::new(std::fs::File::create(&in_path).unwrap());
+    w.write_header(&header).unwrap();
+    let mut r = RecordBuf::default();
+    *r.flags_mut() = Flags::UNMAPPED;
+    *r.name_mut() = Some(b"read1".into());
+    *r.sequence_mut() = b"ACGTAC".to_vec().into();
+    *r.quality_scores_mut() = vec![40; 6].into();
+    r.data_mut()
+        .insert(Tag::READ_GROUP, Value::String(group.as_bytes().into()));
+    r.data_mut().insert(
+        Tag::new(b'm', b'v'),
+        Value::Array(Array::Int8(vec![2, 1, 1, 0, 1, 1, 0, 1, 1])),
+    );
+    r.data_mut().insert(Tag::new(b't', b's'), Value::Int32(10));
+    r.data_mut().insert(Tag::new(b'n', b's'), Value::Int32(100));
+    w.write_alignment_record(&header, &r).unwrap();
+    w.try_finish().unwrap();
+
+    let run = |args: &[&str]| {
+        Command::cargo_bin("whittle")
+            .unwrap()
+            .env_remove("WHITTLE_LOG")
+            .args(["-t", "1", "--quiet"])
+            .args(args)
+            .assert()
+            .success();
+    };
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    run(&["-i", &path("mv.bam"), "-o", &path("tagged.fastq")]);
+    let crop = ["--update-moves", "--trim-front", "2"];
+    run(&[
+        &["-i", &path("mv.bam"), "-o", &path("bam.fastq.gz")][..],
+        &crop,
+    ]
+    .concat());
+    run(&[
+        &["-i", &path("tagged.fastq"), "-o", &path("fq.fastq")][..],
+        &crop,
+    ]
+    .concat());
+
+    let mut from_bam = String::new();
+    std::io::Read::read_to_string(
+        &mut flate2::read::MultiGzDecoder::new(std::fs::File::open(path("bam.fastq.gz")).unwrap()),
+        &mut from_bam,
+    )
+    .unwrap();
+    let from_fastq = std::fs::read_to_string(path("fq.fastq")).unwrap();
+    // `mv` sliced to blocks [3,8) and `ts` advanced by 3 * 2 samples, as on
+    // BAM output.
+    let expected =
+        format!("@read1\tRG:Z:{group}\tmv:B:c,2,1,1,0,1,1\tts:i:16\tns:i:100\nGTAC\n+\nIIII\n");
+    assert_eq!(from_bam, expected);
+    assert_eq!(from_fastq, expected);
+}
+
 /// A BGZF-framed BAM piped through stdin is detected as BAM rather than generic
 /// gzip and is converted through the chained probe stream.
 #[test]
@@ -1037,7 +1106,7 @@ fn signal_rewriting_requires_resolvable_model_direction() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "requires a DNA or RNA basecall_model",
+            "--update-moves requires a DNA or RNA basecall model",
         ));
 }
 

@@ -210,6 +210,7 @@ fn run_bam_to_fastq_parallel_matches_sequential_as_multiset() {
 
     let mut a = Vec::new();
     run_bam_to_fastq(
+        &sam::Header::default(),
         recs.iter().map(|r| Ok(raw_record(r))),
         &mut KeyedSinks::single(&mut a),
         None,
@@ -219,6 +220,7 @@ fn run_bam_to_fastq_parallel_matches_sequential_as_multiset() {
     .unwrap();
     let mut b = Vec::new();
     run_bam_to_fastq(
+        &sam::Header::default(),
         recs.iter().map(|r| Ok(raw_record(r))),
         &mut KeyedSinks::single(&mut b),
         None,

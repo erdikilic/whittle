@@ -255,10 +255,10 @@ pub struct Config {
     /// (`io::default_compression_level`).
     pub compression_level_explicit: bool,
     /// Whether ONT signal tags are kept consistent through trimming: the `mv`
-    /// move table is sliced and `ts`/`ns`/`sp`/`pi` are updated (BAM-to-BAM
-    /// only, see `workflow::bam`). When false, a trimmed read drops
-    /// `mv`/`ts`/`ns`, and `sp`/`pi` unless it is a crop, which keeps them
-    /// since they place the raw signal in its parent.
+    /// move table is sliced and `ts`/`ns`/`sp`/`pi` are updated on BAM and
+    /// FASTQ output (`workflow::bam::ReadMoves`). When false, a trimmed read
+    /// drops `mv`/`ts`/`ns`, and `sp`/`pi` unless it is a crop, which keeps
+    /// them since they place the raw signal in its parent.
     pub update_moves: bool,
     /// Aux tags removed from every output record (`--remove-tag`,
     /// its groups). Requires BAM or tagged FASTQ;

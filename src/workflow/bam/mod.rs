@@ -96,6 +96,8 @@ pub(crate) fn tag_filtered_bam_fastq(
         inspect_mod_block(&rec, seq_len),
         None,
         platform(&rec),
+        // The whole read is written, so no signal tag changes.
+        None,
         &cfg.fastq_tags,
         &cfg.remove_tags,
         // A read the tag filter rejects is not trimmed; its `tm` is copied.

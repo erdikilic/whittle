@@ -93,8 +93,8 @@ groups `kinetics` (`ip`, `pw`, `fi`, `fp`, `ri`, `rp`, `sa`, `sm`, `sx`),
 `mods` (`MM`, `ML`, `MN`) and `moves` (`mv`, `ts`, `ns`, `sp`, `pi`) name
 several at once. Removal runs after the rewrites in
 the table above, so the remaining tags stay in register. It applies to BAM
-output and to the tags carried into a BAM-to-FASTQ header, and requires BAM
-input. See [cli.md](cli.md#tag-removal).
+output and to the tags carried into a FASTQ header, and requires BAM or
+tagged FASTQ input. See [cli.md](cli.md#tag-removal).
 
 ## Barcode positions
 
@@ -134,9 +134,13 @@ above; the remaining rules are keyed on the tag type.
 ## ONT signal tags under `--update-moves`
 
 Signal direction comes from `basecall_model=dna...` or `basecall_model=rna...`
-in the record's `@RG` description. A record without `RG` can use a direction
-shared by every read group in the header. Rewriting a trimmed read's move table
-requires a resolvable direction; otherwise the run fails with the read name.
+in the record's `@RG` description, or else from the model a dorado read-group
+id names (`<run_id>_<model>[_<barcode>]`, such as
+`4f2a_dna_r10.4.1_e8.2_400bps_sup@v5.0.0`). Tagged FASTQ input has no header,
+so its direction comes from the id in the `RG` header field. A BAM record
+without `RG` can use a direction shared by every read group in the header.
+Rewriting a trimmed read's move table requires a resolvable direction;
+otherwise the run fails with the read name.
 RNA sequence intervals are reversed into signal order before locating move
 boundaries, since RNA basecalls and move tables have opposite directions.
 
@@ -151,7 +155,8 @@ advanced by the subread's start sample, written at millisecond precision in the
 parent's offset form (`Z`, a numeric offset, or none). A missing or unusable
 `ns`, `du`, or `st` leaves the tag unchanged.
 
-BAM-to-FASTQ always removes the signal tags on a trim. A known per-base tag
+FASTQ output carries the same rewritten or removed tags as BAM output, from
+BAM input and from tagged FASTQ input alike. A known per-base tag
 whose length does not match the sequence is left untouched and reported in a
 one-line advisory; a malformed modification block is removed from the record
 and reported the same way.

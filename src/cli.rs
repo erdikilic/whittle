@@ -237,13 +237,14 @@ struct Cli {
     quality_end_cutoff: Option<u8>,
     /// Keep the ONT move table consistent through trimming (slice mv, update
     /// ts, ns, sp, pi and the poly-A tags) for signal-aware tools such as
-    /// Remora and Clair3 v2, instead of dropping them. BAM-to-BAM only;
-    /// requires a DNA or RNA basecall_model in the read-group description.
+    /// Remora and Clair3 v2, instead of dropping them. BAM or tagged FASTQ
+    /// input; the DNA or RNA basecall model comes from the read-group
+    /// description or a dorado read-group id in RG.
     #[arg(long = "update-moves", help_heading = "Tags")]
     update_moves: bool,
     /// Remove aux tags from every output record. Comma-separated and
     /// repeatable; an item is a two-character tag or a group: kinetics (ip pw
-    /// fi fp ri rp sa sm sx), mods (MM ML MN), signal (mv ts ns sp pi). BAM or
+    /// fi fp ri rp sa sm sx), mods (MM ML MN), moves (mv ts ns sp pi). BAM or
     /// tagged FASTQ input.
     #[arg(long, value_name = "TAGS", help_heading = "Tags")]
     remove_tag: Vec<String>,
@@ -518,16 +519,13 @@ pub fn parse() -> anyhow::Result<Config> {
         }
     }
 
-    // Only an explicit `--input-format` or a known extension decides the input
-    // format here; a stream or an extensionless path is classified by `run`,
+    // Only an explicit `--input-format` or a known extension decides the
+    // formats here; a stream or an extensionless path is classified by `run`,
     // which applies the same guard once detection has run.
     let in_fmt = cfg
         .io
         .in_format
         .or_else(|| cfg.io.input.as_deref().and_then(crate::io::from_extension));
-    if let Some(fmt) = in_fmt {
-        crate::guards::guard_bam_only_flags(&cfg, fmt)?;
-    }
     let out_fmt = cfg
         .io
         .out_format

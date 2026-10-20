@@ -255,6 +255,7 @@ fn well_formed_mod_block_is_not_counted_and_gains_mn() {
     let cfg = cfg_bam2fq(None, 0, FastqTags::All);
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
+        &sam::Header::default(),
         [Ok(raw_record(&rec))].into_iter(),
         &mut KeyedSinks::single(&mut out),
         None,
@@ -310,6 +311,7 @@ fn interior_adapter_split_reconstructs_mods_per_segment() {
 
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
+        &sam::Header::default(),
         [Ok(raw_record(&rec))].into_iter(),
         &mut KeyedSinks::single(&mut out),
         None,

@@ -22,6 +22,7 @@ fn split_sets_rn_to_minus_one_without_update_moves() {
     let cfg = cfg_bam2fq(Some(QualityOp::runs(20, 1)), 0, FastqTags::All);
     let mut out = Vec::new();
     let stats = run_bam_to_fastq(
+        &sam::Header::default(),
         [Ok(raw_record(&src))].into_iter(),
         &mut KeyedSinks::single(&mut out),
         None,

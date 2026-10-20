@@ -158,8 +158,7 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
     // bytes are refused on an interactive terminal.
     guards::guard_stdout_binary(cfg, out_fmt)?;
     // Detection has classified the stream, so a piped or extensionless FASTQ
-    // reaches the same refusals `cli::parse` applies to a named one.
-    guards::guard_bam_only_flags(cfg, in_fmt)?;
+    // reaches the same refusal `cli::parse` applies to a named one.
     guards::guard_fastq_to_bam(in_fmt, out_fmt)?;
 
     tracing::debug!(
@@ -238,7 +237,6 @@ fn run_folder(dir: &Path, cfg: &mut Config, obs: &mut obs::ProgressHandle) -> an
         .out_format
         .unwrap_or_else(|| io::resolve_output(cfg.io.output.as_deref(), family_fmt));
     guards::guard_stdout_binary(cfg, out_fmt)?;
-    guards::guard_bam_only_flags(cfg, family_fmt)?;
     guards::guard_fastq_to_bam(family_fmt, out_fmt)?;
 
     // A `.gz` member is BGZF when its first block header says so. Members are
@@ -484,8 +482,7 @@ impl Session {
                 self.finish(obs, &stats, cfg)
             },
             (Format::Bam, Format::Fastq | Format::FastqGz | Format::FastqBgzf) => {
-                note_update_moves_ignored(cfg, out_fmt);
-                let (_header, records) = self.bam_reader(source, false)?;
+                let (header, records) = self.bam_reader(source, false)?;
                 let rejects = self.start_rejects(cfg, out_fmt, None)?;
                 let records = self.tag_filtered_bam(cfg, records, out_fmt);
                 let Some(records) = settle(
@@ -503,6 +500,7 @@ impl Session {
                     io::fastq::writer_to(path, out_fmt, level, parallel)
                 })?;
                 let stats = workflow::run_bam_to_fastq(
+                    &header,
                     records,
                     &mut writers,
                     io::fastq::block_level(out_fmt, level, parallel),
@@ -1134,17 +1132,6 @@ fn note_tags_ignored(cfg: &Config, in_fmt: Format, out_fmt: Format) {
             output = out_fmt.label(),
             "--fastq-tags applies only to FASTQ output from BAM or tagged FASTQ input and is \
              ignored"
-        );
-    }
-}
-
-/// Warns that `--update-moves` has no effect on BAM-to-FASTQ output, which
-/// drops the signal tags on every trim.
-fn note_update_moves_ignored(cfg: &Config, out_fmt: Format) {
-    if cfg.update_moves {
-        tracing::warn!(
-            output = out_fmt.label(),
-            "--update-moves applies only to BAM-to-BAM output and is ignored"
         );
     }
 }
