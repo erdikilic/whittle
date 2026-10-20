@@ -497,10 +497,16 @@ pub(super) fn outer_part(seq: &[u8], keep: usize, end: End) -> Vec<u8> {
     }
 }
 
+/// Fraction of the error rate allowed when a candidate is matched to the
+/// inner end of a marker-gene primer. A consensus holds a primer that it was
+/// assembled from nearly exactly, while at the full rate the inner ends of
+/// the catalog's primers match random sequence about once per kilobase.
+const MARKER_ERROR_RATE: f64 = 0.5;
+
 /// Returns the number of bases of `seq`, a candidate of `end`, that lie
 /// outboard of the inner end of a marker-gene primer it holds reading into
 /// the insert, or `None`. The primer's inner `KMER_K` bases must align
-/// within their edit budget.
+/// within their edit budget at `MARKER_ERROR_RATE` of `error_rate`.
 pub(super) fn marker_primer_end(seq: &[u8], end: End, error_rate: f64) -> Option<usize> {
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     let seq = seq.to_ascii_uppercase();
@@ -515,7 +521,7 @@ pub(super) fn marker_primer_end(seq: &[u8], end: End, error_rate: f64) -> Option
                 &mut searcher,
                 &pattern,
                 &seq,
-                edit_budget(error_rate, KMER_K),
+                edit_budget(MARKER_ERROR_RATE * error_rate, KMER_K),
             )
             .into_iter()
             .min_by_key(|hit| hit.cost)

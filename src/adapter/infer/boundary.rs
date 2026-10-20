@@ -17,7 +17,8 @@ pub(super) struct PrimerBoundary {
 /// conserved insert itself is excluded from the inferred trimming sequence.
 /// `windows` read outward from the `end` boundary, reversed for the 3' end.
 /// Read starts that open alternative layers behind the reconstructed sequence
-/// (`opens_layers`) mark no boundary.
+/// (`opens_layers`) mark no boundary, and neither do read starts outward of
+/// them, which lie in that sequence.
 pub(super) fn contrast_boundary(
     consensus: &[u8],
     windows: &[&[u8]],
@@ -71,7 +72,13 @@ pub(super) fn contrast_boundary(
     }
     positions.sort_by_key(|&(pos, count)| (std::cmp::Reverse(count), pos));
     let mut tried = std::collections::HashSet::new();
+    // Position of the innermost read start that opens layers. The read
+    // starts outward of it lie in the sequence in front of those layers.
+    let mut opened: Option<usize> = None;
     for (pos, _) in positions {
+        if opened.is_some_and(|at| pos < at) {
+            continue;
+        }
         let anchor = &seq[pos..pos + KMER_K];
         if tried.len() >= MAX_BOUNDARY_ANCHORS || !tried.insert(anchor.to_vec()) {
             continue;
@@ -140,6 +147,7 @@ pub(super) fn contrast_boundary(
                 outer.clone()
             };
             tracing::debug!(sequence = %String::from_utf8_lossy(&outer), "Read starts open layers behind a sequence");
+            opened = Some(opened.map_or(pos, |at| at.max(pos)));
             continue;
         }
         if reverse {
@@ -279,6 +287,11 @@ pub(super) const RAMP: usize = 4;
 /// sequencing-error dip spans at most `KMER_K` k-mers; a barcode spans more.
 pub(super) const RUN_PERSIST: usize = 24;
 
+/// K-mers over which each continuation of a division keeps its support. A
+/// branch opened by one base, such as a degenerate primer base, rejoins the
+/// path after `KMER_K`.
+pub(super) const DIVISION_PERSIST: usize = KMER_K + 1;
+
 /// Returns the base span `[lo, hi)` of the outermost support run of a
 /// consensus and whether the run ends at a rise in support. `weights` holds
 /// the support of each k-mer by start base. Scanning inward from the read
@@ -368,35 +381,35 @@ pub(super) fn supported_span(weights: &[u32], end: End) -> (usize, usize, bool) 
     (lo, hi, rises)
 }
 
-/// Returns the inner edge of the shared part of a consensus whose path
+/// Returns the inner edges of the shared parts of a consensus whose path
 /// divides into two supported continuations, as a shared adapter divides
 /// into the strand-specific primers behind it, with the first `KMER_K`
-/// bases of each continuation; `None` without a division. The edge is the
+/// bases of each continuation, inward from the read end. The edge is the
 /// end of the last shared k-mer for the 5' end and its start for the 3' end.
 ///
-/// Scanning inward over the k-mers of `[lo, hi)`, a k-mer divides when it
-/// lies at the support level of the path (within `RUN_JUMP` of the peak of
-/// the span, and in at least `1 / RUN_JUMP` of the `windows` counted), the
-/// path's own successor and another successor each hold at least
-/// `1 / RUN_JUMP` of its support and together at most twice it, and both
-/// open paths that keep their support for `RUN_PERSIST` k-mers, the other
-/// one off the consensus. A degenerate primer base opens a branch that
-/// rejoins the consensus within `KMER_K` k-mers and does not divide it. The
-/// shared part holds at least the k-mer that divides, so it is longer than
-/// `MIN_PATTERN_LEN`. `weights` holds the window counts of k-mers
-/// (`kmer_counts`) over windows that reach past the assembly windows, so a
-/// division near the inner end of the assembly windows still shows its
-/// continuations.
+/// Scanning inward over the k-mers of `[lo, hi)`, the innermost included,
+/// whose continuations then lie past the span, a k-mer divides when it
+/// lies within `RUN_JUMP` of the peak of the span, the path's own successor
+/// and another successor each hold at least `1 / RUN_JUMP` of its support
+/// and together at most twice it, and both open paths that keep their
+/// support for `DIVISION_PERSIST` k-mers, the other one off the consensus.
+/// A degenerate primer base opens a branch that rejoins the consensus within
+/// `KMER_K` k-mers and does not divide it. The shared part holds at least
+/// the k-mer that divides, so it is longer than `MIN_PATTERN_LEN`. `weights`
+/// holds the window counts of k-mers (`kmer_counts`) over windows that reach
+/// past the assembly windows, so a division near the inner end of the
+/// assembly windows still shows its continuations. What the path divides
+/// into is read from the reads (`division_kind`).
 pub(super) fn division_point(
     cons: &[u8],
     weights: &KmerMap<(u32, usize)>,
-    windows: usize,
     lo: usize,
     hi: usize,
     end: End,
-) -> Option<(usize, [Vec<u8>; 2])> {
+) -> Vec<(usize, [Vec<u8>; 2])> {
+    let mut divisions = Vec::new();
     if hi < lo + KMER_K + 1 {
-        return None;
+        return divisions;
     }
     let codes: Vec<u64> = cons
         .windows(KMER_K)
@@ -409,10 +422,13 @@ pub(super) fn division_point(
         End::Five => ((code << 2) | base) & mask,
         End::Three => (code >> 2) | (base << (2 * (KMER_K - 1))),
     };
-    // Starts of the k-mers of the span, inward from the read end.
+    // Starts of the k-mers of the span, inward from the read end, that the
+    // path continues past.
     let starts: Vec<usize> = match end {
-        End::Five => (lo..hi - KMER_K).collect(),
-        End::Three => (lo + 1..=hi - KMER_K).rev().collect(),
+        End::Five => (lo..=hi - KMER_K)
+            .filter(|&j| j + 1 < codes.len())
+            .collect(),
+        End::Three => (lo.max(1)..=hi - KMER_K).rev().collect(),
     };
     let peak = starts.iter().map(|&j| weight(codes[j])).max().unwrap_or(0);
     for j in starts {
@@ -422,19 +438,18 @@ pub(super) fn division_point(
             End::Three => codes[j - 1],
         };
         if here < MIN_SUPPORT_WINDOWS as u32
-            || (here as usize).saturating_mul(RUN_JUMP as usize) < windows
             || here.saturating_mul(RUN_JUMP) < peak
             || weight(next).saturating_mul(RUN_JUMP) < here
         {
             continue;
         }
         // A continuation persists when its heaviest path keeps at least half
-        // of its opening support for `RUN_PERSIST` k-mers; a barcode panel
-        // behind a flank spreads its support over the members instead.
+        // of its opening support for `DIVISION_PERSIST` k-mers; a barcode
+        // panel behind a flank spreads its support over the members instead.
         let persists = |start: u64, off_path: bool| {
             let floor = weight(start).div_ceil(2).max(MIN_SUPPORT_WINDOWS as u32);
             let mut code = start;
-            (0..RUN_PERSIST).all(|_| {
+            (0..DIVISION_PERSIST).all(|_| {
                 let kept = weight(code) >= floor && !(off_path && on_path.contains(&code));
                 code = (0..4)
                     .map(|base| step(code, base))
@@ -468,10 +483,112 @@ pub(super) fn division_point(
                 End::Five => j + KMER_K,
                 End::Three => j,
             };
-            return Some((edge, [own(next), own(alt)]));
+            divisions.push((edge, [own(next), own(alt)]));
         }
     }
-    None
+    divisions
+}
+
+/// What a path divides into at a division (`division_point`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Division {
+    /// The primers of the two strands: the shared layer ends at the
+    /// division, and each continuation opens a strand-specific layer.
+    Strands,
+    /// The starts of templates behind one primer: the insert begins at the
+    /// division.
+    Templates,
+}
+
+/// Reads what a path divides into from where each continuation recurs
+/// reverse complemented at the other read end. The continuations open with
+/// `words` behind the k-mer `shared`; `windows` are the windows of the end
+/// assembled and `partners` the physical windows of the other end of the
+/// same reads, empty where a read has none.
+///
+/// The primers of the two strands flank the same molecules, so the mirror
+/// of each is read at the other end of the reads of the other
+/// (`Division::Strands`). A template start behind one primer is read from
+/// its other strand behind the other primer, at the other end of reads
+/// that hold neither continuation (`Division::Templates`). A barcode read
+/// at both ends recurs in its own reads and is neither. The reads holding
+/// each mirror, at least `MIN_SUPPORT_WINDOWS` and `1 /
+/// MIRROR_SUPPORT_DIVISOR` of the partners, must hold one kind
+/// `RUN_JUMP`-fold more often than the others. The words must differ beyond
+/// their edit budget, as the variants of one sequence do not, and the
+/// continuations must hold at least `1 - 1 / RUN_JUMP` of the windows
+/// holding `shared`: the two orientations of one of several templates
+/// behind a primer at both ends of a molecule recur in each other's reads,
+/// but hold only that template's share. The primers of the two strands
+/// open the layers of most reads and continue in at least `1 / RUN_JUMP`
+/// of `windows`, which a path specific to one barcode does not, while a
+/// shared layer that only some reads keep whole, such as a rear adapter,
+/// does.
+pub(super) fn division_kind(
+    shared: &[u8],
+    words: &[Vec<u8>; 2],
+    windows: &[&[u8]],
+    partners: &[&[u8]],
+    error_rate: f64,
+) -> Option<Division> {
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
+    let edits = edit_budget(error_rate, KMER_K);
+    if !hits(&mut searcher, &words[0], &words[1], edits).is_empty() {
+        return None;
+    }
+    let jump = RUN_JUMP as usize;
+    let at_shared = windows_with(&mut searcher, shared, windows, edits);
+    let held = [
+        windows_with(&mut searcher, &words[0], windows, edits),
+        windows_with(&mut searcher, &words[1], windows, edits),
+    ];
+    let holding = at_shared.iter().filter(|&&at| at).count();
+    let continued = (0..windows.len())
+        .filter(|&j| at_shared[j] && (held[0][j] || held[1][j]))
+        .count();
+    if continued * jump < holding * (jump - 1) {
+        return None;
+    }
+    let paired: Vec<usize> = (0..partners.len())
+        .filter(|&j| !partners[j].is_empty())
+        .collect();
+    let texts: Vec<&[u8]> = paired.iter().map(|&j| partners[j]).collect();
+    let floor = MIN_SUPPORT_WINDOWS.max(texts.len() / MIRROR_SUPPORT_DIVISOR);
+    let mirror_edits = edit_budget(MIRROR_ERROR_RATE * error_rate, KMER_K);
+    let mut kinds = [None; 2];
+    for (index, word) in words.iter().enumerate() {
+        let mirror = crate::adapter::reverse_complement(word);
+        // Reads holding the mirror by what their own end holds: this
+        // continuation, the other, neither, or both.
+        let mirrored = windows_with(&mut searcher, &mirror, &texts, mirror_edits);
+        let mut tally = [0usize; 4];
+        for (&j, mirrored) in paired.iter().zip(mirrored) {
+            if mirrored {
+                tally[match (held[index][j], held[1 - index][j]) {
+                    (true, false) => 0,
+                    (false, true) => 1,
+                    (false, false) => 2,
+                    (true, true) => 3,
+                }] += 1;
+            }
+        }
+        let [own, other, neither, both] = tally;
+        if own + both + other + neither < floor {
+            return None;
+        }
+        kinds[index] =
+            if other >= jump * (own + both + neither) && continued * jump >= windows.len() {
+                Some(Division::Strands)
+            } else if neither >= jump * (own + both + other) {
+                Some(Division::Templates)
+            } else {
+                None
+            };
+    }
+    match kinds {
+        [Some(first), Some(second)] if first == second => Some(first),
+        _ => None,
+    }
 }
 
 /// Returns the length of the homopolymer run that ends `seq` on its

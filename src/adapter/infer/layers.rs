@@ -415,13 +415,20 @@ pub(super) fn symmetry_cut(
     (outer, insert.to_vec())
 }
 
-/// Removes from each candidate the prefix and suffix that occur in a
+/// Removes from each candidate of `end` the prefix and suffix that occur in a
 /// better supported candidate of another family in the same layer and end.
 /// Sequence shared with a better supported neighbour, such as the flank
 /// around a barcode, belongs to that neighbour's layer; a fragment of the
-/// candidate itself is never stronger. Candidates left shorter than
-/// `MIN_PATTERN_LEN` are dropped.
-pub(super) fn strip_shared_ends(candidates: &mut Vec<Candidate>, error_rate: f64) {
+/// candidate itself is never stronger. A candidate that holds an opening
+/// k-mer of a strand-specific layer in `strand` keeps its insert-facing
+/// side, where a neighbour holds more of the same primer rather than a
+/// shared flank. Candidates left shorter than `MIN_PATTERN_LEN` are dropped.
+pub(super) fn strip_shared_ends(
+    candidates: &mut Vec<Candidate>,
+    end: End,
+    strand: &[Vec<u8>],
+    error_rate: f64,
+) {
     // Longest prefix of `a` that occurs anywhere in `b`.
     let shared_prefix = |a: &[u8], b: &[u8]| {
         (SHARED_END_MIN..=a.len())
@@ -431,6 +438,7 @@ pub(super) fn strip_shared_ends(candidates: &mut Vec<Candidate>, error_rate: f64
     };
     let originals: Vec<(Vec<u8>, f64, bool)> =
         candidates.iter().map(|c| (c.0.clone(), c.1, c.2)).collect();
+    let mut searcher = crate::adapter::search::new_searcher_fwd();
     for (i, candidate) in candidates.iter_mut().enumerate() {
         let (seq, support, _) = &originals[i];
         let reversed: Vec<u8> = seq.iter().rev().copied().collect();
@@ -451,13 +459,28 @@ pub(super) fn strip_shared_ends(candidates: &mut Vec<Candidate>, error_rate: f64
             let other_reversed: Vec<u8> = other.iter().rev().copied().collect();
             suffix = suffix.max(shared_prefix(&reversed, &other_reversed));
         }
+        let primer = strand.iter().any(|word| {
+            !hits(
+                &mut searcher,
+                word,
+                seq,
+                edit_budget(error_rate, word.len()),
+            )
+            .is_empty()
+        });
+        if primer {
+            match end {
+                End::Five => suffix = 0,
+                End::Three => prefix = 0,
+            }
+        }
         let start = if prefix >= SHARED_END_MIN { prefix } else { 0 };
-        let end = if suffix >= SHARED_END_MIN {
+        let stop = if suffix >= SHARED_END_MIN {
             seq.len().saturating_sub(suffix).max(start)
         } else {
             seq.len()
         };
-        candidate.0 = seq[start..end].to_vec();
+        candidate.0 = seq[start..stop].to_vec();
     }
     candidates.retain(|c| c.0.len() >= MIN_PATTERN_LEN);
 }

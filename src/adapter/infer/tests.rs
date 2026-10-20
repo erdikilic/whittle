@@ -1327,14 +1327,14 @@ fn division_needs_continuations_that_do_not_rejoin() {
     let mut cons = shared.clone();
     cons.extend_from_slice(&left);
     let counts = kmer_counts(&divided, KMER_K);
-    let edge = division_point(&cons, &counts, divided.len(), 0, cons.len(), End::Five);
-    assert_eq!(edge.map(|(edge, _)| edge), Some(shared.len()));
+    let edge = division_point(&cons, &counts, 0, cons.len(), End::Five);
+    assert_eq!(edge.first().map(|(edge, _)| *edge), Some(shared.len()));
 
     let mut cons = shared.clone();
     cons.push(b'A');
     cons.extend_from_slice(&tail);
     let counts = kmer_counts(&bubbled, KMER_K);
-    assert!(division_point(&cons, &counts, bubbled.len(), 0, cons.len(), End::Five).is_none());
+    assert!(division_point(&cons, &counts, 0, cons.len(), End::Five).is_empty());
 }
 
 /// The homopolymer run on the insert-facing side of a sequence is measured
@@ -2036,6 +2036,15 @@ fn a_primer_behind_a_one_sided_adapter_is_kept() {
     );
 }
 
+/// Returns whether `seq`, on either strand, holds every base of `primer` as
+/// one of the bases of the IUPAC code at its position.
+fn holds_whole(seq: &[u8], primer: &[u8]) -> bool {
+    [seq.to_vec(), rc(seq)].iter().any(|s| {
+        s.windows(primer.len())
+            .any(|window| iupac_compatible(primer, window))
+    })
+}
+
 /// Ligated 16S amplicons of six templates, read from either strand: the Y
 /// adapter's top strand, a forward or a reverse primer, the template, the
 /// other primer and, in seven reads of ten, part of the rear adapter. Reads
@@ -2070,10 +2079,7 @@ fn ligated_amplicon_primers_are_kept_whole() {
     let found = infer_owned(&reads);
     for primer in [&forward, &reverse] {
         assert!(
-            found.iter().any(|d| {
-                longest_common_substring(primer, &d.adapter.seq) >= 20
-                    || longest_common_substring(&rc(primer), &d.adapter.seq) >= 20
-            }),
+            found.iter().any(|d| holds_whole(&d.adapter.seq, primer)),
             "{:?} is not recovered whole: {:?}",
             String::from_utf8_lossy(primer),
             found
@@ -2212,5 +2218,82 @@ fn strand_primers_are_kept_when_reads_lack_the_rear_adapter() {
             "read {i}: {:?}",
             cfg.adapters
         );
+    }
+}
+
+/// Reads, the forward and the reverse primer, and the templates of an
+/// amplicon library.
+type AmpliconReads = (Vec<Vec<u8>>, Vec<u8>, Vec<u8>, Vec<Vec<u8>>);
+
+/// Reads with 2.5% errors of amplicons of six templates of 300 to 600 bases
+/// whose two primers are outside the catalog, read from either strand:
+/// `front`, the forward or the reverse primer, the template, the other
+/// primer reverse complemented and, with `rear`, part of `rear` in seven
+/// reads of ten.
+fn custom_primer_reads(front: &[u8], rear: Option<&[u8]>) -> AmpliconReads {
+    let forward = random_bases(81_001, 20);
+    let reverse = random_bases(81_002, 20);
+    let mut state = 81_010u64;
+    let templates: Vec<Vec<u8>> = (0..6)
+        .map(|t| random_bases(81_100 + t, 300 + (draw(&mut state) % 301) as usize))
+        .collect();
+    let reads = (0..900u64)
+        .map(|i| {
+            let template = &templates[(i % 6) as usize];
+            let (outer, body, inner) = if (i / 6) % 2 == 0 {
+                (&forward, template.clone(), rc(&reverse))
+            } else {
+                (&reverse, rc(template), rc(&forward))
+            };
+            let kept = match rear {
+                Some(rear) if i % 10 < 7 => &rear[..8 + (i as usize * 7) % (rear.len() - 7)],
+                _ => &[][..],
+            };
+            let read = [front, outer, &body, &inner, kept].concat();
+            with_errors(&read, 81_200 + i, 25)
+        })
+        .collect();
+    (reads, forward, reverse, templates)
+}
+
+/// Amplicons of two primers outside the catalog, behind a rapid adapter
+/// that only the 5' end carries or behind a Y adapter: each primer is kept
+/// whole, and no sequence from the starts of the templates is learned.
+#[test]
+fn custom_primers_behind_an_adapter_are_kept_whole() {
+    let rapid = random_bases(81_301, 44);
+    let top = b"TTTTTTTTCCTGTACTTCGTTCAGTTACGTATTGCT".to_vec();
+    let rear = b"AGCAATACGTAACTGAACGAAGTACAGG".to_vec();
+    for (front, rear) in [(rapid, None), (top, Some(rear))] {
+        let (reads, forward, reverse, templates) = custom_primer_reads(&front, rear.as_deref());
+        let found: Vec<Vec<u8>> = infer_owned(&reads)
+            .into_iter()
+            .map(|d| d.adapter.seq)
+            .collect();
+        let shown: Vec<String> = found
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect();
+        for primer in [&forward, &reverse] {
+            assert!(
+                found.iter().any(|s| holds_whole(s, primer)),
+                "{:?} is not recovered whole: {shown:?}",
+                String::from_utf8_lossy(primer)
+            );
+        }
+        for start in templates
+            .iter()
+            .flat_map(|t| [t[..100].to_vec(), rc(t)[..100].to_vec()])
+        {
+            for word in start.windows(KMER_K) {
+                assert!(
+                    !found
+                        .iter()
+                        .any(|s| contains(s, word) || contains(&rc(s), word)),
+                    "template sequence {:?} is learned: {shown:?}",
+                    String::from_utf8_lossy(word)
+                );
+            }
+        }
     }
 }

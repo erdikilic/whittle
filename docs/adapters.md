@@ -258,15 +258,38 @@ the next layer is assembled from the unexplained sequence, so an adapter
 remnant, a barcode flank and the barcodes of a rapid barcoding library are
 found in turn. A layer ends where the support of adjacent k-mers changes
 fourfold, such as where a barcode joins its shared flank, and the sequence
-past that point belongs to the next layer. A layer also ends where its path
-divides into two continuations that each keep at least a quarter of its
-support for 24 k-mers, when each continuation recurs reverse complemented at
-the other read end: a cDNA adapter core shared by both strands divides into
-the strand-switching primer on one strand and the oligo(dT) primer on the
-other, and each primer is found at the other end of the opposite strand. A
-degenerate primer base opens a branch that rejoins the path within 16
-k-mers, and variants of a conserved insert do not recur at the other end, so
-neither divides a layer. A homopolymer run of at least 8 bases at the inner
+past that point belongs to the next layer. A path divides where two
+continuations open, each with at least a quarter of the support of the
+k-mer before them and each keeping half its opening support for 17 k-mers,
+the second off the path. The reads tell what it divides into, from where
+the reverse complement of the first 16 bases of each continuation is found
+at the other read end:
+
+- The primers of the two strands flank the same molecules, so each primer is
+  found at the other end of the reads of the other. The layer ends at the
+  division, and each primer is a layer of its own behind it: a cDNA adapter
+  core divides into the strand-switching and the oligo(dT) primers, and a
+  rapid or ligation adapter in front of an amplicon divides into its forward
+  and reverse primers, however short. The two primers continue in at least
+  a quarter of the windows, which a path specific to one barcode does not.
+- The starts of the templates behind one primer are each read from their
+  other strand behind the other primer, at the other end of reads that hold
+  neither continuation. The insert begins at the division, as at a column
+  that follows the template.
+
+Each reverse complement must be found in at least 20 reads and one in 8 of
+the reads with an other end, and the reads holding it must hold one kind
+fourfold more often than the others; a barcode read at both ends is found in
+its own reads and divides neither way. The two continuations must hold at
+least three quarters of the reads holding the k-mer before them, as the two
+orientations of one of several templates behind a single primer do not, and
+their first 16 bases must differ beyond the error budget: a degenerate
+primer base opens a branch that rejoins the path within 16 k-mers, and
+variants of a conserved insert are one sequence, so neither divides a
+layer. A path divides at the first such point inward from the read end. A
+candidate that reaches past the shared layer of a division into strand
+primers, in most of the reads holding both, is left to the next layer, which
+assembles the primers whole behind it. A homopolymer run of at least 8 bases at the inner
 end of a candidate, such as the poly(A) tail behind an oligo(dT) primer,
 varies in length between reads and is left to the insert. A variable layer is resolved from
 the reads rather than the graph: when the best supported candidate lies at
@@ -325,7 +348,8 @@ dropped when that column lies within its first 11 bases or when one of the 16
 columns outboard of it follows the template: the candidate then lies in the
 insert. A candidate whose first column behind it follows the template, or that
 holds the inner end of a catalog marker primer (see [Marker-gene
-primers](#marker-gene-primers)), ends at the insert boundary: when accepted it
+primers](#marker-gene-primers)), its last 16 bases within half the error
+budget, ends at the insert boundary: when accepted it
 closes its read end, as a primer reconstructed from unprimed read starts does,
 and its reverse complement marks the insert boundary at the other read end,
 where the far primer of the molecule is read. A candidate that holds such a
@@ -337,9 +361,10 @@ ends inside such a primer in most of the reads holding both, as an outer layer
 assembled together with the first bases of the primer does, is continued to the
 primer's inner end. Where a candidate that follows the template from its outer
 bases lies within 11 bases of the boundary, no other layer is taken at that
-end. Behind the sequences of a preset or FASTA, the reads they trimmed are
-tested column by column behind the boundary, as a whole and as two families
-split by their most frequent far k-mer, as the two ends of a gene read from the
+end, except one that divides into strand primers or opens the layer of one.
+Behind the sequences of a preset or FASTA, the reads they trimmed are tested
+column by column behind the boundary, as a whole and as two families split
+by their most frequent far k-mer, as the two ends of a gene read from the
 two strands are; when the template begins within 11 bases of the boundary,
 discovery adds no layer at that end.
 
@@ -396,10 +421,11 @@ carries, such as a rapid adapter at the 5' end, deepens every layer behind it
 at that end, so a flank that both ends carry behind it lies deeper at the 5'
 end than its mirror, but at the same depth behind the explained layers. A
 mirror at the very end of the far reads, with no explained layer outboard of
-it, is judged from the physical end only. A layer that divides
-into strand primers, and the primer layers behind it, are exempt: their mirrors
-lie at a depth set by how much outer adapter each end keeps, which differs
-between the 5' and 3' ends of nanopore reads. A candidate that ends where the
+it, is judged from the physical end only. A layer that divides into strand
+primers, and the primer layers behind it at either end, reverse complemented
+at the other, are exempt: their mirrors lie at a depth set by how much outer
+adapter each end keeps, which differs between the 5' and 3' ends of nanopore
+reads. A candidate that ends where the
 insert begins, behind a template start, a marker-gene primer or the primers of
 unprimed reads, is exempt for the same reason, as a primer behind a rapid
 adapter that only the 5' end carries is. A candidate that occupies the same
@@ -439,12 +465,15 @@ that lack a primer. Discovery aligns the upstream sequence in primer-bearing
 reads, reconstructs supported IUPAC variants, and excludes the conserved insert.
 Reads that lack only an outer adapter start at the primer behind it as well,
 so a boundary that such read starts alone support yields to a template that
-begins further inward in the same reads. Behind an adapter followed by
-alternative layers, such as the primers of the two strands of a cDNA
+begins further inward in the same reads, and read starts with a primer of a
+division into strand primers at or behind them, as at the 3' ends that keep
+part of the rear adapter, mark no insert boundary. Behind an adapter followed
+by alternative layers, such as the primers of the two strands of a cDNA
 library, those reads start at each of them: when the reads holding the
 reconstructed sequence continue with two recurrent read starts that are not
 one sequence within the error rate, each in at least 20 reads, the starts
-open layers rather than the insert and mark no boundary.
+open layers rather than the insert and mark no boundary. Read starts outward
+of them lie in the adapter and mark none either.
 Distinct primer families sharing an insert boundary are considered separately.
 Candidates overlapping a validated insert start, or supported mainly on the
 insert-facing side of a reconstructed primer, are excluded. Candidates whose

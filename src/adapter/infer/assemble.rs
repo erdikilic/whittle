@@ -7,7 +7,8 @@ use super::*;
 /// insert boundary was found, the summed original k-mer support of the
 /// retained span, whether the assembly window could not bound the
 /// insert-facing side, and the opening k-mers of the strand-specific layers
-/// it divides into, empty unless it ends at a division (`division_point`).
+/// it divides into, empty unless it ends at a division into strand primers
+/// (`division_kind`).
 pub(super) type Candidate = (Vec<u8>, f64, bool, u64, bool, Vec<Vec<u8>>);
 
 /// Returns whether the k-mer after a candidate occurs in `RUN_JUMP` times as
@@ -26,20 +27,58 @@ pub(super) fn jumps_past(
         <= u64::from(continuation) * recounted as u64
 }
 
-/// Assembles one end's candidates and validates support and insert boundaries.
-/// `contrast` enables primer reconstruction from recurrent unprimed window
-/// starts, which describe an insert boundary only in the first discovery
-/// layer. `opposite` holds physical windows of the other read end, where
-/// the continuations of a division into strand-specific layers recur.
-pub(super) fn assemble(
-    windows: &[&[u8]],
-    opposite: &[&[u8]],
+/// A path through the k-mer graph of one read end, with the span of its
+/// outermost support run (`supported_span`) and the outermost division that
+/// the reads tell the kind of, which ends it.
+pub(super) struct GraphPath {
+    cons: Vec<u8>,
+    /// Original window counts of the k-mers of `cons`.
+    weights: Vec<u32>,
+    lo: usize,
+    hi: usize,
+    rises: bool,
+    /// The edge, the kind and the opening k-mers of the continuations of a
+    /// division (`division_point`, `division_kind`).
+    division: Option<(usize, Division, [Vec<u8>; 2])>,
+}
+
+/// The k-mer graph of one read end and one layer: its paths, and the
+/// validation windows sampled across the sample with their partners.
+pub(super) struct EndGraph<'a> {
+    /// Windows of the layer at this end.
+    windows: usize,
+    /// Exact k-mer support of the retained graph nodes.
+    original_weights: std::collections::HashMap<u64, u32>,
+    recount: Vec<&'a [u8]>,
+    paths: Vec<GraphPath>,
+}
+
+impl EndGraph<'_> {
+    /// Returns the opening k-mers of the strand-specific layers that the
+    /// paths divide into, as this end reads them.
+    pub(super) fn strand_words(&self) -> Vec<Vec<u8>> {
+        self.paths
+            .iter()
+            .filter_map(|path| path.division.as_ref())
+            .filter(|(_, kind, _)| *kind == Division::Strands)
+            .flat_map(|(_, _, words)| words.iter().cloned())
+            .collect()
+    }
+}
+
+/// Builds the k-mer graph of one end's `windows` and divides its paths.
+/// `partners` holds, for each of `windows`, the physical window of the
+/// other end of the same read, empty when the read has none; the
+/// continuations of a division recur there (`division_kind`). Returns
+/// `None` without a supported k-mer.
+pub(super) fn end_graph<'a>(
+    windows: &[&'a [u8]],
+    partners: &[&'a [u8]],
     base: &AdapterConfig,
     end: End,
-    contrast: bool,
-) -> Vec<Candidate> {
+) -> Option<EndGraph<'a>> {
     if windows.len() < 3 {
-        return Vec::new();
+        return None;
     }
     let assembly_windows: Vec<&[u8]> = windows
         .iter()
@@ -53,16 +92,88 @@ pub(super) fn assemble(
         .first()
         .is_none_or(|&(_, count)| count < MIN_SUPPORT_WINDOWS as u32)
     {
-        return Vec::new();
+        return None;
     }
-    // Validation uses windows distributed across the complete sample.
+    // Validation uses windows distributed across the complete sample. The
+    // partners are sampled with the same stride, so they stay paired.
     let recount = stride_sample(windows, RECOUNT_WINDOWS);
+    let partners = stride_sample(partners, RECOUNT_WINDOWS);
+    let original_weights: std::collections::HashMap<u64, u32> = exact.iter().copied().collect();
+    let mut deep = None;
+    let mut paths = Vec::new();
+    for cons in peel_paths(exact, KMER_K, end) {
+        tracing::debug!(sequence = %String::from_utf8_lossy(&cons), "Assembled end candidate");
+        // Original weights show the support of every k-mer of the path,
+        // including k-mers earlier peels removed from the graph.
+        let weights: Vec<u32> = cons
+            .windows(KMER_K)
+            .map(|w| {
+                encode_kmer(w)
+                    .and_then(|code| original_weights.get(&code).copied())
+                    .unwrap_or(0)
+            })
+            .collect();
+        let (lo, hi, rises) = supported_span(&weights, end);
+        // A shared layer ends where its path divides into the primers of the
+        // two strands, a boundary like a rise in support, and the insert
+        // begins where it divides into the starts of templates. The other
+        // read end tells the two apart (`division_kind`); variants of a
+        // conserved insert divide into neither.
+        let deep = deep.get_or_insert_with(|| kmer_counts(&recount, KMER_K));
+        let division = division_point(&cons, deep, lo, hi, end)
+            .into_iter()
+            .find_map(|(edge, continuations)| {
+                let shared = match end {
+                    End::Five => &cons[edge - KMER_K..edge],
+                    End::Three => &cons[edge..edge + KMER_K],
+                };
+                let kind =
+                    division_kind(shared, &continuations, &recount, &partners, base.error_rate)?;
+                tracing::debug!(sequence = %String::from_utf8_lossy(&cons), edge, ?kind, "Path divides");
+                Some((edge, kind, continuations))
+            });
+        paths.push(GraphPath {
+            cons,
+            weights,
+            lo,
+            hi,
+            rises,
+            division,
+        });
+    }
+    Some(EndGraph {
+        windows: windows.len(),
+        original_weights,
+        recount,
+        paths,
+    })
+}
+
+/// Validates support and insert boundaries of the candidates of one end's
+/// `graph`. `contrast` enables primer reconstruction from recurrent unprimed
+/// window starts, which describe an insert boundary only in the first
+/// discovery layer. `strand` holds the opening k-mers of the strand-specific
+/// layers of the divisions of this and earlier layers at either end, as
+/// this end reads them.
+pub(super) fn assemble(
+    graph: Option<EndGraph<'_>>,
+    base: &AdapterConfig,
+    end: End,
+    contrast: bool,
+    strand: &[Vec<u8>],
+) -> Vec<Candidate> {
+    let Some(EndGraph {
+        windows,
+        original_weights,
+        recount,
+        paths,
+    }) = graph
+    else {
+        return Vec::new();
+    };
     let n_recount = recount.len();
     let composition = base_composition(&recount);
     let following = FollowingBases::new(&recount, end);
-
-    let original_weights: std::collections::HashMap<u64, u32> = exact.iter().copied().collect();
-    let weighted = exact;
     let mut out = Vec::new();
     let mut insert_starts = Vec::new();
     let mut primer_edges = vec![None; recount.len()];
@@ -82,51 +193,34 @@ pub(super) fn assemble(
     } else {
         reversed.iter().map(Vec::as_slice).collect()
     };
-    let mut deep = None;
     // Candidates whose insert boundary only unprimed read starts support.
     let mut contrast_only: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     // Whether a candidate at the boundary follows the template, so that the
     // insert begins there for the reads holding it.
     let mut at_template = false;
-    for cons in peel_paths(weighted, KMER_K, end) {
-        tracing::debug!(sequence = %String::from_utf8_lossy(&cons), "Assembled end candidate");
-        // Original weights show the support of every k-mer of the path,
-        // including k-mers earlier peels removed from the graph.
-        let weights: Vec<u32> = cons
-            .windows(KMER_K)
-            .map(|w| {
-                encode_kmer(w)
-                    .and_then(|code| original_weights.get(&code).copied())
-                    .unwrap_or(0)
-            })
-            .collect();
-        let (mut lo, mut hi, mut rises) = supported_span(&weights, end);
-        // A shared layer ends where its path divides into the layers behind
-        // it, a boundary like a rise in support. The division holds when both
-        // continuations recur reverse complemented at the other read end, as
-        // the primers of the two strands do; variants of a conserved insert
-        // do not.
-        let deep = deep.get_or_insert_with(|| kmer_counts(&recount, KMER_K));
+    for GraphPath {
+        cons,
+        weights,
+        mut lo,
+        mut hi,
+        mut rises,
+        division,
+    } in paths
+    {
         let mut divided = Vec::new();
-        if let Some((edge, continuations)) = division_point(&cons, deep, recount.len(), lo, hi, end)
-            && continuations.iter().all(|word| {
-                let mirrored = windows_containing(
-                    &mut primer_searcher,
-                    &crate::adapter::reverse_complement(word),
-                    opposite,
-                    edit_budget(MIRROR_ERROR_RATE * base.error_rate, KMER_K),
-                ) as usize;
-                mirrored >= MIN_SUPPORT_WINDOWS
-                    && mirrored * MIRROR_SUPPORT_DIVISOR >= opposite.len()
-            })
-        {
-            tracing::debug!(sequence = %String::from_utf8_lossy(&cons), edge, "Path divides");
+        let mut into_templates = false;
+        if let Some((edge, kind, continuations)) = division {
             match end {
                 End::Five => hi = edge,
                 End::Three => lo = edge,
             }
-            rises = true;
-            divided = continuations.to_vec();
+            match kind {
+                Division::Strands => {
+                    rises = true;
+                    divided = continuations.to_vec();
+                },
+                Division::Templates => into_templates = true,
+            }
         }
         // A homopolymer run at the inner end, such as the poly(A) tail of a
         // transcript behind a cDNA primer, varies in length between reads
@@ -170,7 +264,7 @@ pub(super) fn assemble(
         {
             continue;
         }
-        let trimmed = if peak as usize * 4 < windows.len() {
+        let trimmed = if peak as usize * 4 < windows {
             polish_consensus(&trimmed, &recount)
         } else {
             trimmed
@@ -182,9 +276,11 @@ pub(super) fn assemble(
         // few bases lie before it at the boundary to hold a technical layer,
         // the insert begins at the boundary itself. A division into strand
         // primers already accounts for the alternative bases behind a
-        // candidate.
+        // candidate, and a division into templates places the insert boundary.
         let start = if !divided.is_empty() {
             (None, 0)
+        } else if into_templates {
+            (Some(TemplateStart::Behind), usize::MAX)
         } else if let Some(keep) = marker_primer_end(&trimmed, end, base.error_rate) {
             let start = if keep < trimmed.len() {
                 TemplateStart::Inside(keep)
@@ -217,9 +313,30 @@ pub(super) fn assemble(
         if template {
             tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), "Template begins behind candidate");
         }
+        // Reads that lack the shared layer of a division into strand
+        // primers, in whole or in part, start in front of a primer rather
+        // than at the insert: unprimed read starts with a strand-specific
+        // layer at or behind them mark no insert boundary.
         let contrast = (contrast && !template)
             .then(|| contrast_boundary(&cons, &oriented, end, base.error_rate))
-            .flatten();
+            .flatten()
+            .filter(|boundary| {
+                let start = &boundary.insert_start;
+                let inner: &[u8] = match cons.windows(start.len()).position(|w| w == start) {
+                    Some(at) => match end {
+                        End::Five => &cons[at..],
+                        End::Three => &cons[..at + start.len()],
+                    },
+                    None => &cons,
+                };
+                !strand.iter().any(|word| {
+                    let mut held = |pattern: &[u8], text: &[u8]| {
+                        let edits = edit_budget(base.error_rate, pattern.len());
+                        !hits(&mut primer_searcher, pattern, text, edits).is_empty()
+                    };
+                    held(start, word) || held(word, inner)
+                })
+            });
         let has_insert_boundary = contrast.is_some() || template;
         let from_contrast = contrast.is_some() && !template;
         let mut unbounded = false;
@@ -269,7 +386,7 @@ pub(super) fn assemble(
             );
             measured = Some((present, anchored));
             let rise = rises
-                || jumps_past(present, n_recount, continuation, windows.len())
+                || jumps_past(present, n_recount, continuation, windows)
                 || (continuation >= 2 * boundary_weight && {
                     let downstream = windows_containing(
                         &mut primer_searcher,
@@ -335,10 +452,48 @@ pub(super) fn assemble(
             }
         }
     }
+    // The layers that a division divides into are assembled whole behind
+    // the shared layer, in the next layer; a candidate that reaches past
+    // the inner end of a dividing candidate in most of at least
+    // `MIN_SUPPORT_WINDOWS` reads holding both is left to it.
+    let dividing: Vec<Vec<Option<(usize, usize)>>> = out
+        .iter()
+        .filter(|(.., divided)| !divided.is_empty())
+        .map(|(seq, ..)| hit_spans(seq, &recount, end, edit_budget(base.error_rate, seq.len())))
+        .collect();
+    if !dividing.is_empty() {
+        out.retain(|(seq, .., divided)| {
+            if !divided.is_empty() {
+                return true;
+            }
+            let spans = hit_spans(seq, &recount, end, edit_budget(base.error_rate, seq.len()));
+            !dividing.iter().any(|shared| {
+                let (mut held, mut behind) = (0, 0);
+                for (own, shared) in spans.iter().zip(shared) {
+                    if let (Some((_, reach)), Some((_, inner))) = (own, shared) {
+                        held += 1;
+                        behind += usize::from(*reach > inner + FORM_TRIM_SLACK);
+                    }
+                }
+                held >= MIN_SUPPORT_WINDOWS && 2 * behind > held
+            })
+        });
+    }
     // Behind a boundary where the insert begins, only candidates that end at
-    // an insert boundary themselves are technical.
-    out.retain(|(seq, _, boundary, _, _, _)| {
+    // an insert boundary themselves, divide into strand primers or open a
+    // strand-specific layer are technical.
+    out.retain(|(seq, _, boundary, _, _, divided)| {
         *boundary
+            || !divided.is_empty()
+            || strand.iter().any(|word| {
+                !hits(
+                    &mut primer_searcher,
+                    word,
+                    seq,
+                    edit_budget(base.error_rate, word.len()),
+                )
+                .is_empty()
+            })
             || (!at_template
                 && !insert_starts
                     .iter()

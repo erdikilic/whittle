@@ -283,7 +283,7 @@ pub(super) fn other_end_form(
 
 /// Bases by which a trim may stop short of a candidate's inner edge and
 /// still count as trimming it, for alignment differences at the edge.
-const FORM_TRIM_SLACK: usize = 3;
+pub(super) const FORM_TRIM_SLACK: usize = 3;
 
 /// Returns the candidate of the other read end, with its support and end,
 /// that the family of `seq`, accepted at `end`, does not trim: the longest

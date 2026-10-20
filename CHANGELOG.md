@@ -231,7 +231,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the 3' end lies at the same depth behind the layers explained at each end.
 - Adapter discovery keeps both strand primers of a cDNA library whose reads
   often lack the rear adapter. Read starts that recur at two sequences behind
-  one adapter open layers and mark no insert boundary behind that adapter.
+  one adapter open layers and mark no insert boundary behind that adapter,
+  and read starts within that adapter mark none either.
+- Adapter discovery keeps amplicon primers outside the catalog whole behind
+  a rapid or ligation adapter. A path divides into the primers of the two
+  strands, of any length, when each is found at the other end of the reads
+  of the other, and into template starts, where the insert begins, when each
+  is found in reads that hold neither, so the templates of an amplicon of a
+  few templates are not learned as primers. A candidate ends at a
+  marker-gene primer only where it holds the primer's inner end within half
+  the error budget, which template sequence matches by chance far less often.
 - Adapter discovery keeps the primers of ligated amplicon and cDNA libraries
   whose reads often lack the rear adapter. Such reads start at the primer, so
   an insert boundary from unprimed read starts behind the rear adapter yields

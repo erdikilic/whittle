@@ -264,6 +264,13 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     }
     let physical = Boundaries::new(sample);
     let (five_p, three_p) = layer_windows(sample, &physical, MIRROR_WINDOW);
+    // The physical windows of each read, empty where an end has none.
+    let mut physical_of: [Vec<&[u8]>; 2] = [vec![&[]; sample.len()], vec![&[]; sample.len()]];
+    for (index, windows) in [&five_p, &three_p].into_iter().enumerate() {
+        for &(i, window) in windows {
+            physical_of[index][i] = window;
+        }
+    }
     let five_p = stride_sample(&five_p, RECOUNT_WINDOWS);
     let three_p = stride_sample(&three_p, RECOUNT_WINDOWS);
     let five_phys: Vec<&[u8]> = five_p.iter().map(|(_, w)| *w).collect();
@@ -275,8 +282,8 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     // beyond it.
     let mut open = [true, true];
     // Opening k-mers of the strand-specific layers behind the divisions of
-    // earlier layers.
-    let mut strand_words: Vec<Vec<u8>> = Vec::new();
+    // this and earlier layers, as the 5' and the 3' ends read them.
+    let mut strand_words: [Vec<Vec<u8>>; 2] = [Vec::new(), Vec::new()];
     // Sequences whose inner end is the insert boundary, as each read end
     // holds them: the marker-gene primers, and the accepted sequences that
     // end at the insert boundary.
@@ -326,11 +333,27 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         }
         let five_texts: Vec<&[u8]> = five_w.iter().map(|(_, w)| *w).collect();
         let three_texts: Vec<&[u8]> = three_w.iter().map(|(_, w)| *w).collect();
+        // The physical window of the other end of each window's read.
+        let five_partners: Vec<&[u8]> = five_w.iter().map(|(i, _)| physical_of[1][*i]).collect();
+        let three_partners: Vec<&[u8]> = three_w.iter().map(|(i, _)| physical_of[0][*i]).collect();
         // Ranking statistics use windows distributed across the sample.
         let five_sample = stride_sample(&five_texts, RECOUNT_WINDOWS);
         let three_sample = stride_sample(&three_texts, RECOUNT_WINDOWS);
-        let mut five = assemble(&five_texts, &three_phys, base, End::Five, layer == 0);
-        let mut three = assemble(&three_texts, &five_phys, base, End::Three, layer == 0);
+        let five_graph = end_graph(&five_texts, &five_partners, base, End::Five);
+        let three_graph = end_graph(&three_texts, &three_partners, base, End::Three);
+        // The continuations of a division are read behind it at its own end
+        // and reverse complemented at the other end, where the primer of
+        // each strand ends the reads of the other.
+        let mut divides = [false; 2];
+        for (index, graph) in [&five_graph, &three_graph].into_iter().enumerate() {
+            for word in graph.iter().flat_map(EndGraph::strand_words) {
+                divides[index] = true;
+                strand_words[1 - index].push(crate::adapter::reverse_complement(&word));
+                strand_words[index].push(word);
+            }
+        }
+        let mut five = assemble(five_graph, base, End::Five, layer == 0, &strand_words[0]);
+        let mut three = assemble(three_graph, base, End::Three, layer == 0, &strand_words[1]);
         // The insert boundary of a candidate that ends at it holds at both
         // read ends: at its own end, and reverse complemented at the other,
         // where the far primer of the molecule is read. A marker-gene primer
@@ -353,8 +376,8 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         }
         end_at_insert_boundaries(&mut five, &layer_bounds[0], End::Five);
         end_at_insert_boundaries(&mut three, &layer_bounds[1], End::Three);
-        strip_shared_ends(&mut five, base.error_rate);
-        strip_shared_ends(&mut three, base.error_rate);
+        strip_shared_ends(&mut five, End::Five, &strand_words[0], base.error_rate);
+        strip_shared_ends(&mut three, End::Three, &strand_words[1], base.error_rate);
         let (five, five_variable) = with_variable_layer(
             &mut searcher,
             five,
@@ -386,7 +409,6 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         // fragments that reconstruct part of them. `same_family` compares
         // both strands, so each stretch is kept on the strand it was cut from.
         let mut inserts: Vec<Vec<u8>> = Vec::new();
-        let mut next_words: Vec<Vec<u8>> = Vec::new();
         let cut: Vec<(Vec<u8>, f64, bool, u64, End)> = five
             .into_iter()
             .map(|c| (c, End::Five))
@@ -400,17 +422,18 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                     // candidate and the layers it divides into technical;
                     // their mirrors lie at a depth that depends on how much
                     // outer adapter each end keeps.
-                    let strand = strand_words.iter().any(|word| {
-                        !hits(
-                            &mut searcher,
-                            word,
-                            &seq,
-                            edit_budget(base.error_rate, word.len()),
-                        )
-                        .is_empty()
-                    });
+                    let strand = strand_words[usize::from(end == End::Three)]
+                        .iter()
+                        .any(|word| {
+                            !hits(
+                                &mut searcher,
+                                word,
+                                &seq,
+                                edit_budget(base.error_rate, word.len()),
+                            )
+                            .is_empty()
+                        });
                     if !divided.is_empty() || strand {
-                        next_words.extend(divided);
                         return Some((seq, support, boundary, weight, end));
                     }
                     // A candidate that ends where the insert begins, behind
@@ -448,7 +471,6 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 },
             )
             .collect();
-        strand_words.extend(next_words);
         let mut candidates: Vec<LayerCandidate> = cut
             .into_iter()
             .filter(|(seq, _, _, _, _)| {
@@ -626,9 +648,10 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             accepted = accepted.len(),
             "Discovery layer"
         );
-        // An end without a layer here has none deeper either.
+        // An end without a layer here has none deeper either, unless its
+        // path divides into the strand-specific layers behind this one.
         for (index, end) in [End::Five, End::Three].into_iter().enumerate() {
-            if !accepted_ends.contains(&end) {
+            if !accepted_ends.contains(&end) && !divides[index] {
                 open[index] = false;
             }
         }
