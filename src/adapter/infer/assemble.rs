@@ -342,16 +342,21 @@ pub(super) fn assemble(
     // holding both continues into the insert that begins there; it ends
     // where the primer does. A candidate that ends inside such a primer, as
     // an outer layer assembled together with the primer's first bases does,
-    // is continued to the primer's inner end.
+    // is continued to the primer's inner end. Both need a candidate at the
+    // insert boundary, which a library without amplicons lacks.
+    let flagged: Vec<bool> = out
+        .iter()
+        .map(|(_, _, boundary, _, _, _)| *boundary)
+        .collect();
+    if !flagged.contains(&true) {
+        out.retain(|(seq, _, _, _, _, _)| seq.len() >= MIN_PATTERN_LEN);
+        return out;
+    }
     let spans: Vec<Vec<Option<(usize, usize)>>> = out
         .iter()
         .map(|(seq, _, _, _, _, _)| {
             hit_spans(seq, &recount, end, edit_budget(base.error_rate, seq.len()))
         })
-        .collect();
-    let flagged: Vec<bool> = out
-        .iter()
-        .map(|(_, _, boundary, _, _, _)| *boundary)
         .collect();
     let mut cut = vec![false; out.len()];
     for (i, (seq, _, boundary, _, unbounded, _)) in out.iter_mut().enumerate() {

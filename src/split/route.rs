@@ -427,15 +427,44 @@ impl KeyTable {
 /// directories are created, and it must not name a file the run reads or
 /// writes otherwise, nor a file an earlier key already opened. Warns once
 /// when the opened count passes `OPEN_FILES_WARNING`.
+///
+/// The admitted paths are indexed by resolved path and by file identity, so
+/// a check costs a fixed number of file system calls however many paths came
+/// before it.
 pub(crate) struct OpenGuard {
     /// Files the run reads or writes besides the split outputs, each with
     /// the description an error names it by.
     protected: Vec<(String, PathBuf)>,
     /// Whether the input is stdin, whose file is compared by descriptor.
     stdin: bool,
-    /// Every admitted path, resolved (canonical parent and file name), with
-    /// the path as expanded.
-    opened: Vec<(PathBuf, PathBuf)>,
+    /// Every admitted path as expanded, in admission order.
+    opened: Vec<PathBuf>,
+    /// The index in `opened` of each admitted path by its resolved form
+    /// (`guards::resolve`, or the path as written when it does not resolve):
+    /// the form at admission, and the form once the run created the file.
+    by_resolved: HashMap<PathBuf, usize>,
+    /// The index in `opened` of each admitted path that is a regular file,
+    /// by device and inode.
+    by_file: HashMap<(u64, u64), usize>,
+    /// The first index in `opened` whose path has not been looked at since
+    /// its admission (`refresh`).
+    unrefreshed: usize,
+}
+
+/// The device and inode of `path` when it is an existing regular file, the
+/// identity `guards::same_path` compares.
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_path: &Path) -> Option<(u64, u64)> {
+    None
 }
 
 impl OpenGuard {
@@ -446,7 +475,26 @@ impl OpenGuard {
             protected,
             stdin,
             opened: Vec::new(),
+            by_resolved: HashMap::new(),
+            by_file: HashMap::new(),
+            unrefreshed: 0,
         }
+    }
+
+    /// Indexes the paths admitted since the last check by the files they
+    /// name at this check. The run creates each file after its check, so a
+    /// path that did not exist then is indexed here by the identity and the
+    /// resolved form of the created file, once.
+    fn refresh(&mut self) {
+        for (index, path) in self.opened.iter().enumerate().skip(self.unrefreshed) {
+            if let Some(id) = file_identity(path) {
+                self.by_file.entry(id).or_insert(index);
+                if let Some(resolved) = crate::guards::resolve(path) {
+                    self.by_resolved.entry(resolved).or_insert(index);
+                }
+            }
+        }
+        self.unrefreshed = self.opened.len();
     }
 
     /// Admits `path` as the next output file, creating its directories
@@ -468,10 +516,10 @@ impl OpenGuard {
 
     /// Checks `path` against the protected files and every path checked
     /// before, and records it. Paths are compared as the file system
-    /// resolves them (`guards::same_path`, `guards::resolve`), which reads
-    /// file metadata and canonicalizes the path or its parent directory; a
-    /// path that does not resolve is compared as written. A directory at
-    /// `path` is an error.
+    /// resolves them: with `guards::same_path` against the protected files,
+    /// and by resolved form (`guards::resolve`) and file identity against
+    /// the earlier paths. A path that does not resolve is compared as
+    /// written. A directory at `path` is an error.
     pub(crate) fn check(&mut self, path: &Path) -> anyhow::Result<()> {
         if path.is_dir() {
             anyhow::bail!(
@@ -495,20 +543,27 @@ impl OpenGuard {
                 path.display()
             );
         }
+        self.refresh();
         let resolved = crate::guards::resolve(path).unwrap_or_else(|| path.to_path_buf());
-        if let Some((_, earlier)) = self
-            .opened
-            .iter()
-            .find(|(r, earlier)| *r == resolved || crate::guards::same_path(earlier, path))
-        {
+        let identity = file_identity(path);
+        let earlier = self
+            .by_resolved
+            .get(&resolved)
+            .or_else(|| identity.and_then(|id| self.by_file.get(&id)));
+        if let Some(&earlier) = earlier {
             anyhow::bail!(
                 "the -o template expands two keys to the same file ({} and {}); make each \
                  key's path distinct",
-                earlier.display(),
+                self.opened[earlier].display(),
                 path.display()
             );
         }
-        self.opened.push((resolved, path.to_path_buf()));
+        let index = self.opened.len();
+        self.opened.push(path.to_path_buf());
+        self.by_resolved.entry(resolved).or_insert(index);
+        if let Some(id) = identity {
+            self.by_file.entry(id).or_insert(index);
+        }
         Ok(())
     }
 }
@@ -788,6 +843,27 @@ mod tests {
         guard.check(&dir.path().join("new/16S.fq")).unwrap();
         assert!(!dir.path().join("new").exists());
         assert!(guard.check(&input).is_err());
+    }
+
+    /// An output created after its check is compared by the file it became:
+    /// a later path that is a hard link or a symlink to it is refused.
+    #[cfg(unix)]
+    #[test]
+    fn open_guard_refuses_links_to_created_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut guard = OpenGuard::new(Vec::new(), false);
+        let first = dir.path().join("a.fq");
+        guard.admit(&first).unwrap();
+        std::fs::write(&first, "").unwrap();
+        let hard = dir.path().join("b.fq");
+        std::fs::hard_link(&first, &hard).unwrap();
+        let err = guard.admit(&hard).unwrap_err().to_string();
+        assert!(err.contains("a.fq") && err.contains("b.fq"), "{err}");
+        let soft = dir.path().join("c.fq");
+        std::os::unix::fs::symlink(&first, &soft).unwrap();
+        let err = guard.admit(&soft).unwrap_err().to_string();
+        assert!(err.contains("a.fq") && err.contains("c.fq"), "{err}");
+        guard.admit(&dir.path().join("d.fq")).unwrap();
     }
 
     #[test]

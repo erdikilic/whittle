@@ -317,6 +317,11 @@ error that names the read and the tag, so a typo does not silently select or
 drop every read. Rejected reads are counted as input and reported as `Tag
 filtered` on stderr and as `reads.tag_filtered` in the summary JSON.
 
+On tagged FASTQ the filter parses only the values the expression reads, so a
+move table is not decoded to test `[qs]`. Every field must still have the
+`TAG:TYPE:VALUE` form, and a kept read's header is parsed in full, so a
+malformed value goes unreported only in a read the filter drops.
+
 ## Stage order
 
 Adapter preparation loads a FASTA or preset, or discovers adapters from a

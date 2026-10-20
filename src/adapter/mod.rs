@@ -41,6 +41,11 @@ thread_local! {
     /// every call. Per-thread state keeps the parallel workflows free of
     /// sharing.
     static STATE: RefCell<ThreadState> = RefCell::new(ThreadState::new());
+
+    /// The searcher and the normalized span of `barcode_span_verified`,
+    /// reused across reads.
+    static BARCODE_SEARCH: RefCell<(AmbiguousSearcher, Vec<u8>)> =
+        RefCell::new((search::new_ambiguous_searcher(), Vec::new()));
 }
 
 /// What a catalog sequence is. Every role is trimmed at the read ends and
@@ -244,11 +249,12 @@ impl AdapterConfig {
     }
 
     /// Returns whether a barcode sequence matches the read at `[start, end)`
-    /// within the error budget: a barcode-role entry of the configured set,
-    /// or a catalog barcode with the number of the barcode call `call`. The
-    /// span is widened by `BARCODE_SPAN_SLACK` bases on each side and read
-    /// as every search reads a read (`passes::normalize_into`), so an
-    /// uncalled base costs an edit.
+    /// within the error budget: a catalog barcode with the number of the
+    /// barcode call `call`, searched first since it is the likely match, or a
+    /// barcode-role entry of the configured set. The span is widened by
+    /// `BARCODE_SPAN_SLACK` bases on each side and read as every search reads
+    /// a read (`passes::normalize_into`), so an uncalled base costs an edit.
+    /// Entries are uppercase, as the catalog and the FASTA reader store them.
     pub(crate) fn barcode_span_verified(
         &self,
         seq: &[u8],
@@ -261,23 +267,26 @@ impl AdapterConfig {
         if hi <= lo {
             return false;
         }
-        let mut buf = Vec::new();
-        let (text, _) = passes::normalize_into(&seq[lo..hi], &mut buf);
-        let number = call.and_then(barcode_number);
-        let named = catalog_barcodes().iter().filter(|entry| {
-            number.is_some_and(|n| barcode_number(entry.name.as_bytes()) == Some(n))
-        });
-        let mut searcher = search::new_ambiguous_searcher();
-        self.adapters
-            .iter()
-            .filter(|entry| entry.role == Role::Barcode)
-            .chain(named)
-            .filter(|entry| entry.seq.len() >= MIN_PATTERN_LEN)
-            .any(|entry| {
-                let pattern = entry.seq.to_ascii_uppercase();
-                let k = edit_budget(self.error_rate, pattern.len());
-                !search::hits(&mut searcher, &pattern, text, k).is_empty()
-            })
+        let named = call
+            .and_then(barcode_number)
+            .and_then(|n| catalog_barcodes_by_number().get(&n))
+            .map_or(&[][..], Vec::as_slice);
+        BARCODE_SEARCH.with_borrow_mut(|(searcher, buf)| {
+            let (text, _) = passes::normalize_into(&seq[lo..hi], buf);
+            named
+                .iter()
+                .copied()
+                .chain(
+                    self.adapters
+                        .iter()
+                        .filter(|entry| entry.role == Role::Barcode),
+                )
+                .filter(|entry| entry.seq.len() >= MIN_PATTERN_LEN)
+                .any(|entry| {
+                    let k = edit_budget(self.error_rate, entry.seq.len());
+                    !search::hits(searcher, &entry.seq, text, k).is_empty()
+                })
+        })
     }
 }
 
@@ -292,6 +301,23 @@ fn catalog_barcodes() -> &'static [Adapter] {
             .into_iter()
             .filter(|entry| entry.role == Role::Barcode)
             .collect()
+    })
+}
+
+/// The barcode-role catalog entries by the number their names end in
+/// (`barcode_number`), built once.
+fn catalog_barcodes_by_number() -> &'static std::collections::HashMap<u32, Vec<&'static Adapter>> {
+    static BY_NUMBER: OnceLock<std::collections::HashMap<u32, Vec<&'static Adapter>>> =
+        OnceLock::new();
+    BY_NUMBER.get_or_init(|| {
+        let mut map: std::collections::HashMap<u32, Vec<&'static Adapter>> =
+            std::collections::HashMap::new();
+        for entry in catalog_barcodes() {
+            if let Some(n) = barcode_number(entry.name.as_bytes()) {
+                map.entry(n).or_default().push(entry);
+            }
+        }
+        map
     })
 }
 

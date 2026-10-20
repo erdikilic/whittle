@@ -72,6 +72,72 @@ pub fn parse_aux_fields(fields: &[u8]) -> anyhow::Result<Data> {
     Ok(data)
 }
 
+/// The aux fields of a tagged FASTQ header as the tag filter reads them, in
+/// place: `new` checks the `TAG:TYPE:` form of every field and refuses a
+/// duplicated tag, and a lookup parses only the field it names. A `B` array
+/// is reported present without parsing its elements, so a move table is not
+/// decoded to judge a scalar tag; a kept read is decoded in full by
+/// `record_from_tagged`, which reports a malformed value.
+#[derive(Debug)]
+pub struct HeaderTags<'a> {
+    /// Each field's tag with the field text.
+    fields: Vec<([u8; 2], &'a [u8])>,
+}
+
+impl<'a> HeaderTags<'a> {
+    /// Splits the tab-delimited `fields` of a header, as `parse_aux_fields`
+    /// takes them.
+    pub fn new(fields: &'a [u8]) -> anyhow::Result<Self> {
+        let mut out: Vec<([u8; 2], &[u8])> = Vec::new();
+        if fields.is_empty() {
+            return Ok(Self { fields: out });
+        }
+        for field in fields.split(|&b| b == b'\t') {
+            let valid = field.len() >= 5
+                && field[0].is_ascii_alphabetic()
+                && field[1].is_ascii_alphanumeric()
+                && field[2] == b':'
+                && matches!(field[3], b'A' | b'i' | b'f' | b'Z' | b'H' | b'B')
+                && field[4] == b':';
+            if !valid {
+                // The full parser names what is wrong with the field.
+                parse_aux_field(field).map_err(|e| {
+                    anyhow::anyhow!("field {:?}: {e}", String::from_utf8_lossy(field))
+                })?;
+            }
+            let tag = [field[0], field[1]];
+            if out.iter().any(|(t, _)| *t == tag) {
+                anyhow::bail!("field {:?}: duplicate tag", String::from_utf8_lossy(field));
+            }
+            out.push((tag, field));
+        }
+        Ok(Self { fields: out })
+    }
+}
+
+impl crate::tagfilter::TagSource for HeaderTags<'_> {
+    fn tag_value(&self, tag: [u8; 2]) -> anyhow::Result<crate::tagfilter::TagValue<'_>> {
+        use std::borrow::Cow;
+
+        use crate::tagfilter::TagValue;
+        let Some(&(_, field)) = self.fields.iter().find(|(t, _)| *t == tag) else {
+            return Ok(TagValue::Missing);
+        };
+        if field[3] == b'B' {
+            return Ok(TagValue::Array);
+        }
+        let (_, value) = parse_aux_field(field)
+            .map_err(|e| anyhow::anyhow!("field {:?}: {e}", String::from_utf8_lossy(field)))?;
+        Ok(match crate::tagfilter::value_of_buf(&value) {
+            TagValue::Num(n) => TagValue::Num(n),
+            // The text checked by the parser, borrowed from the header.
+            TagValue::Str(_) => TagValue::Str(Cow::Borrowed(&field[5..])),
+            TagValue::Missing => TagValue::Missing,
+            TagValue::Array => TagValue::Array,
+        })
+    }
+}
+
 /// Parses one `TAG:TYPE:VALUE` field.
 fn parse_aux_field(field: &[u8]) -> anyhow::Result<(Tag, Value)> {
     if field.len() < 5 || field[2] != b':' || field[4] != b':' {
@@ -226,6 +292,34 @@ mod tests {
             seq: b"ACGT".to_vec(),
             qual: vec![30; 4],
         }
+    }
+
+    /// The in-place header source answers the tag filter as the decoded
+    /// fields do, and parses a value only when the filter reads it.
+    #[test]
+    fn header_tags_answer_as_decoded_fields() {
+        use crate::tagfilter::{TagSource, TagValue};
+        let fields: &[u8] =
+            b"qs:f:12.5\tRG:Z:4f2a_dna\tXA:A:x\tXH:H:1A2B\tNM:i:-3\tmv:B:c,6,1,0,1\tML:B:C";
+        let data = parse_aux_fields(fields).unwrap();
+        let header = HeaderTags::new(fields).unwrap();
+        for tag in [
+            *b"qs", *b"RG", *b"XA", *b"XH", *b"NM", *b"mv", *b"ML", *b"zz",
+        ] {
+            assert_eq!(
+                header.tag_value(tag).unwrap(),
+                data.tag_value(tag).unwrap(),
+                "{}",
+                String::from_utf8_lossy(&tag)
+            );
+        }
+        let err = HeaderTags::new(b"qs:f:1\tqs:f:2").unwrap_err().to_string();
+        assert!(err.contains("duplicate tag"), "{err}");
+        let err = HeaderTags::new(b"qs:f:1\tbad").unwrap_err().to_string();
+        assert!(err.contains("expected TAG:TYPE:VALUE"), "{err}");
+        let header = HeaderTags::new(b"qs:f:abc\tmv:B:c,1,x").unwrap();
+        assert!(header.tag_value(*b"qs").is_err());
+        assert_eq!(header.tag_value(*b"mv").unwrap(), TagValue::Array);
     }
 
     #[test]

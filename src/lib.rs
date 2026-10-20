@@ -730,8 +730,7 @@ impl Session {
                     .iter()
                     .position(|&b| b == b'\t')
                     .map_or(&[][..], |t| &rec.name[t + 1..]);
-                let data = io::tagged::parse_aux_fields(fields)?;
-                filters.keeps(&data)
+                filters.keeps(&io::tagged::HeaderTags::new(fields)?)
             },
             |rec| rec.seq.len(),
             |rec| {

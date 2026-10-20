@@ -73,12 +73,12 @@ struct Columns {
     outer: Vec<usize>,
 }
 
-/// Returns `seq` read inward from `end`: unchanged for the 5' end, reversed
-/// for the 3' end, where the insert lies before the sequence.
-fn inward(seq: &[u8], end: End) -> Vec<u8> {
+/// Returns `seq` read inward from `end`: borrowed unchanged for the 5' end,
+/// reversed for the 3' end, where the insert lies before the sequence.
+fn inward(seq: &[u8], end: End) -> std::borrow::Cow<'_, [u8]> {
     match end {
-        End::Five => seq.to_vec(),
-        End::Three => seq.iter().rev().copied().collect(),
+        End::Five => std::borrow::Cow::Borrowed(seq),
+        End::Three => std::borrow::Cow::Owned(seq.iter().rev().copied().collect()),
     }
 }
 
@@ -105,8 +105,9 @@ impl Columns {
     /// bases of its columns and of its flanks.
     fn of_candidate(seq: &[u8], windows: &[&[u8]], end: End, edits: usize) -> Self {
         let pattern = inward(seq, end);
-        let texts: Vec<Vec<u8>> = windows.iter().map(|w| inward(w, end)).collect();
-        let texts: Vec<&[u8]> = texts.iter().map(Vec::as_slice).collect();
+        let texts: Vec<std::borrow::Cow<'_, [u8]>> =
+            windows.iter().map(|w| inward(w, end)).collect();
+        let texts: Vec<&[u8]> = texts.iter().map(AsRef::as_ref).collect();
         let mut searcher = crate::adapter::search::new_searcher_fwd();
         let mut best: Vec<Option<sassy::Match>> = vec![None; texts.len()];
         for hit in searcher.search_texts(&pattern, &texts, edits) {
@@ -312,8 +313,8 @@ pub(super) fn hit_spans(
     edits: usize,
 ) -> Vec<Option<(usize, usize)>> {
     let pattern = inward(seq, end);
-    let texts: Vec<Vec<u8>> = windows.iter().map(|w| inward(w, end)).collect();
-    let texts: Vec<&[u8]> = texts.iter().map(Vec::as_slice).collect();
+    let texts: Vec<std::borrow::Cow<'_, [u8]>> = windows.iter().map(|w| inward(w, end)).collect();
+    let texts: Vec<&[u8]> = texts.iter().map(AsRef::as_ref).collect();
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     let mut best: Vec<Option<(i32, usize, usize)>> = vec![None; texts.len()];
     for hit in searcher.search_texts(&pattern, &texts, edits) {
@@ -386,9 +387,9 @@ pub(super) fn continued_into(
     offsets.sort_unstable();
     let offset = offsets[offsets.len() / 2];
     let primer = inward(primer, end);
-    let mut joined = inward(seq, end);
+    let mut joined = inward(seq, end).into_owned();
     joined.extend_from_slice(primer.get(offset..)?);
-    Some(inward(&joined, end))
+    Some(inward(&joined, end).into_owned())
 }
 
 /// Returns whether the template of an amplicon begins at the boundary of

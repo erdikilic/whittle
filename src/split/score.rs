@@ -8,7 +8,6 @@
 //! one per SIMD lane. `Scorer::score_at_site` first drops the primers that
 //! the whole hit behind a locus rules out (`site_bound`).
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -89,10 +88,71 @@ pub struct Scorer {
     /// like `AdapterConfig::adapters`, which a locus site names; empty
     /// unless set by `with_sites`.
     sites: Vec<Vec<u8>>,
-    /// Every sheet primer's `site_bound` per tabled site shape
-    /// (`SiteShape::slot`), each computed on first use and then read
-    /// without a lock by every thread; reset by `with_sites`.
-    bounds: Vec<OnceLock<Box<[usize]>>>,
+    /// Every sheet primer's `site_bound` per site shape: one table per
+    /// entry, orientation and end (`SiteShape::key`), allocated on first
+    /// use, of one slot per pair of flanks (`SiteShape::slot`), each
+    /// computed on first use and then read without a lock by every thread;
+    /// reset by `with_sites`.
+    bounds: Vec<BoundTable>,
+}
+
+/// Every sheet primer's `site_bound` for one site shape, computed on first
+/// use.
+type BoundSlot = OnceLock<Box<[usize]>>;
+
+/// The slots of one site entry, orientation and end, one per pair of
+/// flanks, allocated on first use.
+type BoundTable = OnceLock<Box<[BoundSlot]>>;
+
+/// One side of a rescoring window around a locus site, as `site_bound`
+/// takes it: the window bases beside the site, and whether a hit may hang
+/// off that side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flank {
+    /// A side no hit hangs off, or one with `MIN_OVERLAP` or more window
+    /// bases beside the site: this many bases, at most
+    /// `Scorer::max_primer_len`.
+    Closed(usize),
+    /// A side that counts as a read end, with this many window bases beside
+    /// the site, fewer than `MIN_OVERLAP`.
+    Open(usize),
+}
+
+impl Flank {
+    /// The flank of a window side with `bases` window bases beside the
+    /// site, which `touches` a read end, for primers of at most `max` bases.
+    fn of(touches: bool, bases: usize, max: usize) -> Flank {
+        match (touches, bases) {
+            (true, b) if b < MIN_OVERLAP => Flank::Open(b),
+            (true, _) => Flank::Closed(max),
+            (false, b) => Flank::Closed(b.min(max)),
+        }
+    }
+
+    /// The wildcards a primer of `len` bases takes on this side. A scoring
+    /// hit keeps `MIN_OVERLAP` bases aligned, so it hangs at most `len -
+    /// MIN_OVERLAP` bases off an open side, past its window bases; more
+    /// wildcards than `len` bound no lower.
+    fn wildcards(self, len: usize) -> usize {
+        match self {
+            Flank::Closed(bases) => bases.min(len),
+            Flank::Open(bases) => (bases + len.saturating_sub(MIN_OVERLAP)).min(len),
+        }
+    }
+
+    /// The index of this flank among the `codes(max)` flanks of primers of
+    /// at most `max` bases.
+    fn code(self, max: usize) -> usize {
+        match self {
+            Flank::Closed(bases) => bases,
+            Flank::Open(bases) => max + 1 + bases,
+        }
+    }
+
+    /// The number of distinct flanks of primers of at most `max` bases.
+    fn codes(max: usize) -> usize {
+        max + 1 + MIN_OVERLAP
+    }
 }
 
 /// The shape of a rescoring window around a locus site (`site_bound`).
@@ -104,35 +164,30 @@ struct SiteShape {
     rc: bool,
     /// The end whose orientation the primers are aligned in.
     end: End,
-    /// Wildcards left of the site, at most `Scorer::max_primer_len`.
-    left: usize,
-    /// Wildcards right of the site, at most `Scorer::max_primer_len`.
-    right: usize,
+    /// The window side left of the site.
+    left: Flank,
+    /// The window side right of the site.
+    right: Flank,
 }
 
 impl SiteShape {
-    /// Shapes tabled per entry, orientation and end, for flanks of at most
-    /// `max` wildcards: both flanks at `max`, one flank at `max` and the
-    /// other below it, or both flanks equal and below `max`.
-    fn slots_per_key(max: usize) -> usize {
-        3 * max + 1
+    /// Tables per site entry: one per orientation and end.
+    const KEYS_PER_ENTRY: usize = 4;
+
+    /// The index of this shape's table: its entry, orientation and end.
+    fn key(&self) -> usize {
+        (self.entry * 2 + usize::from(self.rc)) * 2 + usize::from(self.end == End::Five)
     }
 
-    /// Returns the index of this shape in a table of `slots_per_key(max)`
-    /// slots per entry, orientation and end, or `None` for a shape outside
-    /// it. A window side that reaches a read end takes `max` wildcards and
-    /// every other side the widening of the locus, the same on both sides,
-    /// so every shape of a rescoring window is tabled.
-    fn slot(&self, max: usize) -> Option<usize> {
-        let within = match (self.left, self.right) {
-            (l, r) if l == max && r == max => 0,
-            (l, r) if l == max => 1 + r,
-            (l, r) if r == max => 1 + max + l,
-            (l, r) if l == r => 1 + 2 * max + l,
-            _ => return None,
-        };
-        let key = (self.entry * 2 + usize::from(self.rc)) * 2 + usize::from(self.end == End::Five);
-        Some(key * Self::slots_per_key(max) + within)
+    /// The slots of one table, for primers of at most `max` bases: one per
+    /// pair of flanks.
+    fn slots(max: usize) -> usize {
+        Flank::codes(max) * Flank::codes(max)
+    }
+
+    /// The index of this shape's slot in its table.
+    fn slot(&self, max: usize) -> usize {
+        self.left.code(max) * Flank::codes(max) + self.right.code(max)
     }
 }
 
@@ -167,9 +222,11 @@ fn base_mask(code: u8) -> u8 {
 /// the two costs together: at most `e + c` for a hit whose aligned part
 /// costs `e` and a site of cost `c`. A scoring hit overhangs only a side of
 /// the window that counts as a read end, which then takes further wildcards
-/// for the hanging bases. An optimal alignment uses no more wildcards on a
-/// side than the pattern has bases, as each further one is a deletion, so a
-/// flank of `pattern.len()` wildcards gives the bound of any longer flank.
+/// for the hanging bases, at most `pattern.len() - MIN_OVERLAP` of them since
+/// the hit keeps `MIN_OVERLAP` bases aligned (`Flank::wildcards`). An optimal
+/// alignment uses no more wildcards on a side than the pattern has bases, as
+/// each further one is a deletion, so a flank of `pattern.len()` wildcards
+/// gives the bound of any longer flank.
 /// A hit costs at least its aligned edits, and a scoring hit at most the
 /// budget `k` of its search, so a primer whose bound exceeds `c + k` has no
 /// scoring hit in the window.
@@ -273,33 +330,40 @@ impl Scorer {
             .iter()
             .map(|a| a.seq.to_ascii_uppercase())
             .collect();
-        let slots = self.sites.len() * 4 * SiteShape::slots_per_key(self.max_primer_len);
-        self.bounds = std::iter::repeat_with(OnceLock::new).take(slots).collect();
+        self.bounds = std::iter::repeat_with(OnceLock::new)
+            .take(self.sites.len() * SiteShape::KEYS_PER_ENTRY)
+            .collect();
         self
     }
 
     /// Returns every sheet primer's `site_bound` in the orientation `end`
     /// gives, around the whole hit of entry `entry` (its reverse complement
-    /// when `rc`) with `left` and `right` wildcards beside it, each capped
-    /// at the longest primer, or `None` for an entry without a recorded
-    /// sequence. A tabled shape is computed once and borrowed from the
-    /// table after; any other shape is computed on each call.
+    /// when `rc`) with the wildcards of `left` and `right` beside it
+    /// (`Flank::wildcards`), or `None` for an entry without a recorded
+    /// sequence. Each shape is computed once and borrowed from the table
+    /// after.
     fn site_bounds(
         &self,
         (entry, rc): (usize, bool),
         end: End,
-        left: usize,
-        right: usize,
-    ) -> Option<Cow<'_, [usize]>> {
+        left: Flank,
+        right: Flank,
+    ) -> Option<&[usize]> {
         let seq = self.sites.get(entry)?;
         let shape = SiteShape {
             entry,
             rc,
             end,
-            left: left.min(self.max_primer_len),
-            right: right.min(self.max_primer_len),
+            left,
+            right,
         };
-        let compute = || -> Box<[usize]> {
+        let max = self.max_primer_len;
+        let table = self.bounds.get(shape.key())?.get_or_init(|| {
+            std::iter::repeat_with(OnceLock::new)
+                .take(SiteShape::slots(max))
+                .collect()
+        });
+        let bounds = table[shape.slot(max)].get_or_init(|| {
             let site = if rc {
                 reverse_complement(seq)
             } else {
@@ -312,17 +376,16 @@ impl Scorer {
                         End::Five => &e.forward,
                         End::Three => &e.reverse,
                     };
-                    site_bound(pattern, &site, shape.left, shape.right)
+                    site_bound(
+                        pattern,
+                        &site,
+                        left.wildcards(pattern.len()),
+                        right.wildcards(pattern.len()),
+                    )
                 })
                 .collect()
-        };
-        let cell = shape
-            .slot(self.max_primer_len)
-            .and_then(|slot| self.bounds.get(slot));
-        Some(match cell {
-            Some(cell) => Cow::Borrowed(cell.get_or_init(compute)),
-            None => Cow::Owned(compute().into_vec()),
-        })
+        });
+        Some(bounds)
     }
 
     /// Returns every sheet primer's terminal edit budget, indexed like
@@ -412,19 +475,12 @@ impl Scorer {
             return Vec::new();
         }
         let window = &read[start..stop];
-        let flank = |touches: bool, bases: usize| {
-            if touches {
-                bases + self.max_primer_len
-            } else {
-                bases
-            }
-        };
         let pruning = site.and_then(|site| {
             let bounds = self.site_bounds(
                 (site.entry, site.rc),
                 end,
-                flank(touches_start, lo.saturating_sub(start)),
-                flank(touches_end, stop.saturating_sub(hi)),
+                Flank::of(touches_start, lo.saturating_sub(start), self.max_primer_len),
+                Flank::of(touches_end, stop.saturating_sub(hi), self.max_primer_len),
             )?;
             Some((bounds, site.cost))
         });
@@ -1140,15 +1196,13 @@ mod tests {
                             let start = hit.start.saturating_sub(widen);
                             let stop = (hit.end + widen).min(read.len());
                             clamped += usize::from(start == 0 && stop == read.len());
-                            let flank = |touches: bool, bases: usize| {
-                                bases + if touches { scorer.max_primer_len } else { 0 }
-                            };
+                            let max = scorer.max_primer_len;
                             let bounds = scorer
                                 .site_bounds(
                                     (entry, hit.rc),
                                     end,
-                                    flank(start == 0, hit.start - start),
-                                    flank(stop == read.len(), stop - hit.end),
+                                    Flank::of(start == 0, hit.start - start, max),
+                                    Flank::of(stop == read.len(), stop - hit.end, max),
                                 )
                                 .unwrap();
                             pruned += scorer
@@ -1167,6 +1221,56 @@ mod tests {
             "{compared} loci, {scored} scored, {pruned} primers skipped, \
              {clamped} sites clamped at both ends"
         );
+    }
+
+    /// At a site flush with a read end, a primer hangs at most `len -
+    /// MIN_OVERLAP` bases off that end, so most primers of a sheet of 96
+    /// unrelated pairs are skipped there, at the 5' and the 3' end, as at a
+    /// site inside the read. A flank that lets a whole primer hang off skips
+    /// none.
+    #[test]
+    fn site_pruning_skips_primers_at_a_read_end() {
+        let mut text = String::from("target\tfwd\trev\n");
+        for t in 0..96u64 {
+            let len = 20 + (t % 2) as usize;
+            text.push_str(&format!(
+                "T{t}\t{}\t{}\n",
+                String::from_utf8_lossy(&splitmix_dna(1_000 + t, len)),
+                String::from_utf8_lossy(&splitmix_dna(2_000 + t, len)),
+            ));
+        }
+        let sheet = Sheet::parse_tsv(&text).unwrap();
+        let adapters: Vec<Adapter> = sheet
+            .primers
+            .iter()
+            .map(|p| Adapter {
+                name: p.name.clone(),
+                seq: p.seq.clone(),
+                role: crate::adapter::Role::Primer,
+            })
+            .collect();
+        let scorer = Scorer::new(&sheet, 0.2, 150).with_sites(&adapters);
+        let max = scorer.max_primer_len;
+        let skipped = |end: End, left: Flank, right: Flank| {
+            let bounds = scorer.site_bounds((0, false), end, left, right).unwrap();
+            scorer
+                .entries
+                .iter()
+                .zip(bounds)
+                .filter(|&(e, &b)| b > e.budget.max(e.anchored))
+                .count()
+        };
+        let total = scorer.entries.len();
+        let widen = Flank::Closed(max - 20 + 3);
+        for (end, left, right) in [
+            (End::Five, Flank::Open(0), widen),
+            (End::Three, widen, Flank::Open(0)),
+            (End::Five, widen, widen),
+        ] {
+            let n = skipped(end, left, right);
+            assert!(4 * n > 3 * total, "{end:?}: {n} of {total} skipped");
+        }
+        assert_eq!(skipped(End::Five, Flank::Closed(max), widen), 0);
     }
 
     /// Every site `adapter_segments_annotated` records aligns its entry over
