@@ -218,7 +218,7 @@ pub(super) fn assemble(
             tracing::debug!(sequence = %String::from_utf8_lossy(&trimmed), "Template begins behind candidate");
         }
         let contrast = (contrast && !template)
-            .then(|| contrast_boundary(&cons, &oriented, end))
+            .then(|| contrast_boundary(&cons, &oriented, end, base.error_rate))
             .flatten();
         let has_insert_boundary = contrast.is_some() || template;
         let from_contrast = contrast.is_some() && !template;

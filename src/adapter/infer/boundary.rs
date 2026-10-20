@@ -16,10 +16,13 @@ pub(super) struct PrimerBoundary {
 /// A primer must be independently supported upstream of that boundary; the
 /// conserved insert itself is excluded from the inferred trimming sequence.
 /// `windows` read outward from the `end` boundary, reversed for the 3' end.
+/// Read starts that open alternative layers behind the reconstructed sequence
+/// (`opens_layers`) mark no boundary.
 pub(super) fn contrast_boundary(
     consensus: &[u8],
     windows: &[&[u8]],
     end: End,
+    error_rate: f64,
 ) -> Option<PrimerBoundary> {
     if consensus.len() < 2 * KMER_K {
         return None;
@@ -125,6 +128,20 @@ pub(super) fn contrast_boundary(
                 })
                 .collect()
         };
+        // Reads that lack an outer adapter start at each of the layers behind
+        // it, so a start that opens one of them is no insert boundary.
+        if let Some(outer) = primers
+            .iter()
+            .find(|primer| opens_layers(primer, windows, &starts, floor, error_rate))
+        {
+            let outer: Vec<u8> = if reverse {
+                outer.iter().rev().copied().collect()
+            } else {
+                outer.clone()
+            };
+            tracing::debug!(sequence = %String::from_utf8_lossy(&outer), "Read starts open layers behind a sequence");
+            continue;
+        }
         if reverse {
             for primer in &mut primers {
                 primer.reverse();
@@ -142,6 +159,52 @@ pub(super) fn contrast_boundary(
         }
     }
     None
+}
+
+/// Returns whether the read starts behind `primer`, a sequence reconstructed
+/// outward of a recurrent read start, open alternative layers rather than one
+/// insert: the windows that hold the inner `START_K` bases of `primer` within
+/// its length of their outer end continue with two recurrent read starts
+/// (`starts` holding them at least `floor` times) that are not one sequence
+/// within `error_rate`, each in at least `MIN_SUPPORT_WINDOWS` windows. Reads
+/// that lack an outer adapter start at the layer behind it, so an adapter
+/// followed by either of two primers, as a cDNA adapter is by the primers of
+/// the two strands, precedes two read starts; a primer precedes its insert.
+fn opens_layers(
+    primer: &[u8],
+    windows: &[&[u8]],
+    starts: &std::collections::HashMap<u64, usize>,
+    floor: usize,
+    error_rate: f64,
+) -> bool {
+    let Some(inner) = primer.len().checked_sub(START_K).map(|at| &primer[at..]) else {
+        return false;
+    };
+    let mut following = std::collections::HashMap::<u64, usize>::new();
+    for window in windows {
+        let next = window
+            .windows(2 * START_K)
+            .take(primer.len() + 1)
+            .find(|pair| &pair[..START_K] == inner)
+            .and_then(|pair| encode_kmer(&pair[START_K..]))
+            .filter(|code| starts.get(code).is_some_and(|&count| count >= floor));
+        if let Some(code) = next {
+            *following.entry(code).or_default() += 1;
+        }
+    }
+    let mut layers: Vec<(usize, u64)> = following
+        .into_iter()
+        .filter(|&(_, count)| count >= MIN_SUPPORT_WINDOWS)
+        .map(|(code, count)| (count, code))
+        .collect();
+    layers.sort_unstable_by(|a, b| b.cmp(a));
+    let Some(&(_, first)) = layers.first() else {
+        return false;
+    };
+    let first = decode_kmer(first, START_K);
+    layers[1..]
+        .iter()
+        .any(|&(_, code)| !same_adapter(&first, &decode_kmer(code, START_K), error_rate))
 }
 
 /// Tests whether a candidate is predominantly on the insert-facing side of

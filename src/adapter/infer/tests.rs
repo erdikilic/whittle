@@ -256,7 +256,7 @@ fn truncated_insert_anchor_recovers_distinct_upstream_primers() {
         })
         .collect();
     let windows: Vec<&[u8]> = reads.iter().map(Vec::as_slice).collect();
-    let found = contrast_boundary(&insert[1..90], &windows, End::Five)
+    let found = contrast_boundary(&insert[1..90], &windows, End::Five, 0.2)
         .unwrap()
         .primers;
     assert_eq!(found.len(), 2);
@@ -2128,4 +2128,89 @@ fn a_flank_behind_a_one_sided_adapter_is_kept() {
         }),
         "the flank is not recovered: {found:?}"
     );
+}
+
+/// The bases of a strand-switched cDNA molecule read from either strand:
+/// the strand-switching primer, `transcript` and a poly(A) tail of `tail`
+/// bases, then the reverse complement of the oligo(dT) primer; the other
+/// strand reads the oligo(dT) primer, poly(T) and the reverse complement of
+/// the rest. Returns the outer primer, the insert with its tail, and the
+/// reverse complement of the inner primer.
+fn strand_switched(
+    forward: bool,
+    transcript: &[u8],
+    tail: usize,
+    ssp: &[u8],
+    vnp: &[u8],
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    if forward {
+        let mut body = transcript.to_vec();
+        body.extend(std::iter::repeat_n(b'A', tail));
+        (ssp.to_vec(), body, rc(vnp))
+    } else {
+        let mut body = vec![b'T'; tail];
+        body.extend(rc(transcript));
+        (vnp.to_vec(), body, rc(ssp))
+    }
+}
+
+/// Discovery keeps both strand primers of a cDNA library whose reads often
+/// lack the rear adapter. Reads with 2% errors carry the Y adapter's top
+/// strand, eroded by up to 14 bases in a third of them, then either strand
+/// of the molecule, and in half of them the first 8 to 28 bases of the rear
+/// adapter. The reads without it end at either primer, behind the one rear
+/// adapter, so those read starts mark no insert boundary behind it, and
+/// trimming with the discovered set keeps the insert with its poly(A) or
+/// poly(T) tail.
+#[test]
+fn strand_primers_are_kept_when_reads_lack_the_rear_adapter() {
+    let top = b"TTTTTTTTCCTGTACTTCGTTCAGTTACGTATTGCT";
+    let rear = b"AGCAATACGTAACTGAACGAAGTACAGG";
+    let ssp = b"TTTCTGTTGGTGCTGATATTGCTGGG";
+    let vnp = b"ACTTGCCTGTCGCTCTATCTTC";
+    let reads: Vec<Vec<u8>> = (0..2000u64)
+        .map(|i| {
+            let mut state = 81_000 + i;
+            let tail = 10 + (draw(&mut state) % 21) as usize;
+            let transcript = random_bases(82_000 + i, 500);
+            let (outer, body, inner) = strand_switched(i % 2 == 0, &transcript, tail, ssp, vnp);
+            let kept = if draw(&mut state).is_multiple_of(2) {
+                8 + (draw(&mut state) % 21) as usize
+            } else {
+                0
+            };
+            let eroded = if draw(&mut state).is_multiple_of(3) {
+                1 + (draw(&mut state) % 14) as usize
+            } else {
+                0
+            };
+            let read = [&top[eroded..], &outer, &body, &inner, &rear[..kept]].concat();
+            with_errors(&read, 83_000 + i, 20)
+        })
+        .collect();
+    let found = infer_owned(&reads);
+    for primer in [&ssp[..], &vnp[..]] {
+        assert!(
+            found.iter().any(|d| {
+                longest_common_substring(primer, &d.adapter.seq) == primer.len()
+                    || longest_common_substring(&rc(primer), &d.adapter.seq) == primer.len()
+            }),
+            "{:?} is not recovered whole: {found:?}",
+            String::from_utf8_lossy(primer)
+        );
+    }
+    let cfg = trimming_with(found);
+    for i in 0..8u64 {
+        let transcript = random_bases(84_000 + i, 500);
+        let (outer, body, inner) = strand_switched(i % 2 == 0, &transcript, 20, ssp, vnp);
+        let kept = if i % 4 < 2 { 0 } else { 20 };
+        let read = [&top[..], &outer, &body, &inner, &rear[..kept]].concat();
+        let start = top.len() + outer.len();
+        assert_eq!(
+            crate::adapter::adapter_segments(&read, &cfg),
+            vec![(start, start + body.len())],
+            "read {i}: {:?}",
+            cfg.adapters
+        );
+    }
 }

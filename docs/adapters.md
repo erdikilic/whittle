@@ -439,7 +439,12 @@ that lack a primer. Discovery aligns the upstream sequence in primer-bearing
 reads, reconstructs supported IUPAC variants, and excludes the conserved insert.
 Reads that lack only an outer adapter start at the primer behind it as well,
 so a boundary that such read starts alone support yields to a template that
-begins further inward in the same reads.
+begins further inward in the same reads. Behind an adapter followed by
+alternative layers, such as the primers of the two strands of a cDNA
+library, those reads start at each of them: when the reads holding the
+reconstructed sequence continue with two recurrent read starts that are not
+one sequence within the error rate, each in at least 20 reads, the starts
+open layers rather than the insert and mark no boundary.
 Distinct primer families sharing an insert boundary are considered separately.
 Candidates overlapping a validated insert start, or supported mainly on the
 insert-facing side of a reconstructed primer, are excluded. Candidates whose
