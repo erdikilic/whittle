@@ -15,7 +15,8 @@ pub enum Kit {
     Lsk114,
     /// Rapid sequencing kit V14 (SQK-RAD114) and the ultra-long kit (SQK-ULK114).
     Rad114,
-    /// Rapid barcoding kit V14 (SQK-RBK114, 24 or 96 barcodes).
+    /// Rapid barcoding kit V14 (SQK-RBK114.24 or SQK-RBK114.96): BC01 to BC96
+    /// with RBK26, RBK39, RBK40, RBK48, RBK54 and RBK60 for those numbers.
     Rbk114,
     /// Native barcoding kit V14 (SQK-NBD114, 24 or 96 barcodes).
     Nbd114,
@@ -266,10 +267,6 @@ mod tests {
                 .any(|a| a.name == "16S_mix_F" && a.role == Role::Adapter)
         );
         assert_eq!(mab.iter().filter(|a| a.name.starts_with("TP")).count(), 24);
-        assert!(
-            mab.iter()
-                .any(|a| a.name == "RAD" && a.role == Role::Adapter)
-        );
         let mixed = preset(&[Kit::Mab114, Kit::Lsk114]);
         assert!(
             mixed
@@ -326,7 +323,7 @@ mod tests {
             assert!(pcb.iter().any(|a| a.name == name), "{name}");
         }
         assert!(pcb.iter().all(|a| a.name != "RLB12A"));
-        for kit in [Kit::Rad114, Kit::Rbk114, Kit::Mab114] {
+        for kit in [Kit::Rad114, Kit::Rbk114] {
             assert!(preset(&[kit]).iter().any(|a| a.name == "RAD"), "{kit:?}");
         }
         assert!(
@@ -334,6 +331,91 @@ mod tests {
                 .iter()
                 .all(|a| a.name != "RLB12A")
         );
+    }
+
+    /// The rapid barcoding preset holds the arrangement of dorado's
+    /// `SQK-RBK114-96`, whose barcodes cover those of `SQK-RBK114-24`: the
+    /// ligation Y-adapter, the transposon end `RAD`, the `RBK4_FRONT` flank and
+    /// the barcodes of `RBK_1_96`, RBK26, RBK39, RBK40, RBK48, RBK54 and RBK60
+    /// in place of the BC oligos of those numbers, which the native kit keeps.
+    #[test]
+    fn rbk114_preset_matches_the_kit() {
+        const VARIANTS: [usize; 6] = [26, 39, 40, 48, 54, 60];
+        let names: Vec<String> = preset(&[Kit::Rbk114]).into_iter().map(|a| a.name).collect();
+        let mut expected: Vec<String> = [
+            "LSK114_front",
+            "LSK114_rear",
+            "LSK109_front",
+            "LSK109_rear",
+            "RAD",
+            "RBK4_front",
+        ]
+        .map(String::from)
+        .to_vec();
+        expected.extend((1..=96).map(|n| {
+            if VARIANTS.contains(&n) {
+                format!("RBK{n}")
+            } else {
+                format!("BC{n:02}")
+            }
+        }));
+        assert_eq!(names, expected);
+        let variants: [(&str, &[u8]); 6] = [
+            ("RBK26", b"ACTATGCCTTTCCGTGAAACAGTT"),
+            ("RBK39", b"TCTGCCACACACTCGTAAGTCCTT"),
+            ("RBK40", b"GTCGATACTGGACCTATCCCTTGG"),
+            ("RBK48", b"GAGTCCGTGACAACTTCTGAAAGC"),
+            ("RBK54", b"GGGTGCCAACTACATACCAAACCT"),
+            ("RBK60", b"GAACCCTACTTTGGACAGACACCT"),
+        ];
+        for (name, seq) in variants {
+            assert_eq!(
+                super::super::catalog::sequence_of(name),
+                Some(seq),
+                "{name}"
+            );
+        }
+
+        let nbd = preset(&[Kit::Nbd114]);
+        for n in VARIANTS {
+            assert!(nbd.iter().any(|a| a.name == format!("BC{n}")), "BC{n}");
+            assert!(nbd.iter().all(|a| a.name != format!("RBK{n}")), "RBK{n}");
+        }
+    }
+
+    /// The amplicon barcoding preset holds the arrangement of dorado's
+    /// `SQK-MAB114-24` and the kit's primers: the ligation Y-adapter, whose
+    /// top strand the rapid adapter shares, the twelve primers, the
+    /// `MAB_FRONT` and `MAB_REAR` flanks and the 24 TP barcodes. The kit
+    /// attaches its rapid adapter without a transposase, so it carries no
+    /// transposon end `RAD`.
+    #[test]
+    fn mab114_preset_matches_the_kit() {
+        let names: Vec<String> = preset(&[Kit::Mab114]).into_iter().map(|a| a.name).collect();
+        let mut expected: Vec<String> = [
+            "LSK114_front",
+            "LSK114_rear",
+            "LSK109_front",
+            "LSK109_rear",
+            "16S_mix_F",
+            "16S_mix_R",
+            "16S_Bor_F",
+            "16S_Bor_R",
+            "16S_Chl_F",
+            "16S_Chl_R",
+            "16S_Ent_F",
+            "ITS1",
+            "ITS1_Fus",
+            "ITS1_Mal",
+            "ITS4",
+            "ITS4_Pyt",
+            "RBK4_front",
+            "MAB_rear",
+        ]
+        .map(String::from)
+        .to_vec();
+        expected.extend((1..=24).map(|n| format!("TP{n:02}")));
+        assert_eq!(names, expected);
     }
 
     /// The whole catalog holds every barcode, and the ONT union excludes PacBio.

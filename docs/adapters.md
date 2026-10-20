@@ -509,11 +509,11 @@ a comma-separated list of tokens:
 |---|---|---|
 | `lsk114` | Ligation sequencing kit V14 | Ligation Y-adapter (kit 14 and legacy), cDNA and 10X primers |
 | `rad114`, `ulk114` | Rapid and ultra-long kits V14 | Rapid adapter, ligation adapter |
-| `rbk114` | Rapid barcoding kit V14 | Rapid adapter, rapid flank, 96 barcodes |
+| `rbk114` | Rapid barcoding kit V14 | Rapid adapter, rapid flank, 96 barcodes with RBK26, RBK39, RBK40, RBK48, RBK54 and RBK60 for those numbers |
 | `nbd114` | Native barcoding kit V14 | Ligation adapter, native flank, 96 barcodes |
 | `pcb114`, `pcs114` | cDNA-PCR sequencing and barcoding kits V14 | Ligation adapter, PCS primers, PCS114 UMI, PCR flanks, 24 barcodes |
 | `rpb114` | Rapid PCR barcoding kit V14 | Ligation adapter, whose top strand the rapid adapter shares, rapid PCR barcode flank, 24 barcodes with RLB12A as barcode 12 |
-| `mab114` | Microbial amplicon barcoding kit V14 | Ligation and rapid adapters, the kit's seven 16S and five ITS primers, MAB flanks, 24 barcodes |
+| `mab114` | Microbial amplicon barcoding kit V14 | Ligation adapter, whose top strand the rapid adapter shares, the kit's seven 16S and five ITS primers, MAB flanks, 24 barcodes |
 | `rna004` | Direct RNA sequencing kit | RNA adapter |
 | `pacbio` | PacBio SMRTbell | SMRTbell adapter, C2 sequencing primer |
 | `ont` | Every ONT kit above | |

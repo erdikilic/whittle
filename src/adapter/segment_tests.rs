@@ -880,19 +880,25 @@ fn rapid_pcr_barcode_is_trimmed_through_the_transposon_end() {
 }
 
 /// A dorado barcode call verifies its span against the catalog barcodes of
-/// its number, the rapid PCR kit's `RLB12A` among those of barcode 12.
+/// its number: the rapid PCR kit's `RLB12A` among those of barcode 12, and
+/// the rapid barcoding kit's `RBK26` among those of barcode 26.
 #[test]
 fn barcode_call_verifies_against_the_catalog_barcodes_of_its_number() {
-    let rlb12a = b"GTTGAGTTACAAAGCACCGATCAG";
-    let mut w = splitmix_dna(5, 60);
-    w.extend_from_slice(rlb12a);
-    w.extend(splitmix_dna(6, 300));
     let c = cfg(Vec::new(), true);
-    let (start, end) = (60, 60 + rlb12a.len());
-    let call = |n: &str| format!("SQK-RPB114-24_barcode{n}").into_bytes();
-    assert!(c.barcode_span_verified(&w, start, end, Some(call("12").as_slice())));
-    assert!(!c.barcode_span_verified(&w, start, end, Some(call("11").as_slice())));
+    for (kit, oligo, number, other) in [
+        ("SQK-RPB114-24", &b"GTTGAGTTACAAAGCACCGATCAG"[..], 12, 11),
+        ("SQK-RBK114-96", &b"ACTATGCCTTTCCGTGAAACAGTT"[..], 26, 27),
+    ] {
+        let mut w = splitmix_dna(5, 60);
+        w.extend_from_slice(oligo);
+        w.extend(splitmix_dna(6, 300));
+        let (start, end) = (60, 60 + oligo.len());
+        let call = |n: usize| format!("{kit}_barcode{n}").into_bytes();
+        assert!(c.barcode_span_verified(&w, start, end, Some(call(number).as_slice())));
+        assert!(!c.barcode_span_verified(&w, start, end, Some(call(other).as_slice())));
+    }
     assert_eq!(barcode_number(b"RLB12A"), Some(12));
+    assert_eq!(barcode_number(b"RBK26"), Some(26));
     assert_eq!(barcode_number(b"BC07"), Some(7));
     assert_eq!(barcode_number(b"RBK4_front"), None);
 }
@@ -1790,10 +1796,10 @@ fn marker_sites_partition_the_marker_primers() {
 /// joins another entry's chance family or pairs; only the set-wide
 /// terminal and interior chance bounds can still move another entry's
 /// budget when the twelve kit primers stand in for the four legacy
-/// primers 16S 27F and 1492R, ITS1F and ITS4. `LSK109_front`, `RAD` and
-/// `MAB_rear` move by one edit in one or two read-length classes; every
-/// other entry of the preset, including `TP01` to `TP24` and the barcode
-/// flank `RBK4_front`, keeps its budgets exactly.
+/// primers 16S 27F and 1492R, ITS1F and ITS4. `LSK109_front`,
+/// `LSK109_rear` and `MAB_rear` move by one edit in one or two read-length
+/// classes; every other entry of the preset, including `TP01` to `TP24`
+/// and the barcode flank `RBK4_front`, keeps its budgets exactly.
 #[test]
 fn kit_primer_variants_move_named_budgets_under_mab114_alone() {
     use super::catalog::CATALOG;
@@ -1829,13 +1835,13 @@ fn kit_primer_variants_move_named_budgets_under_mab114_alone() {
     let expected_move: &[(&str, [usize; INTERIOR_CLASSES], [usize; INTERIOR_CLASSES])] = &[
         (
             "LSK109_front",
-            [4, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1],
-            [4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1],
+            [4, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1],
+            [4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1],
         ),
         (
-            "RAD",
-            [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8],
-            [10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8],
+            "LSK109_rear",
+            [2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ),
         (
             "MAB_rear",
@@ -1869,7 +1875,7 @@ fn kit_primer_variants_move_named_budgets_under_mab114_alone() {
         compared += 1;
     }
     assert_eq!(moved, expected_move.len());
-    assert_eq!(compared, 31, "{compared}");
+    assert_eq!(compared, 30, "{compared}");
 }
 
 /// A barcode entry whose sequence matches a marker primer within its edit

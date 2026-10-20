@@ -17,8 +17,10 @@
 //! the native, PCR, and rapid kits, which differ only in flank and orientation
 //! (native uses the reverse complement). Only the canonical forward oligo is
 //! stored, and reverse-complement search covers the rest. The rapid PCR kit's
-//! barcode 12, `RLB12A`, is an oligo of its own. Trimming through the flanks
-//! removes the barcode whatever its number.
+//! barcode 12, `RLB12A`, and barcodes 26, 39, 40, 48, 54 and 60 of the 96-plex
+//! rapid barcoding kit, `RBK26`, `RBK39`, `RBK40`, `RBK48`, `RBK54` and
+//! `RBK60`, are oligos of their own. Trimming through the flanks removes the
+//! barcode whatever its number.
 
 use super::Role;
 use super::preset::Kit;
@@ -40,10 +42,11 @@ const KIT14: &[Kit] = &[
     Kit::Mab114,
 ];
 
-/// Kits whose presets carry the rapid adapter `RAD`, the transposon end of
-/// the rapid kits. A rapid PCR barcoding read holds only its last 21 bases,
-/// which `RLB_rear` covers.
-const RAPID: &[Kit] = &[Kit::Rad114, Kit::Rbk114, Kit::Mab114];
+/// Kits whose reads carry the rapid adapter `RAD`, the transposon end, before
+/// the insert: the rapid sequencing and rapid barcoding kits. A rapid PCR
+/// barcoding read holds only its last 21 bases, which `RLB_rear` covers, and
+/// the amplicon kit attaches its rapid adapter without a transposase.
+const RAPID: &[Kit] = &[Kit::Rad114, Kit::Rbk114];
 
 /// The sequences that lie between a barcode and the insert in their kit's
 /// read layout: the inner flanks of the PCR, rapid PCR, rapid and amplicon
@@ -160,7 +163,7 @@ pub(crate) const CATALOG: &[Entry] = &[
     ("LSK109_rear", Role::Adapter, KIT14, b"GCAATACGTAACTGAACGAAGT"),
 
     // Rapid adapter, which doubles as the 3' flank of the rapid-barcoding kits.
-    // SQK-RAD004/RAD114, ULK114, RBK*, MAB114
+    // SQK-RAD004/RAD114, ULK114, RBK*
     // [dorado:adapter_primer_kits.cpp(RAD) / porechop(Rapid_adapter)]
     ("RAD", Role::Adapter, RAPID, b"GTTTTCGCATTTATCGTGAAACGCTTTCGCGTTTTTCGTGCGCCGCTTCA"),
 
@@ -244,6 +247,9 @@ pub(crate) const CATALOG: &[Entry] = &[
     // The 96 canonical forward barcode oligos, from Porechop `adapters.py` and confirmed
     // present in dorado. BC01 to BC24 serve the 24-plex PCR kits as well, and all but BC12
     // the rapid PCR kit, whose barcode 12 is RLB12A [dorado:barcode_kits.cpp(BC2_1_24)].
+    // The 96-plex rapid barcoding kits carry RBK26, RBK39, RBK40, RBK48, RBK54 and RBK60
+    // in place of BC26, BC39, BC40, BC48, BC54 and BC60, as their reads show; ONT's
+    // barcode tables list the BC oligos under those numbers [dorado:barcode_kits.cpp(RBK_1_96)].
     ("BC01", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"AAGAAAGTTGTCGGTGTCTTTGTG"),
     ("BC02", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"TCGATTCCGTTTGTAGTCGTCTGT"),
     ("BC03", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"GAGTCTTGTGTCCCAGTTACCAGG"),
@@ -272,7 +278,9 @@ pub(crate) const CATALOG: &[Entry] = &[
     ("BC23", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"CTTACTACCCAGTGAACCTCCTCG"),
     ("BC24", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114, Kit::Pcb114, Kit::Rpb114], b"GCATAGTTCTGCATGATGGGTTAG"),
     ("BC25", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"GTAAGTTGGGTATGCAACGCAATG"),
-    ("BC26", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CATACAGCGACTACGCATTCTCAT"),
+    ("BC26", Role::Barcode, &[Kit::Nbd114], b"CATACAGCGACTACGCATTCTCAT"),
+    // Barcode 26 of the 96-plex rapid barcoding kits [dorado:barcode_kits.cpp(RBK26)]
+    ("RBK26", Role::Barcode, &[Kit::Rbk114], b"ACTATGCCTTTCCGTGAAACAGTT"),
     ("BC27", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CGACGGTTAGATTCACCTCTTACA"),
     ("BC28", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"TGAAACCTAAGAAGGCACCGTATC"),
     ("BC29", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CTAGACACCTTGGGTTGACAGACC"),
@@ -285,8 +293,12 @@ pub(crate) const CATALOG: &[Entry] = &[
     ("BC36", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"ATGTCCCAGTTAGAGGAGGAAACA"),
     ("BC37", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"GCTTGCGATTGATGCTTAGTATCA"),
     ("BC38", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"ACCACAGGAGGACGATACAGAGAA"),
-    ("BC39", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CCACAGTGTCAACTAGAGCCTCTC"),
-    ("BC40", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"TAGTTTGGATGACCAAGGATAGCC"),
+    ("BC39", Role::Barcode, &[Kit::Nbd114], b"CCACAGTGTCAACTAGAGCCTCTC"),
+    // Barcode 39 of the 96-plex rapid barcoding kits [dorado:barcode_kits.cpp(RBK39)]
+    ("RBK39", Role::Barcode, &[Kit::Rbk114], b"TCTGCCACACACTCGTAAGTCCTT"),
+    ("BC40", Role::Barcode, &[Kit::Nbd114], b"TAGTTTGGATGACCAAGGATAGCC"),
+    // Barcode 40 of the 96-plex rapid barcoding kits [dorado:barcode_kits.cpp(RBK40)]
+    ("RBK40", Role::Barcode, &[Kit::Rbk114], b"GTCGATACTGGACCTATCCCTTGG"),
     ("BC41", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"GGAGTTCGTCCAGAGAAGTACACG"),
     ("BC42", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CTACGTGTAAGGCATACCTGCCAG"),
     ("BC43", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CTTTCGTTGTTGACTCGACGGTAG"),
@@ -294,19 +306,25 @@ pub(crate) const CATALOG: &[Entry] = &[
     ("BC45", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"GATCCAACAGAGATGCCTTCAGTG"),
     ("BC46", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"GCTGTGTTCCACTTCATTCTCCTG"),
     ("BC47", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"GTGCAACTTTCCCACAGGTAGTTC"),
-    ("BC48", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CATCTGGAACGTGGTACACCTGTA"),
+    ("BC48", Role::Barcode, &[Kit::Nbd114], b"CATCTGGAACGTGGTACACCTGTA"),
+    // Barcode 48 of the 96-plex rapid barcoding kits [dorado:barcode_kits.cpp(RBK48)]
+    ("RBK48", Role::Barcode, &[Kit::Rbk114], b"GAGTCCGTGACAACTTCTGAAAGC"),
     ("BC49", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"ACTGGTGCAGCTTTGAACATCTAG"),
     ("BC50", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"ATGGACTTTGGTAACTTCCTGCGT"),
     ("BC51", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"GTTGAATGAGCCTACTGGGTCCTC"),
     ("BC52", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"TGAGAGACAAGATTGTTCGTGGAC"),
     ("BC53", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"AGATTCAGACCGTCTCATGCAAAG"),
-    ("BC54", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CAAGAGCTTTGACTAAGGAGCATG"),
+    ("BC54", Role::Barcode, &[Kit::Nbd114], b"CAAGAGCTTTGACTAAGGAGCATG"),
+    // Barcode 54 of the 96-plex rapid barcoding kits [dorado:barcode_kits.cpp(RBK54)]
+    ("RBK54", Role::Barcode, &[Kit::Rbk114], b"GGGTGCCAACTACATACCAAACCT"),
     ("BC55", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"TGGAAGATGAGACCCTGATCTACG"),
     ("BC56", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"TCACTACTCAACAGGTGGCATGAA"),
     ("BC57", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"GCTAGGTCAATCTCCTTCGGAAGT"),
     ("BC58", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CAGGTTACTCCTCCGTGAGTCTGA"),
     ("BC59", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"TCAATCAAGAAGGGAAAGCAAGGT"),
-    ("BC60", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CATGTTCAACCAAGGCTTCTATGG"),
+    ("BC60", Role::Barcode, &[Kit::Nbd114], b"CATGTTCAACCAAGGCTTCTATGG"),
+    // Barcode 60 of the 96-plex rapid barcoding kits [dorado:barcode_kits.cpp(RBK60)]
+    ("RBK60", Role::Barcode, &[Kit::Rbk114], b"GAACCCTACTTTGGACAGACACCT"),
     ("BC61", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"AGAGGGTACTATGTGCCTCAGCAC"),
     ("BC62", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"CACCCACACTTACTTCAGGACGTA"),
     ("BC63", Role::Barcode, &[Kit::Rbk114, Kit::Nbd114], b"TTCTGAAGTTCCTGGGTCTTGAAC"),

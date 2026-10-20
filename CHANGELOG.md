@@ -55,10 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edit in the same reads under `all`, raises that of `RNA004_rear` by one
   edit in reads of 32 to 64 kb under `all`, and under `mab114` alone,
   where the kit's primers take the adapter role and join no chance family,
-  moves the interior budget of `LSK109_front` and `RAD` by one edit in one
-  read-length class each and of `MAB_rear` by one edit in two read-length
-  classes. Every other budget outside the kit primers stays as that catalog
-  sets it.
+  moves the interior budget of `LSK109_front` and `MAB_rear` by one edit in
+  two read-length classes each and of `LSK109_rear` by one edit in one
+  read-length class. Every other budget outside the kit primers stays as
+  that catalog sets it.
 - `--quality-trim segments` keeps every maximal scoring segment under the
   modified Mott score of `best-segment` (Ruzzo and Tompa 1999) instead of the best
   one alone, so a read with a low-quality interior keeps both flanks.
@@ -241,6 +241,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `16S_Bor_R`, `16S_Chl_R` and `MAB_rear` in reads of 8 to 16 kb under
   `ont`, and to `ITS4`, `ITS4_Pyt` and `PacBio_C2` in reads of 16 to 32 kb
   and `RNA004_rear` in reads of 32 to 64 kb under `all`.
+- The `rbk114` adapter preset holds the barcodes SQK-RBK114.96 reads carry,
+  as dorado's `SQK-RBK114-96` arrangement lists them: barcodes 26, 39, 40,
+  48, 54 and 60 of the kit are its own oligos `RBK26`, `RBK39`, `RBK40`,
+  `RBK48`, `RBK54` and `RBK60`, not the `BC` oligos of those numbers, which
+  the native kit keeps; SQK-RBK114.24 uses `BC01` to `BC24`. A dorado
+  barcode call `barcode26` verifies a recorded barcode span against `RBK26`
+  as well. Every budget of the `rbk114`, `ont` and `all` presets stays as it
+  was.
+- The `mab114` adapter preset no longer searches the rapid adapter `RAD`.
+  The kit attaches its rapid adapter without a transposase, so its reads
+  hold no transposon end. Without it, the set-wide interior bound of the
+  preset leaves one edit more to `LSK109_front` in reads of 512 kb to 1 Mb
+  and of 64 to 128 Mb, to `LSK109_rear` in reads of 2 to 4 Mb and to
+  `LSK114_front` in reads of 1 Gb or more.
 - Adapter discovery keeps a flank that both read ends carry behind an
   adapter that only the 5' end carries, such as a barcode flank behind a
   rapid adapter, instead of cutting it as insert: its reverse complement at
