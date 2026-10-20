@@ -372,6 +372,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--tag-filter` rejects expressions nested more than 100 levels deep with a
   parse error instead of overflowing the stack, and a NaN tag value satisfies
   only `!=`. String tags of BAM records are compared without copying.
+- A `--tag-filter` chain of several thousand conditions joined by `&&` or
+  `||` no longer overflows the stack of a worker thread and aborts the run:
+  a chain is one node of the parsed expression, so its length adds no depth.
+- A `--targets` FASTA sheet with entries that carry no `target=` field
+  reports their count in an info line, since they are trimmed only when the
+  same file is also given to `--adapter-fasta`.
 - A partial adapter hit that overhangs both ends of a short read is charged
   the overhang cost the search applies to each side, and a very large custom
   adapter set no longer exhausts the seed table.

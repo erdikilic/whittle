@@ -775,13 +775,27 @@ fn resolve_split(
         Some(out) => Template::parse(out)?,
         None => None,
     };
-    let sources = specs
+    let sources: Vec<std::path::PathBuf> = specs
         .iter()
         .map(std::path::PathBuf::from)
         .filter(|path| crate::split::sheet::is_sheet_file(path))
         .collect();
     let sheet = Sheet::load_all(&specs)?;
     sheet.validate(c.target_require)?;
+    for path in &sources {
+        let untargeted = crate::split::sheet::untargeted_entries(path)?;
+        let also_adapters = c
+            .adapter_fasta
+            .as_deref()
+            .is_some_and(|fasta| crate::guards::same_path(fasta, path));
+        if untargeted > 0 && !also_adapters {
+            advisories.push(Advisory::info(format!(
+                "Sheet entries without target= are not targets and are trimmed only when the \
+                 file is also given to --adapter-fasta: sheet={}, entries={untargeted}",
+                path.display()
+            )));
+        }
+    }
     for primer in &sheet.primers {
         if let Some(per_position) = high_degeneracy(&primer.seq) {
             advisories.push(Advisory::warn(format!(

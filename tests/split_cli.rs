@@ -2083,3 +2083,41 @@ fn rejected_records_omit_input_target_tags() {
         }
     }
 }
+
+/// A FASTA sheet's entries without `target=` are named in an info line as
+/// left untrimmed, unless the same file is also given to `--adapter-fasta`.
+#[test]
+fn fasta_sheet_entries_without_a_target_are_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = primers();
+    let s = |v: &[u8]| String::from_utf8(v.to_vec()).unwrap();
+    let sheet = dir.path().join("sheet.fa");
+    std::fs::write(
+        &sheet,
+        format!(
+            ">adapterA\n{}\n>f16 target=16S end=fwd\n{}\n>r16 target=16S end=rev\n{}\n",
+            s(&splitmix_dna(905, 24)),
+            s(&p.f16),
+            s(&p.r16)
+        ),
+    )
+    .unwrap();
+    let input = dir.path().join("in.fastq");
+    write_fastq(&input, &three_reads(&p));
+    let note = "Sheet entries without target= are not targets";
+    let run = |extra: &[&std::ffi::OsStr]| {
+        whittle()
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg(dir.path().join("out.fastq"))
+            .arg("--targets")
+            .arg(&sheet)
+            .args(extra)
+            .assert()
+            .success()
+    };
+    run(&[]).stderr(predicate::str::contains(note).and(predicate::str::contains("entries=1")));
+    run(&["--adapter-fasta".as_ref(), sheet.as_os_str()])
+        .stderr(predicate::str::contains(note).not());
+}

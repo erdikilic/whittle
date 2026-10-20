@@ -87,8 +87,10 @@ enum Expr {
     Num(f64),
     Str(Vec<u8>),
     Not(Box<Expr>),
-    And(Box<Expr>, Box<Expr>),
-    Or(Box<Expr>, Box<Expr>),
+    /// Two or more conditions joined by `&&`, in source order.
+    And(Vec<Expr>),
+    /// Two or more conditions joined by `||`, in source order.
+    Or(Vec<Expr>),
     Cmp(Op, Box<Expr>, Box<Expr>),
 }
 
@@ -361,8 +363,8 @@ fn lex(text: &str) -> Result<Vec<Token>, String> {
 /// Deepest nesting of negations and parentheses an expression may use. The
 /// parser, the evaluator and the drop of the expression tree recurse once per
 /// level, so deeper nesting is a parse error rather than a stack overflow. A
-/// chain of `&&` or `||` is parsed iteratively into a left-deep tree, as deep
-/// as the chain is long, which this limit does not bound.
+/// chain of `&&` or `||` is one node holding its operands (`Expr::And`,
+/// `Expr::Or`), so its length adds no depth.
 const MAX_NESTING: usize = 100;
 
 /// A recursive-descent parser over the token list.
@@ -400,27 +402,40 @@ impl Parser {
     }
 
     fn expr(&mut self) -> Result<Expr, String> {
-        let mut left = self.and()?;
-        while self.peek() == Some(&Token::Or) {
-            self.pos += 1;
-            let right = self.and()?;
-            require_condition(&left)?;
-            require_condition(&right)?;
-            left = Expr::Or(Box::new(left), Box::new(right));
-        }
-        Ok(left)
+        let operands = self.chain(Token::Or, Self::and)?;
+        Ok(Self::joined(operands, Expr::Or))
     }
 
     fn and(&mut self) -> Result<Expr, String> {
-        let mut left = self.not()?;
-        while self.peek() == Some(&Token::And) {
+        let operands = self.chain(Token::And, Self::not)?;
+        Ok(Self::joined(operands, Expr::And))
+    }
+
+    /// Parses one or more operands with `operand`, separated by `join`; the
+    /// operands of a chain of two or more must be conditions.
+    fn chain(
+        &mut self,
+        join: Token,
+        operand: fn(&mut Self) -> Result<Expr, String>,
+    ) -> Result<Vec<Expr>, String> {
+        let mut operands = vec![operand(self)?];
+        while self.peek() == Some(&join) {
             self.pos += 1;
-            let right = self.not()?;
-            require_condition(&left)?;
-            require_condition(&right)?;
-            left = Expr::And(Box::new(left), Box::new(right));
+            operands.push(operand(self)?);
         }
-        Ok(left)
+        if operands.len() > 1 {
+            operands.iter().try_for_each(require_condition)?;
+        }
+        Ok(operands)
+    }
+
+    /// Returns a lone operand as itself, and two or more as one `node`.
+    fn joined(mut operands: Vec<Expr>, node: fn(Vec<Expr>) -> Expr) -> Expr {
+        if operands.len() == 1 {
+            operands.pop().unwrap()
+        } else {
+            node(operands)
+        }
     }
 
     /// Enters one level of nesting, or fails past `MAX_NESTING`.
@@ -500,8 +515,22 @@ fn eval_bool(e: &Expr, rec: &impl TagSource) -> anyhow::Result<bool> {
     Ok(match e {
         Expr::Tag(t) => rec.tag_value(*t)? != TagValue::Missing,
         Expr::Not(inner) => !eval_bool(inner, rec)?,
-        Expr::And(a, b) => eval_bool(a, rec)? && eval_bool(b, rec)?,
-        Expr::Or(a, b) => eval_bool(a, rec)? || eval_bool(b, rec)?,
+        Expr::And(operands) => {
+            for operand in operands {
+                if !eval_bool(operand, rec)? {
+                    return Ok(false);
+                }
+            }
+            true
+        },
+        Expr::Or(operands) => {
+            for operand in operands {
+                if eval_bool(operand, rec)? {
+                    return Ok(true);
+                }
+            }
+            false
+        },
         Expr::Cmp(op, a, b) => compare(*op, a, b, rec)?,
         Expr::Num(_) | Expr::Str(_) => {
             anyhow::bail!("a literal is not a condition")
@@ -526,7 +555,7 @@ fn op_context(e: &Expr) -> &'static str {
     match e {
         Expr::Cmp(..) => "another comparison",
         Expr::Not(_) => "a negation",
-        Expr::And(..) | Expr::Or(..) => "a boolean expression",
+        Expr::And(_) | Expr::Or(_) => "a boolean expression",
         Expr::Tag(_) | Expr::Num(_) | Expr::Str(_) => "a value",
     }
 }
@@ -787,6 +816,27 @@ mod tests {
         ] {
             assert!(!keeps(expr, &rec), "{expr}");
         }
+    }
+
+    /// A chain of `&&` or `||` as long as one command-line argument holds is
+    /// parsed, evaluated and dropped without recursing per operand, on a
+    /// thread with a small stack, as a render worker's.
+    #[test]
+    fn long_chains_do_not_recurse_per_operand() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let rec = Rec::new(&[(*b"qs", TagValue::Num(12.0))]);
+                let all = vec!["[qs] > 1"; 20_000].join(" && ");
+                assert!(keeps(&all, &rec));
+                let none = vec!["[zz]"; 20_000].join("||");
+                assert!(!keeps(&none, &rec));
+                let last = format!("{} || [qs] == 12", vec!["[zz]"; 20_000].join("||"));
+                assert!(keeps(&last, &rec));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

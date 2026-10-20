@@ -253,6 +253,42 @@ pub(crate) fn is_sheet_file(path: &std::path::Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| !m.is_dir())
 }
 
+/// Returns the value of the last `key=value` field of a FASTA header
+/// description whose key is `key`, matched without regard to case.
+fn header_field<'a>(description: &'a str, key: &str) -> Option<&'a str> {
+    description
+        .split_whitespace()
+        .filter_map(|tok| tok.split_once('='))
+        .rfind(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, v)| v)
+}
+
+/// Returns how many entries of the annotated FASTA sheet at `path` carry no
+/// `target=` field, which `--targets` ignores (`Sheet::parse_fasta`): zero
+/// for a TSV sheet, and for a path that is not a regular file, such as a
+/// pipe that loading the sheet consumed.
+pub(crate) fn untargeted_entries(path: &std::path::Path) -> anyhow::Result<usize> {
+    use seq_io::fasta::{Reader, Record};
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return Ok(0);
+    }
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading --targets sheet {}", path.display()))?;
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    if bytes.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'>') {
+        return Ok(0);
+    }
+    let mut reader = Reader::new(bytes);
+    let mut untargeted = 0;
+    while let Some(rec) = reader.next() {
+        let rec = rec.map_err(|e| anyhow::anyhow!("target FASTA: {e}"))?;
+        let head = String::from_utf8_lossy(rec.head());
+        let description = head.split_once(char::is_whitespace).map_or("", |(_, d)| d);
+        untargeted += usize::from(header_field(description, "target").is_none());
+    }
+    Ok(untargeted)
+}
+
 /// Minimum IUPAC edit distance of the shorter sequence aligned within the
 /// longer, searched up to `k` edits, or `None` when no alignment scores
 /// within that budget. The search budget is capped at the shorter length:
@@ -634,20 +670,9 @@ impl Sheet {
                 .unwrap_or((head.as_str(), ""));
             let name = name.to_string();
 
-            let mut target_field: Option<&str> = None;
-            let mut end_field: Option<&str> = None;
-            let mut group_field: Option<&str> = None;
-            for tok in description.split_whitespace() {
-                if let Some((k, v)) = tok.split_once('=') {
-                    match k.to_ascii_lowercase().as_str() {
-                        "target" => target_field = Some(v),
-                        "end" => end_field = Some(v),
-                        "group" => group_field = Some(v).filter(|g| !g.is_empty()),
-                        _ => {},
-                    }
-                }
-            }
-            let Some(target_name) = target_field else {
+            let end_field = header_field(description, "end");
+            let group_field = header_field(description, "group").filter(|g| !g.is_empty());
+            let Some(target_name) = header_field(description, "target") else {
                 continue;
             };
             if target_name.is_empty() {

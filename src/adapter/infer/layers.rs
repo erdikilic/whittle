@@ -360,6 +360,7 @@ pub(super) fn symmetry_cut(
     if cut == 0 {
         return (Some(seq.to_vec()), Vec::new());
     }
+    tracing::debug!(sequence = %String::from_utf8_lossy(seq), cut, own_depth, present, "Mirror cuts the insert side");
     // The removed stretch is insert up to the last mirrored window, which
     // may straddle the junction with the technical sequence.
     let core = cut - MIRROR_SEGMENT;

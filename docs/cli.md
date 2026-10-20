@@ -511,7 +511,8 @@ empty; `end=fwd` or `end=rev` places it. Several entries may share one
 `group=` overrides the default group and may appear on any entry of a
 target; two entries of one target giving different `group=` values is an
 error. `--targets` ignores entries with no `target=` field; they are
-searched as `-a` entries only when the same file is also given to `-a`.
+searched as `-a` entries only when the same file is also given to `-a`, and
+otherwise an info line gives their count.
 
 The preset `mab114` defines two targets, `16S` and `ITS`, holding the primer
 mixes of the ONT Microbial Amplicon Barcoding kit (SQK-MAB114.24) under
