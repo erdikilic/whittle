@@ -225,6 +225,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `obs::ProgressHandle::is_bar` are removed.
 
 ### Fixed
+- Adapter discovery keeps a flank that both read ends carry behind an
+  adapter that only the 5' end carries, such as a barcode flank behind a
+  rapid adapter, instead of cutting it as insert: its reverse complement at
+  the 3' end lies at the same depth behind the layers explained at each end.
 - Adapter discovery keeps the primers of ligated amplicon and cDNA libraries
   whose reads often lack the rear adapter. Such reads start at the primer, so
   an insert boundary from unprimed read starts behind the rear adapter yields

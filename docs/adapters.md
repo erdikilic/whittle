@@ -387,7 +387,16 @@ different depth is cut back to its outer part, or dropped when fewer than 11
 bases remain: sequence that appears at the far end of the molecule without the
 technical layers around it is insert, such as a conserved gene end that reads
 reach from the other side. A mirror at the same depth, or none, is neutral, so
-one-sided rapid libraries of genomic DNA are unaffected. A layer that divides
+one-sided rapid libraries of genomic DNA are unaffected. Depth is measured from
+the physical read end and, when most reads holding the candidate and most
+holding its mirror carry layers already explained outboard of it at their
+ends, also from the boundary those layers leave: a mirror at the same depth
+behind the explained layers is neutral too. An adapter that only one end
+carries, such as a rapid adapter at the 5' end, deepens every layer behind it
+at that end, so a flank that both ends carry behind it lies deeper at the 5'
+end than its mirror, but at the same depth behind the explained layers. A
+mirror at the very end of the far reads, with no explained layer outboard of
+it, is judged from the physical end only. A layer that divides
 into strand primers, and the primer layers behind it, are exempt: their mirrors
 lie at a depth set by how much outer adapter each end keeps, which differs
 between the 5' and 3' ends of nanopore reads. A candidate that ends where the

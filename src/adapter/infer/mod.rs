@@ -264,14 +264,10 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
     }
     let physical = Boundaries::new(sample);
     let (five_p, three_p) = layer_windows(sample, &physical, MIRROR_WINDOW);
-    let five_phys: Vec<&[u8]> = stride_sample(
-        &five_p.iter().map(|(_, w)| *w).collect::<Vec<_>>(),
-        RECOUNT_WINDOWS,
-    );
-    let three_phys: Vec<&[u8]> = stride_sample(
-        &three_p.iter().map(|(_, w)| *w).collect::<Vec<_>>(),
-        RECOUNT_WINDOWS,
-    );
+    let five_p = stride_sample(&five_p, RECOUNT_WINDOWS);
+    let three_p = stride_sample(&three_p, RECOUNT_WINDOWS);
+    let five_phys: Vec<&[u8]> = five_p.iter().map(|(_, w)| *w).collect();
+    let three_phys: Vec<&[u8]> = three_p.iter().map(|(_, w)| *w).collect();
 
     let mut searcher = crate::adapter::search::new_searcher_fwd();
     let mut distinct: Vec<Distinct> = Vec::new();
@@ -379,6 +375,13 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         let background = background_windows(sample, &bounds, WINDOW_LEN);
         let background = stride_sample(&background, RECOUNT_WINDOWS);
 
+        // Depth explained by earlier layers and known sequences in the read
+        // of each physical window, from its end.
+        let five_explained: Vec<usize> = five_p.iter().map(|&(i, _)| bounds.five[i]).collect();
+        let three_explained: Vec<usize> = three_p
+            .iter()
+            .map(|&(i, _)| sample[i].len() - bounds.three[i])
+            .collect();
         // Insert stretches identified by their mirror also reject the graph
         // fragments that reconstruct part of them. `same_family` compares
         // both strands, so each stretch is kept on the strand it was cut from.
@@ -418,13 +421,22 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                     if boundary {
                         return Some((seq, support, boundary, weight, end));
                     }
-                    let (own, opposite) = match end {
-                        End::Five => (&five_phys, &three_phys),
-                        End::Three => (&three_phys, &five_phys),
+                    let (own, opposite, explained) = match end {
+                        End::Five => (&five_phys, &three_phys, [&five_explained, &three_explained]),
+                        End::Three => {
+                            (&three_phys, &five_phys, [&three_explained, &five_explained])
+                        },
                     };
                     // A mirror at the opposite end is the only insert evidence
                     // for a candidate the assembly window could not bound.
-                    let (cut, insert) = symmetry_cut(&seq, end, own, opposite, base.error_rate);
+                    let (cut, insert) = symmetry_cut(
+                        &seq,
+                        end,
+                        own,
+                        opposite,
+                        explained.map(Vec::as_slice),
+                        base.error_rate,
+                    );
                     if insert.len() >= MIN_PATTERN_LEN {
                         inserts.push(insert);
                     }

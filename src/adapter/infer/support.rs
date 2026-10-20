@@ -167,8 +167,8 @@ pub(super) fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec
 /// Samples at most `cap` windows deterministically, spread across the whole
 /// slice by stride rather than taken from its start, so the recount and
 /// support frame in `assemble` is not order-biased. Returns every window in
-/// order when `windows.len() <= cap`.
-pub(super) fn stride_sample<'a>(windows: &[&'a [u8]], cap: usize) -> Vec<&'a [u8]> {
+/// order when `windows.len() <= cap`. A window may carry its read index.
+pub(super) fn stride_sample<T: Copy>(windows: &[T], cap: usize) -> Vec<T> {
     let step = windows.len().div_ceil(cap.max(1)).max(1);
     windows.iter().step_by(step).copied().collect()
 }

@@ -2083,3 +2083,49 @@ fn ligated_amplicon_primers_are_kept_whole() {
         );
     }
 }
+
+/// Reads with 2% errors that carry a flank at both ends of a random insert,
+/// behind a known short layer at both ends and a known adapter, longer than
+/// the depth tolerance, that only the 5' end carries. The flank lies deeper
+/// at the 5' end than its mirror at the 3' end by the adapter's length, and
+/// at the same depth behind the known layers of each end, so it is kept.
+#[test]
+fn a_flank_behind_a_one_sided_adapter_is_kept() {
+    let adapter = random_bases(81_001, 40);
+    let tag = random_bases(81_002, 15);
+    let flank = random_bases(81_003, 21);
+    let reads: Vec<Vec<u8>> = (0..1500u64)
+        .map(|i| {
+            let read = [
+                &adapter[(i % 4) as usize..],
+                &tag,
+                &flank,
+                &random_bases(810_000 + i, 600),
+                &rc(&flank),
+                &rc(&tag),
+            ]
+            .concat();
+            with_errors(&read, 820_000 + i, 20)
+        })
+        .collect();
+    let known = vec![
+        Adapter {
+            name: "adapter".into(),
+            seq: adapter.clone(),
+            role: Role::Adapter,
+        },
+        Adapter {
+            name: "tag".into(),
+            seq: tag.clone(),
+            role: Role::Primer,
+        },
+    ];
+    let found = infer_with_known(&reads, known);
+    assert!(
+        found.iter().any(|d| {
+            longest_common_substring(&flank, &d.adapter.seq) >= 19
+                || longest_common_substring(&rc(&flank), &d.adapter.seq) >= 19
+        }),
+        "the flank is not recovered: {found:?}"
+    );
+}

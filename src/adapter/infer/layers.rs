@@ -236,15 +236,15 @@ pub(super) fn advance_boundaries(
     }
 }
 
-/// Returns the median depth of the inner edge of `pattern` hits in physical
-/// end windows of `end`, and the number of windows with a hit.
-pub(super) fn inner_depth(
+/// Returns, per physical end window of `end`, the depth of the inner edge of
+/// the best `pattern` hit, or `None` without a hit.
+pub(super) fn inner_edges(
     searcher: &mut AmbiguousSearcher,
     pattern: &[u8],
     windows: &[&[u8]],
     end: End,
     error_rate: f64,
-) -> (usize, usize) {
+) -> Vec<Option<usize>> {
     let k = edit_budget(error_rate, pattern.len());
     let mut best: Vec<Option<(i32, usize)>> = vec![None; windows.len()];
     for hit in searcher.search_texts(pattern, windows, k) {
@@ -257,10 +257,38 @@ pub(super) fn inner_depth(
             *entry = Some((hit.cost, depth));
         }
     }
-    let mut depths: Vec<usize> = best.iter().flatten().map(|&(_, d)| d).collect();
+    best.into_iter()
+        .map(|hit| hit.map(|(_, depth)| depth))
+        .collect()
+}
+
+/// Returns the median of the depths in `edges` (`inner_edges`) and the
+/// number of windows with a hit.
+fn median_edge(edges: &[Option<usize>]) -> (usize, usize) {
+    let mut depths: Vec<usize> = edges.iter().flatten().copied().collect();
     depths.sort_unstable();
     let present = depths.len();
     (depths.get(present / 2).copied().unwrap_or(0), present)
+}
+
+/// Returns the median depth of the hits in `edges` behind the explained
+/// layers of their reads, each window's explained depth in `explained`,
+/// over the windows whose explained layers lie outboard of the hit. `None`
+/// unless at least `least` windows qualify.
+fn median_behind(edges: &[Option<usize>], explained: &[usize], least: usize) -> Option<usize> {
+    let mut behind: Vec<usize> = edges
+        .iter()
+        .zip(explained)
+        .filter_map(|(edge, &outer)| {
+            edge.filter(|&depth| outer > 0 && depth > outer)
+                .map(|depth| depth - outer)
+        })
+        .collect();
+    if behind.is_empty() || behind.len() < least {
+        return None;
+    }
+    behind.sort_unstable();
+    Some(behind[behind.len() / 2])
 }
 
 /// Returns the median depth of the outer edge of `pattern` hits in physical
@@ -311,23 +339,32 @@ pub(super) fn is_flush(
 /// the opposite physical end at a different depth. Returns the outer part,
 /// or `None` when fewer than `MIN_PATTERN_LEN` outer bases remain, with the
 /// removed insert stretch. A mirror at the same depth, or no mirror, leaves
-/// `seq` unchanged.
+/// `seq` unchanged. Depth is measured from the physical end and, where most
+/// windows holding `seq` and most holding its mirror have explained layers
+/// outboard of it, behind those layers: `explained` holds the explained
+/// depth of the read of each `own` and each `opposite` window at its end. A
+/// mirror at the same depth behind the explained layers is technical, as
+/// the layers behind an adapter that only one end carries are.
 pub(super) fn symmetry_cut(
     seq: &[u8],
     end: End,
     own: &[&[u8]],
     opposite: &[&[u8]],
+    explained: [&[usize]; 2],
     error_rate: f64,
 ) -> (Option<Vec<u8>>, Vec<u8>) {
     let mut searcher = crate::adapter::search::new_searcher_fwd();
-    let (own_depth, present) = inner_depth(&mut searcher, seq, own, end, error_rate);
+    let edges = inner_edges(&mut searcher, seq, own, end, error_rate);
+    let (own_depth, present) = median_edge(&edges);
     if present < MIN_SUPPORT_WINDOWS {
         return (Some(seq.to_vec()), Vec::new());
     }
+    let own_behind = median_behind(&edges, explained[0], present.div_ceil(2));
     let opposite_end = match end {
         End::Five => End::Three,
         End::Three => End::Five,
     };
+    let least = MIN_SUPPORT_WINDOWS.max(present / MIRROR_SUPPORT_DIVISOR);
     // Windows slide from the inner edge outward. A window whose mirror
     // lies at a different depth is insert, and the cut extends to its outer
     // edge; a window mirrored at the same depth is technical and ends the
@@ -341,16 +378,22 @@ pub(super) fn symmetry_cut(
             End::Three => &seq[offset..offset + MIRROR_SEGMENT],
         };
         let mirror = crate::adapter::reverse_complement(segment);
-        let (depth, found) = inner_depth(
+        let mirror_edges = inner_edges(
             &mut searcher,
             &mirror,
             opposite,
             opposite_end,
             MIRROR_ERROR_RATE * error_rate,
         );
-        tracing::trace!(sequence = %String::from_utf8_lossy(seq), offset, own_depth, present, depth, found, "Mirror");
-        if found >= MIN_SUPPORT_WINDOWS.max(present / MIRROR_SUPPORT_DIVISOR) {
-            if depth.abs_diff(own_depth.saturating_sub(offset)) <= SYMMETRY_TOLERANCE {
+        let (depth, found) = median_edge(&mirror_edges);
+        let behind = median_behind(&mirror_edges, explained[1], least.max(found.div_ceil(2)));
+        tracing::trace!(sequence = %String::from_utf8_lossy(seq), offset, own_depth, present, depth, found, ?own_behind, ?behind, "Mirror");
+        if found >= least {
+            let same_behind = own_behind.zip(behind).is_some_and(|(own, other)| {
+                other.abs_diff(own.saturating_sub(offset)) <= SYMMETRY_TOLERANCE
+            });
+            if same_behind || depth.abs_diff(own_depth.saturating_sub(offset)) <= SYMMETRY_TOLERANCE
+            {
                 break;
             }
             cut = offset + MIRROR_SEGMENT;
