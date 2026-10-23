@@ -26,6 +26,14 @@ pub(crate) use crate::config::RLE_COVERAGE_TAG;
 /// once per read in `Counters::undo_tags_dropped_reads`.
 pub(crate) const UNDO_TAGS: [[u8; 2]; 2] = [*b"ds", *b"ls"];
 
+/// fibertools footprints: nucleosome starts and lengths (`ns`, `nl`) and
+/// MTase-sensitive patch starts and lengths (`as`, `al`), `B` arrays of read
+/// positions that `ft add-nucleosomes` recomputes from the m6A calls. They are
+/// removed from every output record of a trimmed or split read, counted once
+/// per read in `Counters::footprint_tags_dropped_reads`. An array `ns` is a
+/// footprint, never dorado's integer signal end.
+pub(crate) const FOOTPRINT_TAGS: [[u8; 2]; 4] = [*b"ns", *b"nl", *b"as", *b"al"];
+
 /// PacBio reverse-strand kinetics: the PacBio BAM spec stores them from the
 /// last base to the first, so the window `[start, end)` maps to array indexes
 /// `[len - end, len - start)`.
@@ -284,9 +292,10 @@ pub(super) fn set_update(updates: &mut TagUpdates, tag: Tag, value: Option<Value
 /// the BAM and FASTQ output paths: `(tag, Some(value))` replaces the tag or
 /// adds it, `(tag, None)` removes it. Empty for a full, unsplit window. Covers
 /// the signal and poly-A tags, the tags dropped on a trim, the `qs:f` refresh,
-/// the PacBio `qs`/`qe` coordinates, `st`/`du` on a split, and the dorado
-/// subread tags `rn`, `pi`, `me` and `er` on an ONT split. The modification
-/// block and the per-base arrays are the callers' own.
+/// the PacBio `qs`/`qe` coordinates, `st`/`du` on a split, the dorado subread
+/// tags `rn`, `pi`, `me` and `er` on an ONT split, and the fibertools
+/// footprints. The modification block and the per-base arrays are the callers'
+/// own.
 pub(super) fn window_tag_updates(
     src: &RecordBuf,
     qual: &[u8],
@@ -370,19 +379,41 @@ pub(super) fn window_tag_updates(
             updates.push((er, Some(Value::String(b"unknown".as_slice().into()))));
         }
     }
+    // Footprint arrays index the whole read. Applied after the signal rule, the
+    // removal takes precedence over an integer `ns` rewritten from the moves.
+    for t in FOOTPRINT_TAGS {
+        let tag = Tag::new(t[0], t[1]);
+        if matches!(src.data().get(&tag), Some(Value::Array(_))) {
+            set_update(&mut updates, tag, None);
+        }
+    }
     updates
 }
 
 /// Bumps `Counters::undo_tags_dropped_reads` when a read carrying a PacBio
-/// undo blob (`ds`/`ls`) loses it in the output, which `trimmed` tells: at
-/// least one written window does not span the whole read.
-pub(super) fn count_undo_tags_dropped(counters: &Counters, src: &RecordBuf, trimmed: bool) {
-    let carries_undo = UNDO_TAGS
+/// undo blob (`ds`/`ls`) loses it in the output, and
+/// `Counters::footprint_tags_dropped_reads` when a read carrying fibertools
+/// footprint arrays loses them, which `trimmed` tells: at least one written
+/// window does not span the whole read.
+pub(super) fn count_dropped_read_tags(counters: &Counters, src: &RecordBuf, trimmed: bool) {
+    if !trimmed {
+        return;
+    }
+    let data = src.data();
+    if UNDO_TAGS
         .iter()
-        .any(|t| src.data().get(&Tag::new(t[0], t[1])).is_some());
-    if trimmed && carries_undo {
+        .any(|t| data.get(&Tag::new(t[0], t[1])).is_some())
+    {
         counters
             .undo_tags_dropped_reads
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    if FOOTPRINT_TAGS
+        .iter()
+        .any(|t| matches!(data.get(&Tag::new(t[0], t[1])), Some(Value::Array(_))))
+    {
+        counters
+            .footprint_tags_dropped_reads
             .fetch_add(1, Ordering::Relaxed);
     }
 }

@@ -227,6 +227,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `obs::ProgressHandle::is_bar` are removed.
 
 ### Fixed
+- Trimmed or split reads no longer keep the fibertools footprint arrays
+  `nl`, `as` and `al` with positions of the untrimmed read after the ONT
+  signal rule removes the array `ns`. All four footprint arrays are removed
+  and counted under `warnings.footprint_tags_dropped_reads`, and an array
+  `ns` is never read as dorado's signal end.
 - The `rpb114` adapter preset holds what SQK-RPB114.24 reads carry, as
   dorado's `SQK-RPB114-24` arrangement and ONT's protocol list it. Barcode
   12 of the kit is `RLB12A`, not `BC12`. The PCR primers and barcode flank

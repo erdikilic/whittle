@@ -408,6 +408,59 @@ fn undo_blobs_are_dropped_on_trim_and_counted_once_per_read() {
     assert!(tag(&recs[0], *b"ds").is_some() && tag(&recs[0], *b"ls").is_some());
 }
 
+/// The fibertools footprint arrays leave every output record of a trimmed or
+/// split read and the read is counted once; an untrimmed read keeps them, and
+/// an integer `ns` is not a footprint.
+#[test]
+fn footprint_arrays_are_dropped_on_trim_and_counted_once_per_read() {
+    let add_footprints = |rec: &mut RecordBuf| {
+        let d = rec.data_mut();
+        for (t, v) in [
+            (*b"ns", vec![1u32, 6]),
+            (*b"nl", vec![3, 2]),
+            (*b"as", vec![4]),
+            (*b"al", vec![2]),
+        ] {
+            d.insert(Tag::new(t[0], t[1]), Value::Array(Array::UInt32(v)));
+        }
+    };
+    let without_footprints =
+        |rec: &RecordBuf| FOOTPRINT_TAGS.iter().all(|&t| tag(rec, t).is_none());
+    let mut src = pacbio_hifi_record(HIFI);
+    add_footprints(&mut src);
+    assert!(without_footprints(&reconstruct_record(
+        &src, 2, 7, 1, 0, false
+    )));
+    let kept = reconstruct_record(&src, 0, 10, 1, 0, false);
+    assert!(FOOTPRINT_TAGS.iter().all(|&t| tag(&kept, t).is_some()));
+
+    // A cropped read with footprints, one with an integer `ns`, and a split
+    // read with footprints: two reads counted, no output record keeps them.
+    let mut split = pacbio_hifi_record(b"m1/7/ccs");
+    add_footprints(&mut split);
+    let mut quals = vec![40; 10];
+    quals[5] = 1;
+    *split.quality_scores_mut() = quals.into();
+    let mut integer = pacbio_hifi_record(b"m1/8/ccs");
+    integer
+        .data_mut()
+        .insert(Tag::new(b'n', b's'), Value::Int32(26));
+    let mut cfg = split_cfg();
+    cfg.trim.head = 1;
+    let reads = vec![src.clone(), integer, split];
+    let (stats, recs) = bam2bam(reads.clone(), &cfg);
+    assert_eq!(stats.output_reads, 4);
+    assert_eq!(stats.footprint_tags_dropped_reads, 2);
+    assert!(recs.iter().all(without_footprints));
+    let (stats, s) = bam2fq(reads, &cfg);
+    assert_eq!(stats.footprint_tags_dropped_reads, 2);
+    assert!(!s.contains("nl:B") && !s.contains("as:B"), "{s:?}");
+
+    let (stats, recs) = bam2bam(vec![src], &cfg_bam2fq(None, 0, FastqTags::All));
+    assert_eq!(stats.footprint_tags_dropped_reads, 0);
+    assert!(FOOTPRINT_TAGS.iter().all(|&t| tag(&recs[0], t).is_some()));
+}
+
 /// A removed tag is left out of a trimmed record, whether whittle rewrites
 /// it (`MM`) or copies it (`RG`). Removal runs after the rewrite, so the
 /// rest of the modification block is still rebuilt against the window.

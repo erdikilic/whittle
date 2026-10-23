@@ -404,7 +404,7 @@ pub(super) fn render_windows(
             render.borrow_mut()(window, mod_block, indexed.as_ref(), Some(reason), None)
         },
     )?;
-    count_undo_tags_dropped(counters, rec, trimmed);
+    count_dropped_read_tags(counters, rec, trimmed);
     Ok(())
 }
 

@@ -291,6 +291,12 @@ impl ProgressHandle {
                 "PacBio undo blobs (ds/ls) were removed from trimmed reads"
             );
         }
+        if stats.footprint_tags_dropped_reads > 0 {
+            tracing::warn!(
+                reads = stats.footprint_tags_dropped_reads,
+                "fibertools footprints (ns/nl/as/al) were removed from trimmed or split reads"
+            );
+        }
         if stats.barcode_tag_malformed_reads > 0 {
             tracing::warn!(
                 reads = stats.barcode_tag_malformed_reads,

@@ -161,6 +161,9 @@ struct Warnings {
     malformed_mod_reads: u64,
     /// Trimmed reads whose PacBio undo blobs (`ds`, `ls`) were removed.
     undo_tags_dropped_reads: u64,
+    /// Trimmed or split reads whose fibertools footprint arrays (`ns`, `nl`,
+    /// `as`, `al`) were removed.
+    footprint_tags_dropped_reads: u64,
     /// Reads whose `bi` barcode tag was not a valid barcode window and were
     /// left untrimmed by that stage.
     barcode_tag_malformed_reads: u64,
@@ -302,6 +305,7 @@ impl Summary {
                 malformed_tag_reads: stats.malformed_tag_reads,
                 malformed_mod_reads: stats.malformed_mod_reads,
                 undo_tags_dropped_reads: stats.undo_tags_dropped_reads,
+                footprint_tags_dropped_reads: stats.footprint_tags_dropped_reads,
                 barcode_tag_malformed_reads: stats.barcode_tag_malformed_reads,
                 barcode_tag_unverified_reads: stats.barcode_tag_unverified_reads,
             },
@@ -435,6 +439,7 @@ mod tests {
             malformed_tag_reads: 2,
             malformed_mod_reads: 0,
             undo_tags_dropped_reads: 0,
+            footprint_tags_dropped_reads: 0,
             barcode_tag_malformed_reads: 0,
             barcode_tag_unverified_reads: 0,
             reads_with_output: 92,
