@@ -48,12 +48,13 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 | Reverse-strand kinetics (`ri`/`rp`) | Sliced from the opposite end, since the PacBio BAM specification stores them last base first |
 | `sa` (PacBio run-length subread coverage, `B:I`) | Decoded to per-base coverage, sliced, and re-encoded as `<length>,<coverage>` runs; runs that do not sum to the read length leave the tag unchanged and count as malformed |
 | Fixed-size PacBio arrays (`sn`/`ac`/`bc`) | Copied verbatim |
-| ONT signal (`mv`/`ts`/`ns`/`sp`) | Removed, or rewritten with `--update-moves`; `sp` is kept on a crop, since the raw signal it places is unchanged |
+| ONT signal (`mv`/`ts`/integer `ns`/`sp`) | Removed, or rewritten with `--update-moves`; `sp` is kept on a crop, since the raw signal it places is unchanged |
 | `pi` (parent read id) | Set to the parent's name on every ONT split segment, with or without `--update-moves`; kept on a crop |
 | Poly-A (`pa`/`pt`) | Kept and shifted with `--update-moves` when the tail survives, otherwise removed; `pa` positions are absolute POD5 sample indexes, the frame `ts` uses |
 | `bi` (barcode positions) | Read with any adapter source to place the barcode trim where a barcode sequence is found, then removed, since the positions index the untrimmed read; a tag that is not a seven-element `B:f` array, or whose positions describe an empty, inverted, or out-of-range window, leaves the read untrimmed and is counted |
 | `BC`/`bv` (barcode call and kit version) | Per-read labels, copied unchanged |
 | `ds`/`ls` (PacBio undo blobs for `skera undo` and `lima-undo`) | Removed from every output record of a trimmed read, since they describe the untrimmed read; counted once per read and reported |
+| `ns`/`nl`/`as`/`al` arrays (fibertools nucleosome and MTase-sensitive patch footprints) | Removed from every output record of a trimmed or split read, since their positions index the whole read and `ft add-nucleosomes` recomputes them from the m6A calls; counted once per read and reported. An array `ns` is never treated as dorado's signal end |
 | `qs:f` (dorado mean qscore) | Recomputed from the trimmed quality |
 | `qs:i`/`qe:i` (PacBio query coordinates) | Rewritten as `qs + start` and `qs + end` of the window, since the PacBio BAM specification keeps them relative to the original read; one without the other leaves both unchanged |
 | Read name | A crop updates an existing PacBio query interval in the name; other names are kept. A split names ONT segments `{name}_segment_N`; PacBio segments (an integer `qs`, or a `{movie}/{zmw}/ccs[/fwd|/rev]` or `{movie}/{zmw}/{qStart}_{qEnd}` name) take the specification's `{stem}/{qStart}_{qEnd}` from the rewritten coordinates, replacing any existing interval |
@@ -90,8 +91,8 @@ input. See [cli.md](cli.md#tag-removal).
 
 With an adapter source, the barcode spans recorded in `bi` are removed where a
 barcode sequence is found at them ([cli.md](cli.md#barcode-positions)),
-using an interval in the original read. Every position-indexed tag is
-rewritten against each final interval. The tag is a `B:f` array of seven floats, `[barcode_score,
+using an interval in the original read. The tags of each final interval
+follow [Tag handling](#tag-handling). The tag is a `B:f` array of seven floats, `[barcode_score,
 front_start_index, front_len, front_score, rear_end_index, rear_len,
 rear_score]` (dorado `read_pipeline/base/messages.cpp`). `front_start_index +
 front_len` is the last base of the front barcode and `rear_end_index -

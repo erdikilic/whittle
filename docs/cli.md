@@ -444,7 +444,7 @@ whittle -i reads.bam -o trimmed.fastq.gz -l 500 --quiet --summary-json qc.json
   "reads": { "input": 1000, "output": 950, "with_output": 940, "trimmed_to_nothing": 30, "all_filtered": 20, "tag_filtered": 10 },
   "bases": { "input": 10000000, "output": 9500000 },
   "segments_dropped": { "too_short": 12, "too_long": 0, "low_quality": 5, "high_quality": 0, "expected_errors": 0, "gc_out_of_range": 0 },
-  "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0, "barcode_tag_malformed_reads": 0, "barcode_tag_unverified_reads": 0 }
+  "warnings": { "malformed_tag_reads": 0, "malformed_mod_reads": 0, "undo_tags_dropped_reads": 0, "footprint_tags_dropped_reads": 0, "barcode_tag_malformed_reads": 0, "barcode_tag_unverified_reads": 0 }
 }
 ```
 
@@ -455,10 +455,13 @@ records in input order.
 Under `warnings`, `malformed_tag_reads` counts reads whose per-base tag length
 disagreed with the sequence and was left untouched, `malformed_mod_reads` counts
 reads whose `MM`/`ML`/`MN` block could not be parsed and was removed from the
-output, `barcode_tag_malformed_reads` counts reads whose `bi` positions did
+output, `undo_tags_dropped_reads` counts trimmed reads whose PacBio `ds`/`ls`
+undo blobs were removed, `footprint_tags_dropped_reads` counts trimmed or
+split reads whose fibertools footprint arrays (`ns`, `nl`, `as`, `al`) were
+removed, `barcode_tag_malformed_reads` counts reads whose `bi` positions did
 not describe a window inside the read, and `barcode_tag_unverified_reads`
 counts reads with a recorded barcode span at which no barcode sequence was
-found. All four are also reported on stderr at the end of the run.
+found. All six are also reported on stderr at the end of the run.
 
 `reads.output` counts output segments, not input reads, so under
 `--quality-trim segments` or `runs`, or chimera splitting, it can exceed

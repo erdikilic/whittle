@@ -487,6 +487,10 @@ pub struct Counters {
     /// Trimmed input reads whose PacBio undo blobs (`ds`, `ls`) were removed,
     /// since they describe the untrimmed read.
     pub undo_tags_dropped_reads: AtomicU64,
+    /// Trimmed or split input reads whose fibertools footprint arrays (`ns`,
+    /// `nl`, `as`, `al`) were removed, since their positions index the whole
+    /// read.
+    pub footprint_tags_dropped_reads: AtomicU64,
     /// Input reads whose `bi` barcode tag could not be read as a barcode window
     /// (not a seven-element float array, or an empty, inverted or out-of-range
     /// window) and were left untrimmed by that stage.
@@ -596,6 +600,7 @@ impl Counters {
             output_reads: self.output_reads.load(Ordering::Relaxed),
             malformed_mod_reads: self.malformed_mod_reads.load(Ordering::Relaxed),
             undo_tags_dropped_reads: self.undo_tags_dropped_reads.load(Ordering::Relaxed),
+            footprint_tags_dropped_reads: self.footprint_tags_dropped_reads.load(Ordering::Relaxed),
             barcode_tag_malformed_reads: self.barcode_tag_malformed_reads.load(Ordering::Relaxed),
             barcode_tag_unverified_reads: self.barcode_tag_unverified_reads.load(Ordering::Relaxed),
             input_bases: self.input_bases.load(Ordering::Relaxed),
@@ -746,6 +751,8 @@ pub struct Stats {
     pub malformed_mod_reads: u64,
     /// Trimmed reads whose `ds`/`ls` undo blobs were removed.
     pub undo_tags_dropped_reads: u64,
+    /// Trimmed or split reads whose fibertools footprint arrays were removed.
+    pub footprint_tags_dropped_reads: u64,
     /// Reads whose `bi` barcode tag was unusable; see
     /// `Counters::barcode_tag_malformed_reads`.
     pub barcode_tag_malformed_reads: u64,

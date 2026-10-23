@@ -128,6 +128,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source.
 
 ### Fixed
+- Trimmed or split reads no longer keep the fibertools footprint arrays
+  `nl`, `as` and `al` with positions of the untrimmed read after the ONT
+  signal rule removes the array `ns`. All four footprint arrays are removed
+  and counted under `warnings.footprint_tags_dropped_reads`, and an array
+  `ns` is never read as dorado's signal end.
 - Discovery on amplicon libraries ends each primer where the insert begins
   and no longer learns the conserved start or end of the amplified gene, or
   sequences of single templates behind it, as technical layers. The start of
