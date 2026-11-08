@@ -24,7 +24,7 @@ jobs:
       matrix:
         include:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, cc: musl-gcc }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04 }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04 }
           - { target: x86_64-apple-darwin, os: macos-15-intel }
@@ -36,14 +36,26 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
 
       # Linux: installs the cross C toolchain and Rust target. This covers the
-      # aarch64 cross-compile and both musl targets, using the runner's native
+      # x86_64 glibc build and both aarch64 targets, using the runner's native
       # cross GCCs (cmake is present there for the zlib-ng C build) rather than
       # a container. sassy's SIMD resolves per architecture: x86_64 gets AVX2
       # via .cargo/config.toml, aarch64 uses baseline NEON.
       - uses: taiki-e/setup-cross-toolchain-action@v1
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.cc
         with:
           target: ${{ matrix.target }}
+
+      # x86_64 musl: Ubuntu's musl-gcc wraps the system GCC, which accepts the
+      # x86-64-v3 baseline that .cargo/config.toml sets for C dependencies.
+      - name: Add musl-gcc and Rust target (x86_64 musl)
+        if: matrix.cc == 'musl-gcc'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add "$TARGET"
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
 
       # macOS: native build; adds the Rust target for the active toolchain.
       - name: Add Rust target (macOS)
