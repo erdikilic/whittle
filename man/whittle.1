@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH whittle 1  "whittle 0.2.0"
+.TH whittle 1  "whittle 1.0.0"
 .SH NAME
 whittle \- Coordinate\-consistent trimming of long\-read uBAM and tagged FASTQ
 .SH SYNOPSIS
@@ -212,6 +212,6 @@ Examples:
   samtools fastq \-T MM,ML,MN reads.bam | whittle \-o trimmed.fastq.gz \-H 10 \-T 10
   whittle \-i reads.bam \-o reads.fastq.gz \-\-quiet \-\-summary\-json qc.json
 .SH VERSION
-0.2.0
+1.0.0
 .SH AUTHORS
 Erdi Kilic <erdican266@gmail.com>

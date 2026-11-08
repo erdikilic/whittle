@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-08
+
 ### Added
 - `--quality-trim segments` keeps every maximal scoring segment under the
   modified Mott score of `best` (Ruzzo and Tompa 1999) instead of the best
@@ -586,7 +588,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Folder-merge mode, parallel processing with a workload-aware thread budget,
   and a progress/summary UI.
 
-[Unreleased]: https://github.com/erdikilic/whittle/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/erdikilic/whittle/compare/1.0.0...HEAD
+[1.0.0]: https://github.com/erdikilic/whittle/compare/0.2.0...1.0.0
 [0.2.0]: https://github.com/erdikilic/whittle/compare/0.1.1...0.2.0
 [0.1.1]: https://github.com/erdikilic/whittle/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/erdikilic/whittle/releases/tag/0.1.0

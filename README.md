@@ -8,7 +8,6 @@
 [![crates.io](https://img.shields.io/crates/v/whittle.svg)](https://crates.io/crates/whittle)
 [![Bioconda](https://img.shields.io/conda/vn/bioconda/whittle.svg)](https://anaconda.org/bioconda/whittle)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21355499.svg)](https://doi.org/10.5281/zenodo.21355499)
 ![Rust](https://img.shields.io/badge/rust-2024%20edition-000000?logo=rust&logoColor=white)
 ![Long reads](https://img.shields.io/badge/long--reads-ONT%20%7C%20PacBio-1f6feb)
 
@@ -235,7 +234,10 @@ Formats are taken from the path extension, a stream sniff, or `--input-format`/`
 
 ## Citation
 
-Kılıç E. whittle: coordinate-consistent trimming of long-read uBAM and tagged FASTQ. Zenodo. https://doi.org/10.5281/zenodo.21355499
+A manuscript describing whittle (Kılıç E, Otlu B. whittle: annotation-preserving trimming and filtering of
+long reads) is under review. Until it is published, please cite the software archive:
+
+Kılıç E. whittle. Zenodo. https://doi.org/10.5281/zenodo.21355498
 
 ## License
 
