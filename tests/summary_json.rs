@@ -342,7 +342,9 @@ fn parse_time_advisories_are_formatted_and_ordered() {
         "The advisory carries the standard prefix: {advisory}"
     );
 
-    let version_at = stderr.find("whittle 0.").expect("Version line present");
+    let version_at = stderr
+        .find(concat!("whittle ", env!("CARGO_PKG_VERSION")))
+        .expect("Version line present");
     let advisory_at = stderr
         .find("--adapter-ends-only has no effect")
         .expect("Advisory present");

@@ -21,7 +21,7 @@ env:
 # libraries.
 jobs:
   commit-message:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -65,13 +65,13 @@ jobs:
           exit "$status"
 
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - run: cargo fmt --all --check
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Install HTSlib build deps
@@ -82,7 +82,7 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Install HTSlib build deps
@@ -103,7 +103,7 @@ jobs:
   # Verifies the crate builds on its declared MSRV (Cargo.toml `rust-version`).
   # RUSTUP_TOOLCHAIN overrides the pinned rust-toolchain.toml.
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTUP_TOOLCHAIN: "1.91.0"
     steps:
@@ -117,7 +117,11 @@ jobs:
       - run: cargo check --all-features --locked
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # The prebuilt cargo-deny binary checks advisories, bans, licenses and sources.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.0
+      - run: cargo deny --locked check

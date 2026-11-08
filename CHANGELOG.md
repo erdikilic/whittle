@@ -59,41 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two read-length classes each and of `LSK109_rear` by one edit in one
   read-length class. Every other budget outside the kit primers stays as
   that catalog sets it.
-- `--quality-trim segments` keeps every maximal scoring segment under the
-  modified Mott score of `best-segment` (Ruzzo and Tompa 1999) instead of the best
-  one alone, so a read with a low-quality interior keeps both flanks.
-  Segments scoring below 50 error-free bases are dropped; the kept segments
-  are named, filtered and counted like the pieces of `runs`.
-- `--max-expected-errors <E>` rejects an output segment whose expected
-  errors, the sum of its per-base error probabilities (Edgar and Flyvbjerg
-  2015), exceed E. Each segment is judged after all trimming and splitting;
-  rejected segments are reported as `expected_errors` in `--rejected-output`
-  and `segments_dropped.expected_errors`, and the bound as
-  `params.max_expected_errors`.
-- `--quality-end-cutoff <PHRED>` trims the ends of every piece of
-  `--quality-trim segments` or `runs`, split or not, up to the first base at
-  or above PHRED, so a read splits at `--quality-cutoff` while its ends are
-  trimmed more strictly. It defaults to `--quality-cutoff`, which leaves the
-  output unchanged, and is reported as `params.quality_trim.end_cutoff`.
-- Adapter trimming is recorded in dorado's trim mode, merged with the input
-  value in its `adapter,primer,barcode` grammar: the `tm` field of each `@RG`
-  line in BAM output and the per-read `tm:Z` tag in tagged FASTQ output.
-- `--tag-filter <EXPR>` keeps only reads whose aux tags satisfy a
-  samtools-style expression (`[er]!="data_service_unblock_mux_change"`,
-  `[dx]==1 || ([dx]==0 && [qs]>=15)`, `[rq]>=0.99 && [np]>=3`). Rejected
-  reads are dropped before adapter discovery and trimming and reported as
-  `Tag filtered` and `reads.tag_filtered`. BAM and tagged FASTQ input.
-- `--rejected-output <PATH>` writes every input read or trimmed segment that
-  does not reach the output to a second file in the output's format family,
-  each with a `wr:Z` tag naming the reason (`tag_filter`,
-  `trimmed_to_nothing`, `too_short`, `too_long`, `low_quality`,
-  `high_quality`, `expected_errors`, `gc`).
-- Tagged FASTQ input. A FASTQ whose headers carry SAM aux tags in the
-  `samtools fastq -T` convention is trimmed on the BAM-to-FASTQ path: `MM`,
-  `ML` and `MN` are rebuilt and per-base arrays sliced for every output
-  segment, `--fastq-tags` selects the output tags, and barcode positions,
-  `--remove-tag` applies. Each header is inspected;
-  a field that does not parse as a SAM tag fails the run and names the read.
 - `--update-moves` rewrites the ONT signal tags on FASTQ output too, from BAM
   and tagged FASTQ input, so every output format carries the same `mv`,
   `ts`, `ns`, `sp`, `pi`, poly-A and `st`/`du` values; it was BAM-to-BAM only
@@ -118,45 +83,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `uncertain_bases`, since the trimming sequence spans the whole consensus,
   and `mods::ModCode::Chebi` holds the digits of the identifier as written
   (`Vec<u8>`) instead of a `u32`.
-- Quality trimming is selected with one method and one cutoff:
-  `--quality-trim <ends|best-segment|segments|runs>` with `--quality-cutoff <PHRED>`,
-  which is required with it, and `--min-low-quality-run <BASES>` for `runs`.
-  `--trim-quality Q` becomes `--quality-trim ends --quality-cutoff Q`,
-  `--best-quality-segment Q` becomes `best-segment`, `--split-quality Q`
-  becomes `runs`, and `--split-min-low-quality-bases N` becomes
-  `--min-low-quality-run N`. The old spellings are not accepted. The summary
-  JSON reports `params.quality_trim` with `method`, `cutoff` and
-  `min_low_quality_run` in place of `params.quality_op`.
-- Primers and barcodes split a read at an interior hit, as adapters do. The
-  barcodes of a panel leave the split to the barcode flanks when the set
-  carries them; the universal 16S and ITS primers split alone only under an
-  amplicon-only preset or in an amplicon library; and a primer or barcode
-  splits only reads short
-  enough for its exact matches to stay within the interior chance bound.
-- The interior adapter search skips both end zones, where the terminal search
-  applies.
-- Plain gzip FASTQ input is inflated on its own thread, one of the `-t`
-  workers, ahead of the parser. Multithreaded runs over gzip input finish
-  about 10% sooner.
-- Linux musl builds use mimalloc as the global allocator. Multithreaded runs
-  take about 30% less CPU than with musl's allocator, at a higher peak
-  memory.
-- Integer tags and `B` arrays in tagged FASTQ headers are parsed from the
-  bytes directly. Tagged FASTQ carrying a move table takes 20 to 40% less
-  CPU.
-- `--preserve-order` reorders batches through a sliding window instead of
-  waiting for each group of batches to complete. Ordered multithreaded runs
-  finish up to 10% sooner.
-- The barcode panel is not searched at a read end already trimmed through a
-  sequence that lies between the barcode and the insert: the native barcode
-  construct, or the insert-side flank of the PCR, rapid and amplicon
-  barcodes. Barcoded reads take 25 to 40% less CPU under the `ont` preset.
-- The interior adapter search covers the whole read for an adapter whose
-  exact seeds would open candidate windows over more than a quarter of it,
-  such as `RAD`, `SMRTbell` and the ligation front adapters. Output is
-  unchanged; adapter trimming with the `ont` preset takes about 30% less CPU.
-- `--update-signal-tags` is renamed `--update-moves`, after the ONT move
-  table it maintains. The old spelling is not accepted.
 - `--remove-kinetics` is folded into `--remove-tag`, which now takes
   comma-separated lists and the group names `kinetics`, `mods` and `moves`
   (`signal` is accepted for `moves`).
@@ -179,44 +105,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `params.adapters.end_search` replace `min_qual`, `max_qual`,
   `qual_mode`, `head_crop`, `tail_crop`, `ordered` and `end_size`, and the
   file moves to `schema_version` 3.
-- `-t` bounds the working threads: BGZF input takes its decode workers out
-  of the budget instead of adding them to the render pool.
-- BGZF blocks are compressed with one libdeflate compressor per thread,
-  reused across blocks, on every compressed output path.
-- Trimmed BAM records are assembled from the input record's bytes: the
-  sequence window, qualities and per-base arrays are sliced and only the
-  rewritten tags are re-encoded. A single-threaded run writes an unchanged
-  record as its input bytes, as a multithreaded run does.
-- Terminal edit budgets are bounded by a chance-match null model that
-  lowers the budget of the shortest patterns by one edit; catalog adapters,
-  barcodes, flanks and primers keep their configured budget.
-- BAM records whose QUAL field is absent (`0xFF`) are refused like records
-  with a QUAL length mismatch, instead of being read as Phred 255.
-- Folder-merge and output-creation errors name the file involved, and a
-  FASTQ run rejected by a tag-flag guard finishes its output file first.
-- Adapter discovery proceeds in layers from each read end. Each accepted
-  layer moves the boundary inward and the next layer is assembled from the
-  unexplained sequence, so adapters, barcode flanks, barcodes and primers are
-  found in turn. A variable layer between a boundary and a constant layer
-  behind it, such as a barcode panel between its flanks, is clustered from
-  the reads and reported with the barcode role. A candidate whose inner
-  segment mirrors at the opposite read end at a different depth is cut back
-  to its outer part. The outermost discovered layer takes the adapter role;
-  inner layers trim ends only.
-- A preset or FASTA given with `--discover-adapters` is trimmed first and
-  discovery continues beyond it. The final set is the union.
-- Barcode positions recorded in the `bi` tag are used with any adapter
-  source, and a recorded span is trimmed only where a barcode sequence is
-  found at it. Unverified spans are counted under
-  `warnings.barcode_tag_unverified_reads`.
 - `-vv` traces the target call of every kept segment under `--targets`, with
   the reason of an unassigned one, and the filter decision of every read of
   a BAM run that copies records without trimming them. The per-offset
   `Mirror` lines of adapter discovery are logged at trace instead of debug.
+- Adapter trimming handles partial adapters, classifies hits by position, and
+  cleans up chimeric junctions. A rear adapter cut short by the read end, or a
+  front adapter missing its first bases, is trimmed when at least 10 of its
+  bases align flush with the end; the error rate applies to the bases beyond
+  the first 9, so a 10-base overlap must match exactly. A hit in the head
+  zone trims the 5' end and a hit in the tail zone the 3' end, whichever
+  catalog entry matched.
+  Every piece an interior excision creates is searched again at its new end,
+  so a primer, barcode, or truncated adapter next to a junction is trimmed as
+  at a physical read end, and an adapter remnant followed by up to 36
+  unalignable bases is found by a masked search. Excisions separated by fewer
+  bases than `--min-length`, or by at most 11 bases, merge into one.
 
 ### Removed
-- `--trim-barcodes`. Barcode positions apply automatically with an adapter
-  source.
 - The progress bar, the indicatif dependency and `--progress`. Logging
   follows `-v` and `--quiet` alone: info by default, debug with `-v`, trace
   with `-vv`, and warnings and errors only with `--quiet`. Progress is an
@@ -227,11 +133,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `obs::ProgressHandle::is_bar` are removed.
 
 ### Fixed
-- Trimmed or split reads no longer keep the fibertools footprint arrays
-  `nl`, `as` and `al` with positions of the untrimmed read after the ONT
-  signal rule removes the array `ns`. All four footprint arrays are removed
-  and counted under `warnings.footprint_tags_dropped_reads`, and an array
-  `ns` is never read as dorado's signal end.
 - The `rpb114` adapter preset holds what SQK-RPB114.24 reads carry, as
   dorado's `SQK-RPB114-24` arrangement and ONT's protocol list it. Barcode
   12 of the kit is `RLB12A`, not `BC12`. The PCR primers and barcode flank
@@ -334,6 +235,228 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Output collision checks protect split source files and detect hard links
   between split outputs.
 - Rejected BAM and FASTQ records omit input target tags.
+- A `--tag-filter` chain of several thousand conditions joined by `&&` or
+  `||` no longer overflows the stack of a worker thread and aborts the run:
+  a chain is one node of the parsed expression, so its length adds no depth.
+- A `--targets` FASTA sheet with entries that carry no `target=` field
+  reports their count in an info line, since they are trimmed only when the
+  same file is also given to `--adapter-fasta`.
+- Adapter discovery reads lowercase and mixed-case FASTQ as uppercase: it no
+  longer panics when it clusters a barcode panel from lowercase reads, and it
+  finds the same sequences as in the uppercased reads.
+- `--adapter-discover-only` leaves the `--rejected-output` path alone: the
+  file is no longer created or truncated, and its format family is not
+  checked against the input.
+- With `--adapter-discover` and `--adapter-preset` or `--adapter-fasta`, an
+  input of fewer than 100 reads is trimmed with the configured sequences
+  instead of being written untrimmed. The warning names what the run does
+  instead of discovery.
+- A `--targets` TSV sheet with a header but no target rows, a row whose
+  `min_len` exceeds its `max_len`, and a FASTA entry with an empty `target=`
+  are errors, instead of runs that leave every segment unassigned or create
+  an unnamed target. An empty `group=` leaves the target in its own group.
+- A `--targets` sheet file that starts with a UTF-8 byte order mark loads,
+  and a sheet read through a pipe or process substitution (`/dev/stdin`,
+  `<(...)`) loads as a file does.
+- A `--target-margin` larger than the sheet sequences is applied at once,
+  with the pairs and calls of any margin above their lengths, instead of
+  hanging or exhausting memory in the close-pair search.
+- A `--tag-filter` reject of a BAM record without base qualities (`*` QUAL)
+  is written to a BAM `--rejected-output` as read, and a FASTQ
+  `--rejected-output` run fails with the error that names such a read,
+  instead of panicking.
+- A failed write to `--rejected-output`, such as on a full disk, reports the
+  file and the system error instead of "the rejected-record writer stopped".
+- `--tag-filter` refuses an expression that joins a literal with `&&` or `||`,
+  or compares a condition, such as `[qs] && 5` or `([qs]>10) == 1`, when it
+  is parsed, instead of failing at the first read that reaches the operand.
+- A recorded `bi` barcode span is verified with each `N` or other uncalled
+  base costing an edit, as in every other adapter search, so a span masked
+  with `N` is left untrimmed and counted as unverified instead of matching
+  any barcode.
+- `--adapter-discover-only` output cut off by a closed pipe exits 0 without a
+  message, and a failed write to stdout is an error, instead of a panic.
+- Under `-t > 1` a BAM `--rejected-output` is marked `SO:unsorted`, with or
+  without `--preserve-order`, since rejected records are written in
+  completion order.
+- A read rejected whole on the BAM path that copies records without trimming
+  them is written with its modification block rewritten as on the trimming
+  path: a malformed `MM`/`ML` block is removed and a missing `MN` is added.
+- A rejected FASTQ record whose input header holds a `wr` tag carries one
+  `wr`, the new reason, instead of two, which made the file unreadable as
+  tagged FASTQ.
+- BAM-to-FASTQ output copies an `ML` or `MN` that a read carries without an
+  `MM:Z` block, and the tags of a non-string `MM`, into the header as BAM
+  output does, instead of dropping them.
+- `--input-format fastq-gz` reads a stream that opens with a BGZF block as
+  plain gzip, so a stream joined from BGZF and plain gzip files decodes whole
+  instead of failing at the first plain member.
+- An empty gzip input, a 0-byte `.gz` file or an empty stream under
+  `--input-format fastq-gz`, is read as zero reads, as an empty plain FASTQ
+  is, instead of failing with "unexpected end of file".
+- A ChEBI modification code in `MM` is written back as the input spells it,
+  instead of being rewritten when it has leading zeros or exceeds 4294967295.
+- SAM text input, such as `samtools view -h` output, is refused with a message
+  that names it instead of a FASTQ parse error, and a stream whose format is
+  not detected is described, without advice to pass the `--input-format` a
+  forced run already names.
+- With `--targets` and no adapter source, the summary reports
+  `params.adapters.configured` and `sample` as 0, since no adapter is
+  configured and no read is sampled, instead of the sheet sequence count and
+  2000; `--adapter-sample-reads` is no longer range-checked there, as it has
+  no effect.
+- Without `-c`, `--rejected-output` is compressed at the default level of its
+  own format (4 for `.fastq.gz`, 6 for `.fastq.bgz` and BAM) instead of the
+  main output's.
+- A `WHITTLE_LOG` that names only targets, such as `whittle::adapter=trace`,
+  logs every other target at the `-v`/`-vv` level instead of dropping its
+  errors, warnings and banner.
+- Errors name their source: a BAM record that fails to decode or rebuild
+  names its read, an error in a member of a BAM folder names the file, an
+  unreadable BAM header is named as such, and a tagged FASTQ record is named
+  by its read id without the aux fields of its header.
+- A highly degenerate `--targets` sequence is reported with a warning that
+  names it, as a highly degenerate `--adapter-fasta` entry is.
+- Tagged FASTQ input under `--tag-filter` logs the line that reports its
+  tagged headers, as a run without the filter does.
+- When the input `@PG` chain has a `PP` that names a missing record or forms
+  a cycle, the warning that whittle's `@PG` record was not added is logged.
+- `--input-format fastq-bgz` on a `.gz` path and `fastq-gz` on a `.bgz` path
+  are accepted without an extension warning, since bgzip writes BGZF under
+  `.gz` and the stream check refuses plain gzip under `fastq-bgz`.
+- The startup banner gives the size of a regular input file only, instead of
+  `(0 B)` for a pipe or process substitution.
+- The `--fastq-tags` warning names FASTQ output from BAM or tagged FASTQ
+  input as the case the flag applies to.
+
+## [1.0.0] - 2026-11-08
+
+### Added
+- `--quality-trim segments` keeps every maximal scoring segment under the
+  modified Mott score of `best` (Ruzzo and Tompa 1999) instead of the best
+  one alone, so a read with a low-quality interior keeps both flanks.
+  Segments scoring below 50 error-free bases are dropped; the kept segments
+  are named, filtered and counted like the pieces of `runs`.
+- `--max-expected-errors <E>` rejects an output segment whose expected
+  errors, the sum of its per-base error probabilities (Edgar and Flyvbjerg
+  2015), exceed E. Each segment is judged after all trimming and splitting;
+  rejected segments are reported as `expected_errors` in `--rejected-output`
+  and `segments_dropped.expected_errors`, and the bound as
+  `params.max_expected_errors`.
+- `--quality-end-cutoff <PHRED>` trims the ends of every piece of
+  `--quality-trim segments` or `runs`, split or not, up to the first base at
+  or above PHRED, so a read splits at `--quality-cutoff` while its ends are
+  trimmed more strictly. It defaults to `--quality-cutoff`, which leaves the
+  output unchanged, and is reported as `params.quality_trim.end_cutoff`.
+- Adapter trimming is recorded in dorado's trim mode, merged with the input
+  value in its `adapter,primer,barcode` grammar: the `tm` field of each `@RG`
+  line in BAM output and the per-read `tm:Z` tag in tagged FASTQ output.
+- `--tag-filter <EXPR>` keeps only reads whose aux tags satisfy a
+  samtools-style expression (`[er]!="data_service_unblock_mux_change"`,
+  `[dx]==1 || ([dx]==0 && [qs]>=15)`, `[rq]>=0.99 && [np]>=3`). Rejected
+  reads are dropped before adapter discovery and trimming and reported as
+  `Tag filtered` and `reads.tag_filtered`. BAM and tagged FASTQ input.
+- `--rejected-output <PATH>` writes every input read or trimmed segment that
+  does not reach the output to a second file in the output's format family,
+  each with a `wr:Z` tag naming the reason (`tag_filter`,
+  `trimmed_to_nothing`, `too_short`, `too_long`, `low_quality`,
+  `high_quality`, `expected_errors`, `gc`).
+- Tagged FASTQ input. A FASTQ whose headers carry SAM aux tags in the
+  `samtools fastq -T` convention is trimmed on the BAM-to-FASTQ path: `MM`,
+  `ML` and `MN` are rebuilt and per-base arrays sliced for every output
+  segment, `--fastq-tags` selects the output tags, and barcode positions,
+  `--remove-tag` applies. Each header is inspected;
+  a field that does not parse as a SAM tag fails the run and names the read.
+
+### Changed
+- Quality trimming is selected with one method and one cutoff:
+  `--quality-trim <ends|best|segments|runs>` with `--quality-cutoff <PHRED>`,
+  which is required with it, and `--min-low-quality-run <BASES>` for `runs`.
+  `--trim-quality Q` becomes `--quality-trim ends --quality-cutoff Q`,
+  `--best-quality-segment Q` becomes `best`, `--split-quality Q` becomes
+  `runs`, and `--split-min-low-quality-bases N` becomes
+  `--min-low-quality-run N`. The old spellings are not accepted. The summary
+  JSON reports `params.quality_trim` with `method`, `cutoff` and
+  `min_low_quality_run` in place of `params.quality_op`.
+- Primers and barcodes split a read at an interior hit, as adapters do. The
+  barcodes of a panel leave the split to the barcode flanks when the set
+  carries them; the universal 16S and ITS primers split alone only under an
+  amplicon-only preset or in an amplicon library; and a primer or barcode
+  splits only reads short
+  enough for its exact matches to stay within the interior chance bound.
+- The interior adapter search skips both end zones, where the terminal search
+  applies.
+- Plain gzip FASTQ input is inflated on its own thread, one of the `-t`
+  workers, ahead of the parser. Multithreaded runs over gzip input finish
+  about 10% sooner.
+- Linux musl builds use mimalloc as the global allocator. Multithreaded runs
+  take about 30% less CPU than with musl's allocator, at a higher peak
+  memory.
+- Integer tags and `B` arrays in tagged FASTQ headers are parsed from the
+  bytes directly. Tagged FASTQ carrying a move table takes 20 to 40% less
+  CPU.
+- `--preserve-order` reorders batches through a sliding window instead of
+  waiting for each group of batches to complete. Ordered multithreaded runs
+  finish up to 10% sooner.
+- The barcode panel is not searched at a read end already trimmed through a
+  sequence that lies between the barcode and the insert: the native barcode
+  construct, or the insert-side flank of the PCR, rapid and amplicon
+  barcodes. Barcoded reads take 25 to 40% less CPU under the `ont` preset.
+- The interior adapter search covers the whole read for an adapter whose
+  exact seeds would open candidate windows over more than a quarter of it,
+  such as `RAD`, `SMRTbell` and the ligation front adapters. Output is
+  unchanged; adapter trimming with the `ont` preset takes about 30% less CPU.
+- `--update-signal-tags` is renamed `--update-moves`, after the ONT move
+  table it maintains. The old spelling is not accepted.
+- `--remove-kinetics` is folded into `--remove-tag`, which now takes
+  comma-separated lists and the group names `kinetics`, `mods` and `signal`.
+  The summary JSON drops `params.strip_kinetics` and moves to
+  `schema_version` 2.
+- `--discover-adapters [trim|report]` is replaced by `--adapter-discover`
+  (discover and trim) and `--adapter-report` (print the discovered FASTA and
+  exit). `params.adapters.infer` in the summary JSON reads `off`, `discover`
+  or `report`.
+- `-t` bounds the working threads: BGZF input takes its decode workers out
+  of the budget instead of adding them to the render pool.
+- BGZF blocks are compressed with one libdeflate compressor per thread,
+  reused across blocks, on every compressed output path.
+- Trimmed BAM records are assembled from the input record's bytes: the
+  sequence window, qualities and per-base arrays are sliced and only the
+  rewritten tags are re-encoded. A single-threaded run writes an unchanged
+  record as its input bytes, as a multithreaded run does.
+- Terminal edit budgets are bounded by a chance-match null model that
+  lowers the budget of the shortest patterns by one edit; catalog adapters,
+  barcodes, flanks and primers keep their configured budget.
+- BAM records whose QUAL field is absent (`0xFF`) are refused like records
+  with a QUAL length mismatch, instead of being read as Phred 255.
+- Folder-merge and output-creation errors name the file involved, and a
+  FASTQ run rejected by a tag-flag guard finishes its output file first.
+- Adapter discovery proceeds in layers from each read end. Each accepted
+  layer moves the boundary inward and the next layer is assembled from the
+  unexplained sequence, so adapters, barcode flanks, barcodes and primers are
+  found in turn. A variable layer between a boundary and a constant layer
+  behind it, such as a barcode panel between its flanks, is clustered from
+  the reads and reported with the barcode role. A candidate whose inner
+  segment mirrors at the opposite read end at a different depth is cut back
+  to its outer part. The outermost discovered layer takes the adapter role;
+  inner layers trim ends only.
+- A preset or FASTA given with `--discover-adapters` is trimmed first and
+  discovery continues beyond it. The final set is the union.
+- Barcode positions recorded in the `bi` tag are used with any adapter
+  source, and a recorded span is trimmed only where a barcode sequence is
+  found at it. Unverified spans are counted under
+  `warnings.barcode_tag_unverified_reads`.
+
+### Removed
+- `--trim-barcodes`. Barcode positions apply automatically with an adapter
+  source.
+
+### Fixed
+- Trimmed or split reads no longer keep the fibertools footprint arrays
+  `nl`, `as` and `al` with positions of the untrimmed read after the ONT
+  signal rule removes the array `ns`. All four footprint arrays are removed
+  and counted under `warnings.footprint_tags_dropped_reads`, and an array
+  `ns` is never read as dorado's signal end.
 - Discovery on amplicon libraries ends each primer where the insert begins
   and no longer learns the conserved start or end of the amplified gene, or
   sequences of single templates behind it, as technical layers. The start of
@@ -457,12 +580,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--tag-filter` rejects expressions nested more than 100 levels deep with a
   parse error instead of overflowing the stack, and a NaN tag value satisfies
   only `!=`. String tags of BAM records are compared without copying.
-- A `--tag-filter` chain of several thousand conditions joined by `&&` or
-  `||` no longer overflows the stack of a worker thread and aborts the run:
-  a chain is one node of the parsed expression, so its length adds no depth.
-- A `--targets` FASTA sheet with entries that carry no `target=` field
-  reports their count in an info line, since they are trimmed only when the
-  same file is also given to `--adapter-fasta`.
 - A partial adapter hit that overhangs both ends of a short read is charged
   the overhang cost the search applies to each side, and a very large custom
   adapter set no longer exhausts the seed table.
@@ -507,93 +624,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FASTQ-to-BAM output and `--update-moves` on FASTQ input are rejected at parse
   time; `--qual-split-window`, `--adapter-infer-policy` and `-t 0` errors name
   the flag.
-- Adapter discovery reads lowercase and mixed-case FASTQ as uppercase: it no
-  longer panics when it clusters a barcode panel from lowercase reads, and it
-  finds the same sequences as in the uppercased reads.
-- `--adapter-discover-only` leaves the `--rejected-output` path alone: the
-  file is no longer created or truncated, and its format family is not
-  checked against the input.
-- With `--adapter-discover` and `--adapter-preset` or `--adapter-fasta`, an
-  input of fewer than 100 reads is trimmed with the configured sequences
-  instead of being written untrimmed. The warning names what the run does
-  instead of discovery.
-- A `--targets` TSV sheet with a header but no target rows, a row whose
-  `min_len` exceeds its `max_len`, and a FASTA entry with an empty `target=`
-  are errors, instead of runs that leave every segment unassigned or create
-  an unnamed target. An empty `group=` leaves the target in its own group.
-- A `--targets` sheet file that starts with a UTF-8 byte order mark loads,
-  and a sheet read through a pipe or process substitution (`/dev/stdin`,
-  `<(...)`) loads as a file does.
-- A `--target-margin` larger than the sheet sequences is applied at once,
-  with the pairs and calls of any margin above their lengths, instead of
-  hanging or exhausting memory in the close-pair search.
-- A `--tag-filter` reject of a BAM record without base qualities (`*` QUAL)
-  is written to a BAM `--rejected-output` as read, and a FASTQ
-  `--rejected-output` run fails with the error that names such a read,
-  instead of panicking.
-- A failed write to `--rejected-output`, such as on a full disk, reports the
-  file and the system error instead of "the rejected-record writer stopped".
-- `--tag-filter` refuses an expression that joins a literal with `&&` or `||`,
-  or compares a condition, such as `[qs] && 5` or `([qs]>10) == 1`, when it
-  is parsed, instead of failing at the first read that reaches the operand.
-- A recorded `bi` barcode span is verified with each `N` or other uncalled
-  base costing an edit, as in every other adapter search, so a span masked
-  with `N` is left untrimmed and counted as unverified instead of matching
-  any barcode.
-- `--adapter-discover-only` output cut off by a closed pipe exits 0 without a
-  message, and a failed write to stdout is an error, instead of a panic.
-- Under `-t > 1` a BAM `--rejected-output` is marked `SO:unsorted`, with or
-  without `--preserve-order`, since rejected records are written in
-  completion order.
-- A read rejected whole on the BAM path that copies records without trimming
-  them is written with its modification block rewritten as on the trimming
-  path: a malformed `MM`/`ML` block is removed and a missing `MN` is added.
-- A rejected FASTQ record whose input header holds a `wr` tag carries one
-  `wr`, the new reason, instead of two, which made the file unreadable as
-  tagged FASTQ.
-- BAM-to-FASTQ output copies an `ML` or `MN` that a read carries without an
-  `MM:Z` block, and the tags of a non-string `MM`, into the header as BAM
-  output does, instead of dropping them.
-- `--input-format fastq-gz` reads a stream that opens with a BGZF block as
-  plain gzip, so a stream joined from BGZF and plain gzip files decodes whole
-  instead of failing at the first plain member.
-- An empty gzip input, a 0-byte `.gz` file or an empty stream under
-  `--input-format fastq-gz`, is read as zero reads, as an empty plain FASTQ
-  is, instead of failing with "unexpected end of file".
-- A ChEBI modification code in `MM` is written back as the input spells it,
-  instead of being rewritten when it has leading zeros or exceeds 4294967295.
-- SAM text input, such as `samtools view -h` output, is refused with a message
-  that names it instead of a FASTQ parse error, and a stream whose format is
-  not detected is described, without advice to pass the `--input-format` a
-  forced run already names.
-- With `--targets` and no adapter source, the summary reports
-  `params.adapters.configured` and `sample` as 0, since no adapter is
-  configured and no read is sampled, instead of the sheet sequence count and
-  2000; `--adapter-sample-reads` is no longer range-checked there, as it has
-  no effect.
-- Without `-c`, `--rejected-output` is compressed at the default level of its
-  own format (4 for `.fastq.gz`, 6 for `.fastq.bgz` and BAM) instead of the
-  main output's.
-- A `WHITTLE_LOG` that names only targets, such as `whittle::adapter=trace`,
-  logs every other target at the `-v`/`-vv` level instead of dropping its
-  errors, warnings and banner.
-- Errors name their source: a BAM record that fails to decode or rebuild
-  names its read, an error in a member of a BAM folder names the file, an
-  unreadable BAM header is named as such, and a tagged FASTQ record is named
-  by its read id without the aux fields of its header.
-- A highly degenerate `--targets` sequence is reported with a warning that
-  names it, as a highly degenerate `--adapter-fasta` entry is.
-- Tagged FASTQ input under `--tag-filter` logs the line that reports its
-  tagged headers, as a run without the filter does.
-- When the input `@PG` chain has a `PP` that names a missing record or forms
-  a cycle, the warning that whittle's `@PG` record was not added is logged.
-- `--input-format fastq-bgz` on a `.gz` path and `fastq-gz` on a `.bgz` path
-  are accepted without an extension warning, since bgzip writes BGZF under
-  `.gz` and the stream check refuses plain gzip under `fastq-bgz`.
-- The startup banner gives the size of a regular input file only, instead of
-  `(0 B)` for a pipe or process substitution.
-- The `--fastq-tags` warning names FASTQ output from BAM or tagged FASTQ
-  input as the case the flag applies to.
 
 ### Changed
 - Modification occurrences and signal boundaries are indexed once per read
@@ -604,10 +634,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adapter trimming handles partial adapters, classifies hits by position, and
   cleans up chimeric junctions. A rear adapter cut short by the read end, or a
   front adapter missing its first bases, is trimmed when at least 10 of its
-  bases align flush with the end; the error rate applies to the bases beyond
-  the first 9, so a 10-base overlap must match exactly. A hit in the head
-  zone trims the 5' end and a hit in the tail zone the 3' end, whichever
-  catalog entry matched.
+  bases align flush with the end; the first 10 bases must match exactly and
+  the error rate applies to the rest. A hit in the head zone trims the 5' end
+  and a hit in the tail zone the 3' end, whichever catalog entry matched.
   Every piece an interior excision creates is searched again at its new end,
   so a primer, barcode, or truncated adapter next to a junction is trimmed as
   at a physical read end, and an adapter remnant followed by up to 36
@@ -620,7 +649,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry has a role: adapters split reads at interior hits, primers and
   barcodes trim read ends only, and an amplicon-only preset (`mab114`)
   promotes its primers to adapters. The catalog gains the MAB114 kit
-  (its seven 16S and five ITS primers, MAB flanks, 24 barcodes)
+  (degenerate 16S 27F/1492R and ITS1F/ITS4 primers, MAB flanks, 24 barcodes)
   and the PacBio SMRTbell adapter and C2 primer; the RAB 16S kit-9 entries
   are replaced by the degenerate primers.
 - A FASTA entry whose header description contains the word `primer` or
@@ -881,7 +910,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Folder-merge mode, parallel processing with a workload-aware thread budget,
   and a progress/summary UI.
 
-[Unreleased]: https://github.com/erdikilic/whittle/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/erdikilic/whittle/compare/1.0.0...HEAD
+[1.0.0]: https://github.com/erdikilic/whittle/compare/0.2.0...1.0.0
 [0.2.0]: https://github.com/erdikilic/whittle/compare/0.1.1...0.2.0
 [0.1.1]: https://github.com/erdikilic/whittle/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/erdikilic/whittle/releases/tag/0.1.0
