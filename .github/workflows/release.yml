@@ -25,6 +25,10 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
           - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, cc: musl-gcc }
+          # x86-64-v4 archives: sassy searches adapters with AVX-512; they run only on
+          # CPUs with AVX-512 and ship beside the x86-64-v3 archives.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, cpu: x86-64-v4 }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, cc: musl-gcc, cpu: x86-64-v4 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04 }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04 }
           - { target: x86_64-apple-darwin, os: macos-15-intel }
@@ -66,18 +70,41 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # RUSTFLAGS replaces the x86-64-v3 rustflags of .cargo/config.toml, and the
+      # per-target CFLAGS replace its [env] value for the C dependencies.
+      - name: Select the x86-64-v4 baseline
+        if: matrix.cpu == 'x86-64-v4'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          echo "RUSTFLAGS=-C target-cpu=x86-64-v4" >> "$GITHUB_ENV"
+          echo "CFLAGS_${TARGET//-/_}=-march=x86-64-v4" >> "$GITHUB_ENV"
+
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --target "$TARGET"
 
+      # The runner's CPU decides whether an x86-64-v4 binary can execute here.
+      - name: Run the x86-64-v4 binary where AVX-512 is present
+        if: matrix.cpu == 'x86-64-v4'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if grep -q avx512f /proc/cpuinfo; then
+            "target/${TARGET}/release/whittle" --version
+          else
+            echo "::notice::This runner has no AVX-512; the x86-64-v4 binary was built but not run."
+          fi
+
       - name: Package
         id: pkg
         env:
           TARGET: ${{ matrix.target }}
+          SUFFIX: ${{ matrix.cpu && format('-{0}', matrix.cpu) || '' }}
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          name="whittle-${version}-${TARGET}"
+          name="whittle-${version}-${TARGET}${SUFFIX}"
           mkdir -p "dist/${name}"
           cp "target/${TARGET}/release/whittle" "dist/${name}/"
           # The committed man page, not a regenerated one: the cross-toolchain

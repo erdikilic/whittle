@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Linux x86-64 release archives built for x86-64-v4 (suffix `-x86-64-v4`), in
+  which the adapter search uses AVX-512. They run only on CPUs with AVX-512 and
+  ship beside the x86-64-v3 archives.
 - `--targets <SPEC>` (repeatable) assigns every output read, or
   chimera-split segment, to a target and tags it `wt:Z` with the target,
   `unassigned` or `ambiguous`. Each `SPEC` adds a source, merged into one

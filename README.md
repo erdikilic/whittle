@@ -36,7 +36,7 @@ Bioconda:
 conda install -c conda-forge -c bioconda whittle
 ```
 
-Prebuilt binaries for Linux and macOS (x86-64 and arm64, glibc and static musl) are on the [Releases](https://github.com/erdikilic/whittle/releases) page. Each tarball includes the man page, which is also in [`man/`](man).
+Prebuilt binaries for Linux and macOS (x86-64 and arm64, glibc and static musl) are on the [Releases](https://github.com/erdikilic/whittle/releases) page. Each tarball includes the man page, which is also in [`man/`](man). Linux x86-64 archives ending in `-x86-64-v4` use AVX-512 in the adapter search and run only on CPUs with AVX-512 (`grep avx512f /proc/cpuinfo` prints a line on such a CPU).
 
 crates.io. The adapter search requires AVX2 on x86-64, and `cargo install` does not read the repository's `.cargo/config.toml`, so the target is passed explicitly:
 
