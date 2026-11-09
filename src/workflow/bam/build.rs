@@ -423,6 +423,19 @@ fn encoded_index(index: Option<usize>) -> io::Result<i32> {
     })
 }
 
+/// Reads record bytes built by `build_record`, given without the `block_size`
+/// prefix, back as the raw record a production reader yields.
+pub(super) fn raw_record_from_bytes(bytes: &[u8]) -> io::Result<bam::Record> {
+    let size =
+        u32::try_from(bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let mut framed = Vec::with_capacity(4 + bytes.len());
+    framed.extend_from_slice(&size.to_le_bytes());
+    framed.extend_from_slice(bytes);
+    let mut record = bam::Record::default();
+    bam::io::Reader::from(framed.as_slice()).read_record(&mut record)?;
+    Ok(record)
+}
+
 /// Builds the output record `edit` describes from the raw input record `src`,
 /// without the `block_size` prefix: the fixed fields with the window's lengths
 /// and a recomputed bin, the output name, the input CIGAR, the window's bases

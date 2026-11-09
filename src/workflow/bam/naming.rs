@@ -24,19 +24,16 @@ pub(crate) enum Platform {
     Ont,
 }
 
-/// Classifies a record: `PacBio` when it carries an integer `qs` (dorado's `qs`
-/// is a float) or its name follows a PacBio convention (`parse_pacbio_name`),
+/// Classifies a record: `PacBio` when it carries integer `qs` and `qe` query
+/// coordinates (`query_span`; ONT writes no `qe`, and its `qs` is a mean
+/// quality) or its name follows a PacBio convention (`parse_pacbio_name`),
 /// `Ont` otherwise.
 pub(crate) fn platform(rec: &RecordBuf) -> Platform {
-    let integer_qs = rec
-        .data()
-        .get(&Tag::new(b'q', b's'))
-        .and_then(aux_integer)
-        .is_some();
+    let coordinates = query_span(rec).is_some();
     let pacbio_name = rec
         .name()
         .is_some_and(|n| parse_pacbio_name(AsRef::<[u8]>::as_ref(n)).is_some());
-    if integer_qs || pacbio_name {
+    if coordinates || pacbio_name {
         Platform::PacBio
     } else {
         Platform::Ont

@@ -28,6 +28,13 @@ that is not a `B:C` array of the length `MM` declares, or an `MM` that does not
 parse to its end, or modification coordinates beyond the available counting-base
 occurrences. Such reads are counted and reported in the run summary.
 
+The lowercase spellings `Mm` and `Ml` of the two tags are read as htslib
+reads them: in place of an absent `MM` or `ML`, and dropped beside a present
+one. Their calls are updated like any others and written as `MM`/`ML` with
+`MN`, also in reads that are not trimmed. The run summary counts these reads
+with the other legacy tag forms (`legacy_tags_reads`; see
+[Platform rules](#platform-rules)).
+
 ### Decode-equivalence tests
 
 The test suite re-decodes whittle's output with `rust-htslib`'s
@@ -44,6 +51,7 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 | Tag(s) | On a trimmed read |
 |---|---|
 | `MM` / `ML` / `MN` | Reconstructed for the output window; a group that loses every position is kept empty; a malformed block is removed and counted |
+| Lowercase `Mm` / `Ml` | Read as `MM` / `ML` and written as `MM` / `ML` with `MN`; dropped beside `MM` / `ML` |
 | Per-base kinetics (`ip`/`pw`/`fi`/`fp`), PacBio per-base match and mismatch counts (`sm`/`sx` as `B:C`), and any read-length `B` array | Sliced with the sequence; dorado's scalar `sm:f` is copied |
 | Reverse-strand kinetics (`ri`/`rp`) | Sliced from the opposite end, since the PacBio BAM specification stores them last base first |
 | `sa` (PacBio run-length subread coverage, `B:I`) | Decoded to per-base coverage, sliced, and re-encoded as `<length>,<coverage>` runs; runs that do not sum to the read length leave the tag unchanged and count as malformed |
@@ -56,8 +64,10 @@ WHITTLE_UBAM=/path/to/reads.ubam cargo test --test bam_mods_oracle -- --ignored
 | `ds`/`ls` (PacBio undo blobs for `skera undo` and `lima-undo`) | Removed from every output record of a trimmed read, since they describe the untrimmed read; counted once per read and reported |
 | `ns`/`nl`/`as`/`al` arrays (fibertools nucleosome and MTase-sensitive patch footprints) | Removed from every output record of a trimmed or split read, since their positions index the whole read and `ft add-nucleosomes` recomputes them from the m6A calls; counted once per read and reported. An array `ns` is never treated as dorado's signal end |
 | `qs:f` (dorado mean qscore) | Recomputed from the trimmed quality |
+| `qs:i` without `qe` (ONT mean qscore as an integer) | Written as `qs:f`: the same value on an untrimmed read, recomputed from the trimmed quality otherwise |
+| `fi`/`fp`/`ri`/`rp` longer than the read, with `qs`/`qe` spanning it (HiFi kinetics of the whole CCS read) | Cut to the read's bases `[qs, qe)` of the CCS read, from its last base for `ri`/`rp`, then sliced with the sequence |
 | `qs:i`/`qe:i` (PacBio query coordinates) | Rewritten as `qs + start` and `qs + end` of the window, since the PacBio BAM specification keeps them relative to the original read; one without the other leaves both unchanged |
-| Read name | A crop updates an existing PacBio query interval in the name; other names are kept. A split names ONT segments `{name}_segment_N`; PacBio segments (an integer `qs`, or a `{movie}/{zmw}/ccs[/fwd|/rev]` or `{movie}/{zmw}/{qStart}_{qEnd}` name) take the specification's `{stem}/{qStart}_{qEnd}` from the rewritten coordinates, replacing any existing interval |
+| Read name | A crop updates an existing PacBio query interval in the name; other names are kept. A split names ONT segments `{name}_segment_N`; PacBio segments (integer `qs` and `qe`, or a `{movie}/{zmw}/ccs[/fwd|/rev]` or `{movie}/{zmw}/{qStart}_{qEnd}` name) take the specification's `{stem}/{qStart}_{qEnd}` from the rewritten coordinates, replacing any existing interval |
 | `rn` (read number) | Kept on a crop; `-1` on an ONT split (dorado's convention); PacBio's `rn` is a pass count and is copied |
 | `st`/`du` (start time, duration) | Kept on a crop; with `--update-moves`, a crop that shortens `ns` scales `du` with it, so `ns` over `du` stays the sample rate. On a split, recomputed with `--update-moves`, otherwise removed; pbmarkdup's `du:Z` is not a duration and is copied |
 | `me`/`er` (MinKNOW event count, end reason) | On an ONT split, `me` is 0 on every segment and `er` is `unknown` except on the segment retaining the parent signal end when moves are rewritten, or the last sequence segment otherwise; only when the source carries them |
@@ -125,10 +135,12 @@ from the original record for each surviving interval.
 
 ## Platform rules
 
-A record is treated as PacBio when it carries an integer `qs` (dorado's `qs` is
-a float) or its name follows a PacBio convention: `{movie}/{zmw}/ccs`, with an
-optional `/fwd` or `/rev` and an optional `/{qStart}_{qEnd}`, or the subread
-form `{movie}/{zmw}/{qStart}_{qEnd}`. Every other record is treated as ONT. The
+A record is treated as PacBio when it carries integer `qs` and `qe` query
+coordinates or its name follows a PacBio convention: `{movie}/{zmw}/ccs`, with
+an optional `/fwd` or `/rev` and an optional `/{qStart}_{qEnd}`, or the subread
+form `{movie}/{zmw}/{qStart}_{qEnd}`. Every other record is treated as ONT.
+ONT writes no `qe`: its `qs` is the mean read quality, which whittle writes as
+a float. The
 platform selects the split naming and the `rn`, `pi`, `me`, and `er` rules
 above; the remaining rules are keyed on the tag type.
 

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Legacy tag forms are converted on input. The lowercase `Mm`/`Ml`
+  modification tags are read as `MM`/`ML`, as htslib reads them, and written
+  as `MM`/`ML` with `MN`; beside `MM`/`ML` they are dropped. An integer mean
+  quality `qs` is written as a float, recomputed on trimmed reads. HiFi
+  kinetics (`fi`, `fp`, `ri`, `rp`) that index the whole CCS read are cut to
+  the read's bases by `qs`/`qe`. The run summary counts these reads
+  (`warnings.legacy_tags_reads`) and the log reports them at the end of the
+  run.
 - Linux x86-64 release archives built for x86-64-v4 (suffix `-x86-64-v4`), in
   which the adapter search uses AVX-512. They run only on CPUs with AVX-512 and
   ship beside the x86-64-v3 archives.
@@ -136,6 +144,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `obs::ProgressHandle::is_bar` are removed.
 
 ### Fixed
+- An integer `qs` classifies a record as PacBio only together with `qe`, so
+  ONT reads with an integer mean quality `qs` keep dorado's subread tags
+  (`pi`, `rn`, `me`, `er`) on a split and a `qs` of their kept bases.
 - The `rpb114` adapter preset holds what SQK-RPB114.24 reads carry, as
   dorado's `SQK-RPB114-24` arrangement and ONT's protocol list it. Barcode
   12 of the kit is `RLB12A`, not `BC12`. The PCR primers and barcode flank

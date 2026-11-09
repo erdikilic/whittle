@@ -26,6 +26,7 @@ use crate::mods::reconstruct::IndexedMods;
 
 mod barcode;
 mod build;
+mod legacy;
 mod modblock;
 mod naming;
 mod raw;
@@ -35,6 +36,7 @@ mod tags;
 mod to_fastq;
 pub(crate) use barcode::*;
 use build::*;
+use legacy::*;
 pub(crate) use modblock::*;
 pub(crate) use naming::*;
 use raw::*;
@@ -62,8 +64,14 @@ pub(super) fn read_context(record: &bam::Record) -> impl FnOnce() -> String + '_
 }
 
 /// Renders a raw record rejected by the tag filter for BAM output: the whole
-/// record with the reason tag.
-pub(crate) fn tag_filtered_bam(record: &bam::Record) -> anyhow::Result<RejectItem> {
+/// record with its legacy tag forms converted (`upgraded_tags`) and the reason
+/// tag.
+pub(crate) fn tag_filtered_bam(
+    record: &bam::Record,
+    counters: &Counters,
+) -> anyhow::Result<RejectItem> {
+    let upgraded = upgraded_tags(record, counters)?;
+    let record = upgraded.as_ref().unwrap_or(record);
     let keep = TagRemoval::default();
     let edit = RecordEdit {
         reason: Some(Reason::TagFilter),
@@ -73,12 +81,17 @@ pub(crate) fn tag_filtered_bam(record: &bam::Record) -> anyhow::Result<RejectIte
 }
 
 /// Renders a raw record rejected by the tag filter for FASTQ output: the whole
-/// read with its selected tags and the reason tag.
+/// read with its legacy tag forms converted (`upgrade_legacy_tags`), its
+/// selected tags and the reason tag.
 pub(crate) fn tag_filtered_bam_fastq(
     record: &bam::Record,
     cfg: &Config,
+    counters: &Counters,
 ) -> anyhow::Result<RejectItem> {
-    let rec = decode_raw_record(record)?;
+    let mut rec = decode_raw_record(record)?;
+    if upgrade_legacy_tags(&mut rec) {
+        counters.legacy_tags_reads.fetch_add(1, Ordering::Relaxed);
+    }
     let seq_len = rec.sequence().len();
     // `workflow::filter_by_tags` names the read.
     require_qualities(seq_len, rec.quality_scores().as_ref())?;
@@ -119,7 +132,7 @@ fn run_bam_seq(
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
     for raw in records {
-        let raw = raw?;
+        let raw = current_tags(raw?, counters)?;
         let rec = decode_raw_record(&raw).with_context(read_context(&raw))?;
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
@@ -165,6 +178,7 @@ where
         cfg,
         sinks,
         |rec, cfg, out| {
+            let rec = current_tags(rec, counters)?;
             let decoded = decode_raw_record(&rec).with_context(read_context(&rec))?;
             render(rec, &decoded, cfg, out)
         },

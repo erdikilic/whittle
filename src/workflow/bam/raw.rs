@@ -130,13 +130,10 @@ pub(super) fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<
     Ok((block, malformed_perbase))
 }
 
-/// Applies the aligned, reverse-complement and legacy-tag guards to a raw
-/// record; the counterpart of `io::bam::ensure_trimmable`.
+/// Applies the aligned and reverse-complement guards to a raw record; the
+/// counterpart of `io::bam::ensure_trimmable`.
 pub(super) fn ensure_raw_trimmable(record: &bam::Record) -> anyhow::Result<()> {
-    let legacy_tag = crate::io::bam::LEGACY_MOD_TAGS
-        .into_iter()
-        .find(|t| record.data().get(&Tag::new(t[0], t[1])).is_some());
-    crate::io::bam::refuse_untrimmable(record.flags(), legacy_tag, || {
+    crate::io::bam::refuse_untrimmable(record.flags(), || {
         crate::io::bam::display_name(record.name().map(AsRef::as_ref))
     })
 }
@@ -285,6 +282,7 @@ pub(super) fn run_raw_bam_full_window_seq(
     for record in records {
         let record = record?;
         ensure_raw_trimmable(&record)?;
+        let record = current_tags(record, counters)?;
         let seq_len = record.sequence().len();
         counters.input_reads.fetch_add(1, Ordering::Relaxed);
         counters
@@ -315,6 +313,7 @@ pub(super) fn run_raw_bam_full_window_parallel(
         &mut KeyedSinks::single(sink),
         |record, cfg, out: &mut Parts<BamOutputRecord>| {
             ensure_raw_trimmable(&record)?;
+            let record = current_tags(record, counters)?;
             out.part(0)
                 .extend(process_raw_full_window(record, cfg, counters)?);
             Ok(())

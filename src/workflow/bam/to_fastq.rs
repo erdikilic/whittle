@@ -234,7 +234,7 @@ pub(crate) fn run_bam_to_fastq<W: BatchSink>(
     if cfg.threads <= 1 {
         let mut parts = Parts::default();
         for rec in records {
-            let raw = rec?;
+            let raw = current_tags(rec?, counters)?;
             let rec = decode_raw_record(&raw).with_context(read_context(&raw))?;
             counters.input_reads.fetch_add(1, Ordering::Relaxed);
             counters
@@ -253,6 +253,7 @@ pub(crate) fn run_bam_to_fastq<W: BatchSink>(
         writers,
         level,
         |rec, cfg, parts| {
+            let rec = current_tags(rec, counters)?;
             let decoded = decode_raw_record(&rec).with_context(read_context(&rec))?;
             render_bam_fastq_read(&decoded, Some(header), cfg, counters, parts, &[])
         },
@@ -278,6 +279,9 @@ pub(crate) fn render_tagged_fastq_read(
         .position(u8::is_ascii_whitespace)
         .unwrap_or(head_end);
     let description = rec.name[id_end..head_end].to_vec();
-    let rec = crate::io::tagged::record_from_tagged(rec)?;
+    let mut rec = crate::io::tagged::record_from_tagged(rec)?;
+    if upgrade_legacy_tags(&mut rec) {
+        counters.legacy_tags_reads.fetch_add(1, Ordering::Relaxed);
+    }
     render_bam_fastq_read(&rec, None, cfg, counters, parts, &description)
 }

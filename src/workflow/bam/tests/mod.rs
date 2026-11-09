@@ -10,6 +10,7 @@ use crate::trim::{QualityOp, TrimPlan};
 
 mod build;
 mod drivers;
+mod legacy;
 mod mods;
 mod naming;
 mod signal;

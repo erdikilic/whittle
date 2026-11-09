@@ -394,7 +394,8 @@ fn record_without_qualities() -> RecordBuf {
 #[test]
 fn tag_filtered_record_without_qualities_matches_noodles() {
     let mut rec = record_without_qualities();
-    let RejectItem::Bam(bytes) = tag_filtered_bam(&raw_record(&rec)).unwrap() else {
+    let RejectItem::Bam(bytes) = tag_filtered_bam(&raw_record(&rec), &Counters::default()).unwrap()
+    else {
         panic!("a BAM reject");
     };
     rec.data_mut().insert(
@@ -409,9 +410,13 @@ fn tag_filtered_record_without_qualities_matches_noodles() {
 #[test]
 fn tag_filtered_record_without_qualities_is_refused_for_fastq() {
     let cfg = cfg_bam2fq(None, 0, FastqTags::All);
-    let err = tag_filtered_bam_fastq(&raw_record(&record_without_qualities()), &cfg)
-        .err()
-        .expect("a FASTQ reject of a record without qualities is refused")
-        .to_string();
+    let err = tag_filtered_bam_fastq(
+        &raw_record(&record_without_qualities()),
+        &cfg,
+        &Counters::default(),
+    )
+    .err()
+    .expect("a FASTQ reject of a record without qualities is refused")
+    .to_string();
     assert!(err.contains("records without per-base quality"), "{err}");
 }

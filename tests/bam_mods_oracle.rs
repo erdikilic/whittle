@@ -898,25 +898,225 @@ fn write_flagged(path: &Path, flags: Flags, mm_tag: &[u8; 2], ml_tag: &[u8; 2]) 
     w.write_alignment_record(&header, &rec).unwrap();
 }
 
-/// htslib reads the pre-spec lowercase `Mm`/`Ml` (emitted by early guppy and
-/// megalodon). whittle rewrites only `MM`/`ML`, so a record carrying the
-/// lowercase spelling is refused rather than copied onto a trimmed sequence with
-/// every call pointing at the wrong base.
+/// Builds a one-read uBAM with `C+m` calls under the lowercase `Mm`/`Ml` and
+/// no `MN`. With `current`, the record also carries other calls under
+/// `MM`/`ML`, which htslib reads first.
+fn write_legacy(path: &Path, current: bool) {
+    let header = sam::Header::default();
+    let mut w = bam::io::Writer::new(std::fs::File::create(path).unwrap());
+    w.write_header(&header).unwrap();
+
+    let mut rec = RecordBuf::default();
+    *rec.flags_mut() = Flags::UNMAPPED;
+    *rec.name_mut() = Some(b"read1".into());
+    // C at 2, 5, 10, 15 and 16.
+    *rec.sequence_mut() = b"AGCTACGTNACGGTACCGTA".to_vec().into();
+    *rec.quality_scores_mut() = vec![40u8; 20].into();
+    let data = rec.data_mut();
+    if current {
+        // C occurrences 1 and 3: positions 5 and 15.
+        data.insert(
+            Tag::BASE_MODIFICATIONS,
+            Value::String(b"C+m,1,1;".to_vec().into()),
+        );
+        data.insert(
+            Tag::BASE_MODIFICATION_PROBABILITIES,
+            Value::Array(Array::UInt8(vec![100, 101])),
+        );
+    }
+    // C occurrences 0 and 2: positions 2 and 10.
+    data.insert(
+        Tag::new(b'M', b'm'),
+        Value::String(b"C+m,0,1;".to_vec().into()),
+    );
+    data.insert(
+        Tag::new(b'M', b'l'),
+        Value::Array(Array::UInt8(vec![200, 201])),
+    );
+    w.write_alignment_record(&header, &rec).unwrap();
+}
+
+/// Asserts that the single record of the uBAM at `path` carries `MM`, `ML` and
+/// an `MN` of `mn`, and neither `Mm` nor `Ml`.
+fn assert_current_mod_tags(path: &Path, mn: i64) {
+    let mut reader = bam::io::Reader::new(std::fs::File::open(path).unwrap());
+    let header = reader.read_header().unwrap();
+    let rec = reader.record_bufs(&header).next().unwrap().unwrap();
+    let tags: Vec<[u8; 2]> = rec.data().keys().map(<[u8; 2]>::from).collect();
+    for tag in [b"MM", b"ML", b"MN"] {
+        assert!(tags.contains(tag), "Output carries {tag:?}: {tags:?}");
+    }
+    for tag in [b"Mm", b"Ml"] {
+        assert!(!tags.contains(tag), "Output drops {tag:?}: {tags:?}");
+    }
+    let found = rec
+        .data()
+        .get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH)
+        .and_then(Value::as_int);
+    assert_eq!(found, Some(mn), "MN is the output length");
+}
+
+/// htslib reads `Mm`/`Ml` in place of absent `MM`/`ML`. whittle reads them
+/// the same way, moves the calls to the trimmed sequence and writes them as
+/// `MM`/`ML` with `MN`, on the single-threaded and the parallel path.
 #[test]
-fn legacy_lowercase_mod_tags_are_refused() {
+fn legacy_mod_tags_are_written_in_the_current_spelling_after_trimming() {
+    for threads in [1, 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("legacy.ubam");
+        let output = dir.path().join("out.ubam");
+        write_legacy(&input, false);
+
+        let cfg = whittle::cli::config_for_test_threads(&input, &output, 3, 4, threads);
+        let mut h = whittle::obs::ProgressHandle::disabled();
+        whittle::run(cfg, &mut h).unwrap();
+
+        let mut expected: Vec<_> = hts_mods(&input)
+            .iter()
+            .filter(|(pos, ..)| (3..16).contains(pos))
+            .map(|&(pos, cb, mb, st, q)| (pos - 3, cb, mb, st, q))
+            .collect();
+        let mut got = hts_mods(&output);
+        expected.sort();
+        got.sort();
+        assert!(!expected.is_empty(), "The window keeps a legacy call");
+        assert_eq!(
+            expected, got,
+            "Calls follow the trim with {threads} threads"
+        );
+        assert_current_mod_tags(&output, 13);
+    }
+}
+
+/// An untrimmed record with `Mm`/`Ml` is written with `MM`/`ML`/`MN` and
+/// every call in place.
+#[test]
+fn legacy_mod_tags_are_written_in_the_current_spelling_without_trimming() {
+    for threads in [1, 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("legacy.ubam");
+        let output = dir.path().join("out.ubam");
+        write_legacy(&input, false);
+
+        let cfg = whittle::cli::config_for_test_threads(&input, &output, 0, 0, threads);
+        let mut h = whittle::obs::ProgressHandle::disabled();
+        whittle::run(cfg, &mut h).unwrap();
+
+        let mut expected = hts_mods(&input);
+        let mut got = hts_mods(&output);
+        expected.sort();
+        got.sort();
+        assert_eq!(expected.len(), 2, "htslib reads both legacy calls");
+        assert_eq!(expected, got, "Calls are unchanged with {threads} threads");
+        assert_current_mod_tags(&output, 20);
+    }
+}
+
+/// Beside `MM`/`ML`, `Mm`/`Ml` are dropped: htslib reads `MM` and `ML` first,
+/// so their calls are the ones kept.
+#[test]
+fn legacy_mod_tags_beside_current_tags_are_dropped() {
     let dir = tempfile::tempdir().unwrap();
-    let input = dir.path().join("legacy.ubam");
+    let input = dir.path().join("both.ubam");
     let output = dir.path().join("out.ubam");
-    write_flagged(&input, Flags::UNMAPPED, b"Mm", b"Ml");
+    write_legacy(&input, true);
 
     let cfg = whittle::cli::config_for_test(&input, &output, 3, 4);
     let mut h = whittle::obs::ProgressHandle::disabled();
-    let err = whittle::run(cfg, &mut h).expect_err("A legacy-tag record is refused");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("legacy") && msg.contains("Mm"),
-        "Error names the legacy tag, got: {msg}"
+    whittle::run(cfg, &mut h).unwrap();
+
+    let mut got = hts_mods(&output);
+    got.sort();
+    assert_eq!(
+        got,
+        vec![(2, 'C', 'm', 0, 100), (12, 'C', 'm', 0, 101)],
+        "The MM/ML calls at 5 and 15 move to 2 and 12"
     );
+    assert_current_mod_tags(&output, 13);
+}
+
+/// FASTQ output from a uBAM with `Mm`/`Ml` carries the calls under `MM`/`ML`
+/// with `MN`, and the run reports the converted reads in its log and its
+/// summary.
+#[test]
+fn legacy_mod_tags_reach_fastq_headers_and_the_run_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("legacy.ubam");
+    let output = dir.path().join("out.fastq");
+    let json = dir.path().join("summary.json");
+    write_legacy(&input, false);
+
+    let assert = Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .args([
+            "--summary-json",
+            json.to_str().unwrap(),
+            "-H",
+            "3",
+            "-T",
+            "4",
+        ])
+        .assert()
+        .success();
+    let log = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        log.contains("Legacy tag forms were converted") && log.contains("Mm/Ml to MM/ML/MN"),
+        "The log reports the conversion: {log}"
+    );
+
+    let fastq = std::fs::read_to_string(&output).unwrap();
+    let head = fastq.lines().next().unwrap();
+    for field in ["MM:Z:C+m,1;", "ML:B:C,201", "MN:i:13"] {
+        assert!(head.contains(field), "Header carries {field}: {head}");
+    }
+    assert!(!head.contains("Mm:") && !head.contains("Ml:"), "{head}");
+
+    let summary: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert_eq!(summary["warnings"]["legacy_tags_reads"], 1);
+}
+
+/// Tagged FASTQ input with `Mm`/`Ml` is written with `MM`/`ML`/`MN`.
+#[test]
+fn legacy_mod_tags_in_tagged_fastq_are_written_in_the_current_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("legacy.fastq");
+    let output = dir.path().join("out.fastq");
+    std::fs::write(
+        &input,
+        format!(
+            "@read1\tMm:Z:C+m,0,1;\tMl:B:C,200,201\nAGCTACGTNACGGTACCGTA\n+\n{}\n",
+            "I".repeat(20)
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("whittle")
+        .unwrap()
+        .env_remove("WHITTLE_LOG")
+        .args([
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .args(["-H", "3", "-T", "4"])
+        .assert()
+        .success();
+
+    let fastq = std::fs::read_to_string(&output).unwrap();
+    let head = fastq.lines().next().unwrap();
+    for field in ["MM:Z:C+m,1;", "ML:B:C,201", "MN:i:13"] {
+        assert!(head.contains(field), "Header carries {field}: {head}");
+    }
+    assert!(!head.contains("Mm:") && !head.contains("Ml:"), "{head}");
 }
 
 /// A record flagged reverse-complemented stores SEQ reverse-complemented and

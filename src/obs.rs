@@ -285,6 +285,13 @@ impl ProgressHandle {
                 "Malformed MM/ML/MN modification blocks were removed from the output"
             );
         }
+        if stats.legacy_tags_reads > 0 {
+            tracing::info!(
+                reads = stats.legacy_tags_reads,
+                "Legacy tag forms were converted: Mm/Ml to MM/ML/MN, an integer ONT qs \
+                 to qs:f, HiFi kinetics of the whole CCS read to the read's bases"
+            );
+        }
         if stats.undo_tags_dropped_reads > 0 {
             tracing::warn!(
                 reads = stats.undo_tags_dropped_reads,

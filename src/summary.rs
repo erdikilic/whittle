@@ -159,6 +159,9 @@ struct Warnings {
     malformed_tag_reads: u64,
     /// Reads whose `MM`/`ML`/`MN` block was malformed and removed.
     malformed_mod_reads: u64,
+    /// Reads whose legacy tag forms (`Mm`/`Ml`, an integer mean quality `qs`,
+    /// HiFi kinetics that index the whole CCS read) were converted.
+    legacy_tags_reads: u64,
     /// Trimmed reads whose PacBio undo blobs (`ds`, `ls`) were removed.
     undo_tags_dropped_reads: u64,
     /// Trimmed or split reads whose fibertools footprint arrays (`ns`, `nl`,
@@ -304,6 +307,7 @@ impl Summary {
             warnings: Warnings {
                 malformed_tag_reads: stats.malformed_tag_reads,
                 malformed_mod_reads: stats.malformed_mod_reads,
+                legacy_tags_reads: stats.legacy_tags_reads,
                 undo_tags_dropped_reads: stats.undo_tags_dropped_reads,
                 footprint_tags_dropped_reads: stats.footprint_tags_dropped_reads,
                 barcode_tag_malformed_reads: stats.barcode_tag_malformed_reads,
@@ -438,6 +442,7 @@ mod tests {
             output_bases: 9_000,
             malformed_tag_reads: 2,
             malformed_mod_reads: 0,
+            legacy_tags_reads: 0,
             undo_tags_dropped_reads: 0,
             footprint_tags_dropped_reads: 0,
             barcode_tag_malformed_reads: 0,

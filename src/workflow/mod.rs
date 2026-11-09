@@ -496,6 +496,10 @@ pub struct Counters {
     /// counting-base occurrences, or a non-`B:C` `ML`) and was
     /// therefore removed from the output record.
     pub malformed_mod_reads: AtomicU64,
+    /// Input reads with a legacy tag form (`Mm`/`Ml`, an integer mean quality
+    /// `qs`, HiFi kinetics that index the whole CCS read), converted by
+    /// `bam::upgrade_legacy_tags`. Tracked by the BAM and tagged FASTQ paths.
+    pub legacy_tags_reads: AtomicU64,
     /// Trimmed input reads whose PacBio undo blobs (`ds`, `ls`) were removed,
     /// since they describe the untrimmed read.
     pub undo_tags_dropped_reads: AtomicU64,
@@ -629,6 +633,7 @@ impl Counters {
             input_reads,
             output_reads: self.output_reads.load(Ordering::Relaxed),
             malformed_mod_reads: self.malformed_mod_reads.load(Ordering::Relaxed),
+            legacy_tags_reads: self.legacy_tags_reads.load(Ordering::Relaxed),
             undo_tags_dropped_reads: self.undo_tags_dropped_reads.load(Ordering::Relaxed),
             footprint_tags_dropped_reads: self.footprint_tags_dropped_reads.load(Ordering::Relaxed),
             barcode_tag_malformed_reads: self.barcode_tag_malformed_reads.load(Ordering::Relaxed),
@@ -878,6 +883,8 @@ pub struct Stats {
     /// Input reads whose modification block was malformed and removed; see
     /// `Counters::malformed_mod_reads`.
     pub malformed_mod_reads: u64,
+    /// Input reads with a legacy tag form; see `Counters::legacy_tags_reads`.
+    pub legacy_tags_reads: u64,
     /// Trimmed reads whose `ds`/`ls` undo blobs were removed.
     pub undo_tags_dropped_reads: u64,
     /// Trimmed or split reads whose fibertools footprint arrays were removed.

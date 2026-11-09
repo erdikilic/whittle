@@ -36,8 +36,8 @@ fn split_sets_rn_to_minus_one_without_update_moves() {
     assert!(s.contains("@r1_segment_2\trn:i:-1\t"), "{s:?}");
 }
 
-/// An integer `qs` or a PacBio read name classifies a record as PacBio;
-/// anything else is ONT.
+/// Integer `qs` and `qe` coordinates or a PacBio read name classify a record
+/// as PacBio; anything else is ONT.
 #[test]
 fn platform_follows_the_qs_type_and_the_read_name() {
     assert_eq!(platform(&pacbio_hifi_record(HIFI)), Platform::PacBio);
@@ -47,6 +47,15 @@ fn platform_follows_the_qs_type_and_the_read_name() {
         "An integer qs alone classifies"
     );
     assert_eq!(platform(&ont_record()), Platform::Ont);
+    let mut legacy_ont = ont_record();
+    legacy_ont
+        .data_mut()
+        .insert(Tag::new(b'q', b's'), Value::Int32(13));
+    assert_eq!(
+        platform(&legacy_ont),
+        Platform::Ont,
+        "An integer qs without qe is a mean quality"
+    );
     let named = |name: &[u8]| {
         let mut rec = RecordBuf::default();
         *rec.name_mut() = Some(name.into());
@@ -97,6 +106,17 @@ fn lone_integer_qs_is_left_unchanged() {
     let out = reconstruct_record(&src, 2, 7, 1, 0, false);
     assert_eq!(tag(&out, *b"qs"), Some(Value::Int32(100)));
     assert!(tag(&out, *b"qe").is_none());
+}
+
+/// A PacBio read name keeps a lone integer `qs` a query coordinate through
+/// the workflow.
+#[test]
+fn lone_integer_qs_of_a_pacbio_name_stays_an_integer() {
+    let mut src = pacbio_hifi_record(HIFI);
+    src.data_mut().remove(&Tag::new(b'q', b'e'));
+    let (stats, out) = bam2bam(vec![src], &split_cfg());
+    assert_eq!(stats.legacy_tags_reads, 0);
+    assert_eq!(tag(&out[0], *b"qs"), Some(Value::Int32(100)));
 }
 
 /// A crop keeps the name; a split names PacBio segments by their query
@@ -276,4 +296,35 @@ fn rn_and_du_follow_the_platform_on_a_split() {
     assert_eq!(tag(&ont, *b"rn"), Some(Value::Int32(-1)));
     assert!(tag(&ont, *b"du").is_none());
     assert!(tag(&ont, *b"st").is_none());
+}
+
+/// An integer `qs` without `qe` marks an ONT read: its split segments take
+/// dorado's subread tags, and each carries `qs` as a float of its own bases.
+#[test]
+fn split_of_an_integer_qs_ont_read_follows_dorado() {
+    let mut src = ubam_with_mods(b"CCAC", vec![40, 40, 1, 40], b"C+m,0;", vec![10]);
+    src.data_mut()
+        .insert(Tag::new(b'q', b's'), Value::Int32(13));
+    src.data_mut().insert(Tag::new(b'r', b'n'), Value::Int32(7));
+
+    let (stats, s) = bam2fq(vec![src.clone()], &split_cfg());
+    assert_eq!(stats.output_reads, 2);
+    assert_eq!(stats.legacy_tags_reads, 1);
+    for segment in ["@r1_segment_1\t", "@r1_segment_2\t"] {
+        assert!(s.contains(segment), "{s:?}");
+    }
+    assert_eq!(s.matches("rn:i:-1").count(), 2, "{s:?}");
+    assert_eq!(s.matches("pi:Z:r1").count(), 2, "{s:?}");
+    assert!(!s.contains("qs:i:"), "{s:?}");
+
+    let (_, out) = bam2bam(vec![src], &split_cfg());
+    assert_eq!(out.len(), 2);
+    for rec in &out {
+        let expected = crate::qual::mean_prob_q(rec.quality_scores().as_ref()) as f32;
+        match tag(rec, *b"qs") {
+            Some(Value::Float(q)) => assert!((q - expected).abs() < 1e-4, "{q} {expected}"),
+            other => panic!("Unexpected qs: {other:?}"),
+        }
+        assert_eq!(tag(rec, *b"pi"), string_value(b"r1"));
+    }
 }

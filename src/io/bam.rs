@@ -9,7 +9,6 @@ use noodles_bam as bam;
 use noodles_bgzf as bgzf;
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::Flags;
-use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::{self as sam};
 
 /// A boxed, owning iterator over raw BAM records (or per-record errors). A
@@ -26,26 +25,12 @@ pub(crate) fn display_name(name: Option<&[u8]>) -> String {
     )
 }
 
-/// The pre-spec lowercase spellings of the base-modification tags.
-///
-/// htslib reads them (`sam_mods.c` falls back to `Mm` when `MM` is absent,
-/// and to `Ml` when `ML` is absent), so guppy and megalodon output decodes
-/// correctly in htslib-based tools, while whittle, which reads only the
-/// uppercase tags, would copy them through unchanged onto a trimmed sequence
-/// and relocate every call.
-pub(crate) const LEGACY_MOD_TAGS: [[u8; 2]; 2] = [*b"Mm", *b"Ml"];
-
 /// Refuses a record the workflows cannot trim, naming the read: one that is
-/// aligned, one flagged reverse-complemented, or one carrying a legacy
-/// `Mm`/`Ml` tag (`legacy_tag`, the first such tag it carries). Shared by the
-/// decoded guard (`ensure_trimmable`) and the raw-record guard in
-/// `workflow::bam`, so both refuse with the same message. `name` renders the
-/// read name for the message.
-pub(crate) fn refuse_untrimmable(
-    flags: Flags,
-    legacy_tag: Option<[u8; 2]>,
-    name: impl Fn() -> String,
-) -> anyhow::Result<()> {
+/// aligned or one flagged reverse-complemented. Shared by the decoded guard
+/// (`ensure_trimmable`) and the raw-record guard in `workflow::bam`, so both
+/// refuse with the same message. `name` renders the read name for the
+/// message.
+pub(crate) fn refuse_untrimmable(flags: Flags, name: impl Fn() -> String) -> anyhow::Result<()> {
     if !flags.is_unmapped() {
         anyhow::bail!(
             "read {} is aligned (mapped); only unaligned BAM (uBAM) input is supported",
@@ -67,32 +52,14 @@ pub(crate) fn refuse_untrimmable(
             name()
         );
     }
-    // A legacy tag is refused rather than rewritten: supporting both spellings
-    // would require choosing which to emit, and rewriting the tag changes the
-    // record's schema. Refusing avoids the corruption that copying the tag
-    // through would produce.
-    if let Some(t) = legacy_tag {
-        anyhow::bail!(
-            "read {} carries the legacy `{}` base-modification tag; whittle rewrites only \
-             the current `MM`/`ML` spelling, so trimming this record would leave its \
-             modification calls pointing at the wrong bases",
-            name(),
-            String::from_utf8_lossy(&t)
-        );
-    }
     Ok(())
 }
 
-/// Errors (naming the read) if a decoded record is aligned, flagged
-/// reverse-complemented or carries a legacy `Mm`/`Ml` tag; see
-/// `refuse_untrimmable`. Only unaligned BAM (uBAM) input is supported.
+/// Errors (naming the read) if a decoded record is aligned or flagged
+/// reverse-complemented; see `refuse_untrimmable`. Only unaligned BAM (uBAM)
+/// input is supported.
 pub fn ensure_trimmable(rec: &RecordBuf) -> anyhow::Result<()> {
-    let legacy_tag = LEGACY_MOD_TAGS
-        .into_iter()
-        .find(|t| rec.data().get(&Tag::new(t[0], t[1])).is_some());
-    refuse_untrimmable(rec.flags(), legacy_tag, || {
-        display_name(rec.name().map(AsRef::as_ref))
-    })
+    refuse_untrimmable(rec.flags(), || display_name(rec.name().map(AsRef::as_ref)))
 }
 
 /// Opens a BAM reader over an already-open stream and returns the header and a
@@ -573,30 +540,15 @@ mod tests {
         assert!(err.contains("aligned"));
     }
 
-    /// The reverse-complement and legacy-tag refusals name the read and the
-    /// offending fact.
+    /// The reverse-complement refusal names the read and the offending fact.
     #[test]
-    fn reverse_and_legacy_tag_records_are_refused() {
+    fn reverse_complemented_records_are_refused() {
         let mut rec = RecordBuf::default();
         *rec.flags_mut() = Flags::UNMAPPED | Flags::REVERSE_COMPLEMENTED;
         *rec.name_mut() = Some(b"r1".into());
         let err = ensure_trimmable(&rec).unwrap_err().to_string();
         assert!(
             err.contains("r1") && err.contains("reverse-complemented"),
-            "{err}"
-        );
-
-        let mut rec = RecordBuf::default();
-        *rec.flags_mut() = Flags::UNMAPPED;
-        rec.data_mut().insert(
-            Tag::new(b'M', b'l'),
-            noodles_sam::alignment::record_buf::data::field::Value::Array(
-                noodles_sam::alignment::record_buf::data::field::value::Array::UInt8(vec![1]),
-            ),
-        );
-        let err = ensure_trimmable(&rec).unwrap_err().to_string();
-        assert!(
-            err.contains("<unnamed>") && err.contains("legacy `Ml`"),
             "{err}"
         );
     }

@@ -652,9 +652,9 @@ impl Session {
                     return Ok(());
                 }
                 let item = if out_fmt == Format::Bam {
-                    workflow::bam::tag_filtered_bam(rec)?
+                    workflow::bam::tag_filtered_bam(rec, &counters)?
                 } else {
-                    workflow::bam::tag_filtered_bam_fastq(rec, &cfg)?
+                    workflow::bam::tag_filtered_bam_fastq(rec, &cfg, &counters)?
                 };
                 counters.reject(item)
             },
