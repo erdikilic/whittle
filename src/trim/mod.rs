@@ -5,6 +5,8 @@ pub mod strategies;
 
 use strategies::{best_segment, maximal_segments, split_low_quality, trim_by_quality};
 
+use crate::adapter::Locus;
+
 /// The quality trimming method, selected by `--quality-trim`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum QualityMethod {
@@ -116,9 +118,9 @@ pub struct Piece {
     /// Piece end, exclusive.
     pub end: usize,
     /// The source adapter segment's 5' primer locus, if one was located.
-    pub five: Option<crate::adapter::Locus>,
+    pub five: Option<Locus>,
     /// The source adapter segment's 3' primer locus, if one was located.
-    pub three: Option<crate::adapter::Locus>,
+    pub three: Option<Locus>,
 }
 
 /// Shared core of `apply` and `apply_pieces`: searches the original read for
@@ -146,7 +148,7 @@ fn apply_with(
     adapters: Option<&crate::adapter::AdapterConfig>,
     barcode: Option<(usize, usize)>,
     retain: bool,
-    mut emit: impl FnMut(usize, usize, Option<crate::adapter::Locus>, Option<crate::adapter::Locus>),
+    mut emit: impl FnMut(usize, usize, Option<Locus>, Option<Locus>),
 ) {
     debug_assert_eq!(
         seq.len(),
@@ -162,10 +164,7 @@ fn apply_with(
         return;
     }
 
-    let mut process_segment = |s: usize,
-                               e: usize,
-                               five: Option<crate::adapter::Locus>,
-                               three: Option<crate::adapter::Locus>| {
+    let mut process_segment = |s: usize, e: usize, five: Option<Locus>, three: Option<Locus>| {
         let s = s.max(outer_start);
         let e = e.min(outer_end);
         if s >= e {
@@ -308,7 +307,7 @@ mod tests {
         );
         let end_trim = TrimPlan {
             quality: Some(QualityOp::new(QualityMethod::Ends, 20)),
-            ..plan.clone()
+            ..plan
         };
         assert_eq!(
             apply(&seq, &phred, &end_trim, Some(&ac), None),
@@ -643,13 +642,13 @@ mod piece_tests {
 
     /// Generates deterministic SplitMix64 bases.
     fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(seed);
         (0..len)
             .map(|_| {
-                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
                 let mut z = state;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
                 z ^= z >> 31;
                 b"ACGT"[((z >> 62) & 0b11) as usize]
             })
@@ -722,7 +721,7 @@ mod piece_tests {
             quality: Some(QualityOp::runs(10, 5)),
         };
 
-        let cases: [(&[u8], &[u8], Option<&crate::adapter::AdapterConfig>); 2] = [
+        let cases: [(&[u8], &[u8], Option<&AdapterConfig>); 2] = [
             (&with_primers, &phred_with_primers, Some(&cfg)),
             (&without_primers, &phred_without_primers, None),
         ];
@@ -785,7 +784,7 @@ mod piece_tests {
         for piece in &pieces {
             assert_eq!(
                 piece.five,
-                Some(crate::adapter::Locus {
+                Some(Locus {
                     start: 0,
                     end: FA.len(),
                     outer_open: false,
@@ -799,7 +798,7 @@ mod piece_tests {
             );
             assert_eq!(
                 piece.three,
-                Some(crate::adapter::Locus {
+                Some(Locus {
                     start: read.len() - RA.len(),
                     end: read.len(),
                     outer_open: false,

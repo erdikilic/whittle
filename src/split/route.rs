@@ -245,7 +245,7 @@ impl Template {
                 Token::Field("target") => key,
                 Token::Field("group") => group,
                 Token::Field(_) => barcode,
-            })
+            });
         });
         PathBuf::from(out)
     }
@@ -263,8 +263,8 @@ impl Template {
 }
 
 /// The rule `is_path_component` applies, as error messages state it.
-const COMPONENT_RULE: &str = "a name in an output path must be one path component (not empty, . or .., and without /, \\ \
-     or NUL)";
+const COMPONENT_RULE: &str = "a name in an output path must be one path component \
+     (not empty, . or .., and without /, \\ or NUL)";
 
 /// Whether `name` can stand in a path as exactly one component: not empty,
 /// `.` or `..`, and without a path separator or NUL. Applied to every sheet

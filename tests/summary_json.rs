@@ -34,7 +34,7 @@ fn reads() -> String {
 }
 
 /// Parses `<dir>/summary.json`.
-fn summary(dir: &std::path::Path) -> serde_json::Value {
+fn summary(dir: &Path) -> serde_json::Value {
     let text = std::fs::read_to_string(dir.join("summary.json")).unwrap();
     serde_json::from_str(&text).unwrap()
 }
@@ -429,13 +429,13 @@ fn inference_reports_zero_configured_adapters() {
 
 /// Generates deterministic SplitMix64 bases, for `--targets` fixtures.
 fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
-    let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(seed);
     (0..len)
         .map(|_| {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             b"ACGT"[((z >> 62) & 0b11) as usize]
         })

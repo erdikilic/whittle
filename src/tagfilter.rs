@@ -242,7 +242,8 @@ fn lex(text: &str) -> Result<Vec<Token>, String> {
                     || !name[1].is_ascii_alphanumeric()
                 {
                     return Err(format!(
-                        "invalid tag [{}] at position {} (a SAM tag is a letter followed by a letter or digit)",
+                        "invalid tag [{}] at position {} (a SAM tag is a letter followed by a \
+                         letter or digit)",
                         String::from_utf8_lossy(name),
                         i + 1
                     ));
@@ -300,7 +301,8 @@ fn lex(text: &str) -> Result<Vec<Token>, String> {
                             },
                             _ => {
                                 return Err(format!(
-                                    "invalid escape at position {} (only \\\" and \\\\ are accepted)",
+                                    "invalid escape at position {} \
+                                     (only \\\" and \\\\ are accepted)",
                                     j + 1
                                 ));
                             },
@@ -341,8 +343,9 @@ fn lex(text: &str) -> Result<Vec<Token>, String> {
                     "exists" => out.push(Token::Exists),
                     _ => {
                         return Err(format!(
-                            "unsupported word {word:?} at position {} (tags are written as [{word}]; \
-                             functions other than exists and record fields are not supported)",
+                            "unsupported word {word:?} at position {} (tags are written as \
+                             [{word}]; functions other than exists and record fields are not \
+                             supported)",
                             start + 1
                         ));
                     },
@@ -577,7 +580,8 @@ fn compare(op: Op, a: &Expr, b: &Expr, rec: &impl TagSource) -> anyhow::Result<b
         _ => {
             let tag = ltag.or(rtag).unwrap_or(*b"??");
             anyhow::bail!(
-                "--tag-filter compares [{}] ({}) {} {} ({}); compare a number with a number and a string with a string",
+                "--tag-filter compares [{}] ({}) {} {} ({}); compare a number with a number and a \
+                 string with a string",
                 String::from_utf8_lossy(&tag),
                 kind(&left),
                 op.symbol(),
@@ -684,8 +688,9 @@ impl TagSource for noodles_sam::alignment::RecordBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
 
     struct Rec(HashMap<[u8; 2], TagValue<'static>>);
 

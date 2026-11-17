@@ -1,10 +1,10 @@
-//! FASTQ reading and writing: streaming record iterators over plain, gzip and BGZF input, and segment writers with optional SAM-style header tags.
+//! FASTQ reading and writing: streaming record iterators over plain, gzip and BGZF input, and
+//! segment writers with optional SAM-style header tags.
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
 use anyhow::Context;
-
 use flate2::bufread::MultiGzDecoder;
 use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::data::field::value::Array;
@@ -50,7 +50,7 @@ pub fn byte_stream(
     // An empty stream holds no member and so no records, as an empty plain
     // stream does; the decoder would report a truncated header. A read error
     // is left to the decoder, which reports it on the first read.
-    if buffered.fill_buf().is_ok_and(|bytes| bytes.is_empty()) {
+    if buffered.fill_buf().is_ok_and(<[u8]>::is_empty) {
         return Box::new(io::empty());
     }
     let decoder = MultiGzDecoder::new(buffered);
@@ -248,7 +248,7 @@ impl<R: Read> RecordIter<R> {
             id.truncate(tab);
         }
         match e {
-            seq_io::fastq::Error::Io(e) => {
+            Error::Io(e) => {
                 let context = if self.count == 0 {
                     "reading the first FASTQ record".to_string()
                 } else {
@@ -303,6 +303,7 @@ fn invalid_quality(id: &[u8], qual: &[u8]) -> anyhow::Error {
 
 impl<R: Read> Iterator for RecordIter<R> {
     type Item = anyhow::Result<ReadRecord>;
+
     fn next(&mut self) -> Option<Self::Item> {
         let rec = match self.reader.next()? {
             Ok(rec) => rec,
@@ -699,13 +700,14 @@ pub(crate) enum FastqOut {
 }
 
 impl Write for FastqOut {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             FastqOut::Plain(w) | FastqOut::Blocks(w) => w.write(buf),
             FastqOut::Bgzf(w) => w.write(buf),
         }
     }
-    fn flush(&mut self) -> std::io::Result<()> {
+
+    fn flush(&mut self) -> io::Result<()> {
         match self {
             FastqOut::Plain(w) | FastqOut::Blocks(w) => w.flush(),
             FastqOut::Bgzf(w) => w.flush(),
@@ -735,7 +737,7 @@ impl FastqOut {
 /// Compresses `data` into BGZF blocks at `level`: the bytes of a BGZF stream
 /// fragment with complete blocks and no EOF block, which a `FastqOut::Blocks`
 /// writes through.
-pub(crate) fn encode_blocks(level: u8, data: &[u8]) -> std::io::Result<Vec<u8>> {
+pub(crate) fn encode_blocks(level: u8, data: &[u8]) -> io::Result<Vec<u8>> {
     let mut blocks = Vec::new();
     crate::io::bgzf::encode(level, data, &mut blocks)?;
     Ok(blocks)
@@ -1039,7 +1041,7 @@ mod tests {
 
         assert!(crate::io::is_bgzf_file(&path));
         let mut text = String::new();
-        MultiGzDecoder::new(BufReader::new(std::fs::File::open(&path).unwrap()))
+        MultiGzDecoder::new(BufReader::new(File::open(&path).unwrap()))
             .read_to_string(&mut text)
             .unwrap();
         assert_eq!(text, "@r1\nACGT\n+\nIIII\n");
@@ -1052,7 +1054,7 @@ mod tests {
         writer.write_all(fq).unwrap();
         let compressed = writer.finish().unwrap();
 
-        let records: Vec<_> = reader_from_bgzf(Box::new(std::io::Cursor::new(compressed)), 1)
+        let records: Vec<_> = reader_from_bgzf(Box::new(io::Cursor::new(compressed)), 1)
             .map(Result::unwrap)
             .collect();
         assert_eq!(records.len(), 2);

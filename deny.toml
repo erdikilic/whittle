@@ -19,15 +19,15 @@ version = 2
 # Unix-only rust-htslib dev-dependency; MPL-2.0 is file-level copyleft and
 # redistributable.
 allow = [
-    "Apache-2.0",
-    "MIT",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "Zlib",
-    "Unicode-3.0",
-    "MPL-2.0",
-    "bzip2-1.0.6",
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "MPL-2.0",
+  "bzip2-1.0.6",
 ]
 confidence-threshold = 0.9
 

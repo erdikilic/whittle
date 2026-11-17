@@ -46,7 +46,7 @@ fn cfg(adapters: Vec<Adapter>, split: bool) -> AdapterConfig {
         end_size: 20,
         split,
         min_piece: 1,
-        candidate_index: std::sync::OnceLock::new(),
+        candidate_index: OnceLock::new(),
         amplicon: false,
         split_of: Vec::new(),
         split_opens: Vec::new(),
@@ -66,7 +66,7 @@ fn cfg_with(
         end_size,
         split,
         min_piece: 1,
-        candidate_index: std::sync::OnceLock::new(),
+        candidate_index: OnceLock::new(),
         amplicon: false,
         split_of: Vec::new(),
         split_opens: Vec::new(),
@@ -94,13 +94,13 @@ fn entry(name: &str, seq: &[u8], role: Role) -> Adapter {
 /// Generates deterministic SplitMix64 bases with the same generator the
 /// inference fixtures use.
 fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
-    let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(seed);
     (0..len)
         .map(|_| {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             b"ACGT"[((z >> 62) & 0b11) as usize]
         })
@@ -128,7 +128,7 @@ fn reference_segments(window: &[u8], cfg: &AdapterConfig) -> Vec<(usize, usize)>
         index.unfiltered[adapter_idx] = cfg.split && index.split_classes[adapter_idx] > 0;
     }
     let exhaustive = AdapterConfig {
-        candidate_index: std::sync::OnceLock::from(index),
+        candidate_index: OnceLock::from(index),
         ..cfg.clone()
     };
     adapter_segments(window, &exhaustive)
@@ -144,9 +144,11 @@ impl Lcg {
             .wrapping_add(1442695040888963407);
         (self.0 >> 32) as usize
     }
+
     fn below(&mut self, n: usize) -> usize {
         self.next() % n
     }
+
     fn dna(&mut self, n: usize) -> Vec<u8> {
         (0..n).map(|_| b"ACGT"[self.below(4)]).collect()
     }
@@ -229,7 +231,7 @@ fn check_candidate_search_randomized(seed: u64, degenerate: bool) {
             end_size: 1 + rng.below(180),
             split: true,
             min_piece: 1 + rng.below(60),
-            candidate_index: std::sync::OnceLock::new(),
+            candidate_index: OnceLock::new(),
             amplicon: false,
             split_of: Vec::new(),
             split_opens: Vec::new(),
@@ -301,9 +303,11 @@ fn partition_seeds_survive_random_indels_and_substitutions() {
                 .wrapping_add(3037000493);
             (self.0 >> 32) as usize
         }
+
         fn below(&mut self, n: usize) -> usize {
             self.next() % n
         }
+
         fn base(&mut self) -> u8 {
             b"ACGT"[self.below(4)]
         }
@@ -602,7 +606,7 @@ fn truncated_rear_adapter_at_the_read_end_is_trimmed() {
             "Remnant of {remnant} bases"
         );
     }
-    let mut w = insert.clone();
+    let mut w = insert;
     w.extend_from_slice(&rear[..MIN_OVERLAP - 1]);
     assert_eq!(adapter_segments(&w, &c), vec![(0, w.len())]);
 }
@@ -840,12 +844,7 @@ fn native_barcode_construct_is_trimmed_through_its_inner_flank() {
     let mut w = construct.clone();
     w.extend_from_slice(&insert);
     w.extend(reverse_complement(&construct));
-    let c = cfg_with(
-        super::preset::preset(&[super::preset::Kit::Nbd114]),
-        0.2,
-        150,
-        true,
-    );
+    let c = cfg_with(preset::preset(&[preset::Kit::Nbd114]), 0.2, 150, true);
     assert_eq!(
         adapter_segments(&w, &c),
         vec![(construct.len(), construct.len() + insert.len())]
@@ -867,12 +866,7 @@ fn rapid_pcr_barcode_is_trimmed_through_the_transposon_end() {
     let mut w = front.clone();
     w.extend_from_slice(&insert);
     w.extend(reverse_complement(&primer));
-    let c = cfg_with(
-        super::preset::preset(&[super::preset::Kit::Rpb114]),
-        0.2,
-        150,
-        true,
-    );
+    let c = cfg_with(preset::preset(&[preset::Kit::Rpb114]), 0.2, 150, true);
     assert_eq!(
         adapter_segments(&w, &c),
         vec![(front.len(), front.len() + insert.len())]
@@ -1283,12 +1277,12 @@ fn duplicate_entries_count_once_toward_the_chance_bound() {
 /// primer, and deep in the end zone for every entry of 24 bases or more.
 #[test]
 fn catalog_budgets_keep_their_per_pattern_tolerance() {
-    let catalog = super::preset::preset(super::preset::Kit::ALL);
+    let catalog = preset::preset(preset::Kit::ALL);
     let index = CandidateIndex::new(&catalog, 0.2, 150, true);
     let site = |adapter: &Adapter| {
         marker_primer_of(&adapter.seq, 0.2)
             .filter(|_| !is_umi(adapter))
-            .map(|(primer, _)| super::catalog::marker_site(primer))
+            .map(|(primer, _)| catalog::marker_site(primer))
     };
     for (adapter, budget) in catalog.iter().zip(&index.budgets) {
         let own = Budget::new(&adapter.seq, 0.2, 150);
@@ -1378,7 +1372,7 @@ fn panel_members_share_one_interior_chance_bound() {
         .map(|i| ad(&format!("p{i}"), &splitmix_dna(900 + i, 24)))
         .collect();
     let alone = CandidateIndex::new(&panel[..1], 0.2, 150, true);
-    let mut set = panel.clone();
+    let mut set = panel;
     set.push(ad(
         "long",
         b"AATGTACTTCGTTCAGTTACGTATTGCTGGTTTTCGCATTTATCGTGAAACGCTTTC",
@@ -1439,7 +1433,7 @@ fn barcode_bounding_entries_are_constructs_and_insert_side_flanks() {
 /// trims, although the trimming pass skips the panel search there.
 #[test]
 fn presence_detection_tallies_the_barcode_behind_a_construct() {
-    let adapters = super::preset::preset(&[super::preset::Kit::Nbd114]);
+    let adapters = preset::preset(&[preset::Kit::Nbd114]);
     let mut construct = b"ATTGCTAAGGTTAA".to_vec();
     construct.extend(reverse_complement(b"AAGAAAGTTGTCGGTGTCTTTGTG"));
     construct.extend_from_slice(b"CAGCACCT");
@@ -1728,7 +1722,7 @@ fn amplicon_splits_need_the_whole_marker_primer() {
         adapter_segments(&whole, &c),
         vec![(0, left.len()), (cut, whole.len())]
     );
-    let mut lead = left.clone();
+    let mut lead = left;
     let tail = lead.len() - 4;
     for (base, primer_base) in lead[tail..].iter_mut().zip(&forward[..4]) {
         *base = complement(*primer_base);
@@ -1757,7 +1751,7 @@ fn pair_budgets_respect_the_interior_chance_bound() {
     // highest chance.
     let site = |i: usize| {
         let (primer, _) = marker_primer_of(&adapters[i].seq, 0.2).unwrap();
-        super::catalog::marker_site(primer)
+        catalog::marker_site(primer)
     };
     for class in 0..INTERIOR_CLASSES {
         let mut by_site: BTreeMap<usize, f64> = BTreeMap::new();
@@ -1902,7 +1896,7 @@ fn a_barcode_within_a_marker_primers_budget_keeps_its_own_family() {
     let mut as_primer = barcode.clone();
     as_primer.role = Role::Primer;
     let grouped = CandidateIndex::new(&[primer.clone(), as_primer], 0.2, 150, true);
-    let with_barcode = CandidateIndex::new(&[primer.clone(), barcode.clone()], 0.2, 150, true);
+    let with_barcode = CandidateIndex::new(&[primer, barcode.clone()], 0.2, 150, true);
     assert_ne!(
         (grouped.budgets[0].k_end, grouped.budgets[0].k_mid),
         (with_barcode.budgets[0].k_end, with_barcode.budgets[0].k_mid),
@@ -2182,7 +2176,7 @@ fn interior_split_needs_the_whole_adapter() {
             (left.len() + adapter.len(), junction.len())
         ]
     );
-    let mut site = left.clone();
+    let mut site = left;
     site.extend_from_slice(primer);
     site.extend_from_slice(b"AGCTCAGTAGCTG");
     site.extend_from_slice(&right);
@@ -2198,12 +2192,7 @@ fn pcs114_ssp_is_trimmed_through_its_umi() {
     let ssp = b"TTTCTGTTGGTGCTGATATTGCTTT";
     let umi = b"ACGGTTCAGCTTGGAATTAGCCTTT";
     let insert = splitmix_dna(7, 400);
-    let c = cfg_with(
-        super::preset::preset(&[super::preset::Kit::Pcb114]),
-        0.2,
-        150,
-        true,
-    );
+    let c = cfg_with(preset::preset(&[preset::Kit::Pcb114]), 0.2, 150, true);
     let mut tagged = ssp.to_vec();
     tagged.extend_from_slice(umi);
     let mut forward = tagged.clone();
@@ -2235,7 +2224,7 @@ fn pcs114_ssp_is_trimmed_through_its_umi() {
 
 /// The sheet primers of two targets, `A` and `B`, as SplitMix sequences:
 /// forward and reverse primer of each, as ordered.
-fn split_primers() -> Vec<crate::split::Primer> {
+fn split_primers() -> Vec<Primer> {
     [
         ("fA", 111, 20),
         ("rA", 112, 22),
@@ -2243,7 +2232,7 @@ fn split_primers() -> Vec<crate::split::Primer> {
         ("rB", 114, 20),
     ]
     .into_iter()
-    .map(|(name, seed, len)| crate::split::Primer {
+    .map(|(name, seed, len)| Primer {
         name: name.into(),
         seq: splitmix_dna(seed, len),
     })
@@ -2421,18 +2410,14 @@ fn junction_search_matches_full_read_search() {
 #[test]
 fn sheet_anchored_budgets_match_the_index() {
     let mab114 = crate::split::Sheet::preset("mab114").unwrap().primers;
-    let panel: Vec<crate::split::Primer> = (0..40)
-        .map(|i| crate::split::Primer {
+    let panel: Vec<Primer> = (0..40)
+        .map(|i| Primer {
             name: format!("p{i}"),
             seq: splitmix_dna(7_000 + i, 15),
         })
         .collect();
     let sets = [
-        (
-            super::preset::preset(&[super::preset::Kit::Mab114]),
-            mab114,
-            false,
-        ),
+        (preset::preset(&[preset::Kit::Mab114]), mab114, false),
         (
             vec![ad("lsk", b"AATGTACTTCGTTCAGTTACGTATTGCT")],
             panel,
@@ -2812,11 +2797,11 @@ fn residue_trimmed_split_adapter_yields_an_open_locus() {
 fn entry_of_a_primer_and_its_reverse_complement_opens_both_ways() {
     let px = splitmix_dna(140, 22);
     let primers = vec![
-        crate::split::Primer {
+        Primer {
             name: "fX".into(),
             seq: px.clone(),
         },
-        crate::split::Primer {
+        Primer {
             name: "rX".into(),
             seq: reverse_complement(&px),
         },
@@ -2882,8 +2867,8 @@ fn abutting_inner_primer_moves_the_trim_but_not_the_locus() {
 /// end zone.
 #[test]
 fn far_primer_hit_is_placed_only_when_anchored() {
-    let primers: Vec<crate::split::Primer> = (1..=24)
-        .map(|i| crate::split::Primer {
+    let primers: Vec<Primer> = (1..=24)
+        .map(|i| Primer {
             name: format!("p{i}"),
             seq: splitmix_dna(i, 16),
         })
@@ -3062,12 +3047,7 @@ fn no_locus_without_primer() {
 /// read only at a junction pair.
 #[test]
 fn attach_split_maps_preset_duplicate() {
-    let mut c = cfg_with(
-        super::preset::preset(&[super::preset::Kit::Mab114]),
-        0.2,
-        150,
-        true,
-    );
+    let mut c = cfg_with(preset::preset(&[preset::Kit::Mab114]), 0.2, 150, true);
     let before = c.adapters.clone();
     let sheet = crate::split::Sheet::parse_fasta(
         b">16S_mix_F target=16S end=fwd\nAGRGTTYGATYMTGGCTCAG\n\
@@ -3169,7 +3149,7 @@ fn with_singleton_batches(cfg: &AdapterConfig, tiled: bool) -> AdapterConfig {
         batch.tiled_on_ambiguous_read = tiled;
     }
     AdapterConfig {
-        candidate_index: std::sync::OnceLock::from(index),
+        candidate_index: OnceLock::from(index),
         ..cfg.clone()
     }
 }
@@ -3261,7 +3241,7 @@ fn tiled_singleton_batches_match_the_one_by_one_search() {
     split.attach_split(&crate::split::Sheet::preset("mab114").unwrap().primers);
     let mut ends_only = kit.clone();
     ends_only.split = false;
-    ends_only.candidate_index = std::sync::OnceLock::new();
+    ends_only.candidate_index = OnceLock::new();
     let reads = planted_primer_reads(300);
     for (label, c) in [
         ("kit", kit),
@@ -3305,11 +3285,11 @@ fn singleton_hit_lists(
     read: &[u8],
     cfg: &AdapterConfig,
     span: (usize, usize),
-) -> Vec<(usize, Vec<(Site, search::Hit)>)> {
+) -> Vec<(usize, Vec<(Site, Hit)>)> {
     let mut lists = Vec::new();
-    super::passes::with_engine(read, cfg, |ctx, engine| {
-        super::passes::singleton_hits(ctx, span, cfg.end_size, engine, |adapter_idx, found| {
-            lists.push((adapter_idx, found.to_vec()))
+    with_engine(read, cfg, |ctx, engine| {
+        singleton_hits(ctx, span, cfg.end_size, engine, |adapter_idx, found| {
+            lists.push((adapter_idx, found.to_vec()));
         });
     });
     lists

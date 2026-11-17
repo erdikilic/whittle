@@ -123,10 +123,10 @@ impl RejectWriter {
                     .name("rejected-writer".into())
                     .spawn(move || {
                         let result = (|| {
-                            for item in rx.iter() {
+                            for item in &rx {
                                 match item {
                                     RejectItem::Bam(rec) => {
-                                        sink.write_record_bytes(&header, &rec)?
+                                        sink.write_record_bytes(&header, &rec)?;
                                     },
                                     RejectItem::Fastq(_) => anyhow::bail!(
                                         "a FASTQ record reached the BAM rejected output"
@@ -146,7 +146,7 @@ impl RejectWriter {
                     .spawn(move || {
                         use std::io::Write;
                         let result = (|| {
-                            for item in rx.iter() {
+                            for item in &rx {
                                 match item {
                                     RejectItem::Fastq(bytes) => sink.write_all(&bytes)?,
                                     RejectItem::Bam(_) => anyhow::bail!(

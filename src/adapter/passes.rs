@@ -675,13 +675,13 @@ pub(super) fn search_interior(ctx: Context<'_>, engine: &mut Engine<'_>, keep: &
         let text = ctx.read.strands(start, end);
         let Some(whole) = &ctx.index.whole_primers[adapter_idx] else {
             search(engine, ctx.index, adapter_idx, pattern, text, k_mid, |h| {
-                keep.accept(Site::Interior, adapter_idx, shifted(h, start))
+                keep.accept(Site::Interior, adapter_idx, shifted(h, start));
             });
             continue;
         };
         let mut found: Vec<Hit> = Vec::new();
         search(engine, ctx.index, adapter_idx, pattern, text, k_mid, |h| {
-            found.push(shifted(h, start))
+            found.push(shifted(h, start));
         });
         for hit in found {
             match whole_primer_over(ctx, engine, whole, hit) {
@@ -911,7 +911,7 @@ pub(super) fn search_trimmed_ends(
         flags.clear();
         flags.resize(ctx.cfg.adapters.len(), false);
         table.scan(&ctx.read.window[ws + start..ws + end], |adapter_idx, _| {
-            flags[adapter_idx] = true
+            flags[adapter_idx] = true;
         });
         for (adapter_idx, adapter) in ctx.cfg.adapters.iter().enumerate() {
             if !engine.head_flags[adapter_idx] || !keep.is_split(adapter_idx) {

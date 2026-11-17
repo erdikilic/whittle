@@ -138,7 +138,7 @@ pub(crate) fn run_fastq_paraseq<W: BatchSink>(
         let aborted = &aborted;
         s.spawn(move || {
             let mut errored = false;
-            for batch in rx.iter() {
+            for batch in &rx {
                 if errored {
                     continue;
                 }

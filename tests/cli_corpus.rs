@@ -151,11 +151,11 @@ fn whittle() -> Command {
 
 /// A deterministic base for position `pos` of read `read_idx` (splitmix64 mix).
 fn splitmix_base(read_idx: usize, pos: usize) -> u8 {
-    let mut z = 0x9E37_79B9_7F4A_7C15u64
+    let mut z = 0x9e37_79b9_7f4a_7c15u64
         .wrapping_add(read_idx as u64)
         .wrapping_add((pos as u64) << 32);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^= z >> 31;
     b"ACGT"[(z & 0b11) as usize]
 }
@@ -316,8 +316,9 @@ fn write_bam(path: &Path, reads: &[SourceRead]) {
     let mut header = sam::Header::default();
     for read in reads {
         if let Some(id) = &read.rg {
+            use sam::header::record::value::Map;
+            use sam::header::record::value::map::ReadGroup;
             use sam::header::record::value::map::read_group::tag::DESCRIPTION;
-            use sam::header::record::value::{Map, map::ReadGroup};
             let mut group = Map::<ReadGroup>::default();
             group.other_fields_mut().insert(
                 DESCRIPTION,
@@ -804,7 +805,8 @@ where
         .position(|(a, e)| a != e)
         .unwrap_or_else(|| actual.len().min(expected.len()));
     panic!(
-        "{label} mismatch: actual {} records, expected {} records, first mismatch at {first}\nactual: {:?}\nexpected: {:?}",
+        "{label} mismatch: actual {} records, expected {} records, first mismatch at \
+         {first}\nactual: {:?}\nexpected: {:?}",
         actual.len(),
         expected.len(),
         actual.get(first),

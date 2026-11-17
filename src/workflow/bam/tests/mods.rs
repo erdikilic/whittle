@@ -122,7 +122,8 @@ fn reconstruct_record_preserves_originally_empty_mm_group() {
 /// group's absence would turn into "no call".
 #[test]
 fn split_suffixes_name_and_keeps_empty_mod_group() {
-    let src = ubam_with_mods(b"CCAC", vec![30, 31, 32, 33], b"C+m,0;", vec![10]); // mod at position 0
+    // One C+m call, at position 0.
+    let src = ubam_with_mods(b"CCAC", vec![30, 31, 32, 33], b"C+m,0;", vec![10]);
     // Segment [2,4) has no surviving C modification.
     let out = reconstruct_record(&src, 2, 4, 2, 1, false);
     // `.as_ref()` is ambiguous on `&BStr` (it implements both `AsRef<[u8]>`
@@ -373,7 +374,7 @@ fn untrimmed_mod_record_passes_through_byte_for_byte() {
     use noodles_sam::alignment::record_buf::data::field::Value;
 
     let mut rec = RecordBuf::default();
-    *rec.flags_mut() = noodles_sam::alignment::record::Flags::UNMAPPED;
+    *rec.flags_mut() = Flags::UNMAPPED;
     *rec.name_mut() = Some(b"r1".into());
     *rec.sequence_mut() = b"ACGTACGTACGT".to_vec().into();
     *rec.quality_scores_mut() = vec![40u8; 12].into();

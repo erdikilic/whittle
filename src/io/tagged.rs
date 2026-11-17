@@ -338,10 +338,11 @@ mod tests {
     fn decodes_every_field_type() {
         let rec = tagged(
             "r1",
-            "MM:Z:C+m,1;\tML:B:C,200,7\tMN:i:4\tqs:f:12.5\tXA:A:x\tXH:H:1A2B\tXS:B:s,-3,4\tXF:B:f,0.5,1e3\tXE:B:I",
+            "MM:Z:C+m,1;\tML:B:C,200,7\tMN:i:4\tqs:f:12.5\tXA:A:x\tXH:H:1A2B\t\
+             XS:B:s,-3,4\tXF:B:f,0.5,1e3\tXE:B:I",
         );
         let out = record_from_tagged(rec).unwrap();
-        assert_eq!(out.name().map(|n| n.as_ref()), Some(&b"r1"[..]));
+        assert_eq!(out.name().map(AsRef::as_ref), Some(&b"r1"[..]));
         assert_eq!(out.sequence().as_ref(), b"ACGT");
         assert_eq!(out.quality_scores().as_ref(), &[30; 4]);
         assert!(out.flags().is_unmapped());
@@ -393,7 +394,7 @@ mod tests {
         })
         .unwrap();
         assert!(out.data().is_empty());
-        assert_eq!(out.name().map(|n| n.as_ref()), Some(&b"r1"[..]));
+        assert_eq!(out.name().map(AsRef::as_ref), Some(&b"r1"[..]));
     }
 
     /// The byte-level integer parser accepts and rejects exactly what

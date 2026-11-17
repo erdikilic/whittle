@@ -25,7 +25,7 @@ pub(super) fn column_counts(
             .as_ref()
             .is_none_or(|old| (hit.cost, hit.text_start) < (old.cost, old.text_start))
         {
-            *entry = Some(hit.clone());
+            *entry = Some(hit);
         }
     }
     let mut counts = vec![[0usize; 5]; seq.len()];
@@ -37,8 +37,7 @@ pub(super) fn column_counts(
         for (i, pos) in path.iter().enumerate() {
             let next = path
                 .get(i + 1)
-                .map(|p| (p.0, p.1))
-                .unwrap_or((seq.len() as i32, hit.text_end as i32));
+                .map_or((seq.len() as i32, hit.text_end as i32), |p| (p.0, p.1));
             if next.0 != pos.0 + 1 {
                 continue;
             }
@@ -82,7 +81,7 @@ pub(super) fn polish_consensus(seq: &[u8], windows: &[&[u8]]) -> Vec<u8> {
 pub(super) fn base_composition(windows: &[&[u8]]) -> [f64; 4] {
     let mut counts = [0usize; 4];
     for window in windows {
-        for base in window.iter() {
+        for base in *window {
             if let Some(code) = encode_kmer(std::slice::from_ref(base)) {
                 counts[code as usize] += 1;
             }

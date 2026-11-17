@@ -418,7 +418,7 @@ fn update_moves_does_not_reslice_read_length_pa() {
     let out = reconstruct_record(&src, 1, 5, 1, 0, true);
     match out.data().get(&Tag::new(b'p', b'a')) {
         Some(Value::Array(Array::Int32(v))) => {
-            assert_eq!(v, &[4, 2, 6, -1, -1], "The pa tag must not be re-sliced")
+            assert_eq!(v, &[4, 2, 6, -1, -1], "The pa tag must not be re-sliced");
         },
         other => panic!("Unexpected pa: {other:?}"),
     }

@@ -78,7 +78,7 @@ pub(super) fn upgrade_legacy_tags(rec: &mut RecordBuf) -> bool {
             }
         }
     }
-    if ont_qs && let Some(mean) = data.get(&qs).and_then(|value| value.as_int()) {
+    if ont_qs && let Some(mean) = data.get(&qs).and_then(Value::as_int) {
         data.insert(qs, Value::Float(mean as f32));
         found = true;
     }

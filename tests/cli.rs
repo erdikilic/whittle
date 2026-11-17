@@ -661,7 +661,8 @@ fn verbose_shows_phase_timing() {
         .write_stdin(input)
         .assert()
         .success()
-        .stderr(predicate::str::contains("Processing started")); // the phase timing line appears at DEBUG
+        // The phase timing line appears at DEBUG.
+        .stderr(predicate::str::contains("Processing started"));
 }
 
 #[test]

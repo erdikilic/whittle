@@ -525,7 +525,7 @@ pub(super) fn build_record(src: &bam::Record, mut edit: RecordEdit<'_>) -> io::R
     dst.extend_from_slice(cigar);
     push_packed_bases(&mut dst, sequence.as_bytes(), start, end);
     if qual.is_empty() {
-        dst.extend(std::iter::repeat_n(0xFF, base_count));
+        dst.extend(std::iter::repeat_n(0xff, base_count));
     } else {
         dst.extend_from_slice(qual);
     }

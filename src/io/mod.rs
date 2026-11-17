@@ -186,13 +186,15 @@ pub fn input_format_mismatch_warning(
 /// `1f 8b` but sets neither `FEXTRA` nor `BC`. Requires the full 18-byte block
 /// header.
 pub(crate) fn is_bgzf(sniff: &[u8]) -> bool {
+    // Gzip magic, CM = DEFLATE, FLG.FEXTRA set, and the first extra subfield
+    // identifiers SI1 SI2 = "BC", which mark BGZF.
     sniff.len() >= 18
         && sniff[0] == 0x1f
         && sniff[1] == 0x8b
-        && sniff[2] == 0x08 // CM = DEFLATE
-        && (sniff[3] & 0x04) != 0 // FLG.FEXTRA set
-        && sniff[12] == b'B' // first extra subfield SI1
-        && sniff[13] == b'C' // SI2; "BC" marks BGZF
+        && sniff[2] == 0x08
+        && (sniff[3] & 0x04) != 0
+        && sniff[12] == b'B'
+        && sniff[13] == b'C'
 }
 
 /// Returns true if the file at `path` starts with a BGZF block header. Best

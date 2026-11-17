@@ -47,7 +47,6 @@ impl Kit {
         Kit::Rna004,
         Kit::PacBio,
     ];
-
     /// The Oxford Nanopore kits: everything but PacBio.
     pub const ONT: &[Kit] = &[
         Kit::Lsk114,

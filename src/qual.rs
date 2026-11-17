@@ -84,7 +84,7 @@ pub fn mean_arith_q(phred: &[u8]) -> f64 {
     if phred.is_empty() {
         return 0.0;
     }
-    let sum: u64 = phred.iter().map(|&q| q as u64).sum();
+    let sum: u64 = phred.iter().map(|&q| u64::from(q)).sum();
     sum as f64 / phred.len() as f64
 }
 

@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn truncated_ml_does_not_panic() {
         // MM lists 3 modified Cs but ML has only 1 byte (truncated).
-        let m = reconstruct(&crate::mods::parse(b"C+m,0,0,0;", &[5]), b"CCC", 0, 3);
+        let m = reconstruct(&parse(b"C+m,0,0,0;", &[5]), b"CCC", 0, 3);
         // All three Cs are in the window; deltas renumber to [0, 0, 0]; only the
         // ML bytes present are kept.
         assert_eq!(m.groups.len(), 1);
@@ -286,12 +286,7 @@ mod tests {
         // keeps positions 2 and 3. Against window C positions [1, 2, 3, 4],
         // position 2 has window index 1 (delta 1) and position 3 has window
         // index 2 (delta 0).
-        let m = reconstruct(
-            &crate::mods::parse(b"C+m,0,1,0;", &[10, 20, 30]),
-            b"CCCCC",
-            1,
-            5,
-        );
+        let m = reconstruct(&parse(b"C+m,0,1,0;", &[10, 20, 30]), b"CCCCC", 1, 5);
         assert_eq!(m.groups[0].deltas, vec![1, 0]);
         assert_eq!(m.groups[0].ml, vec![20, 30]);
     }
@@ -329,6 +324,7 @@ mod tests {
                     .wrapping_add(1442695040888963407);
                 self.0
             }
+
             fn below(&mut self, n: usize) -> usize {
                 ((self.next_u64() >> 33) as usize) % n
             }
@@ -404,7 +400,8 @@ mod tests {
                 );
                 assert_eq!(
                     g.ml, exp_ml,
-                    "Kept ML must equal the in-window positions' bytes: seq={seq:?} window=[{start},{end})"
+                    "Kept ML must equal the in-window positions' bytes: seq={seq:?} \
+                     window=[{start},{end})"
                 );
             }
         }
@@ -438,6 +435,7 @@ mod tests {
                     .wrapping_add(1442695040888963407);
                 self.0
             }
+
             fn below(&mut self, n: usize) -> usize {
                 ((self.next_u64() >> 33) as usize) % n
             }
@@ -520,11 +518,13 @@ mod tests {
                 assert_eq!(
                     g.ml.len(),
                     g.deltas.len() * ncodes,
-                    "ML must stay position-major: seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
+                    "ML must stay position-major: seq={seq:?} window=[{start},{end}) \
+                     ncodes={ncodes}"
                 );
                 assert_eq!(
                     g.ml, exp_ml,
-                    "Kept ML must equal the in-window positions' runs: seq={seq:?} window=[{start},{end}) ncodes={ncodes}"
+                    "Kept ML must equal the in-window positions' runs: seq={seq:?} \
+                     window=[{start},{end}) ncodes={ncodes}"
                 );
             }
         }

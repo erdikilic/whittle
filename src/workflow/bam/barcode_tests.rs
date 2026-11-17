@@ -303,7 +303,7 @@ fn barcoded_record(real: bool) -> RecordBuf {
 /// A base configuration for the decoded BAM workflows with an empty
 /// adapter set, which enables the barcode stage.
 fn cfg_barcodes() -> Config {
-    let mut cfg = super::tests::cfg_bam2fq(None, 0, FastqTags::All);
+    let mut cfg = tests::cfg_bam2fq(None, 0, FastqTags::All);
     cfg.adapters = Some(crate::adapter::AdapterConfig {
         adapters: Vec::new(),
         error_rate: 0.2,

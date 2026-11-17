@@ -11,8 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, bail};
 
-use crate::adapter::MIN_PATTERN_LEN;
-use crate::adapter::search;
+use crate::adapter::{MIN_PATTERN_LEN, search};
 
 /// Reserved target and group key names. A sheet cannot define a target with
 /// one of these names, since they are the classifier's own output bins.
@@ -1342,9 +1341,8 @@ mod tests {
         let pairs = close_pairs(&s, 2, false);
         assert_eq!(pairs.len(), 1, "different targets: one close pair");
         assert_eq!(pairs[0].2, 1, "one substitution apart");
-        let flagged: std::collections::HashSet<usize> = [pairs[0].0, pairs[0].1].into();
-        let expected: std::collections::HashSet<usize> =
-            [s.targets[0].fwd[0], s.targets[1].fwd[0]].into();
+        let flagged: HashSet<usize> = [pairs[0].0, pairs[0].1].into();
+        let expected: HashSet<usize> = [s.targets[0].fwd[0], s.targets[1].fwd[0]].into();
         assert_eq!(flagged, expected);
 
         let grouped = close_pairs(&s, 2, true);
@@ -1385,9 +1383,8 @@ mod tests {
         let pairs = close_pairs(&s, 2, false);
         assert_eq!(pairs.len(), 1, "one cross-role pair: {pairs:?}");
         assert_eq!(pairs[0].2, 1, "one substitution apart");
-        let flagged: std::collections::HashSet<usize> = [pairs[0].0, pairs[0].1].into();
-        let expected: std::collections::HashSet<usize> =
-            [s.targets[0].fwd[0], s.targets[1].rev[0]].into();
+        let flagged: HashSet<usize> = [pairs[0].0, pairs[0].1].into();
+        let expected: HashSet<usize> = [s.targets[0].fwd[0], s.targets[1].rev[0]].into();
         assert_eq!(flagged, expected);
     }
 

@@ -1,17 +1,18 @@
 # Formatting configuration for `whittle`.
 #
-# The unstable options in the "nightly" section require the nightly toolchain:
+# The options in the "nightly" sections require the nightly toolchain:
 # `cargo +nightly fmt`. Stable `cargo fmt` runs and passes `--check` with this
 # file; it ignores the unstable options and leaves the affected code as written.
+# CI checks both.
 #
-# Comment- and string-reflowing options (wrap_comments, format_strings,
-# format_code_in_doc_comments, normalize_comments) are not enabled: doc comments
-# and multi-line error strings are hand-formatted.
+# String reflowing (format_strings) is not enabled: multi-line error and assert
+# strings are hand-formatted.
 
 # Width and general options (stable).
 # rustfmt's default width.
 max_width = 100
 newline_style = "Unix"
+style_edition = "2024"
 
 # Expression and literal options (stable).
 # `Foo { x }` instead of `Foo { x: x }`.
@@ -26,3 +27,24 @@ hex_literal_case = "Lower"
 imports_granularity = "Module"
 # Groups imports as std, external crates, this crate.
 group_imports = "StdExternalCrate"
+
+# Comment options (nightly).
+# Wraps comments longer than the code width.
+wrap_comments = true
+comment_width = 100
+# Formats Rust code blocks in doc comments.
+format_code_in_doc_comments = true
+# `#[doc = "..."]` becomes `///`.
+normalize_doc_attributes = true
+
+# Item options (nightly).
+# Orders impl items as types, consts, macros, then functions.
+reorder_impl_items = true
+# Formats `macro_rules!` matchers like ordinary code.
+format_macro_matchers = true
+
+# Checks (nightly).
+# Fails on a line that cannot be fitted to max_width.
+error_on_line_overflow = true
+# Fails on a comment or string that cannot be formatted.
+error_on_unformatted = true

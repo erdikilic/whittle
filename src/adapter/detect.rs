@@ -4,8 +4,9 @@
 //! `presence_min` of the sampled reads, so a large catalog is not searched in
 //! full on every read.
 
-use super::{Adapter, AdapterConfig, adapter_segments_tallied};
 use rayon::prelude::*;
+
+use super::{Adapter, AdapterConfig, adapter_segments_tallied};
 
 /// Sample size below which presence detection is unreliable; callers skip it
 /// and use the full adapter set.
@@ -87,7 +88,7 @@ pub(crate) const AMPLICON_SAMPLE_READS: usize = 4000;
 /// sequence of `MIN_PATTERN_LEN` bases, so that it does not open read ends
 /// by chance.
 fn usable_primer(seq: &[u8]) -> bool {
-    let umi = super::Adapter {
+    let umi = Adapter {
         name: String::new(),
         seq: seq.to_vec(),
         role: super::Role::Primer,
@@ -421,13 +422,13 @@ mod tests {
     /// Generates deterministic SplitMix64 bases with the same generator the
     /// inference fixtures use.
     fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(seed);
         (0..len)
             .map(|_| {
-                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
                 let mut z = state;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
                 z ^= z >> 31;
                 b"ACGT"[((z >> 62) & 0b11) as usize]
             })
@@ -454,7 +455,7 @@ mod tests {
             r.extend_from_slice(&[b'A'; 60]);
             reads.push(r);
         }
-        let seqs: Vec<&[u8]> = reads.iter().map(|r| r.as_slice()).collect();
+        let seqs: Vec<&[u8]> = reads.iter().map(Vec::as_slice).collect();
         let c = cfg(
             vec![ad("P", p, Role::Adapter), ad("Q", q, Role::Adapter)],
             150,
@@ -502,7 +503,7 @@ mod tests {
                 r
             })
             .collect();
-        let seqs: Vec<&[u8]> = reads.iter().map(|r| r.as_slice()).collect();
+        let seqs: Vec<&[u8]> = reads.iter().map(Vec::as_slice).collect();
         let c = cfg(vec![a.clone()], 150, true);
         let kept = present(&seqs, &c, presence_min(seqs.len()), 2);
         assert!(
@@ -550,7 +551,7 @@ mod tests {
                 }
             })
             .collect();
-        let seqs: Vec<&[u8]> = reads.iter().map(|r| r.as_slice()).collect();
+        let seqs: Vec<&[u8]> = reads.iter().map(Vec::as_slice).collect();
         let mut primers: Vec<Vec<u8>> = crate::adapter::catalog::MARKER_PRIMERS
             .iter()
             .map(|p| p.to_vec())
@@ -563,7 +564,7 @@ mod tests {
         let technical: Vec<Vec<u8>> = (0..200u64)
             .map(|i| [custom, &splitmix_dna(600 + i, 800)].concat())
             .collect();
-        let seqs: Vec<&[u8]> = technical.iter().map(|r| r.as_slice()).collect();
+        let seqs: Vec<&[u8]> = technical.iter().map(Vec::as_slice).collect();
         assert_eq!(primer_share(&seqs, &mixed, &primers, 2), Some(0.0));
 
         let amplicon_only = cfg(preset(&[Kit::Mab114]), 150, true);
@@ -589,12 +590,12 @@ mod tests {
                 ]
             })
             .collect();
-        let seqs: Vec<&[u8]> = amplicons.iter().map(|r| r.as_slice()).collect();
+        let seqs: Vec<&[u8]> = amplicons.iter().map(Vec::as_slice).collect();
         assert!(length_share(&seqs) >= 0.45);
         let fragments: Vec<Vec<u8>> = (0..300usize)
             .map(|i| vec![b'A'; 500 + i * 7919 % 9500])
             .collect();
-        let seqs: Vec<&[u8]> = fragments.iter().map(|r| r.as_slice()).collect();
+        let seqs: Vec<&[u8]> = fragments.iter().map(Vec::as_slice).collect();
         assert!(length_share(&seqs) * 100.0 < AMPLICON_LENGTH_PERCENT as f64);
         assert_eq!(length_share(&[]), 0.0);
     }

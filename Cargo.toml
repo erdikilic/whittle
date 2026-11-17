@@ -7,7 +7,6 @@ license = "Apache-2.0"
 description = "Coordinate-consistent trimming of long-read uBAM and tagged FASTQ"
 authors = ["Erdi Kilic <erdican266@gmail.com>"]
 repository = "https://github.com/erdikilic/whittle"
-homepage = "https://github.com/erdikilic/whittle"
 documentation = "https://docs.rs/whittle"
 readme = "README.md"
 keywords = ["bioinformatics", "nanopore", "long-read", "fastq", "bam"]
@@ -33,10 +32,9 @@ paraseq = { version = "0.6", default-features = false, features = ["anyhow"], op
 noodles-bam = "0.98.0"
 noodles-sam = "0.93.0"
 noodles-bgzf = { version = "0.52.0", features = ["libdeflate"] }
+
 libdeflater = "1"
-
 flate2 = { version = "1", features = ["zlib-rs"], default-features = false }
-
 
 sassy = { version = "=0.3.0", default-features = false }
 ensure_simd = "0.1"
@@ -69,6 +67,24 @@ codegen-units = 1
 
 [lints.rust]
 unsafe_code = "forbid"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+cast_lossless = "warn"
+dbg_macro = "warn"
+default_trait_access = "warn"
+explicit_iter_loop = "warn"
+ignored_unit_patterns = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+needless_continue = "warn"
+redundant_clone = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+stable_sort_primitive = "warn"
+todo = "warn"
+unimplemented = "warn"
 
 [package.metadata.docs.rs]
 all-features = true

@@ -1,4 +1,5 @@
-//! BAM reading and writing over noodles: raw-record readers, single- and multithreaded BGZF sinks, and record-level input guards.
+//! BAM reading and writing over noodles: raw-record readers, single- and multithreaded BGZF sinks,
+//! and record-level input guards.
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
@@ -94,6 +95,7 @@ struct RawRecordIterImpl<R: io::Read> {
 
 impl<R: io::Read> Iterator for RawRecordIterImpl<R> {
     type Item = anyhow::Result<bam::Record>;
+
     fn next(&mut self) -> Option<Self::Item> {
         let mut record = bam::Record::default();
         match self.reader.read_record(&mut record) {
@@ -403,7 +405,7 @@ mod tests {
         header
             .read_groups()
             .values()
-            .map(|g| g.other_fields().get(&tm).map(|v| v.to_string()))
+            .map(|g| g.other_fields().get(&tm).map(ToString::to_string))
             .collect()
     }
 
@@ -647,7 +649,7 @@ mod tests {
             .programs()
             .as_ref()
             .keys()
-            .map(|k| k.as_ref())
+            .map(AsRef::as_ref)
             .collect();
         assert_eq!(
             ids.len(),

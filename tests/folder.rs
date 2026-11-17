@@ -339,11 +339,10 @@ fn folder_merge_rejects_conflicting_definitions_of_the_same_read_group() {
         let header: noodles_sam::Header = format!("@HD\tVN:1.6\n@RG\tID:shared\tSM:{sample}\n")
             .parse()
             .unwrap();
-        let mut writer =
-            noodles_bam::io::Writer::new(std::fs::File::create(input.join(file)).unwrap());
+        let mut writer = noodles_bam::io::Writer::new(File::create(input.join(file)).unwrap());
         writer.write_header(&header).unwrap();
-        let mut rec = noodles_sam::alignment::RecordBuf::default();
-        *rec.flags_mut() = noodles_sam::alignment::record::Flags::UNMAPPED;
+        let mut rec = RecordBuf::default();
+        *rec.flags_mut() = Flags::UNMAPPED;
         *rec.name_mut() = Some(sample.as_bytes().into());
         *rec.sequence_mut() = b"ACGT".to_vec().into();
         *rec.quality_scores_mut() = vec![40; 4].into();

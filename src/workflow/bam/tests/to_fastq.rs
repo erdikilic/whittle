@@ -270,8 +270,8 @@ fn removal_drops_the_tag_from_a_fastq_header() {
     assert!(header.contains("ip:B:C,2,3,4,5,6,7"), "{header}");
 
     // Without the flag the same run carries both.
-    let mut keep = cfg.clone();
-    keep.remove_tags = crate::config::TagRemoval::default();
+    let mut keep = cfg;
+    keep.remove_tags = TagRemoval::default();
     let (_stats, text) = bam2fq(vec![rec], &keep);
     let header = text.lines().next().unwrap();
     assert!(header.contains("MM:Z:"), "{header}");

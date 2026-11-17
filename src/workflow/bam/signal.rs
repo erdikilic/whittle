@@ -220,9 +220,8 @@ pub(super) fn polya_updates(
     let pt_tag = Tag::new(b'p', b't');
     let drop_both = || vec![(pa_tag, None), (pt_tag, None)];
 
-    let pa = match src.data().get(&pa_tag) {
-        Some(Value::Array(Array::Int32(v))) => v,
-        _ => return drop_both(),
+    let Some(Value::Array(Array::Int32(pa))) = src.data().get(&pa_tag) else {
+        return drop_both();
     };
     // `pa` = [anchor, range0.start, range0.end, range1.start, range1.end].
     // Dorado's poly-A signal ranges are half-open `[start, end)`: the anchor and
@@ -289,11 +288,9 @@ pub(super) struct SignalWindow {
 /// bases are removed. With it on, `mv` is
 /// sliced by block range (stride-aligned, following dorado
 /// `splitter::subread`) and:
-///   - crop (`total == 1`, name kept): `ts += block_first*stride`; `ns` is the
-///     kept signal's end, which is the source `ns` when the window runs to the
-///     last base.
-///   - split (`total > 1`, renamed): `ts = 0`, `ns = span`,
-///     `sp = parent offset`, `pi = parent id`.
+///   - crop (`total == 1`, name kept): `ts += block_first*stride`; `ns` is the kept signal's end,
+///     which is the source `ns` when the window runs to the last base.
+///   - split (`total > 1`, renamed): `ts = 0`, `ns = span`, `sp = parent offset`, `pi = parent id`.
 pub(super) fn signal_tag_updates(
     src: &RecordBuf,
     seq_len: usize,

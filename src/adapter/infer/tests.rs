@@ -317,7 +317,7 @@ fn top_kmers_ranks_planted_over_background() {
         wnd.extend_from_slice(&[b'B' + (i % 4), b'C', b'G', b'T']);
         owned.push(wnd);
     }
-    let windows: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+    let windows: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let ranked = top_kmers(&windows, 16, 500);
     assert_eq!(decode_kmer(ranked[0].0, 16), planted);
     assert_eq!(ranked[0].1, 50);
@@ -465,18 +465,18 @@ fn discovered_adapters_are_named_by_order_with_catalog_annotation() {
     let mut owned: Vec<Vec<u8>> = Vec::new();
     for i in 0..300usize {
         let mut read = adapter.to_vec();
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64);
         for _ in 0..120usize {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
         }
         owned.push(read);
     }
-    let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+    let sample: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let base = AdapterConfig {
         adapters: vec![],
         error_rate: 0.2,
@@ -508,18 +508,18 @@ fn discover_finds_nothing_in_ambiguity_runs() {
     let mut owned: Vec<Vec<u8>> = Vec::new();
     for i in 0..200usize {
         let mut read = vec![b'N'; 60];
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64);
         for _ in 0..100usize {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
         }
         owned.push(read);
     }
-    let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+    let sample: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let base = AdapterConfig {
         adapters: vec![],
         error_rate: 0.2,
@@ -552,12 +552,12 @@ fn discover_recovers_planted_adapter_under_error() {
         // linear in the position modulo 4 collapses to a phase-rotated ACGT
         // tandem repeat, which is a spurious signal in 100% of reads that
         // crowds out the planted adapter.
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64);
         for _ in 0..120usize {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
         }
@@ -568,7 +568,7 @@ fn discover_recovers_planted_adapter_under_error() {
         }
         owned.push(read);
     }
-    let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+    let sample: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let base = AdapterConfig {
         adapters: vec![],
         error_rate: 0.2,
@@ -625,12 +625,12 @@ fn discover_dual_end_adapter_gets_max_support() {
         }
         // Deterministic non-periodic genomic middle, from the same
         // splitmix64 mix as the other `discover_*` fixtures.
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64);
         for _ in 0..150usize {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
         }
@@ -639,7 +639,7 @@ fn discover_dual_end_adapter_gets_max_support() {
         read.extend_from_slice(&rc);
         owned.push(read);
     }
-    let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+    let sample: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let base = AdapterConfig {
         adapters: vec![],
         error_rate: 0.2,
@@ -687,18 +687,18 @@ fn discover_finds_nothing_in_clean_reads() {
     let mut owned: Vec<Vec<u8>> = Vec::new();
     for i in 0..300usize {
         let mut read = Vec::new();
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64);
         for _ in 0..200usize {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
         }
         owned.push(read);
     }
-    let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+    let sample: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let base = AdapterConfig {
         adapters: vec![],
         error_rate: 0.2,
@@ -754,20 +754,21 @@ fn stride_sample_spans_the_whole_range_not_just_a_prefix() {
 #[test]
 #[ignore]
 fn discover_is_not_order_biased_by_recount_window_cap() {
-    let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT"; // 28bp, same as the other discover_* fixtures
+    // 28 bp, as in the other discover_* fixtures.
+    let adapter: &[u8] = b"AATGTACTTCGTTCAGTTACGTATTGCT";
     let n_clean = RECOUNT_WINDOWS + 1;
     let n_planted = RECOUNT_WINDOWS; // 4000
 
     // Deterministic non-periodic background, from the same splitmix64 mix
     // as the other `discover_*` fixtures.
     let splitmix_tail = |i: usize, len: usize| -> Vec<u8> {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64);
         let mut out = Vec::with_capacity(len);
         for _ in 0..len {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             out.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
         }
@@ -783,7 +784,7 @@ fn discover_is_not_order_biased_by_recount_window_cap() {
         read.extend(splitmix_tail(n_clean + i, 12));
         owned.push(read);
     }
-    let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+    let sample: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let base = AdapterConfig {
         adapters: vec![],
         error_rate: 0.2,
@@ -821,19 +822,19 @@ fn discover_recovers_planted_adapter_from_lowercase_reads() {
     let mut owned: Vec<Vec<u8>> = Vec::new();
     for i in 0..500usize {
         let mut read = adapter.to_vec();
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64);
         for _ in 0..120usize {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
             read.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
         }
         let lower: Vec<u8> = read.iter().map(u8::to_ascii_lowercase).collect();
         owned.push(lower);
     }
-    let sample: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
+    let sample: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     let base = AdapterConfig {
         adapters: vec![],
         error_rate: 0.2,
@@ -891,7 +892,7 @@ fn known_adapter_precedes_a_discovered_primer_layer() {
         .collect();
     let known = vec![Adapter {
         name: "known".into(),
-        seq: adapter.clone(),
+        seq: adapter,
         role: Role::Adapter,
     }];
     let found = infer_with_known(&reads, known);
@@ -1100,7 +1101,7 @@ fn conservation_is_judged_against_the_background_composition() {
 /// the most AT-rich sequenced genomes.
 fn at_rich_bases(seed: u64, len: usize) -> Vec<u8> {
     let first = random_bases(seed ^ 0x5555, len);
-    let second = random_bases(seed ^ 0xAAAA, len);
+    let second = random_bases(seed ^ 0xaaaa, len);
     random_bases(seed, len)
         .into_iter()
         .zip(first.into_iter().zip(second))
@@ -1195,7 +1196,7 @@ fn windows_covered_requires_the_whole_pattern() {
     let mut own = pattern.clone();
     own.extend_from_slice(b"GGATCCATTAC");
     let mut searcher = crate::adapter::search::new_searcher_fwd();
-    let k = crate::adapter::edit_budget(0.2, pattern.len());
+    let k = edit_budget(0.2, pattern.len());
     let covered = windows_covered(&mut searcher, &pattern, &[&other, &own], k);
     assert_eq!(covered, [false, true]);
 }
@@ -1330,7 +1331,7 @@ fn division_needs_continuations_that_do_not_rejoin() {
     let edge = division_point(&cons, &counts, 0, cons.len(), End::Five);
     assert_eq!(edge.first().map(|(edge, _)| *edge), Some(shared.len()));
 
-    let mut cons = shared.clone();
+    let mut cons = shared;
     cons.push(b'A');
     cons.extend_from_slice(&tail);
     let counts = kmer_counts(&bubbled, KMER_K);
@@ -1654,7 +1655,7 @@ fn discovered_marker_primers_split_only_beside_a_partner() {
         crate::adapter::adapter_segments(&site, &cfg),
         vec![(0, site.len())]
     );
-    let mut junction = left.clone();
+    let mut junction = left;
     junction.extend_from_slice(b"AAGTCGTAACAAGGTAACCGTA");
     junction.extend_from_slice(b"AGAGTTTGATCCTGGCTCAG");
     junction.extend_from_slice(&right);
@@ -1845,7 +1846,7 @@ fn known_amplicon_primers_leave_nothing_to_discover() {
 fn template_begins_behind_the_primer_not_at_its_degenerate_base() {
     let (reads, forward, _) = community_amplicon_reads();
     let windows: Vec<&[u8]> = reads.iter().map(|r| &r[..200.min(r.len())]).collect();
-    let mut primer = forward.clone();
+    let mut primer = forward;
     primer[8] = b'C';
     assert_eq!(
         template_start(&primer, &windows, End::Five, 0.2).0,
@@ -2132,12 +2133,12 @@ fn a_flank_behind_a_one_sided_adapter_is_kept() {
     let known = vec![
         Adapter {
             name: "adapter".into(),
-            seq: adapter.clone(),
+            seq: adapter,
             role: Role::Adapter,
         },
         Adapter {
             name: "tag".into(),
-            seq: tag.clone(),
+            seq: tag,
             role: Role::Primer,
         },
     ];

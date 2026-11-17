@@ -1,4 +1,5 @@
-//! uBAM workflows: record reconstruction (sequence, quality, MM/ML/MN, per-base and signal tags) and the sequential, parallel and raw full-window drivers for BAM and FASTQ output.
+//! uBAM workflows: record reconstruction (sequence, quality, MM/ML/MN, per-base and signal tags)
+//! and the sequential, parallel and raw full-window drivers for BAM and FASTQ output.
 
 use std::borrow::Cow;
 use std::io;
@@ -168,8 +169,8 @@ where
     P: Send,
     S: Send,
     Render: Fn(bam::Record, &RecordBuf, &Config, &mut Parts<T>) -> anyhow::Result<()> + Sync,
-    Pack: Fn(Vec<T>) -> std::io::Result<P> + Sync,
-    WriteOne: Fn(&mut S, KeyId, &P) -> std::io::Result<()> + Send,
+    Pack: Fn(Vec<T>) -> io::Result<P> + Sync,
+    WriteOne: Fn(&mut S, KeyId, &P) -> io::Result<()> + Send,
 {
     run_parallel(
         records,
@@ -195,7 +196,7 @@ fn pack_bam_blocks(
     header: &sam::Header,
     level: u8,
     records: Vec<BamOutputRecord>,
-) -> std::io::Result<Vec<u8>> {
+) -> io::Result<Vec<u8>> {
     let mut w = bam::io::Writer::from(Vec::new());
     for rec in &records {
         match rec {
@@ -204,7 +205,7 @@ fn pack_bam_blocks(
                 io::Error::new(e.kind(), format!("read {name}: {e}"))
             })?,
             BamOutputRecord::Built(bytes) => {
-                crate::io::bam::write_record_bytes(w.get_mut(), header, bytes)?
+                crate::io::bam::write_record_bytes(w.get_mut(), header, bytes)?;
             },
         }
     }

@@ -1,4 +1,5 @@
-//! Workflow drivers shared by the FASTQ and BAM paths: batching, the parallel driver, run counters and per-read segment filtering.
+//! Workflow drivers shared by the FASTQ and BAM paths: batching, the parallel driver, run counters
+//! and per-read segment filtering.
 
 pub(crate) mod bam;
 mod fastq;
@@ -14,9 +15,8 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use rayon::prelude::*;
 
-pub(crate) use bam::run_bam_to_fastq;
-pub(crate) use bam::run_raw_bam;
-pub(crate) use keyed::{KeyId, KeyedSinks, Parts};
+pub(crate) use self::bam::{run_bam_to_fastq, run_raw_bam};
+pub(crate) use self::keyed::{KeyId, KeyedSinks, Parts};
 
 /// Wraps a record stream so that only reads `keep` accepts pass on. A rejected
 /// read is counted here as input and as tag-filtered, since no workflow sees
@@ -365,7 +365,7 @@ where
                 }
                 true
             };
-            for (idx, batch) in rx.iter() {
+            for (idx, batch) in &rx {
                 if errored {
                     continue;
                 }
@@ -1260,7 +1260,7 @@ mod tests {
                 Ok(())
             },
             Ok,
-            |_, _, _: &Vec<usize>| Err(std::io::Error::other("sink failed")),
+            |(), _, _: &Vec<usize>| Err(std::io::Error::other("sink failed")),
             &Counters::default(),
         )
         .unwrap_err();
@@ -1410,6 +1410,7 @@ mod tests {
         }
         impl Iterator for PoisonAfterError {
             type Item = anyhow::Result<usize>;
+
             fn next(&mut self) -> Option<Self::Item> {
                 assert!(!self.yielded_error, "Source polled after it returned Err");
                 if self.n == 50 {

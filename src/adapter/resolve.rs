@@ -91,7 +91,8 @@ pub(crate) fn print_discovered_fasta(discovered: &[infer::InferredAdapter]) -> i
         };
         writeln!(
             out,
-            ">{} layer={} role={} support={:.2} boundary=full assembled_length={} uncertain_bases=0{name_suffix}",
+            ">{} layer={} role={} support={:.2} boundary=full assembled_length={} \
+             uncertain_bases=0{name_suffix}",
             d.adapter.name,
             d.layer + 1,
             d.adapter.role.label(),
@@ -110,7 +111,7 @@ where
     F: for<'a> Fn(&'a R) -> Cow<'a, [u8]>,
 {
     let storage: Vec<Cow<'_, [u8]>> = sample.iter().map(seq_of).collect();
-    let seqs: Vec<&[u8]> = storage.iter().map(|s| s.as_ref()).collect();
+    let seqs: Vec<&[u8]> = storage.iter().map(AsRef::as_ref).collect();
     f(&seqs)
 }
 
@@ -122,7 +123,7 @@ const SAMPLE_BASES: usize = 64 * 1024 * 1024;
 /// Estimates a raw BAM record's retained payload and decoded sampling sequence.
 pub(crate) fn bam_sample_weight(rec: &noodles_bam::Record) -> (usize, usize) {
     let bases = rec.sequence().len();
-    let bytes = std::mem::size_of::<noodles_bam::Record>()
+    let bytes = size_of::<noodles_bam::Record>()
         + rec.name().map_or(0, |n| n.len() + 1)
         + rec.cigar().len() * 4
         + bases.div_ceil(2)
@@ -432,7 +433,7 @@ fn judge_amplicon<R, F>(
 {
     let step = sample.len().div_ceil(detect::AMPLICON_SAMPLE_READS).max(1);
     let storage: Vec<Cow<'_, [u8]>> = sample.iter().step_by(step).map(seq_of).collect();
-    let seqs: Vec<&[u8]> = storage.iter().map(|s| s.as_ref()).collect();
+    let seqs: Vec<&[u8]> = storage.iter().map(AsRef::as_ref).collect();
     let Some(share) = detect::primer_share(&seqs, ac, primers, threads) else {
         return;
     };

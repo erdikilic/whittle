@@ -116,7 +116,7 @@ impl Columns {
                 .as_ref()
                 .is_none_or(|old| (hit.cost, hit.text_start) < (old.cost, old.text_start))
             {
-                *entry = Some(hit.clone());
+                *entry = Some(hit);
             }
         }
         let inner = FLANK + pattern.len();
@@ -139,8 +139,7 @@ impl Columns {
             for (i, pos) in path.iter().enumerate() {
                 let next = path
                     .get(i + 1)
-                    .map(|p| (p.0, p.1))
-                    .unwrap_or((pattern.len() as i32, hit.text_end as i32));
+                    .map_or((pattern.len() as i32, hit.text_end as i32), |p| (p.0, p.1));
                 if next.0 == pos.0 + 1 && next.1 == pos.1 + 1 {
                     bases[FLANK + pos.0 as usize] = base_code(text.get(pos.1 as usize));
                 }

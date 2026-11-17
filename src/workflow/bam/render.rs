@@ -12,7 +12,7 @@ use super::*;
 /// BAM's `CG:B:I` overflow representation of a CIGAR longer than 65535
 /// operations is not expanded: the workflows accept unaligned records only,
 /// whose CIGAR is empty.
-pub(crate) fn decode_raw_record(src: &bam::Record) -> std::io::Result<RecordBuf> {
+pub(crate) fn decode_raw_record(src: &bam::Record) -> io::Result<RecordBuf> {
     let mut dst = RecordBuf::default();
     *dst.name_mut() = src.name().map(Into::into);
     *dst.flags_mut() = src.flags();
@@ -318,7 +318,7 @@ pub(super) fn render_windows(
         mod_block,
         barcode,
     } = prepare_read(rec, cfg, counters)?;
-    let _read = crate::workflow::read_span(rec.name().map(|n| n.as_ref()).unwrap_or(b"<unnamed>"));
+    let _read = crate::workflow::read_span(rec.name().map_or(&b"<unnamed>"[..], AsRef::as_ref));
     let _read = _read.enter();
     let (produced, pieces) = crate::workflow::trim_read(seq, qual, cfg, barcode);
     let indexed =

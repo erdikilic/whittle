@@ -160,7 +160,8 @@ pub(crate) fn adapter_banner_line(
     };
     let (n_adapters, roles) = (a.adapters.len(), role_breakdown(&a.adapters));
     Some(format!(
-        "Adapters: {n_adapters} sequences{roles} · {mode} · error {:.2} · end-search {} bp · {sample}{infer_suffix}",
+        "Adapters: {n_adapters} sequences{roles} · {mode} · error {:.2} · end-search {} bp \
+         · {sample}{infer_suffix}",
         a.error_rate, a.end_size
     ))
 }

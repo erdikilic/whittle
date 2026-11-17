@@ -117,8 +117,8 @@ pub(super) fn same_adapter(a: &[u8], b: &[u8], error_rate: f64) -> bool {
 /// `NAME_IDENTITY_MIN`. Ties go to the reference listed first in
 /// `catalog::MARKER_PRIMERS`, as a primer mix comes before its variants,
 /// then to the match over more bases, so an adapter is named by its own
-/// entry rather than by a shorter one it contains, and then by name. The result annotates an inferred adapter with the
-/// catalog entry it corresponds to.
+/// entry rather than by a shorter one it contains, and then by name. The result annotates an
+/// inferred adapter with the catalog entry it corresponds to.
 pub(super) fn name_against(seq: &[u8], refs: &[Adapter], error_rate: f64) -> Vec<(String, f32)> {
     let marker_rank = |r: &Adapter| {
         let upper = r.seq.to_ascii_uppercase();

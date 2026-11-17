@@ -71,7 +71,7 @@ fn fastq_headers(text: &str) -> Vec<&str> {
         .step_by(4)
         .map(|h| h.trim_start_matches('@'))
         .collect();
-    v.sort();
+    v.sort_unstable();
     v
 }
 
@@ -189,7 +189,8 @@ fn rejected_fastq_from_bam_and_from_fastq_input() {
     let plain = dir.path().join("plain.fastq");
     std::fs::write(
         &plain,
-        "@a\nACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIII\n@b\nACGTAC\n+\nIIIIII\n@c\nACGTACGTACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIIIIIIIIIII\n",
+        "@a\nACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIII\n@b\nACGTAC\n+\nIIIIII\n\
+         @c\nACGTACGTACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIIIIIIIIIII\n",
     )
     .unwrap();
     let out = dir.path().join("plain_out.fastq");
@@ -402,7 +403,7 @@ fn mod_tags(path: &Path) -> Vec<ModTags> {
         };
         let mn = data
             .get(&Tag::BASE_MODIFICATION_SEQUENCE_LENGTH)
-            .and_then(|v| v.as_int());
+            .and_then(Value::as_int);
         out.push((
             String::from_utf8_lossy(buf.name().unwrap().as_ref()).into_owned(),
             mm,

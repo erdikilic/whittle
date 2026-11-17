@@ -99,18 +99,15 @@ pub(super) fn rejected_fastq(rec: &ReadRecord, rejection: Rejection) -> Vec<u8> 
             end,
             reason,
         } => {
-            crate::io::fastq::write_head(&mut out, &rec.name, total, idx)
-                .expect("Writing to a Vec does not fail");
+            write_head(&mut out, &rec.name, total, idx).expect("Writing to a Vec does not fail");
             reject::push_fastq_tag(&mut out, Reason::Dropped(reason));
-            crate::io::fastq::write_body(&mut out, &rec.seq[start..end], &rec.qual[start..end])
+            write_body(&mut out, &rec.seq[start..end], &rec.qual[start..end])
                 .expect("Writing to a Vec does not fail");
         },
         Rejection::Whole => {
-            crate::io::fastq::write_head(&mut out, &rec.name, 1, 0)
-                .expect("Writing to a Vec does not fail");
+            write_head(&mut out, &rec.name, 1, 0).expect("Writing to a Vec does not fail");
             reject::push_fastq_tag(&mut out, Reason::TrimmedToNothing);
-            crate::io::fastq::write_body(&mut out, &rec.seq, &rec.qual)
-                .expect("Writing to a Vec does not fail");
+            write_body(&mut out, &rec.seq, &rec.qual).expect("Writing to a Vec does not fail");
         },
     }
     out
@@ -121,15 +118,14 @@ pub(super) fn rejected_fastq(rec: &ReadRecord, rejection: Rejection) -> Vec<u8> 
 pub(crate) fn tag_filtered_fastq(rec: &ReadRecord) -> Vec<u8> {
     let mut out = Vec::new();
     let mut fields = rec.name.split(|&b| b == b'\t');
-    crate::io::fastq::write_head(&mut out, fields.next().unwrap_or_default(), 1, 0)
+    write_head(&mut out, fields.next().unwrap_or_default(), 1, 0)
         .expect("Writing to a Vec does not fail");
     for field in fields.filter(|field| !field.starts_with(b"wt:") && !field.starts_with(b"wr:")) {
         out.push(b'\t');
         out.extend_from_slice(field);
     }
     reject::push_fastq_tag(&mut out, Reason::TagFilter);
-    crate::io::fastq::write_body(&mut out, &rec.seq, &rec.qual)
-        .expect("Writing to a Vec does not fail");
+    write_body(&mut out, &rec.seq, &rec.qual).expect("Writing to a Vec does not fail");
     out
 }
 
@@ -209,18 +205,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!((stats.input_reads, stats.output_reads), (1, 1));
-        assert_eq!(
-            counters
-                .input_reads
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
-        assert_eq!(
-            counters
-                .output_reads
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert_eq!(counters.input_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.output_reads.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -303,12 +289,7 @@ mod tests {
         assert_eq!(stats.segments_dropped_short, 1);
         assert_eq!(stats.reads_all_filtered, 1);
         assert_eq!(stats.reads_trimmed_to_nothing, 0);
-        assert_eq!(
-            counters
-                .segments_dropped_short
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert_eq!(counters.segments_dropped_short.load(Ordering::Relaxed), 1);
     }
 
     /// A crop that removes the complete read produces no segments.
@@ -357,12 +338,7 @@ mod tests {
         .unwrap();
         assert_eq!(out, b"@r1\nAAAAAA\n+\nIIIIII\n");
         assert_eq!(stats.output_reads, 1);
-        assert_eq!(
-            counters
-                .reads_with_output
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert_eq!(counters.reads_with_output.load(Ordering::Relaxed), 1);
         assert_eq!(stats.reads_trimmed_to_nothing, 0);
         assert_eq!(stats.reads_all_filtered, 0);
         assert_eq!(stats.segments_dropped_low_qual, 0);
@@ -421,12 +397,7 @@ mod tests {
             stats.segments_dropped_short, 1,
             "The short flank is dropped"
         );
-        assert_eq!(
-            counters
-                .reads_with_output
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert_eq!(counters.reads_with_output.load(Ordering::Relaxed), 1);
         assert_eq!(stats.reads_trimmed_to_nothing, 0);
         assert_eq!(stats.reads_all_filtered, 0);
         let s = String::from_utf8(out).unwrap();
@@ -507,7 +478,7 @@ mod tests {
             let mut v: Vec<Vec<u8>> = bytes
                 .split(|&b| b == b'@')
                 .filter(|s| !s.is_empty())
-                .map(|s| s.to_vec())
+                .map(<[u8]>::to_vec)
                 .collect();
             v.sort();
             v
@@ -531,6 +502,7 @@ mod tests {
                 self.written += buf.len();
                 Ok(buf.len())
             }
+
             fn flush(&mut self) -> io::Result<()> {
                 Ok(())
             }

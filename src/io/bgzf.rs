@@ -154,8 +154,9 @@ impl<W: Write> Write for Writer<W> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::Read;
+
+    use super::*;
 
     fn inflate(bgzf: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -228,7 +229,7 @@ mod tests {
         w.write_all(b"@r1\nACGT\n+\nIIII\n").unwrap();
         let out = w.into_inner().unwrap();
         assert!(!out.ends_with(&EOF_BLOCK));
-        let mut with_eof = out.clone();
+        let mut with_eof = out;
         with_eof.extend_from_slice(&EOF_BLOCK);
         assert_eq!(inflate(&with_eof), b"@r1\nACGT\n+\nIIII\n");
     }

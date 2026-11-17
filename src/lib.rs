@@ -19,8 +19,6 @@ pub mod tagfilter;
 pub mod trim;
 pub mod workflow;
 
-pub use banner::command_line;
-
 use std::borrow::Cow;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -29,8 +27,9 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 
-pub use config::Config;
-use io::Format;
+pub use self::banner::command_line;
+pub use self::config::Config;
+use self::io::Format;
 
 /// Runs one trimming job. A directory input selects folder-merge mode (every
 /// read file in it is merged into one output); any other input is a single file
@@ -114,7 +113,8 @@ fn run_single(cfg: &mut Config, obs: &mut obs::ProgressHandle) -> anyhow::Result
                 None => forced,
                 Some(d) if io::forced_format_accepts(forced, d) => forced,
                 Some(d) => anyhow::bail!(
-                    "--input-format {} but the input is {}; drop the flag or pass --input-format {}",
+                    "--input-format {} but the input is {}; drop the flag or pass \
+                     --input-format {}",
                     forced.label(),
                     d.label(),
                     d.flag_value()
@@ -569,7 +569,7 @@ impl Session {
                     |r| Cow::Borrowed(r.seq.as_slice()),
                     |r| {
                         (
-                            std::mem::size_of::<record::ReadRecord>()
+                            size_of::<record::ReadRecord>()
                                 + r.name.capacity()
                                 + r.seq.capacity()
                                 + r.qual.capacity(),
@@ -840,7 +840,7 @@ fn settle<R, I, F>(
 where
     I: Iterator<Item = anyhow::Result<R>> + Send + 'static,
     R: Send + 'static,
-    F: for<'a> Fn(&'a R) -> std::borrow::Cow<'a, [u8]>,
+    F: for<'a> Fn(&'a R) -> Cow<'a, [u8]>,
 {
     let Some(resolved) = adapter::resolve::resolve(records, cfg, seq_of, weight)? else {
         return Ok(None);
@@ -1139,8 +1139,8 @@ fn note_tags_ignored(cfg: &Config, in_fmt: Format, out_fmt: Format) {
 mod tests {
     use super::*;
 
-    fn a_read() -> crate::record::ReadRecord {
-        crate::record::ReadRecord {
+    fn a_read() -> record::ReadRecord {
+        record::ReadRecord {
             name: b"r1".to_vec(),
             seq: b"ACGTACGTACGT".to_vec(),
             qual: vec![40; 12],

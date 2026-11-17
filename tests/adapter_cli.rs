@@ -583,13 +583,13 @@ const TAIL_LEN: usize = 120;
 /// per `i` (each read gets its own splitmix64 state), and not periodic (so it
 /// carries no spurious cross-read k-mer signal for the discoverer to flag).
 fn splitmix_tail(i: usize, len: usize) -> Vec<u8> {
-    let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64);
     let mut out = Vec::with_capacity(len);
     for _ in 0..len {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^= z >> 31;
         out.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
     }
@@ -1308,7 +1308,8 @@ fn produced_index_naming_end_to_end() {
         .clone();
 
     let expected = format!(
-        "@one_seg\n{}\n+\n{}\n@two_seg_segment_1\n{}\n+\n{}\n@two_seg_segment_2\n{}\n+\n{}\n@gap_seg_segment_2\n{}\n+\n{}\n",
+        "@one_seg\n{}\n+\n{}\n@two_seg_segment_1\n{}\n+\n{}\n\
+         @two_seg_segment_2\n{}\n+\n{}\n@gap_seg_segment_2\n{}\n+\n{}\n",
         "A".repeat(20),
         "I".repeat(20),
         "A".repeat(14),

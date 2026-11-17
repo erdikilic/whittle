@@ -66,14 +66,23 @@ impl FastqTags {
     }
 }
 
-/// The per-base `B` arrays of PacBio kinetics and per-base alignment counts
-/// that the BAM writer slices with the sequence.
+/// Per-base `B` arrays, one value per SEQ base, sliced in lockstep with the
+/// sequence when a read is trimmed: the PacBio kinetics `ip`/`pw` (single
+/// strand) and `fi`/`fp`/`ri`/`rp` (CCS forward/reverse codec-V1), and the
+/// PacBio `sm`/`sx` per-base aligned match and mismatch counts. Dorado's scalar
+/// `sm:f` (scaling midpoint) shares the `sm` name; the array match leaves it
+/// untouched. Any other `B` array whose length equals the read length is also
+/// treated as per-base (structural rule), so custom tags need no dedicated
+/// handling.
 pub(crate) const KNOWN_PERBASE_TAGS: [[u8; 2]; 8] = [
     *b"ip", *b"pw", *b"fi", *b"fp", *b"ri", *b"rp", *b"sm", *b"sx",
 ];
 
-/// The run-length encoded per-base coverage array that the BAM writer slices
-/// with the sequence.
+/// PacBio `sa:B:I`: run-length encoded per-base coverage by subread alignments,
+/// stored as `<length>,<coverage>` pairs. Decoded to per-base coverage, sliced
+/// to the window and re-encoded (`slice_rle_coverage`). A tag whose run lengths
+/// do not sum to the read length is left unchanged and surfaced via
+/// `has_malformed_perbase_tag`.
 pub(crate) const RLE_COVERAGE_TAG: [u8; 2] = *b"sa";
 
 /// The per-base arrays the `kinetics` removal group names: the PacBio kinetics
@@ -320,8 +329,8 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             io: IoConfig::default(),
-            filter: crate::filter::FilterConfig::default(),
-            trim: crate::trim::TrimPlan::default(),
+            filter: FilterConfig::default(),
+            trim: TrimPlan::default(),
             adapters: None,
             adapter_infer: AdapterInfer::Off,
             threads: 1,

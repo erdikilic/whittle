@@ -326,9 +326,9 @@ fn bam2bam(recs: Vec<RecordBuf>, cfg: &Config) -> (Stats, Vec<RecordBuf>) {
 }
 
 /// Builds the removal set the flags produce.
-fn removal(tags: &[&str]) -> crate::config::TagRemoval {
+fn removal(tags: &[&str]) -> TagRemoval {
     let tags: Vec<String> = tags.iter().map(|t| (*t).to_string()).collect();
-    crate::config::TagRemoval::parse(&tags).unwrap()
+    TagRemoval::parse(&tags).unwrap()
 }
 
 /// An 8-base record carrying a rewritten block (`MM`/`ML`/`MN`), a per-base

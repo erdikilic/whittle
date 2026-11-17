@@ -93,8 +93,8 @@ fn trimmed_output_mods_match_oracle() {
 
     let mut a = expected;
     let mut b = hts_mods(&output);
-    a.sort();
-    b.sort();
+    a.sort_unstable();
+    b.sort_unstable();
     assert_eq!(
         a, b,
         "Trimmed mod set equals the original filtered to [3, len) and offset by 3"
@@ -155,8 +155,8 @@ fn trimmed_output_multimod_mods_match_oracle() {
 
     let mut a = expected;
     let mut b = hts_mods(&output);
-    a.sort();
-    b.sort();
+    a.sort_unstable();
+    b.sort_unstable();
     assert_eq!(
         a, b,
         "Multi-mod trimmed set equals the original filtered to [2,8) and offset by 2"
@@ -195,8 +195,8 @@ fn trimmed_output_multimod_mods_match_oracle_t8() {
 
     let mut a = expected;
     let mut b = hts_mods(&output);
-    a.sort();
-    b.sort();
+    a.sort_unstable();
+    b.sort_unstable();
     assert_eq!(a, b, "Multi-mod calls survive parallel (t8) reconstruction");
 }
 
@@ -305,7 +305,7 @@ fn hts_mods_by_read(path: &Path) -> HashMap<String, (usize, Vec<ModCall>)> {
 /// Sorts a mod-call vector for order-independent comparison.
 fn sorted(mods: &[ModCall]) -> Vec<ModCall> {
     let mut v = mods.to_vec();
-    v.sort();
+    v.sort_unstable();
     v
 }
 
@@ -416,13 +416,13 @@ const INFER_MM_ML_MOD_MIN_ABS: usize = 70;
 /// carries no cross-read k-mer signal that discovery could report as a second
 /// adapter.
 fn splitmix_tail_infer(i: usize, len: usize) -> Vec<u8> {
-    let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(i as u64);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(i as u64);
     let mut out = Vec::with_capacity(len);
     for _ in 0..len {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^= z >> 31;
         out.push(b"ACGT"[((z >> 62) & 0b11) as usize]);
     }
@@ -466,7 +466,7 @@ fn mm_segment(canonical: u8, code: char, occ_indices: &[usize], ml_seed: u8) -> 
         code,
         deltas
             .iter()
-            .map(|d| d.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(",")
     );
@@ -765,8 +765,8 @@ fn filtered_sibling_segment_does_not_corrupt_kept_segment_mods() {
     let solo_mods = hts_mods(&solo_out);
     let mut a = split_mods.clone();
     let mut b = solo_mods.clone();
-    a.sort();
-    b.sort();
+    a.sort_unstable();
+    b.sort_unstable();
     assert_eq!(
         a, b,
         "The kept segment's MM/ML equals the same 14-bp flank run without the \
@@ -828,8 +828,8 @@ fn strand_and_ambiguity_groups_survive_untrimmed_round_trip() {
 
     let mut before = hts_mods(&input);
     let mut after = hts_mods(&output);
-    before.sort();
-    after.sort();
+    before.sort_unstable();
+    after.sort_unstable();
     assert_eq!(
         before, after,
         "A no-op run neither moves, drops, nor relabels any modification call"
@@ -865,8 +865,8 @@ fn strand_and_ambiguity_groups_match_oracle_when_trimmed() {
         .map(|&(pos, cb, mb, st, q)| (pos - head, cb, mb, st, q))
         .collect();
     let mut got = hts_mods(&output);
-    expected.sort();
-    got.sort();
+    expected.sort_unstable();
+    got.sort_unstable();
     assert_eq!(
         expected, got,
         "Trimmed calls equal the original restricted to [{head},{tail_start})"
@@ -977,8 +977,8 @@ fn legacy_mod_tags_are_written_in_the_current_spelling_after_trimming() {
             .map(|&(pos, cb, mb, st, q)| (pos - 3, cb, mb, st, q))
             .collect();
         let mut got = hts_mods(&output);
-        expected.sort();
-        got.sort();
+        expected.sort_unstable();
+        got.sort_unstable();
         assert!(!expected.is_empty(), "The window keeps a legacy call");
         assert_eq!(
             expected, got,
@@ -1004,8 +1004,8 @@ fn legacy_mod_tags_are_written_in_the_current_spelling_without_trimming() {
 
         let mut expected = hts_mods(&input);
         let mut got = hts_mods(&output);
-        expected.sort();
-        got.sort();
+        expected.sort_unstable();
+        got.sort_unstable();
         assert_eq!(expected.len(), 2, "htslib reads both legacy calls");
         assert_eq!(expected, got, "Calls are unchanged with {threads} threads");
         assert_current_mod_tags(&output, 20);
@@ -1026,7 +1026,7 @@ fn legacy_mod_tags_beside_current_tags_are_dropped() {
     whittle::run(cfg, &mut h).unwrap();
 
     let mut got = hts_mods(&output);
-    got.sort();
+    got.sort_unstable();
     assert_eq!(
         got,
         vec![(2, 'C', 'm', 0, 100), (12, 'C', 'm', 0, 101)],
@@ -1165,7 +1165,7 @@ fn plain_unmapped_record_with_modern_tags_still_runs() {
         .map(|&(pos, cb, mb, st, q)| (pos - head, cb, mb, st, q))
         .collect();
     let mut got = hts_mods(&output);
-    expected.sort();
-    got.sort();
+    expected.sort_unstable();
+    got.sort_unstable();
     assert_eq!(expected, got, "Surviving calls match htslib");
 }

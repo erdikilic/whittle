@@ -95,7 +95,7 @@ pub(super) const CONSTRUCT_BARCODE_LEN: usize = 16;
 pub(super) fn bounds_barcode(adapter: &Adapter) -> bool {
     let seq = adapter.seq.to_ascii_uppercase();
     is_construct(adapter)
-        || super::catalog::INSERT_SIDE_FLANKS
+        || catalog::INSERT_SIDE_FLANKS
             .iter()
             .any(|flank| seq == *flank || seq == reverse_complement(flank))
 }
@@ -131,7 +131,7 @@ pub(crate) fn marker_primer_opens(seq: &[u8], error_rate: f64) -> Option<bool> {
 pub(crate) fn marker_primer_of(seq: &[u8], error_rate: f64) -> Option<(&'static [u8], bool)> {
     let seq = seq.to_ascii_uppercase();
     let mut searcher = new_ambiguous_searcher();
-    super::catalog::MARKER_PRIMERS
+    catalog::MARKER_PRIMERS
         .iter()
         .filter_map(|&primer| {
             let best = if seq.len() >= primer.len() {
@@ -200,7 +200,7 @@ pub(crate) fn with_marker_codes(seq: &[u8], error_rate: f64) -> Vec<u8> {
     } else {
         (&primer, &out)
     };
-    let Some(m) = search::new_searcher_fwd()
+    let Some(m) = new_searcher_fwd()
         .search(pattern, text, edit_budget(error_rate, pattern.len()))
         .into_iter()
         .min_by_key(|m| m.cost)
@@ -275,7 +275,7 @@ pub(crate) fn anchored_chance_per_read(primers: &[&[u8]], error_rate: f64) -> f6
 /// strand).
 pub(super) fn is_umi(adapter: &Adapter) -> bool {
     let seq = adapter.seq.to_ascii_uppercase();
-    super::catalog::UMIS
+    catalog::UMIS
         .iter()
         .any(|umi| seq == *umi || seq == reverse_complement(umi))
 }
@@ -546,7 +546,7 @@ impl CandidateIndex {
                 let joins_family = adapter.role == Role::Primer
                     || split.get(adapter_idx).copied().flatten().is_some();
                 hit.filter(|_| joins_family && !is_umi(adapter))
-                    .map(|(primer, _)| super::catalog::marker_site(primer))
+                    .map(|(primer, _)| catalog::marker_site(primer))
             })
             .collect();
         // The interior chance bound covers the splitting entries, per
@@ -829,10 +829,10 @@ impl CandidateIndex {
         let n = we - ws;
         let reach = (end_size + self.end_reach).min(n);
         table.scan(&window[ws..ws + reach], |adapter_idx, _| {
-            head[adapter_idx] = true
+            head[adapter_idx] = true;
         });
         table.scan(&window[we - reach..we], |adapter_idx, _| {
-            tail[adapter_idx] = true
+            tail[adapter_idx] = true;
         });
     }
 

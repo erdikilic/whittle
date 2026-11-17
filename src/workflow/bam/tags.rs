@@ -2,23 +2,7 @@
 //! run-length coverage slicing, and the tag updates of one output window.
 
 use super::*;
-
-/// Per-base `B` arrays, one value per SEQ base, sliced in lockstep with the
-/// sequence when a read is trimmed: the PacBio kinetics `ip`/`pw` (single
-/// strand) and `fi`/`fp`/`ri`/`rp` (CCS forward/reverse codec-V1), and the
-/// PacBio `sm`/`sx` per-base aligned match and mismatch counts. Dorado's scalar
-/// `sm:f` (scaling midpoint) shares the `sm` name; the array match leaves it
-/// untouched. Any other `B` array whose length equals the read length is also
-/// treated as per-base (structural rule), so custom tags need no dedicated
-/// handling.
-pub(crate) use crate::config::KNOWN_PERBASE_TAGS;
-
-/// PacBio `sa:B:I`: run-length encoded per-base coverage by subread alignments,
-/// stored as `<length>,<coverage>` pairs. Decoded to per-base coverage, sliced
-/// to the window and re-encoded (`slice_rle_coverage`). A tag whose run lengths
-/// do not sum to the read length is left unchanged and surfaced via
-/// `has_malformed_perbase_tag`.
-pub(crate) use crate::config::RLE_COVERAGE_TAG;
+pub(crate) use crate::config::{KNOWN_PERBASE_TAGS, RLE_COVERAGE_TAG};
 
 /// PacBio undo blobs: `ds` (segmented-read reconstitution data for `skera
 /// undo`) and `ls` (clipped data for `lima-undo`). Both describe the untrimmed

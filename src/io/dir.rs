@@ -234,8 +234,10 @@ pub fn bam_reader(
             Ok((hdr, recs)) => {
                 if check_read_groups && hdr.read_groups() != &first_read_groups {
                     return Box::new(std::iter::once(Err(anyhow::anyhow!(
-                        "incompatible @RG definitions in {} and {}; BAM folder output requires identical read groups",
-                        first_path.display(), p.display()
+                        "incompatible @RG definitions in {} and {}; BAM folder output requires \
+                         identical read groups",
+                        first_path.display(),
+                        p.display()
                     ))));
                 }
                 recs
@@ -251,7 +253,7 @@ pub fn bam_reader(
 mod tests {
     use super::*;
 
-    fn touch(dir: &std::path::Path, name: &str) {
+    fn touch(dir: &Path, name: &str) {
         std::fs::write(dir.join(name), b"x").unwrap();
     }
 

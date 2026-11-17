@@ -132,7 +132,7 @@ pub(super) fn render_fastq_window(
     let seq = rec.sequence().as_ref();
     let qual = rec.quality_scores().as_ref();
     let coords = query_span(rec).map(|(qs0, _)| window_coords(qs0, start, end));
-    let name = rec.name().map(|n| n.as_ref()).unwrap_or_default();
+    let name = rec.name().map(AsRef::as_ref).unwrap_or_default();
     out.push(b'@');
     if window.total > 1 || start != 0 || end != seq.len() {
         out.extend_from_slice(&segment_name(platform, name, window, coords));

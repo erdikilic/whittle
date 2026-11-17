@@ -447,9 +447,7 @@ pub fn parse() -> anyhow::Result<Config> {
         None => None,
     };
 
-    let ncpu = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let ncpu = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     // `-t` is parsed as u64 so clap enforces the lower bound; a value beyond
     // usize saturates and is clamped to the CPU count like any other excess.
     let threads_requested = c.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX));
@@ -699,8 +697,8 @@ fn resolve_adapters(
             require_adapter_source(c)?;
             if c.adapter_ends_only {
                 advisories.push(Advisory::warn(
-                    "--adapter-ends-only has no effect without --adapter-fasta, --adapter-preset or \
-                     --adapter-discover",
+                    "--adapter-ends-only has no effect without --adapter-fasta, --adapter-preset \
+                     or --adapter-discover",
                 ));
             }
         } else if c.adapter_sample.is_some() {
@@ -775,9 +773,9 @@ fn resolve_split(
         Some(out) => Template::parse(out)?,
         None => None,
     };
-    let sources: Vec<std::path::PathBuf> = specs
+    let sources: Vec<PathBuf> = specs
         .iter()
-        .map(std::path::PathBuf::from)
+        .map(PathBuf::from)
         .filter(|path| crate::split::sheet::is_sheet_file(path))
         .collect();
     let sheet = Sheet::load_all(&specs)?;
@@ -949,7 +947,7 @@ fn high_degeneracy(seq: &[u8]) -> Option<f64> {
 /// `fasta_role`.
 fn read_adapter_fasta(
     path: &std::path::Path,
-    advisories: &mut Vec<crate::config::Advisory>,
+    advisories: &mut Vec<Advisory>,
 ) -> anyhow::Result<Vec<crate::adapter::Adapter>> {
     use seq_io::fasta::{Reader, Record};
     let mut reader = Reader::from_path(path)
@@ -989,14 +987,14 @@ fn read_adapter_fasta(
                 .filter(|&&b| crate::adapter::search::iupac_degeneracy(b).is_none())
                 .map(|&b| b as char)
                 .collect();
-            advisories.push(crate::config::Advisory::warn(format!(
+            advisories.push(Advisory::warn(format!(
                 "Adapter entry skipped, contains non-nucleotide characters: \
                  name={name:?}, chars={bad}"
             )));
             continue;
         }
         if seq.len() < crate::adapter::MIN_PATTERN_LEN {
-            advisories.push(crate::config::Advisory::warn(format!(
+            advisories.push(Advisory::warn(format!(
                 "Adapter entry skipped, shorter than the minimum match length: \
                  name={name:?}, len={}, min={}",
                 seq.len(),
@@ -1005,7 +1003,7 @@ fn read_adapter_fasta(
             continue;
         }
         if let Some(per_position) = high_degeneracy(&seq) {
-            advisories.push(crate::config::Advisory::warn(format!(
+            advisories.push(Advisory::warn(format!(
                 "Adapter entry is highly degenerate and matches almost anywhere, which may \
                  trim real sequence: name={name:?}, bases_per_position={per_position:.1}"
             )));
@@ -1058,8 +1056,9 @@ pub fn config_for_test_threads(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::Write;
+
+    use super::*;
 
     #[test]
     fn unsupported_parameter_names_are_rejected() {

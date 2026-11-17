@@ -371,7 +371,7 @@ pub(super) fn supported_span(weights: &[u32], end: End) -> (usize, usize, bool) 
     // The run is never empty, and its peak clears the floor.
     let run = &order[first..=last];
     let peak = run.iter().map(|&j| weights[j]).max().unwrap_or(0);
-    let floor = (peak as f64 * BOUNDARY_SUPPORT) as u32;
+    let floor = (f64::from(peak) * BOUNDARY_SUPPORT) as u32;
     let supported = run.iter().copied().filter(|&j| weights[j] >= floor);
     let (mut lo, mut hi) = (usize::MAX, 0);
     for j in supported {

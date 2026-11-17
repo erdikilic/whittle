@@ -2,13 +2,12 @@
 //! trimmed piece by rescoring the sheet's primers at its located loci and
 //! names the output key it is written to.
 
-use crate::adapter::{AdapterConfig, Locus};
-use crate::trim::Piece;
-
 use super::classify::{Bounds, Call, KeyLevel, Keys, Rules, classify_at_length};
 use super::route::{KeyTable, Owner, Template, UNCLASSIFIED, barcode_name};
 use super::score::{End, Scorer};
 use super::sheet::Sheet;
+use crate::adapter::{AdapterConfig, Locus};
+use crate::trim::Piece;
 use crate::workflow::KeyId;
 
 /// What `--target-action` does with a classified piece.
@@ -236,13 +235,13 @@ mod tests {
 
     /// Generates deterministic SplitMix64 bases.
     fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(seed);
         (0..len)
             .map(|_| {
-                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
                 let mut z = state;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
                 z ^= z >> 31;
                 b"ACGT"[((z >> 62) & 0b11) as usize]
             })
@@ -577,7 +576,7 @@ mod tests {
             &[
                 splitmix_dna(834, 500),
                 reverse_complement(&ra),
-                fb.clone(),
+                fb,
                 splitmix_dna(835, 500),
             ]
             .concat(),
@@ -748,7 +747,7 @@ mod tests {
         cfg.attach_split(&sheet.primers);
         let splitter = Splitter::new(options(sheet, Require::Either, 1), &cfg).unwrap();
 
-        let mut edited = fwd.clone();
+        let mut edited = fwd;
         for i in [0, 2, 4, 6] {
             edited[i] = if edited[i] == b'A' { b'C' } else { b'A' };
         }

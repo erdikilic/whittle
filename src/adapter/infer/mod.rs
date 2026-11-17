@@ -192,7 +192,8 @@ fn merge_families(
                 && same_adapter(&seq, other, error_rate)
         }) {
             continue;
-        } else if let Some((other, previous, best, _, stored_end)) =
+        }
+        if let Some((other, previous, best, _, stored_end)) =
             merged.iter_mut().find(|(other, previous, _, _, _)| {
                 support < *previous * f64::from(RUN_JUMP)
                     && *previous < support * f64::from(RUN_JUMP)
@@ -235,7 +236,7 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
             }
         })
         .collect();
-    let sample: Vec<&[u8]> = folded.iter().map(|read| read.as_ref()).collect();
+    let sample: Vec<&[u8]> = folded.iter().map(AsRef::as_ref).collect();
     let sample = sample.as_slice();
     let mut bounds = Boundaries::new(sample);
     let (known, known_panel): (Vec<Vec<u8>>, Vec<bool>) = base
@@ -362,16 +363,12 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
         let mut layer_bounds = insert_bounds.clone();
         for (own, other, index) in [(&five, &three, 0), (&three, &five, 1)] {
             layer_bounds[index].extend(
-                own.iter()
-                    .filter(|c| c.2)
-                    .map(|c| c.0.clone())
-                    .chain(
-                        other
-                            .iter()
-                            .filter(|c| c.2)
-                            .map(|c| crate::adapter::reverse_complement(&c.0)),
-                    )
-                    .collect::<Vec<_>>(),
+                own.iter().filter(|c| c.2).map(|c| c.0.clone()).chain(
+                    other
+                        .iter()
+                        .filter(|c| c.2)
+                        .map(|c| crate::adapter::reverse_complement(&c.0)),
+                ),
             );
         }
         end_at_insert_boundaries(&mut five, &layer_bounds[0], End::Five);
@@ -485,13 +482,18 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                     &background,
                     edit_budget(base.error_rate, seq.len()),
                 );
-                if !background.is_empty() && count as f64 * 4.0 >= support * background.len() as f64
+                if !background.is_empty()
+                    && f64::from(count) * 4.0 >= support * background.len() as f64
                 {
                     return None;
                 }
                 let exact = windows_containing(&mut searcher, &seq, &five_sample, 0)
                     + windows_containing(&mut searcher, &seq, &three_sample, 0);
-                tracing::debug!(sequence = %String::from_utf8_lossy(&seq), exact, "Layer candidate");
+                tracing::debug!(
+                    sequence = %String::from_utf8_lossy(&seq),
+                    exact,
+                    "Layer candidate"
+                );
                 Some((seq, support, exact, boundary, weight, end))
             })
             .collect();
@@ -574,7 +576,14 @@ pub fn discover(sample: &[&[u8]], base: &AdapterConfig) -> Vec<InferredAdapter> 
                 .max()
                 .unwrap_or(0);
             let variant = !member && shared * 100 >= own * VARIANT_OVERLAP_PERCENT;
-            tracing::debug!(sequence = %String::from_utf8_lossy(&seq), matched, own, shared, variant, "Ranked candidate");
+            tracing::debug!(
+                sequence = %String::from_utf8_lossy(&seq),
+                matched,
+                own,
+                shared,
+                variant,
+                "Ranked candidate"
+            );
             if variant {
                 continue;
             }

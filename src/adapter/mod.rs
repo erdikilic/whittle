@@ -16,14 +16,13 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use crate::split::Primer;
-
-use search::{
+use self::search::{
     AmbiguousSearcher, EncodedAdapterBatch, Hit, MAX_TILED_PATTERN_LEN, PlainSearcher, Strands,
     encode_patterns, encoded_pattern_hits, for_each_hit, for_each_hit_in_texts,
     for_each_hit_on_strand, is_plain_acgt, iupac_bases, new_ambiguous_searcher,
     new_overhang_searcher, new_plain_searcher_fwd, new_searcher, new_searcher_fwd,
 };
+use crate::split::Primer;
 
 mod budget;
 mod hits;
@@ -45,7 +44,7 @@ thread_local! {
     /// The searcher and the normalized span of `barcode_span_verified`,
     /// reused across reads.
     static BARCODE_SEARCH: RefCell<(AmbiguousSearcher, Vec<u8>)> =
-        RefCell::new((search::new_ambiguous_searcher(), Vec::new()));
+        RefCell::new((new_ambiguous_searcher(), Vec::new()));
 }
 
 /// What a catalog sequence is. Every role is trimmed at the read ends and
@@ -272,7 +271,7 @@ impl AdapterConfig {
             .and_then(|n| catalog_barcodes_by_number().get(&n))
             .map_or(&[][..], Vec::as_slice);
         BARCODE_SEARCH.with_borrow_mut(|(searcher, buf)| {
-            let (text, _) = passes::normalize_into(&seq[lo..hi], buf);
+            let (text, _) = normalize_into(&seq[lo..hi], buf);
             named
                 .iter()
                 .copied()

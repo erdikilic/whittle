@@ -74,7 +74,7 @@ pub(super) fn raw_integer(
 /// otherwise full-window record. Returns the modification block's state and
 /// whether a known per-base tag is malformed, without allocating owned tag
 /// values.
-pub(super) fn raw_full_window_metadata(record: &bam::Record) -> std::io::Result<(ModBlock, bool)> {
+pub(super) fn raw_full_window_metadata(record: &bam::Record) -> io::Result<(ModBlock, bool)> {
     use noodles_sam::alignment::record::data::field::Value as RawValue;
     use noodles_sam::alignment::record::data::field::value::Array as RawArray;
 
@@ -275,7 +275,7 @@ pub(super) fn process_raw_full_window(
 pub(super) fn run_raw_bam_full_window_seq(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<bam::Record>>,
-    sink: &mut crate::io::bam::BamSink,
+    sink: &mut BamSink,
     cfg: &Config,
     counters: &Arc<Counters>,
 ) -> anyhow::Result<Stats> {
@@ -300,7 +300,7 @@ pub(super) fn run_raw_bam_full_window_seq(
 pub(super) fn run_raw_bam_full_window_parallel(
     header: &sam::Header,
     records: impl Iterator<Item = anyhow::Result<bam::Record>> + Send,
-    sink: &mut crate::io::bam::BamSink,
+    sink: &mut BamSink,
     level: u8,
     cfg: &Config,
     counters: &Arc<Counters>,

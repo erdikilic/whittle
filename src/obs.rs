@@ -1,9 +1,23 @@
 //! Observability: leveled logging (tracing) and periodic progress lines.
 
+use std::io::{self, IsTerminal};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
 use tracing::level_filters::LevelFilter;
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::{Advisory, Config};
-use tracing_subscriber::fmt::FormattedFields;
+use crate::workflow::{Counters, Stats};
 
 /// Maps the CLI verbosity and quiet flags to a tracing level. `WHITTLE_LOG`,
 /// when set, is applied separately in `init` and overrides this unless `quiet`
@@ -19,23 +33,6 @@ fn level_from(verbosity: u8, quiet: bool) -> LevelFilter {
         }
     }
 }
-
-use std::io::{self, IsTerminal};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
-
-use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::filter::Targets;
-use tracing_subscriber::fmt;
-use tracing_subscriber::fmt::format::Writer;
-use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::util::SubscriberInitExt;
-
-use crate::workflow::{Counters, Stats};
 
 /// How often the ticker thread wakes to check whether the periodic line is
 /// due. The thread waits this long via `park_timeout`, but `stop_ticker` cuts
@@ -275,8 +272,8 @@ impl ProgressHandle {
         if stats.malformed_tag_reads > 0 {
             tracing::warn!(
                 reads = stats.malformed_tag_reads,
-                "Per-base tags (ip/pw/fi/fp/ri/rp/sm/sx or a malformed sa) whose length did not match \
-                 the sequence were left unchanged"
+                "Per-base tags (ip/pw/fi/fp/ri/rp/sm/sx or a malformed sa) whose length did not \
+                 match the sequence were left unchanged"
             );
         }
         if stats.malformed_mod_reads > 0 {
@@ -761,7 +758,7 @@ mod tests {
         h.start(None, Arc::new(Counters::default()));
         let first = Arc::clone(&h.ticker.as_ref().expect("a ticker runs").0);
         h.start(None, Arc::new(Counters::default()));
-        assert!(first.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(first.load(Ordering::Relaxed));
         assert!(h.ticker.is_some());
     }
 
@@ -1093,7 +1090,8 @@ mod tests {
             vec![
                 "Target 16S: 30 segments, 12.0 kbp (75.0% of assigned)",
                 "Target ITS: 10 segments, 4.0 kbp (25.0% of assigned)",
-                "Target unassigned: 8 segments (no_match 5, missing_end 2, orientation 1, length 0)",
+                "Target unassigned: 8 segments (no_match 5, missing_end 2, orientation 1, \
+                 length 0)",
                 "Target ambiguous: 3 segments",
                 "Target discarded: 4 segments",
             ]

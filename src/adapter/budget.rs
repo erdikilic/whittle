@@ -49,7 +49,7 @@ pub(super) fn interior_positions(class: usize) -> f64 {
 pub(super) fn chance_cumulative(pattern: &[u8], max_edits: usize) -> Vec<f64> {
     let mut previous = vec![1.0; max_edits + 1];
     for &base in pattern {
-        let p = search::iupac_degeneracy(base).unwrap_or(4) as f64 / 4.0;
+        let p = f64::from(search::iupac_degeneracy(base).unwrap_or(4)) / 4.0;
         let mut current = vec![0.0; max_edits + 1];
         current[0] = p * previous[0];
         for k in 1..=max_edits {

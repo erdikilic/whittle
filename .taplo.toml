@@ -1,0 +1,10 @@
+# TOML formatting configuration: `taplo fmt` formats, `taplo fmt --check` checks.
+# The indent follows .editorconfig. Keys are not reordered, so the dependency
+# groups in Cargo.toml keep their order.
+
+include = ["*.toml", ".cargo/*.toml"]
+
+[formatting]
+column_width = 100
+indent_string = "  "
+allowed_blank_lines = 1

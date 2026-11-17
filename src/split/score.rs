@@ -580,7 +580,7 @@ impl Scorer {
                 } else {
                     for &primer in members {
                         search::for_each_hit(searcher, pattern_of(primer), window, budget, |hit| {
-                            keep(primer, *len, hit)
+                            keep(primer, *len, hit);
                         });
                     }
                 }
@@ -606,13 +606,13 @@ mod tests {
 
     /// Generates deterministic SplitMix64 bases.
     fn splitmix_dna(seed: u64, len: usize) -> Vec<u8> {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(seed);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64.wrapping_add(seed);
         (0..len)
             .map(|_| {
-                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
                 let mut z = state;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
                 z ^= z >> 31;
                 b"ACGT"[((z >> 62) & 0b11) as usize]
             })
@@ -747,7 +747,7 @@ mod tests {
         assert!(budget >= 2, "fixture needs a budget of at least 2 edits");
 
         let within = substituted(FA, &(0..budget).map(|i| 2 + i * 3).collect::<Vec<_>>());
-        let mut read = within.clone();
+        let mut read = within;
         read.extend(splitmix_dna(4, 400));
         let scores = scorer.score(&read, (0, FA.len()), End::Five, false, false);
         assert!(
@@ -984,7 +984,7 @@ mod tests {
                     },
                     End::Three => {
                         let site = reverse_complement(&primer[cut..]);
-                        let mut read = insert.clone();
+                        let mut read = insert;
                         read.extend(&site);
                         let n = read.len();
                         (read, (n - site.len(), n))

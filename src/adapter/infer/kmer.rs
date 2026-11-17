@@ -2,6 +2,8 @@
 //! by packed codes, repeat filters, the window counts of k-mers and the most
 //! frequent of them, and the heaviest paths through their graph.
 
+use std::hash::BuildHasherDefault;
+
 use super::*;
 
 /// Encodes a k-mer at 2 bits per base (A=0, C=1, G=2, T=3). `None` when it
@@ -76,8 +78,7 @@ impl std::hash::Hasher for KmerHasher {
 }
 
 /// Hash map keyed by packed k-mer codes.
-pub(super) type KmerMap<V> =
-    std::collections::HashMap<u64, V, std::hash::BuildHasherDefault<KmerHasher>>;
+pub(super) type KmerMap<V> = std::collections::HashMap<u64, V, BuildHasherDefault<KmerHasher>>;
 
 /// Rejects consensuses dominated by a short approximate tandem repeat. Each
 /// base is compared with the base one period earlier, so isolated insertions
@@ -100,7 +101,7 @@ pub(super) fn is_repetitive(seq: &[u8]) -> bool {
 pub(super) fn kmer_counts(windows: &[&[u8]], k: usize) -> KmerMap<(u32, usize)> {
     assert!((1..=32).contains(&k));
     let mut counts: KmerMap<(u32, usize)> =
-        KmerMap::with_capacity_and_hasher(windows.len() * 64, Default::default());
+        KmerMap::with_capacity_and_hasher(windows.len() * 64, BuildHasherDefault::default());
     let mask = u64::MAX >> (64 - 2 * k);
     for (window_index, &wnd) in windows.iter().enumerate() {
         let (mut code, mut valid) = (0, 0);
@@ -243,11 +244,11 @@ pub(super) fn bounded_heaviest_path(
     // last base.
     let mut cons = decode_kmer(nodes[chain[0]].0, k);
     let mut profile: Vec<u32> = vec![nodes[chain[0]].1; k];
-    let mut weight: u64 = nodes[chain[0]].1 as u64;
+    let mut weight: u64 = u64::from(nodes[chain[0]].1);
     for &idx in &chain[1..] {
         cons.push(*decode_kmer(nodes[idx].0, k).last().unwrap());
         profile.push(nodes[idx].1);
-        weight += nodes[idx].1 as u64;
+        weight += u64::from(nodes[idx].1);
     }
     Some((cons, profile, weight))
 }

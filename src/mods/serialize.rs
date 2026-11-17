@@ -71,7 +71,7 @@ mod tests {
         mods.groups.push(crate::mods::MmGroup {
             base: b'A',
             strand: b'+',
-            codes: vec![crate::mods::ModCode::Char(b'a')],
+            codes: vec![ModCode::Char(b'a')],
             status: None,
             deltas: vec![],
             ml: vec![],

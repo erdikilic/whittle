@@ -320,7 +320,8 @@ fn fastq_update_moves_slices_move_table() {
     let in_path = dir.path().join("mv.bam");
     let group = "4f2a_dna_r10.4.1_e8.2_400bps_sup@v5.0.0";
     let header: sam::Header = format!(
-        "@HD\tVN:1.6\n@RG\tID:{group}\tPL:ONT\tDS:basecall_model=dna_r10.4.1_e8.2_400bps_sup@v5.0.0\n"
+        "@HD\tVN:1.6\n\
+         @RG\tID:{group}\tPL:ONT\tDS:basecall_model=dna_r10.4.1_e8.2_400bps_sup@v5.0.0\n"
     )
     .parse()
     .unwrap();

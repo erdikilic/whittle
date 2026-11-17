@@ -66,11 +66,16 @@ jobs:
           done
           exit "$status"
 
+  # Stable rustfmt checks the stable options; nightly rustfmt also
+  # checks the nightly options in rustfmt.toml (import grouping, comment
+  # wrapping, line overflow).
   fmt:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - run: cargo fmt --all --check
+      - run: rustup toolchain install nightly --profile minimal --component rustfmt
+      - run: cargo +nightly fmt --all --check
 
   clippy:
     runs-on: ubuntu-24.04
