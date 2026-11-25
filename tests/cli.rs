@@ -1055,6 +1055,36 @@ fn paraseq_parser_matches_seq_io_on_long_reads() {
     assert!(paraseq == run("seq_io"), "The parsers disagree");
 }
 
+/// A FASTQ cut short inside its last record is an error under either parser,
+/// and the paraseq error names the input file.
+#[cfg(feature = "paraseq")]
+#[test]
+fn truncated_fastq_fails_under_either_parser() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("cut.fastq");
+    let mut fastq = String::new();
+    for i in 0..50 {
+        fastq.push_str(&format!(
+            "@r{i}\n{}\n+\n{}\n",
+            "ACGT".repeat(50),
+            "I".repeat(200)
+        ));
+    }
+    fastq.push_str("@cut\nACGTACGT\n");
+    std::fs::write(&input, fastq).unwrap();
+    for parser in ["paraseq", "seq_io"] {
+        let assert = whittle()
+            .env("WHITTLE_FASTQ_PARSER", parser)
+            .args(["-t", "4", "--quiet", "-i"])
+            .arg(&input)
+            .assert()
+            .failure();
+        if parser == "paraseq" {
+            assert.stderr(predicate::str::contains("cut.fastq"));
+        }
+    }
+}
+
 /// The paraseq parser writes what the seq_io parser writes over BGZF input.
 #[cfg(feature = "paraseq")]
 #[test]

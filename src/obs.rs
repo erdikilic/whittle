@@ -92,7 +92,7 @@ where
         write!(
             w,
             "[{}] {} ",
-            jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S"),
+            jiff::ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S"),
             format_level(event.metadata().level(), self.color)
         )?;
 

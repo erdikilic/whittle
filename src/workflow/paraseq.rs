@@ -127,6 +127,8 @@ impl<Rf: Record> ParallelProcessor<Rf> for Processor {
 /// `cfg.ordered` the sets are handed off in input order. `level` is the
 /// writer's BGZF level when it takes compressed blocks, `None` when it takes
 /// the rendered bytes.
+/// Parse errors, including a record cut short at the end of the input, name
+/// `cfg.io.input` when it is a file.
 pub(crate) fn run_fastq_paraseq<W: BatchSink>(
     input: Box<dyn Read + Send>,
     writer: &mut W,
@@ -143,6 +145,9 @@ pub(crate) fn run_fastq_paraseq<W: BatchSink>(
     let aborted = Arc::new(AtomicBool::new(false));
     let write_err: FirstError<std::io::Error> = FirstError::new();
     let mut reader = paraseq::fastq::Reader::with_batch_size(input, RECORDS_PER_SET)?;
+    if let Some(path) = cfg.io.input.as_deref() {
+        reader.set_source_name(path.display().to_string());
+    }
     reader.update_batch_size_in_bp(BASES_PER_SET)?;
     reader.set_batch_size(reader.batch_size().min(RECORDS_PER_SET))?;
     let mut processor = Processor {
