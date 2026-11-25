@@ -180,6 +180,25 @@ impl Read for InflateThread {
     }
 }
 
+/// Returns the decoded byte stream of a BGZF FASTQ source, inflating blocks
+/// in parallel across `workers` threads when `workers > 1`.
+pub(crate) fn bgzf_byte_stream(
+    inner: Box<dyn Read + Send>,
+    workers: usize,
+) -> Box<dyn Read + Send> {
+    // The block reader issues a `read` per frame part (header, payload,
+    // trailer); the buffer in front of the source coalesces them.
+    let inner = BufReader::with_capacity(INPUT_BUFFER_CAPACITY, inner);
+    if workers > 1 {
+        Box::new(noodles_bgzf::io::MultithreadedReader::with_worker_count(
+            crate::io::workers_nonzero(workers),
+            inner,
+        ))
+    } else {
+        Box::new(noodles_bgzf::io::Reader::new(inner))
+    }
+}
+
 /// Builds a FASTQ iterator over BGZF-compressed input. Unlike ordinary gzip,
 /// BGZF is independently framed, so blocks inflate on a private pool of
 /// `workers` threads while the parser consumes completed blocks in order.
@@ -187,18 +206,7 @@ pub fn reader_from_bgzf(
     inner: Box<dyn Read + Send>,
     workers: usize,
 ) -> Box<dyn Iterator<Item = anyhow::Result<ReadRecord>> + Send> {
-    // The block reader issues a `read` per frame part (header, payload,
-    // trailer); the buffer in front of the source coalesces them.
-    let inner = BufReader::with_capacity(INPUT_BUFFER_CAPACITY, inner);
-    let inner: Box<dyn Read + Send> = if workers > 1 {
-        Box::new(noodles_bgzf::io::MultithreadedReader::with_worker_count(
-            crate::io::workers_nonzero(workers),
-            inner,
-        ))
-    } else {
-        Box::new(noodles_bgzf::io::Reader::new(inner))
-    };
-    Box::new(RecordIter::new(inner))
+    Box::new(RecordIter::new(bgzf_byte_stream(inner, workers)))
 }
 
 /// Highest raw Phred score a Phred+33 quality byte encodes (`~`, ASCII 126).
@@ -264,24 +272,36 @@ impl<R: Read> RecordIter<R> {
     }
 }
 
+/// Converts the Phred+33 quality bytes `raw` of the record `id` into `out`
+/// (clearing `out` first, reusing its allocation). A byte outside ASCII
+/// 33..=126 is an error naming the record and the byte (`invalid_quality`).
+pub(crate) fn phred_from_ascii_into(
+    id: &[u8],
+    raw: &[u8],
+    out: &mut Vec<u8>,
+) -> anyhow::Result<()> {
+    // One pass converts and validates: a byte below 33 wraps above the
+    // maximum, so a single compare per byte flags both ends of the range.
+    out.clear();
+    out.reserve(raw.len());
+    let mut out_of_range = false;
+    out.extend(raw.iter().map(|&b| {
+        let q = b.wrapping_sub(33);
+        out_of_range |= q > MAX_PHRED33;
+        q
+    }));
+    if out_of_range {
+        return Err(invalid_quality(id, raw));
+    }
+    Ok(())
+}
+
 /// Converts the Phred+33 quality bytes `raw` of the record `id` to raw Phred
 /// scores. A byte outside ASCII 33..=126 is an error naming the record and
 /// the byte (`invalid_quality`).
 pub(crate) fn phred_from_ascii(id: &[u8], raw: &[u8]) -> anyhow::Result<Vec<u8>> {
-    // One pass converts and validates: a byte below 33 wraps above the
-    // maximum, so a single compare per byte flags both ends of the range.
-    let mut out_of_range = false;
-    let qual: Vec<u8> = raw
-        .iter()
-        .map(|&b| {
-            let q = b.wrapping_sub(33);
-            out_of_range |= q > MAX_PHRED33;
-            q
-        })
-        .collect();
-    if out_of_range {
-        return Err(invalid_quality(id, raw));
-    }
+    let mut qual = Vec::with_capacity(raw.len());
+    phred_from_ascii_into(id, raw, &mut qual)?;
     Ok(qual)
 }
 

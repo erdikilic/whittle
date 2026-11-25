@@ -1054,3 +1054,41 @@ fn paraseq_parser_matches_seq_io_on_long_reads() {
     assert_eq!(paraseq.iter().filter(|&&b| b == b'@').count(), 40);
     assert!(paraseq == run("seq_io"), "The parsers disagree");
 }
+
+/// The paraseq parser writes what the seq_io parser writes over BGZF input.
+#[cfg(feature = "paraseq")]
+#[test]
+fn paraseq_parser_matches_seq_io_on_bgzf_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("in.fastq");
+    let bgzf = dir.path().join("in.fastq.gz");
+    let mut fastq = String::new();
+    for i in 0..2_000usize {
+        let seq: String = (0..300 + i % 700)
+            .map(|j| ['A', 'C', 'G', 'T'][(i * 13 + j * j) % 4])
+            .collect();
+        fastq.push_str(&format!("@r{i}\n{seq}\n+\n{}\n", "I".repeat(seq.len())));
+    }
+    std::fs::write(&plain, fastq).unwrap();
+    whittle()
+        .args(["-t", "2", "--quiet", "-o", bgzf.to_str().unwrap()])
+        .arg("-i")
+        .arg(&plain)
+        .assert()
+        .success();
+    let run = |parser: &str| {
+        whittle()
+            .env("WHITTLE_FASTQ_PARSER", parser)
+            .args(["-t", "4", "--preserve-order", "--quiet", "-H", "5"])
+            .arg("-i")
+            .arg(&bgzf)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    };
+    let paraseq = run("paraseq");
+    assert_eq!(paraseq.iter().filter(|&&b| b == b'@').count(), 2_000);
+    assert!(paraseq == run("seq_io"), "The parsers disagree");
+}

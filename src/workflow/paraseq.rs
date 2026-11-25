@@ -3,16 +3,15 @@
 //! record copying leaves the serial reader.
 
 use std::io::Read;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::{Arc, Mutex};
 
 use paraseq::prelude::*;
 
-use super::fastq::render_record;
+use super::fastq::render_record_ref;
 use super::{BatchSink, Counters, FirstError, Parts, Stats};
 use crate::config::Config;
-use crate::record::ReadRecord;
 
 /// Most records per set handed to one worker.
 const RECORDS_PER_SET: usize = 128;
@@ -33,30 +32,25 @@ pub(crate) fn selected() -> bool {
     std::env::var_os(PARSER_VAR).is_some_and(|v| v == "paraseq")
 }
 
+/// Drained output buffers the writer returns for workers to render into.
+type BufferPool = Arc<Mutex<Vec<Vec<u8>>>>;
+
 /// One worker's state: its render parts (key 0 only, since a paraseq run has
-/// no `--targets`), its counts since the last hand-off and the writer channel.
+/// no `--targets`), its raw Phred scratch buffer, its counts since the last
+/// hand-off, the writer channel and the shared buffer pool.
 #[derive(Clone)]
 struct Processor {
     cfg: Arc<Config>,
     counters: Arc<Counters>,
     tx: SyncSender<Vec<u8>>,
+    reuse: BufferPool,
     level: Option<u8>,
     ordered: bool,
     aborted: Arc<AtomicBool>,
     parts: Parts<u8>,
+    qual: Vec<u8>,
     reads: u64,
     bases: u64,
-}
-
-/// Copies a parsed record into an owned record with raw Phred qualities.
-fn to_read_record<Rf: Record>(record: &Rf) -> anyhow::Result<ReadRecord> {
-    let id = crate::io::fastq::read_id(record.id());
-    let qual = crate::io::fastq::phred_from_ascii(id, record.qual().unwrap_or_default())?;
-    Ok(ReadRecord {
-        name: record.id().to_vec(),
-        seq: record.seq_raw().to_vec(),
-        qual,
-    })
 }
 
 impl<Rf: Record> ParallelProcessor<Rf> for Processor {
@@ -64,10 +58,24 @@ impl<Rf: Record> ParallelProcessor<Rf> for Processor {
         if self.aborted.load(Ordering::Relaxed) {
             return Err(anyhow::anyhow!("run aborted").into());
         }
-        let rec = to_read_record(&record)?;
+        let head = record.id();
+        let seq = record.seq_raw();
+        let id = crate::io::fastq::read_id(head);
+        crate::io::fastq::phred_from_ascii_into(
+            id,
+            record.qual().unwrap_or_default(),
+            &mut self.qual,
+        )?;
         self.reads += 1;
-        self.bases += rec.seq.len() as u64;
-        render_record(rec, &self.cfg, &self.counters, &mut self.parts)?;
+        self.bases += seq.len() as u64;
+        render_record_ref(
+            head,
+            seq,
+            &self.qual,
+            &self.cfg,
+            &self.counters,
+            &mut self.parts,
+        )?;
         Ok(())
     }
 
@@ -84,10 +92,23 @@ impl<Rf: Record> ParallelProcessor<Rf> for Processor {
             self.parts.only_first(),
             "a paraseq run renders to key 0 only"
         );
-        let bytes = std::mem::take(self.parts.part(0));
         let packed = match self.level {
-            Some(level) => crate::io::fastq::encode_blocks(level, &bytes)?,
-            None => bytes,
+            Some(level) => {
+                // Clearing in place keeps the buffer's capacity for the next set.
+                let buf = self.parts.part(0);
+                let out = crate::io::fastq::encode_blocks(level, buf)?;
+                buf.clear();
+                out
+            },
+            None => {
+                let fresh = self
+                    .reuse
+                    .lock()
+                    .ok()
+                    .and_then(|mut pool| pool.pop())
+                    .unwrap_or_default();
+                std::mem::replace(self.parts.part(0), fresh)
+            },
         };
         if self.tx.send(packed).is_err() {
             self.aborted.store(true, Ordering::Relaxed);
@@ -116,6 +137,9 @@ pub(crate) fn run_fastq_paraseq<W: BatchSink>(
     let workers = super::render_pool_size(cfg);
     let queue = (workers * QUEUE_PER_WORKER).max(2);
     let (tx, rx) = sync_channel::<Vec<u8>>(queue);
+    // Every buffer in flight is either queued or held by a worker.
+    let pool_cap = queue + workers;
+    let reuse: BufferPool = Arc::new(Mutex::new(Vec::with_capacity(pool_cap)));
     let aborted = Arc::new(AtomicBool::new(false));
     let write_err: FirstError<std::io::Error> = FirstError::new();
     let mut reader = paraseq::fastq::Reader::with_batch_size(input, RECORDS_PER_SET)?;
@@ -125,10 +149,12 @@ pub(crate) fn run_fastq_paraseq<W: BatchSink>(
         cfg: Arc::new(cfg.clone()),
         counters: Arc::clone(counters),
         tx,
+        reuse: Arc::clone(&reuse),
         level,
         ordered: cfg.ordered,
         aborted: Arc::clone(&aborted),
         parts: Parts::default(),
+        qual: Vec::new(),
         reads: 0,
         bases: 0,
     };
@@ -136,15 +162,24 @@ pub(crate) fn run_fastq_paraseq<W: BatchSink>(
     let result = std::thread::scope(|s| {
         let write_err = &write_err;
         let aborted = &aborted;
+        let reuse = &reuse;
         s.spawn(move || {
             let mut errored = false;
-            for batch in &rx {
+            for mut batch in &rx {
                 if errored {
                     continue;
                 }
                 if let Err(e) = writer.write_all(&batch) {
                     write_err.record(e, aborted);
                     errored = true;
+                }
+                if level.is_none() {
+                    batch.clear();
+                    if let Ok(mut pool) = reuse.lock()
+                        && pool.len() < pool_cap
+                    {
+                        pool.push(batch);
+                    }
                 }
             }
         });

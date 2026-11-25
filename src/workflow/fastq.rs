@@ -47,33 +47,62 @@ pub(super) fn render_record(
         counters.note_tagged_fastq();
         return super::bam::render_tagged_fastq_read(rec, cfg, counters, parts);
     }
-    let _read = super::read_span(&rec.name);
+    render_plain_record(&rec.name, &rec.seq, &rec.qual, cfg, counters, parts)
+}
+
+/// Renders one record from borrowed fields, as [`render_record`] does. A
+/// plain FASTQ read renders in place; only a tagged FASTQ read is copied into
+/// an owned `ReadRecord`.
+#[cfg(feature = "paraseq")]
+pub(super) fn render_record_ref(
+    name: &[u8],
+    seq: &[u8],
+    qual: &[u8],
+    cfg: &Config,
+    counters: &Counters,
+    parts: &mut Parts<u8>,
+) -> anyhow::Result<()> {
+    if crate::io::tagged::has_aux_tags(name) {
+        counters.note_tagged_fastq();
+        let rec = ReadRecord {
+            name: name.to_vec(),
+            seq: seq.to_vec(),
+            qual: qual.to_vec(),
+        };
+        return super::bam::render_tagged_fastq_read(rec, cfg, counters, parts);
+    }
+    render_plain_record(name, seq, qual, cfg, counters, parts)
+}
+
+/// Trims and routes one plain FASTQ read (no header tags) given as borrowed
+/// name, sequence and raw Phred qualities.
+fn render_plain_record(
+    name: &[u8],
+    seq: &[u8],
+    qual: &[u8],
+    cfg: &Config,
+    counters: &Counters,
+    parts: &mut Parts<u8>,
+) -> anyhow::Result<()> {
+    let _read = super::read_span(name);
     let _read = _read.enter();
-    let (produced, pieces) = trim_read(&rec.seq, &rec.qual, cfg, None);
+    let (produced, pieces) = trim_read(seq, qual, cfg, None);
     process_read_segments(
         &produced,
-        &rec.seq,
-        &rec.qual,
+        seq,
+        qual,
         &cfg.filter,
         counters,
-        |idx, total, s, e| match route(cfg, &rec.seq, &pieces, idx, (e - s) as u64, None, counters)?
-        {
+        |idx, total, s, e| match route(cfg, seq, &pieces, idx, (e - s) as u64, None, counters)? {
             Routing::Untagged => {
-                write_segment(
-                    parts.part(0),
-                    &rec.name,
-                    &rec.seq[s..e],
-                    &rec.qual[s..e],
-                    total,
-                    idx,
-                )?;
+                write_segment(parts.part(0), name, &seq[s..e], &qual[s..e], total, idx)?;
                 Ok(true)
             },
             Routing::Tagged(label, key) => {
                 let w = parts.part(key);
-                write_head(w, &rec.name, total, idx)?;
+                write_head(w, name, total, idx)?;
                 push_fastq_target(w, label);
-                write_body(w, &rec.seq[s..e], &rec.qual[s..e])?;
+                write_body(w, &seq[s..e], &qual[s..e])?;
                 Ok(true)
             },
             Routing::Discarded => Ok(false),
@@ -82,14 +111,16 @@ pub(super) fn render_record(
             if !counters.wants_rejects() {
                 return Ok(());
             }
-            counters.reject(RejectItem::Fastq(rejected_fastq(&rec, rejection)))
+            counters.reject(RejectItem::Fastq(rejected_fastq(
+                name, seq, qual, rejection,
+            )))
         },
     )
 }
 
 /// Renders a rejected plain FASTQ segment, or the whole read, with its reason
 /// tag in the header.
-pub(super) fn rejected_fastq(rec: &ReadRecord, rejection: Rejection) -> Vec<u8> {
+fn rejected_fastq(name: &[u8], seq: &[u8], qual: &[u8], rejection: Rejection) -> Vec<u8> {
     let mut out = Vec::new();
     match rejection {
         Rejection::Segment {
@@ -99,15 +130,15 @@ pub(super) fn rejected_fastq(rec: &ReadRecord, rejection: Rejection) -> Vec<u8> 
             end,
             reason,
         } => {
-            write_head(&mut out, &rec.name, total, idx).expect("Writing to a Vec does not fail");
+            write_head(&mut out, name, total, idx).expect("Writing to a Vec does not fail");
             reject::push_fastq_tag(&mut out, Reason::Dropped(reason));
-            write_body(&mut out, &rec.seq[start..end], &rec.qual[start..end])
+            write_body(&mut out, &seq[start..end], &qual[start..end])
                 .expect("Writing to a Vec does not fail");
         },
         Rejection::Whole => {
-            write_head(&mut out, &rec.name, 1, 0).expect("Writing to a Vec does not fail");
+            write_head(&mut out, name, 1, 0).expect("Writing to a Vec does not fail");
             reject::push_fastq_tag(&mut out, Reason::TrimmedToNothing);
-            write_body(&mut out, &rec.seq, &rec.qual).expect("Writing to a Vec does not fail");
+            write_body(&mut out, seq, qual).expect("Writing to a Vec does not fail");
         },
     }
     out

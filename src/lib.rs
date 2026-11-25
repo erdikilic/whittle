@@ -531,13 +531,16 @@ impl Session {
                     && !sampling
                     && cfg.split_opts.is_none()
                     && cfg.tag_filters.is_empty()
-                    && in_fmt != Format::FastqBgzf
                     && cfg.threads > 1;
                 #[cfg(feature = "paraseq")]
                 if let (true, Source::Stream(src)) = (paraseq, &mut source) {
                     let src = std::mem::replace(src, Box::new(std::io::empty()));
                     cfg.render_workers = self.budget.render;
-                    let stream = io::fastq::byte_stream(src, in_fmt == Format::FastqGz, true);
+                    let stream = if in_fmt == Format::FastqBgzf {
+                        io::fastq::bgzf_byte_stream(src, self.budget.decode)
+                    } else {
+                        io::fastq::byte_stream(src, in_fmt == Format::FastqGz, true)
+                    };
                     let mut writer =
                         io::fastq::writer_to(cfg.io.output.as_deref(), out_fmt, level, true)?;
                     let stats = workflow::run_fastq_paraseq(
